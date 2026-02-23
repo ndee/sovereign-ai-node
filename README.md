@@ -133,3 +133,4 @@ That means:
 - Agent execution frameworks plug in behind a stable interface
 - OpenClaw can be replaced or supplemented later without redesigning the platform
 
+# sovereign-ai-node
