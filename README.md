@@ -76,9 +76,6 @@ Mail is the entry point, not the end state.
 See:
 
 - `docs/ARCHITECTURE.md`
-- `docs/OPEN_CORE_BOUNDARY.md`
-- `docs/ADR-0001-AGENT-RUNTIME.md`
-- `docs/OPENCLAW_PLUGIN_SKILL_GOVERNANCE.md`
 
 ## Planned Repo Architecture (Blueprint)
 

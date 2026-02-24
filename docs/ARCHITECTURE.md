@@ -1,315 +1,191 @@
-# Architecture Blueprint (Open Core)
+# Architecture
 
 ## Purpose
 
-Define the open-core architecture for a self-hosted, local-first, modular multi-agent runtime with Matrix as the primary control plane.
+This is the single architecture document for `sovereign-ai-node`.
+It captures the essential system design, runtime boundary, governance constraints, and open-core product boundary.
 
-## Scope
+## What This Repo Is
 
-This document covers:
-
-- Core runtime architecture
-- Module boundaries
-- Data/control flows
-- Extension points
-- V1 Mail Sentinel implementation shape
-
-This document does not define:
-
-- UI pixel design
-- Commercial packaging details (covered in `sovereign-ai-node-pro`)
-- Final implementation language choices
-
-## Architectural Identity
-
-Sovereign AI Node is:
-
-- A self-hosted AI control plane
-- A multi-agent runtime
-- A local interpretation layer for personal or small-team operations
-
-It is not:
-
-- A monolithic assistant
-- A SaaS orchestration UI
-- A cloud AI wrapper
-
-## Design Goals
-
-- Local-first by default
-- Always-on event-driven processing
-- Modular bots with isolated identities
-- Explicit permissions and auditability
-- No mandatory telemetry
-- Cloud/hybrid capability as an optional adapter
-
-## High-Level Component Model
-
-```mermaid
-flowchart TB
-  subgraph UI["Control Plane"]
-    Matrix["Matrix Homeserver"]
-    Element["Element Client"]
-    Rooms["Bot Rooms / Bot Identities"]
-  end
-
-  subgraph Kernel["Node Kernel"]
-    Gateway["Matrix Gateway"]
-    Bus["Event Bus"]
-    Scheduler["Trigger & Scheduler Engine"]
-    Policy["Policy / Permissions Engine"]
-    State["State & Memory Manager"]
-    Audit["Audit / Event Log"]
-    Registry["Capability Registry"]
-    Broker["Capability Broker"]
-  end
-
-  subgraph Agents["Agent Layer"]
-    Mail["Mail Sentinel (V1)"]
-    Docs["Docs Bot (planned)"]
-    Cal["Calendar Bot (planned)"]
-  end
-
-  subgraph Runtime["OpenClaw Runtime Sidecar"]
-    Adapter["AgentRuntimeAdapter Bridge"]
-    OCExec["OpenClaw Agent Runtime"]
-    OCSkills["Curated Skill Packs"]
-    OCPlugins["Curated Plugin Host"]
-  end
-
-  subgraph Tools["Tool Layer"]
-    IMAP["Mail Connectors (IMAP / Proton Bridge)"]
-    Files["Files / Local FS"]
-    Calendar["Calendar (CalDAV / ICS)"]
-    APIs["External APIs (optional)"]
-  end
-
-  subgraph Intelligence["Intelligence Layer"]
-    Classify["Semantic Classifiers"]
-    Router["Model Router"]
-    LocalLLM["Local Model Adapters"]
-    HybridLLM["Hybrid LLM Adapters (optional)"]
-  end
-
-  subgraph Storage["Local Persistence"]
-    DB["Metadata DB"]
-    Blob["Object Store / Local Files"]
-    Index["Search / Vector Index (optional)"]
-  end
-
-  Element --> Matrix --> Gateway --> Bus
-  Bus --> Scheduler
-  Scheduler --> Mail
-  Mail --> Adapter
-  Adapter --> OCExec
-  OCExec --> OCSkills
-  OCExec --> OCPlugins
-  OCExec --> Broker
-  OCExec --> Classify
-  Broker --> Registry
-  Broker --> Policy
-  Classify --> Router
-  Router --> LocalLLM
-  Router --> HybridLLM
-  Broker --> IMAP
-  Broker --> Files
-  Broker --> Calendar
-  Broker --> APIs
-  Mail --> State
-  Bus --> Audit
-  Broker --> Audit
-  State --> DB
-  Audit --> DB
-  Files --> Blob
-  Classify --> Index
-```
-
-## Core Subsystems
-
-### 1. Control Plane Integration
-
-Primary interface: Matrix.
-
-Responsibilities:
-
-- Bind bot identities to Matrix users/rooms
-- Transform Matrix messages into internal commands/events
-- Deliver alerts, summaries, and follow-up prompts back to rooms
-- Keep chat as the default operator interface
-
-Notes:
-
-- Each bot should have its own identity and room(s)
-- Shared infrastructure, separate operational identities
-
-### 2. Node Kernel (Sovereign Runtime)
-
-The Node Kernel owns the platform behavior that must not depend on a specific agent framework.
-
-Responsibilities:
-
-- Lifecycle management (start/stop/restart bots)
-- Event bus and routing
-- Trigger scheduling
-- Capability discovery and registration
-- Permissions/policy evaluation
-- Persistent state and checkpoints
-- Audit/event logging
-
-Why this stays in open core:
-
-- It is the sovereignty-critical control surface
-- It enables replacement of agent frameworks without breaking the platform
-
-### 2.5 OpenClaw Runtime Sidecar + Adapter Boundary
-
-OpenClaw is the default execution engine for V1/V2 bot behavior, but it is not the system authority.
-
-Responsibilities:
-
-- Execute bot reasoning loops and tool orchestration through OpenClaw
-- Load curated OpenClaw plugins and skill packs for approved bots
-- Return structured actions/results to the kernel through `AgentRuntimeAdapter`
-- Support rapid bot iteration without changing kernel orchestration primitives
-
-Non-responsibilities (kernel-owned):
-
-- Final policy decisions and permission enforcement
-- Durable scheduling and event dispatch
-- Sovereign audit log and system-of-record state
-- Secrets authority and unrestricted outbound access
-
-### 3. Agent Layer
-
-Bots are specialized modules with explicit responsibilities.
-
-Bot contract (conceptual):
-
-- `identity`: Matrix identity + bot metadata
-- `capabilities`: tools and actions the bot may use
-- `subscriptions`: events/triggers it listens to
-- `state`: persistent bot-specific memory
-- `handlers`: command and event processing routines
-- `policies`: constraints and escalation behavior
-
-Rules:
-
-- No monolithic "super-agent" in core
-- Bots are disable-able and auditable independently
-- Shared infrastructure, not shared identity
-
-### 4. Tool Layer
-
-Tooling is provided via connectors and normalized data adapters.
-
-Connector families:
-
-- Mail: IMAP, SMTP (optional), Proton Bridge integration
-- Files: local FS, mounted volumes
-- Calendar: CalDAV/ICS
-- APIs: explicit outbound allowlist only
-
-Connector requirements:
-
-- Typed capability declaration
-- Local credential storage integration
-- Kernel-brokered access mode for high-risk capabilities (mail/files/secrets/outbound APIs)
-- Scoped credentials/tokens (no blanket env exposure to agent runtimes)
-- Rate limiting and timeouts
-- Structured errors
-- Audit hooks
-
-### 5. Logic & Workflow Layer
-
-This layer is event-driven and persistent.
-
-Capabilities:
-
-- Rule-based triggers
-- Semantic classification pipelines
-- Feedback loops (user correction -> classifier updates / weights)
-- Long-running stateful workflows
-- Escalation policies
-
-Important distinction:
-
-- Agent reasoning is not the same as orchestration reliability
-- Durable orchestration primitives belong to the kernel/workflow layer
-
-### 6. Sovereignty Layer (Cross-Cutting)
+Sovereign AI Node is a self-hosted, local-first, modular multi-agent runtime with Matrix as the primary operator interface.
 
 Defaults:
 
-- Local model inference preferred
-- No telemetry emitted by default
-- Explicit outbound networking
-- Self-hosted secrets and state
+- Local-first execution
+- Always-on, event-driven bots
+- Explicit permissions and auditability
+- No mandatory telemetry
+- Optional hybrid/cloud adapters behind policy controls
 
-Optional:
+Initial non-goals:
 
-- Hybrid model routing for cost/performance tradeoffs
-- Bitcoin-aligned payment flow only for commercial distributions (Pro repo)
+- Multi-tenant SaaS control plane
+- Cloud-hosted default mode
+- Closed-source core orchestration
 
-## OpenClaw Plugin + Skill Governance (Required)
+## System Overview
 
-If OpenClaw is used heavily (the preferred path), plugin/skill governance becomes a core architecture concern, not an implementation detail.
+### Main Layers
 
-Required controls:
+1. Matrix control plane (operator chat interface)
+2. Node Kernel (sovereign orchestration authority)
+3. Agent layer (specialized bots)
+4. Agent runtime sidecar (`OpenClaw` via `AgentRuntimeAdapter`)
+5. Tool/connectors (mail, files, calendar, APIs)
+6. Intelligence layer (classifiers + model routing)
+7. Local persistence (DB/files/index)
 
-- Curated allowlist of plugins and skill packs per bot (deny-by-default)
-- Version pinning for plugins/skill packs and explicit upgrade review
-- Per-bot capability scopes enforced by the kernel `Policy` + `Capability Broker`
-- Sidecar/runtime isolation for OpenClaw execution to reduce plugin blast radius
-- Audit records for plugin load, skill source, tool invocation, and policy decisions
-- Production controls to disable auto-loading of unreviewed local/project skills
+### Core Event Flow
 
-Trust zones:
+1. Matrix or connectors emit events into the kernel event bus.
+2. Kernel schedules and dispatches work to a bot.
+3. Bot behavior executes through `AgentRuntimeAdapter` into the OpenClaw sidecar.
+4. Tool access is brokered by the kernel (policy + scoped capabilities).
+5. Results and decisions are audited/persisted by the kernel.
+6. Alerts/responses are delivered back to Matrix rooms.
 
-- `Trusted`: core-owned connectors, kernel-issued tools, reviewed skill packs in repo
-- `Restricted`: curated OpenClaw plugins for bounded integrations (e.g. GitHub, Jira, Slack)
-- `Prohibited by default`: shell/file/network plugins with broad host access in production
+## Component Responsibilities
 
-See `docs/OPENCLAW_PLUGIN_SKILL_GOVERNANCE.md` for the concrete policy and recommended plugin/skill matrix.
+### Matrix Control Plane
 
-## V1 Architecture: Mail Sentinel
+- Bot identities and rooms
+- Operator command interface
+- Incoming command/event translation
+- Outbound alerts and summaries
 
-### Functional Goal
+### Node Kernel (System Authority)
 
-Continuously evaluate inbound mail and alert on high-signal events.
+The kernel must remain framework-independent and sovereignty-critical.
 
-### V1 Trigger Classes
+Owns:
+
+- Event ingestion and dispatch
+- Trigger scheduling
+- Policy/permissions evaluation
+- Capability registration and brokering
+- Audit/event logging
+- Durable state and checkpoints
+- Bot lifecycle management
+
+### Agent Layer
+
+Bots are modular, independently auditable, and disable-able.
+
+Per-bot contract (conceptual):
+
+- `identity`
+- `subscriptions`
+- `capabilities`
+- `handlers`
+- `state`
+- `policies`
+
+Rule: no monolithic super-agent in core.
+
+### Agent Runtime Strategy (`OpenClaw`-first, adapter-safe)
+
+Use `OpenClaw` as the default bot execution engine for V1/V2, but keep platform authority in the kernel.
+
+Required integration shape:
+
+- Stable `AgentRuntimeAdapter`
+- Sidecar/runtime boundary by default when plugins/skills are enabled
+- Structured action/results returned to the kernel
+
+Kernel-owned (must not move into OpenClaw):
+
+- Scheduling and event dispatch
+- Final policy decisions
+- Audit/system-of-record state
+- Secrets authority
+- Capability enforcement
+
+OpenClaw-owned (within kernel policy):
+
+- Agent execution loop
+- Tool orchestration and reasoning steps
+- Curated skill packs
+- Curated plugins for bounded integrations
+
+## Tools, Models, and Storage
+
+### Connectors / Tools (initial)
+
+- Mail (`IMAP`, optional `SMTP`, Proton Bridge path)
+- Files (local FS / mounted volumes)
+- Calendar (`CalDAV` / `ICS`)
+- External APIs (explicit allowlist only)
+
+Connector requirements:
+
+- Typed capability declarations
+- Scoped credentials (no blanket env exposure)
+- Timeouts and rate limits
+- Structured errors
+- Audit hooks
+- Kernel brokering for high-risk capabilities
+
+### Intelligence Layer
+
+- Semantic classifiers / extraction pipelines
+- Model router (local-first)
+- Optional hybrid model adapters
+
+### Storage
+
+- Metadata/state DB (SQLite acceptable for V1)
+- Local files/object storage
+- Optional search/vector index
+
+Authoritative state remains in kernel-managed storage even if runtime plugins provide memory/cache features.
+
+## Plugin and Skill Governance (Essential Policy)
+
+Plugin/skill usage is an architectural concern, not only an ops concern.
+
+Production defaults:
+
+- Deny-by-default allowlists per bot
+- Version pinning and reviewed upgrades
+- Per-bot capability scopes enforced by kernel policy/broker
+- Sidecar isolation to reduce plugin blast radius
+- Audit logging for plugin loads, skill sources, and tool calls
+- Disable unreviewed user/project skill auto-loading
+
+Trust model:
+
+- `Trusted`: core connectors, kernel-brokered tools, reviewed in-repo skills
+- `Restricted`: curated/pinned OpenClaw plugins with explicit scopes
+- `Blocked by default`: unreviewed community plugins and broad host-access plugins in production
+
+V1 Mail Sentinel posture:
+
+- Use OpenClaw runtime + in-repo skill pack(s)
+- Keep IMAP and Matrix delivery kernel-owned
+- No `plugin-shell` in production
+- No community plugins in production
+- No plugin-managed durable state as source of truth
+
+## V1 Reference Bot: Mail Sentinel
+
+### Goal
+
+Continuously evaluate inbound email and alert on high-signal items.
+
+### Initial Trigger Classes
 
 - `decision_required`
 - `financial_relevance`
 - `risk_escalation`
 
-### V1 Event Flow
+### Simplified V1 Flow
 
-```mermaid
-sequenceDiagram
-  participant Mail as IMAP Connector
-  participant Bus as Event Bus
-  participant Sentinel as Mail Sentinel
-  participant Clf as Classifier Pipeline
-  participant Router as Model Router
-  participant LLM as Local/Hybrid Model
-  participant Matrix as Matrix Gateway
-  participant User as Operator
-
-  Mail->>Bus: mail.received
-  Bus->>Sentinel: event dispatch
-  Sentinel->>Clf: classify(email)
-  Clf->>Router: inference request
-  Router->>LLM: run classification / extraction
-  LLM-->>Router: labels + confidence + rationale
-  Router-->>Clf: response
-  Clf-->>Sentinel: trigger labels
-  Sentinel->>Matrix: proactive alert in bot room
-  User->>Matrix: feedback / action
-  Matrix->>Bus: user.feedback event
-  Bus->>Sentinel: feedback update
-  Sentinel->>Sentinel: adjust local heuristics/state
-```
+1. Mail connector ingests message and emits `mail.received`.
+2. Kernel dispatches to `Mail Sentinel`.
+3. Sentinel runs classification/extraction via `AgentRuntimeAdapter` -> OpenClaw.
+4. Model router selects local or explicitly enabled hybrid model.
+5. Sentinel posts proactive alert to Matrix room.
+6. User feedback returns through Matrix and updates bot heuristics/state.
 
 ### V1 Storage Needs
 
@@ -317,92 +193,72 @@ sequenceDiagram
 - Classification results
 - Alert history
 - Feedback corrections
-- Bot state/checkpoints
+- Bot checkpoints/state
 
-Implementation guidance:
+## Open Core vs Pro Boundary (Essential)
 
-- Start with a single local metadata DB (SQLite is acceptable for V1)
-- Abstract repositories to allow later migration (Postgres, external stores)
-- Keep authoritative bot state in kernel/storage even if OpenClaw plugins offer memory features
-- Treat OpenClaw memory/plugins as accelerators or caches, not the source of truth
+Principle: open core must remain fully useful for self-hosting; Pro adds packaging and operational convenience without weakening sovereignty.
 
-V1 runtime guidance:
+### Open Core (`sovereign-ai-node`)
 
-- Mail Sentinel handlers should execute via the `AgentRuntimeAdapter` into the OpenClaw sidecar
-- IMAP ingestion and alert delivery remain kernel-owned / connector-owned for auditability
+- Node Kernel (event bus, scheduler, policy, audit, state, capability broker)
+- Matrix control plane integration
+- Agent SDK/contracts
+- OpenClaw runtime adapter + sidecar integration contracts
+- Plugin/skill governance enforcement hooks
+- Base connector framework
+- Local model adapters (+ optional hybrid adapter interfaces)
+- Base bots (starting with Mail Sentinel)
+- Self-hosted config/CLI and example deployment manifests
 
-## Extension Points (Stable Interfaces)
+### Pro (`sovereign-ai-node-pro`)
 
-The following interfaces should be stable early, because Pro and future bots will depend on them:
+- Maintained appliance builds/distributions
+- Signed release/update channels
+- Curated compatibility bundles
+- Zero-drift update orchestration
+- Read-only monitoring/diagnostics bundles
+- Support workflows / operational tooling
+- Future team/commercial extensions
 
-- Agent runtime adapter
-- Connector capability adapter
-- Model provider adapter
-- Event schema contracts
+Guardrails:
+
+- Do not move core runtime primitives into Pro
+- Do not make Matrix control plane Pro-only
+- Do not make local inference Pro-only
+- Do not move plugin/skill policy enforcement into Pro-only components
+
+## Stable Interfaces (Prioritize Early)
+
+- `AgentRuntimeAdapter`
+- Capability broker contract
+- Connector capability adapters
+- Model provider adapters
+- Event schemas
 - Policy hook interface
 - Audit/event sink interface
-- Capability broker contract (request/response + scoped credential model)
-- Plugin/skill policy manifest schema (allowlist + per-bot scopes)
+- Plugin/skill policy manifest schema
 - Adapter boundary protocol (embedded API or sidecar RPC)
 
-## Runtime Framework Strategy (OpenClaw-First + Adapter Boundary)
+## Deployment Topologies (Initial)
 
-Recommended approach:
+### Single-node local (V1)
 
-- Use OpenClaw as the default agent execution engine for V1/V2 bots
-- Run OpenClaw as a sidecar/runtime boundary by default when plugins are enabled
-- Keep scheduling, policy, state, audit, and secrets authority in the Node Kernel
-- Expose sensitive capabilities through the kernel `Capability Broker`
-- Wrap OpenClaw behind an `AgentRuntimeAdapter`
-
-This maximizes delivery speed while avoiding hard-coding product invariants to a single framework.
-
-## Deployment Topologies (Open Core)
-
-### Single-Node Local (V1)
-
-- Matrix homeserver
-- Element client
-- Sovereign AI Node kernel runtime
-- OpenClaw runtime sidecar (same host)
+- Matrix homeserver + client
+- Sovereign AI Node kernel
+- OpenClaw sidecar (same host)
 - Local DB
 - Optional local model service
 
-### Hybrid-Optional Local
+### Hybrid-optional local
 
-Same as above, plus:
+Same as V1 plus explicitly enabled outbound hybrid model adapter.
 
-- Outbound-only hybrid LLM adapter (explicitly enabled)
+## Open Questions (Implementation)
 
-## Recommended Initial Package Layout
-
-```text
-packages/
-  core-kernel/            # event bus, scheduler, policy, state, audit, capability broker
-  control-plane-matrix/   # matrix bridge + identity/room bindings
-  agent-sdk/              # bot contracts, lifecycle hooks, capability APIs
-  runtime-openclaw/       # adapter bridge, sidecar process, plugin/skill loading
-  openclaw-skillpacks/    # curated/reviewed skill packs for bots
-  intelligence/           # classifiers, model routing, extraction pipelines
-  model-providers/        # local and optional hybrid adapters
-  tool-connectors/        # mail/files/calendar/api connectors
-  storage/                # repositories, schema, migrations
-  bot-mail-sentinel/      # v1 reference bot
-  cli/                    # bootstrap, config, admin ops
-```
-
-## Non-Goals (Initial Open Core)
-
-- Enterprise compliance workflows
-- Multi-tenant control planes
-- Cloud-hosted default mode
-- Closed-source core orchestration logic
-
-## Open Questions (To Resolve Before Implementation Starts)
-
-- Primary implementation stack (TypeScript, Python, Rust, mixed)
+- Primary implementation stack (TS / Python / Rust / mixed)
 - Event bus transport (in-process first vs Redis/NATS)
-- Adapter boundary transport (in-process for dev vs local socket/stdio RPC in prod)
-- Local indexing strategy (SQLite FTS, Tantivy, pgvector, etc.)
-- Matrix homeserver recommendation (Synapse vs Conduit vs Dendrite)
-- Plugin/skill curation workflow (manual review only vs signed internal registry)
+- Adapter transport (stdio/socket/RPC)
+- Local indexing strategy (SQLite FTS / Tantivy / pgvector / etc.)
+- Matrix homeserver recommendation
+- Plugin/skill curation workflow (manual review vs signed registry)
