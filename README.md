@@ -25,7 +25,8 @@ Sovereign AI Node puts that layer back under local control.
 `sovereign-ai-node` is the open-core foundation:
 
 - Local runtime kernel
-- Multi-agent framework contracts
+- Multi-agent framework contracts + runtime adapter boundary
+- OpenClaw runtime adapter + curated plugin/skill gateway
 - Matrix control plane integration
 - Base tool connectors
 - Local model + optional hybrid model adapters
@@ -77,6 +78,7 @@ See:
 - `docs/ARCHITECTURE.md`
 - `docs/OPEN_CORE_BOUNDARY.md`
 - `docs/ADR-0001-AGENT-RUNTIME.md`
+- `docs/OPENCLAW_PLUGIN_SKILL_GOVERNANCE.md`
 
 ## Planned Repo Architecture (Blueprint)
 
@@ -87,6 +89,8 @@ sovereign-ai-node/
     core-kernel/
     control-plane-matrix/
     agent-sdk/
+    runtime-openclaw/
+    openclaw-skillpacks/
     tool-connectors/
       mail-imap/
       files-local/
@@ -123,14 +127,16 @@ Planned bot families:
 - Financebot
 - Researchbot
 
-## Framework Note (OpenClaw)
+## Runtime Strategy (OpenClaw-First, Adapter-Safe)
 
-OpenClaw can be used as the initial agent execution framework, but the core architecture keeps a runtime adapter boundary to avoid framework lock-in.
+OpenClaw is the default agent execution framework for V1/V2, while the core architecture keeps a runtime adapter boundary to avoid lock-in.
 
 That means:
 
 - Sovereignty-critical concerns stay in the core kernel (state, policy, audit, scheduling)
-- Agent execution frameworks plug in behind a stable interface
+- OpenClaw runs behind a stable `AgentRuntimeAdapter` (recommended as a sidecar/runtime boundary)
+- OpenClaw plugins/skills are curated and policy-gated before production use
+- High-risk capabilities (mail, files, secrets, outbound APIs) should be brokered by the kernel, not granted directly to arbitrary plugins
 - OpenClaw can be replaced or supplemented later without redesigning the platform
 
 # sovereign-ai-node

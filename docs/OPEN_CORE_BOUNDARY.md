@@ -18,6 +18,8 @@ The goal is a clean product boundary without weakening the sovereignty value of 
 - Node Kernel (event bus, scheduler, state, policy, audit)
 - Matrix control plane integration
 - Agent SDK and plugin contracts
+- OpenClaw runtime adapter + sidecar integration contracts
+- Plugin/skill governance policy (allowlists, capability scopes, audit hooks)
 - Base connector framework
 - Local model adapters
 - Optional hybrid model adapter interfaces (and possibly community adapters)
@@ -44,6 +46,7 @@ The goal is a clean product boundary without weakening the sovereignty value of 
 | Matrix control plane | Yes | Yes |
 | Base bots | Yes | Yes |
 | Mail Sentinel V1 | Yes | Yes (maintained) |
+| OpenClaw runtime adapter | Yes | Yes (maintained packaging/integration) |
 | Local models | Yes | Yes |
 | Hybrid model support | Optional adapter support | Curated acceleration / managed policy bundles |
 | Appliance images | Community/self-built | Maintained curated builds |
@@ -58,6 +61,7 @@ The goal is a clean product boundary without weakening the sovereignty value of 
 - Do not move core runtime primitives into Pro to force lock-in
 - Do not make Matrix control plane a Pro-only feature
 - Do not make local inference a Pro-only feature
+- Do not move plugin/skill policy enforcement into Pro-only components
 - Prefer Pro features that reduce operational burden, not user sovereignty
 
 ## Packaging Contract
@@ -72,4 +76,3 @@ Core should publish:
 
 - Semantic versioning for extension interfaces
 - Compatibility notes for Pro integration
-
