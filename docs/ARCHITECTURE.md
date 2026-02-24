@@ -3,262 +3,329 @@
 ## Purpose
 
 This is the single architecture document for `sovereign-ai-node`.
-It captures the essential system design, runtime boundary, governance constraints, and open-core product boundary.
+It defines the current architecture after reviewing the OpenClaw codebase and revising the OpenClaw integration strategy.
+
+## Core Decision (Updated)
+
+Sovereign AI Node uses OpenClaw with maximum leverage, but not as the sovereignty authority.
+
+- OpenClaw Gateway is the primary runtime substrate for agent execution, sessions, cron, skills, tools catalog, and Matrix channel integration.
+- Sovereign Node Kernel remains the authority for policy, secrets, audit, and product state.
+- OpenClaw plugins/hooks/skills are treated as trusted code (governed and isolated), not as capability-sandboxed components.
 
 ## What This Repo Is
 
-Sovereign AI Node is a self-hosted, local-first, modular multi-agent runtime with Matrix as the primary operator interface.
+Sovereign AI Node is a self-hosted, local-first, modular multi-agent platform for personal/small-team operations.
 
 Defaults:
 
 - Local-first execution
-- Always-on, event-driven bots
+- Always-on event processing
 - Explicit permissions and auditability
 - No mandatory telemetry
-- Optional hybrid/cloud adapters behind policy controls
+- Optional hybrid/cloud adapters behind policy
 
-Initial non-goals:
+Non-goals (initial):
 
 - Multi-tenant SaaS control plane
 - Cloud-hosted default mode
 - Closed-source core orchestration
 
-## System Overview
+## Architecture Model
 
 ### Main Layers
 
-1. Matrix control plane (operator chat interface)
-2. Node Kernel (sovereign orchestration authority)
-3. Agent layer (specialized bots)
-4. Agent runtime sidecar (`OpenClaw` via `AgentRuntimeAdapter`)
-5. Tool/connectors (mail, files, calendar, APIs)
-6. Intelligence layer (classifiers + model routing)
-7. Local persistence (DB/files/index)
+1. Sovereign Kernel (policy, audit, secrets, state, connector authority)
+2. OpenClaw Gateway runtime (agent/session/cron/gateway substrate)
+3. OpenClaw plugins/hooks/skills (curated, pinned, trusted extensions)
+4. Sovereign connectors and classifiers (high-assurance and domain-specific logic)
+5. Local persistence (Sovereign system of record + OpenClaw runtime state)
 
-### Core Event Flow
+### Why This Model
 
-1. Matrix or connectors emit events into the kernel event bus.
-2. Kernel schedules and dispatches work to a bot.
-3. Bot behavior executes through `AgentRuntimeAdapter` into the OpenClaw sidecar.
-4. Tool access is brokered by the kernel (policy + scoped capabilities).
-5. Results and decisions are audited/persisted by the kernel.
-6. Alerts/responses are delivered back to Matrix rooms.
+OpenClaw already implements a large amount of stable runtime complexity (gateway methods, sessions, cron, auth scopes, channel plugins, hooks).
+Sovereign should reuse that instead of re-implementing it in the kernel.
+
+Sovereign still keeps product invariants and sovereignty-critical controls outside OpenClaw.
 
 ## Component Responsibilities
 
-### Matrix Control Plane
-
-- Bot identities and rooms
-- Operator command interface
-- Incoming command/event translation
-- Outbound alerts and summaries
-
-### Node Kernel (System Authority)
-
-The kernel must remain framework-independent and sovereignty-critical.
+### Sovereign Kernel (System Authority)
 
 Owns:
 
-- Event ingestion and dispatch
-- Trigger scheduling
-- Policy/permissions evaluation
-- Capability registration and brokering
-- Audit/event logging
-- Durable state and checkpoints
-- Bot lifecycle management
-
-### Agent Layer
-
-Bots are modular, independently auditable, and disable-able.
-
-Per-bot contract (conceptual):
-
-- `identity`
-- `subscriptions`
-- `capabilities`
-- `handlers`
-- `state`
-- `policies`
-
-Rule: no monolithic super-agent in core.
-
-### Agent Runtime Strategy (`OpenClaw`-first, adapter-safe)
-
-Use `OpenClaw` as the default bot execution engine for V1/V2, but keep platform authority in the kernel.
-
-Required integration shape:
-
-- Stable `AgentRuntimeAdapter`
-- Sidecar/runtime boundary by default when plugins/skills are enabled
-- Structured action/results returned to the kernel
-
-Kernel-owned (must not move into OpenClaw):
-
-- Scheduling and event dispatch
 - Final policy decisions
-- Audit/system-of-record state
-- Secrets authority
-- Capability enforcement
+- Secrets authority and credential issuance
+- High-risk connector authority (especially production mail/files)
+- Durable audit/event log (system of record)
+- Product state and bot checkpoints
+- Runtime profile compilation/validation for OpenClaw deployments
 
-OpenClaw-owned (within kernel policy):
+Does not own (by default):
 
-- Agent execution loop
-- Tool orchestration and reasoning steps
-- Curated skill packs
-- Curated plugins for bounded integrations
+- Generic chat gateway protocol implementation
+- Generic session runtime and agent loop orchestration
+- Generic cron scheduler implementation for V1
 
-## Tools, Models, and Storage
+### OpenClaw Gateway Runtime (Execution Substrate)
 
-### Connectors / Tools (initial)
+Used as the default runtime substrate for V1/V2.
 
-- Mail (`IMAP`, optional `SMTP`, Proton Bridge path)
-- Files (local FS / mounted volumes)
-- Calendar (`CalDAV` / `ICS`)
-- External APIs (explicit allowlist only)
+Owns (reused from OpenClaw):
 
-Connector requirements:
+- Agent runs and session lifecycle (`agent`, `agent.wait`, `sessions.*`)
+- Cron scheduling/execution (`cron.*`, `wake`) for single-node V1
+- Skills status/update surfaces (`skills.*`)
+- Tool catalog and plugin tool registration (`tools.catalog`)
+- Gateway auth/scopes and typed request/response protocol
+- Matrix channel integration via the Matrix plugin (default path)
 
-- Typed capability declarations
-- Scoped credentials (no blanket env exposure)
-- Timeouts and rate limits
-- Structured errors
-- Audit hooks
-- Kernel brokering for high-risk capabilities
+Does not own in Sovereign architecture:
 
-### Intelligence Layer
+- Final policy authority
+- Sovereign audit system of record
+- Sovereign secrets authority
+- Sovereign durable business state
 
-- Semantic classifiers / extraction pipelines
-- Model router (local-first)
-- Optional hybrid model adapters
+### OpenClaw Plugins, Hooks, and Skills (Trust Boundary)
 
-### Storage
+This is a critical architectural clarification.
 
-- Metadata/state DB (SQLite acceptable for V1)
-- Local files/object storage
-- Optional search/vector index
+- Plugins/hooks/skills are trusted code once loaded into OpenClaw.
+- Governance (allowlists, pins, provenance, reviews) reduces risk.
+- Process/container isolation reduces blast radius.
+- This is not a fine-grained capability sandbox.
 
-Authoritative state remains in kernel-managed storage even if runtime plugins provide memory/cache features.
+Sovereign policy can strongly constrain kernel-owned connectors/tools, but it cannot fully constrain arbitrary plugin internals after load.
 
-## Plugin and Skill Governance (Essential Policy)
+## Integration Strategy (Concrete)
 
-Plugin/skill usage is an architectural concern, not only an ops concern.
+### Primary Integration Seam: `OpenClawGatewayAdapter`
 
-Production defaults:
+Sovereign integrates with OpenClaw primarily through the OpenClaw Gateway protocol (WebSocket request/response + events).
 
-- Deny-by-default allowlists per bot
-- Version pinning and reviewed upgrades
-- Per-bot capability scopes enforced by kernel policy/broker
-- Sidecar isolation to reduce plugin blast radius
-- Audit logging for plugin loads, skill sources, and tool calls
-- Disable unreviewed user/project skill auto-loading
+This replaces an overly abstract "agent sidecar RPC" assumption.
 
-Trust model:
+The adapter wraps OpenClaw methods such as:
 
-- `Trusted`: core connectors, kernel-brokered tools, reviewed in-repo skills
-- `Restricted`: curated/pinned OpenClaw plugins with explicit scopes
-- `Blocked by default`: unreviewed community plugins and broad host-access plugins in production
+- `agent`, `agent.wait`
+- `sessions.*`
+- `cron.*`, `wake`
+- `skills.status`, `skills.update`
+- `tools.catalog`
+- `health`, `logs.tail` (ops)
 
-V1 Mail Sentinel posture:
+Adapter requirements:
 
-- Use OpenClaw runtime + in-repo skill pack(s)
-- Keep IMAP and Matrix delivery kernel-owned
-- No `plugin-shell` in production
-- No community plugins in production
-- No plugin-managed durable state as source of truth
+- Idempotency keys on mutating calls
+- Error mapping into Sovereign error taxonomy
+- Auth/scope-aware client credentials
+- Versioned compatibility against tested OpenClaw releases
 
-## V1 Reference Bot: Mail Sentinel
+### ACP Usage (Optional)
+
+ACP (`openclaw acp`) is useful for IDE/operator interactive workflows.
+It is not the primary Sovereign runtime control protocol.
+
+### Explicit Non-Decision
+
+Do not depend on undocumented or unstable CLI-only modes as the core adapter seam.
+Prefer the Gateway protocol and ACP surfaces.
+
+## OpenClaw Runtime Profile (Sovereign-Owned)
+
+Sovereign compiles a validated production runtime profile for OpenClaw instead of hand-editing OpenClaw config in production.
+
+### `OpenClawRuntimeProfile` (conceptual)
+
+The profile compiler controls:
+
+- Gateway bind/auth/origin policy
+- Plugin allowlist, pins, install provenance, plugin config
+- Skills defaults and per-skill entries
+- Hooks enablement and token/session routing policy
+- Channel/plugin policy (including Matrix)
+- Tool/exec/fs restrictions by agent
+- Deployment assumptions (service user, workspace, mounts)
+
+### Why It Is Core
+
+This is where Sovereign turns OpenClaw from a flexible framework into a reproducible, policy-constrained runtime deployment.
+
+## Production Security Baseline (Required)
+
+### Gateway
+
+- Bind to loopback by default
+- Require auth for non-loopback exposure
+- Require explicit allowed origins for non-loopback Control UI
+- Use trusted-proxy mode only with explicit trusted proxy CIDRs
+
+### Plugins
+
+- `plugins.allow` must be explicit and non-empty in production when plugins are enabled
+- Pin plugin versions/install provenance
+- Treat OpenClaw loader provenance/path warnings as deployment errors in Sovereign
+- Avoid mutable `plugins.load.paths` in production unless explicitly approved and immutable
+
+### Skills
+
+- Run OpenClaw under a dedicated service account/home directory
+- Control workspace mounts to avoid unreviewed project/user skill sources
+- Use curated in-repo or managed skills by default
+- Do not assume skill config alone fully disables source classes; enforce via runtime environment and deployment layout
+
+### Hooks
+
+- Disable external hooks unless needed
+- If enabled: require token, restrict agent routing, restrict session key prefixes
+- Treat internal hook handlers as trusted code (same class as plugins)
+
+### Isolation
+
+- Run OpenClaw in a dedicated process/container profile
+- Restrict filesystem mounts
+- Restrict outbound network egress to approved destinations
+- Split higher-risk plugins into separate runtimes when needed
+
+## Stable Interfaces (Prioritize Early)
+
+### Sovereign -> OpenClaw
+
+- `OpenClawGatewayAdapter` (gateway method wrapper)
+- OpenClaw version/protocol compatibility matrix
+- Runtime profile compiler input/output schema
+
+### Sovereign Internal
+
+- Policy decision interface
+- Audit/event sink interface
+- Connector capability broker contract
+- Model provider adapter interface
+- Mail/event schemas
+
+### Observability / Audit
+
+- OpenClaw hook event mapping into Sovereign audit sink
+- Tool/LLM lifecycle event schema normalization
+
+## V1 Reference Architecture: Mail Sentinel
 
 ### Goal
 
-Continuously evaluate inbound email and alert on high-signal items.
+Continuously evaluate inbound mail and alert on high-signal items.
 
-### Initial Trigger Classes
+### Key Boundary Decision
+
+Production mail ingestion remains kernel-owned.
+OpenClaw is used for agent execution/classification and operator-facing delivery/runtime surfaces.
+
+### V1 Flow (Revised)
+
+1. Sovereign mail connector ingests inbound message (`mail.received`).
+2. Sovereign kernel applies policy and routing.
+3. Kernel dispatches classification/extraction work via `OpenClawGatewayAdapter` (`agent`).
+4. OpenClaw agent executes with curated skills/tools under a Sovereign-managed runtime profile.
+5. Sovereign persists authoritative state/results and audit records.
+6. Alert is delivered through OpenClaw Matrix plugin by default (or a kernel-owned Matrix path in high-assurance mode).
+7. User feedback returns through Matrix/OpenClaw and is mirrored into Sovereign state/audit.
+
+### V1 Trigger Classes
 
 - `decision_required`
 - `financial_relevance`
 - `risk_escalation`
 
-### Simplified V1 Flow
+### V1 Storage Authority
 
-1. Mail connector ingests message and emits `mail.received`.
-2. Kernel dispatches to `Mail Sentinel`.
-3. Sentinel runs classification/extraction via `AgentRuntimeAdapter` -> OpenClaw.
-4. Model router selects local or explicitly enabled hybrid model.
-5. Sentinel posts proactive alert to Matrix room.
-6. User feedback returns through Matrix and updates bot heuristics/state.
-
-### V1 Storage Needs
+Sovereign storage is authoritative for:
 
 - Message metadata index
 - Classification results
 - Alert history
 - Feedback corrections
-- Bot checkpoints/state
+- Bot state/checkpoints
+- Sovereign audit logs
 
-## Open Core vs Pro Boundary (Essential)
+OpenClaw memory/plugins/transcripts are runtime accelerators or working state, not the source of truth.
 
-Principle: open core must remain fully useful for self-hosting; Pro adds packaging and operational convenience without weakening sovereignty.
+## Matrix Control Plane Strategy (V1 Default)
+
+Default: reuse OpenClaw Matrix plugin.
+
+Why:
+
+- OpenClaw already provides a Matrix channel plugin and gateway/channel runtime plumbing.
+- This removes a large amount of early integration complexity.
+
+Alternative (later / high-assurance mode):
+
+- Sovereign-owned Matrix bridge for stricter separation or specialized policy requirements.
+
+## Open Core vs Pro Boundary (Revised)
+
+Principle: open core remains self-hostable and sovereignty-complete; Pro adds packaging, validation, and operational reliability.
 
 ### Open Core (`sovereign-ai-node`)
 
-- Node Kernel (event bus, scheduler, policy, audit, state, capability broker)
-- Matrix control plane integration
-- Agent SDK/contracts
-- OpenClaw runtime adapter + sidecar integration contracts
-- Plugin/skill governance enforcement hooks
-- Base connector framework
-- Local model adapters (+ optional hybrid adapter interfaces)
+Includes:
+
+- Sovereign Kernel (policy, audit, secrets, state, connectors)
+- OpenClaw Gateway adapter and compatibility matrix
+- OpenClaw runtime profile compiler + validators
+- Plugin/skill/hook governance policy and deployment checks
+- Base connector framework (including production mail path)
 - Base bots (starting with Mail Sentinel)
-- Self-hosted config/CLI and example deployment manifests
+- Self-hosted config/CLI/manifests
 
 ### Pro (`sovereign-ai-node-pro`)
 
-- Maintained appliance builds/distributions
-- Signed release/update channels
-- Curated compatibility bundles
-- Zero-drift update orchestration
-- Read-only monitoring/diagnostics bundles
-- Support workflows / operational tooling
-- Future team/commercial extensions
+Adds:
+
+- Maintained appliance builds and runtime bundles
+- Signed compatibility bundles (core + OpenClaw + profile schema)
+- Zero-drift update orchestration and validation
+- Read-only monitoring/diagnostics/support workflows
+- Optional hybrid acceleration packages
 
 Guardrails:
 
-- Do not move core runtime primitives into Pro
-- Do not make Matrix control plane Pro-only
-- Do not make local inference Pro-only
-- Do not move plugin/skill policy enforcement into Pro-only components
-
-## Stable Interfaces (Prioritize Early)
-
-- `AgentRuntimeAdapter`
-- Capability broker contract
-- Connector capability adapters
-- Model provider adapters
-- Event schemas
-- Policy hook interface
-- Audit/event sink interface
-- Plugin/skill policy manifest schema
-- Adapter boundary protocol (embedded API or sidecar RPC)
+- Do not move policy/audit/secrets authority into Pro
+- Do not make local-first runtime or Matrix control plane Pro-only
+- Do not make runtime profile enforcement a Pro-only feature
 
 ## Deployment Topologies (Initial)
 
-### Single-node local (V1)
+### Single-node Local (V1)
 
-- Matrix homeserver + client
-- Sovereign AI Node kernel
-- OpenClaw sidecar (same host)
-- Local DB
+- Sovereign kernel service
+- OpenClaw Gateway runtime (same host, loopback-bound)
+- OpenClaw Matrix plugin enabled (default)
+- Local DB/object storage
 - Optional local model service
 
-### Hybrid-optional local
+### Hardened Single-node Local (Production)
 
-Same as V1 plus explicitly enabled outbound hybrid model adapter.
+Same as V1 plus:
+
+- Dedicated OpenClaw service account
+- Restricted filesystem mounts
+- Restricted egress
+- Pinned plugin installs and curated skills/hooks
+- Signed/validated runtime profile
+
+## Assumptions and Defaults
+
+- OpenClaw cron is accepted for single-node V1 scheduling; Sovereign may replace/supplement later for distributed requirements.
+- OpenClaw Gateway protocol is the primary adapter seam.
+- OpenClaw plugins/hooks/skills are governed as trusted code, not sandboxed capabilities.
+- Sovereign remains the system of record for audit and durable product state.
+- OpenClaw versions must be pinned and tested against a compatibility matrix.
 
 ## Open Questions (Implementation)
 
 - Primary implementation stack (TS / Python / Rust / mixed)
-- Event bus transport (in-process first vs Redis/NATS)
-- Adapter transport (stdio/socket/RPC)
-- Local indexing strategy (SQLite FTS / Tantivy / pgvector / etc.)
-- Matrix homeserver recommendation
-- Plugin/skill curation workflow (manual review vs signed registry)
+- Exact `OpenClawGatewayAdapter` client implementation language/runtime
+- Runtime profile schema/versioning strategy
+- Sovereign audit mirror granularity from OpenClaw hooks/events
+- When to introduce a separate high-assurance Matrix path (if ever)
