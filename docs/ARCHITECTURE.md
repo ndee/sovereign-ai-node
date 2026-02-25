@@ -296,11 +296,9 @@ Alternative (later / high-assurance mode):
 
 - Sovereign-owned Matrix bridge for stricter separation or specialized policy requirements.
 
-## Open Core vs Pro Boundary (Revised)
+## Project Scope (Open Source)
 
-Principle: open core remains self-hostable and sovereignty-complete; Pro adds packaging, validation, and operational reliability.
-
-### Open Core (`sovereign-ai-node`)
+This project is self-hostable and sovereignty-complete.
 
 Includes:
 
@@ -311,22 +309,6 @@ Includes:
 - Base connector/tool framework (including read-only mail tool contracts/plugins)
 - Base bots (starting with Mail Sentinel)
 - Self-hosted config/CLI/manifests
-
-### Pro (`sovereign-ai-node-pro`)
-
-Adds:
-
-- Maintained appliance builds and runtime bundles
-- Signed compatibility bundles (core + OpenClaw + profile schema)
-- Zero-drift update orchestration and validation
-- Read-only monitoring/diagnostics/support workflows
-- Optional hybrid acceleration packages
-
-Guardrails:
-
-- Do not move policy/audit/secrets authority into Pro
-- Do not make local-first runtime or Matrix control plane Pro-only
-- Do not make runtime profile enforcement a Pro-only feature
 
 ## Deployment Topologies (Initial)
 
