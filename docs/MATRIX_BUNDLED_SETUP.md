@@ -44,6 +44,26 @@ The operator-facing UX should stay simple, but Matrix setup still has real infra
 
 The `sovereign-node` CLI and Wizard UI should automate these tasks for the default path instead of exposing them as manual steps.
 
+## Recommended Install Ordering (Relative to OpenClaw Bootstrap)
+
+Bundled Matrix provisioning is one phase inside the larger Sovereign install flow.
+
+Recommended ordering in the default path:
+
+1. Preflight checks
+2. OpenClaw CLI bootstrap/install (official OpenClaw `install.sh`, pinned version, `--no-onboard`)
+3. IMAP validation
+4. Bundled Matrix provisioning and bootstrap (the sequence defined below)
+5. Write Sovereign-managed OpenClaw config using the Matrix outputs (homeserver URL, bot credentials/token, alert room ID)
+6. Install/repair OpenClaw gateway service (`openclaw gateway install`)
+7. Register bot/cron and run smoke checks
+
+Why this order:
+
+- OpenClaw must be present before Sovereign can reliably install/repair the gateway service.
+- Matrix must be provisioned before final OpenClaw channel config can be written because Matrix outputs are needed for plugin/channel configuration.
+- This keeps failure boundaries and retries aligned with `docs/INSTALLER_CONTRACTS.md`.
+
 ## Required Components (Bundled Stack)
 
 The bundled Matrix stack should include:
@@ -74,6 +94,8 @@ The installer should generate or provision:
 - private alert room
 
 ## Bundled Provisioning Sequence (What the Installer Must Automate)
+
+This is the Matrix-specific sub-sequence inside the recommended overall install ordering above.
 
 The default install flow should provision Matrix in this order:
 
