@@ -1,0 +1,307 @@
+import { z } from "zod";
+
+import {
+  checkResultSchema,
+  componentHealthSchema,
+  errorDetailSchema,
+  idSchema,
+  isoTimestampSchema,
+} from "./common.js";
+
+export const jobStateSchema = z.enum([
+  "pending",
+  "running",
+  "succeeded",
+  "failed",
+  "canceled",
+]);
+
+export const stepStateSchema = z.enum([
+  "pending",
+  "running",
+  "succeeded",
+  "failed",
+  "canceled",
+  "skipped",
+]);
+
+export const jobStepIdSchema = z.enum([
+  "preflight",
+  "openclaw_bootstrap_cli",
+  "imap_validate",
+  "matrix_provision",
+  "matrix_bootstrap_accounts",
+  "matrix_bootstrap_room",
+  "openclaw_gateway_service_install",
+  "openclaw_configure",
+  "mail_sentinel_register",
+  "smoke_checks",
+  "test_alert",
+]);
+
+export const jobStepSchema = z.object({
+  id: jobStepIdSchema,
+  label: z.string().min(1),
+  state: stepStateSchema,
+  startedAt: isoTimestampSchema.optional(),
+  endedAt: isoTimestampSchema.optional(),
+  error: errorDetailSchema.optional(),
+  details: z.record(z.string(), z.unknown()).optional(),
+});
+
+export const installJobSummarySchema = z.object({
+  jobId: idSchema,
+  state: jobStateSchema,
+  createdAt: isoTimestampSchema,
+  startedAt: isoTimestampSchema.optional(),
+  endedAt: isoTimestampSchema.optional(),
+  steps: z.array(jobStepSchema),
+  currentStepId: jobStepIdSchema.optional(),
+});
+
+export const openclawInstallRequestSchema = z.object({
+  manageInstallation: z.boolean().optional(),
+  installMethod: z.literal("install_sh").optional(),
+  version: z.string().min(1).optional(),
+  skipIfCompatibleInstalled: z.boolean().optional(),
+  forceReinstall: z.boolean().optional(),
+  runOnboard: z.literal(false).optional(),
+});
+
+export const imapInstallInputSchema = z.object({
+  host: z.string().min(1),
+  port: z.number().int().positive(),
+  tls: z.boolean(),
+  username: z.string().min(1),
+  password: z.string().min(1).optional(),
+  secretRef: z.string().min(1).optional(),
+  mailbox: z.string().min(1).optional(),
+});
+
+export const matrixInstallInputSchema = z.object({
+  homeserverDomain: z.string().min(1),
+  publicBaseUrl: z.string().min(1),
+  federationEnabled: z.boolean().optional(),
+  tlsMode: z.enum(["auto", "manual", "local-dev"]).optional(),
+  alertRoomName: z.string().min(1).optional(),
+});
+
+export const operatorInstallInputSchema = z.object({
+  username: z.string().min(1),
+  password: z.string().min(1).optional(),
+});
+
+export const mailSentinelInstallInputSchema = z.object({
+  pollInterval: z.string().min(1).optional(),
+  lookbackWindow: z.string().min(1).optional(),
+  e2eeAlertRoom: z.boolean().optional(),
+});
+
+export const advancedInstallInputSchema = z.object({
+  rollbackPolicy: z
+    .enum(["safe_partial", "manual", "aggressive_non_destructive"])
+    .optional(),
+  skipPreflight: z.boolean().optional(),
+  nonInteractive: z.boolean().optional(),
+});
+
+export const installRequestSchema = z.object({
+  mode: z.literal("bundled_matrix"),
+  openclaw: openclawInstallRequestSchema.optional(),
+  imap: imapInstallInputSchema,
+  matrix: matrixInstallInputSchema,
+  operator: operatorInstallInputSchema,
+  mailSentinel: mailSentinelInstallInputSchema.optional(),
+  advanced: advancedInstallInputSchema.optional(),
+});
+
+export const preflightResultSchema = z.object({
+  mode: z.literal("bundled_matrix"),
+  overall: z.enum(["pass", "warn", "fail"]),
+  checks: z.array(checkResultSchema),
+  recommendedActions: z.array(z.string()),
+});
+
+export const serviceStatusSchema = z.object({
+  name: z.string().min(1),
+  kind: z.enum([
+    "sovereign-node",
+    "openclaw",
+    "synapse",
+    "postgres",
+    "reverse-proxy",
+  ]),
+  health: componentHealthSchema,
+  state: z.enum(["running", "stopped", "failed", "unknown"]),
+  message: z.string().optional(),
+});
+
+export const testAlertResultSchema = z.object({
+  delivered: z.boolean(),
+  target: z.object({
+    channel: z.literal("matrix"),
+    roomId: z.string().min(1),
+  }),
+  messageId: z.string().min(1).optional(),
+  sentAt: isoTimestampSchema.optional(),
+  error: errorDetailSchema.optional(),
+});
+
+export const installResultSchema = z.object({
+  installationId: idSchema,
+  job: installJobSummarySchema,
+  mode: z.literal("bundled_matrix"),
+  matrix: z.object({
+    homeserverUrl: z.string().min(1),
+    federationEnabled: z.boolean(),
+    operatorUserId: z.string().min(1),
+    botUserId: z.string().min(1),
+    alertRoomId: z.string().min(1),
+    alertRoomName: z.string().min(1),
+    e2eeEnabled: z.boolean(),
+  }),
+  openclaw: z.object({
+    installManagedBySovereign: z.boolean(),
+    installMethod: z.literal("install_sh"),
+    version: z.string().min(1),
+    binaryPath: z.string().min(1),
+    configPath: z.string().min(1),
+    openclawHome: z.string().min(1),
+    gatewayServiceInstalled: z.boolean(),
+    gatewayServiceName: z.string().min(1).optional(),
+    agentId: z.literal("mail-sentinel"),
+    cronJobId: z.string().min(1),
+    pluginIds: z.array(z.string().min(1)),
+  }),
+  paths: z.object({
+    configPath: z.string().min(1),
+    secretsDir: z.string().min(1),
+    stateDir: z.string().min(1),
+    logsDir: z.string().min(1),
+  }),
+  checks: z.object({
+    preflight: preflightResultSchema,
+    smoke: z.array(checkResultSchema),
+    testAlert: testAlertResultSchema,
+  }),
+  nextSteps: z.object({
+    elementHomeserverUrl: z.string().min(1),
+    operatorUsername: z.string().min(1),
+    roomId: z.string().min(1),
+    roomName: z.string().min(1),
+    notes: z.array(z.string()),
+  }),
+});
+
+export const installJobStatusResponseSchema = z.object({
+  job: installJobSummarySchema,
+  result: installResultSchema.optional(),
+  error: errorDetailSchema.optional(),
+});
+
+export const sovereignStatusSchema = z.object({
+  installationId: idSchema.optional(),
+  mode: z.literal("bundled_matrix"),
+  services: z.array(serviceStatusSchema),
+  matrix: z.object({
+    homeserverUrl: z.string().min(1).optional(),
+    health: componentHealthSchema,
+    roomReachable: z.boolean(),
+    federationEnabled: z.boolean(),
+    alertRoomId: z.string().min(1).optional(),
+  }),
+  openclaw: z.object({
+    managedBySovereign: z.boolean(),
+    cliInstalled: z.boolean(),
+    binaryPath: z.string().min(1).optional(),
+    version: z.string().min(1).optional(),
+    health: componentHealthSchema,
+    serviceInstalled: z.boolean(),
+    serviceState: z.enum(["running", "stopped", "failed", "unknown"]).optional(),
+    configPath: z.string().min(1).optional(),
+    agentPresent: z.boolean(),
+    cronPresent: z.boolean(),
+    pluginIds: z.array(z.string().min(1)).optional(),
+  }),
+  mailSentinel: z.object({
+    agentId: z.literal("mail-sentinel"),
+    lastPollAt: isoTimestampSchema.optional(),
+    lastAlertAt: isoTimestampSchema.optional(),
+    lastError: errorDetailSchema.optional(),
+    consecutiveFailures: z.number().int().min(0),
+  }),
+  imap: z.object({
+    lastCredentialTestAt: isoTimestampSchema.optional(),
+    authStatus: z.enum(["ok", "failed", "unknown"]),
+    host: z.string().min(1).optional(),
+    mailbox: z.string().min(1).optional(),
+  }),
+  version: z.object({
+    sovereignNode: z.string().min(1).optional(),
+    contractVersion: z.string().min(1),
+    openclaw: z.string().min(1).optional(),
+    plugins: z.record(z.string(), z.string()).optional(),
+  }),
+});
+
+export const doctorReportSchema = z.object({
+  overall: z.enum(["pass", "warn", "fail"]),
+  checks: z.array(checkResultSchema),
+  suggestedCommands: z.array(z.string()),
+});
+
+export const reconfigureResultSchema = z.object({
+  target: z.enum(["imap", "matrix"]),
+  changed: z.array(z.string()),
+  restartRequiredServices: z.array(z.string()),
+  validation: z.array(checkResultSchema),
+});
+
+export const testImapResultSchema = z.object({
+  ok: z.boolean(),
+  host: z.string().min(1),
+  port: z.number().int().positive(),
+  tls: z.boolean(),
+  auth: z.enum(["ok", "failed"]),
+  mailbox: z.string().min(1).optional(),
+  capabilities: z.array(z.string()).optional(),
+  error: errorDetailSchema.optional(),
+});
+
+export const testMatrixResultSchema = z.object({
+  ok: z.boolean(),
+  homeserverUrl: z.string().min(1),
+  clientDiscovery: z
+    .object({
+      required: z.boolean(),
+      ok: z.boolean(),
+    })
+    .optional(),
+  serverDiscovery: z
+    .object({
+      required: z.boolean(),
+      ok: z.boolean(),
+    })
+    .optional(),
+  checks: z.array(checkResultSchema),
+});
+
+export const startInstallResultSchema = z.object({
+  job: installJobSummarySchema,
+});
+
+export type JobStepId = z.infer<typeof jobStepIdSchema>;
+export type JobStep = z.infer<typeof jobStepSchema>;
+export type InstallRequest = z.infer<typeof installRequestSchema>;
+export type PreflightResult = z.infer<typeof preflightResultSchema>;
+export type InstallJobSummary = z.infer<typeof installJobSummarySchema>;
+export type InstallResult = z.infer<typeof installResultSchema>;
+export type InstallJobStatusResponse = z.infer<typeof installJobStatusResponseSchema>;
+export type SovereignStatus = z.infer<typeof sovereignStatusSchema>;
+export type DoctorReport = z.infer<typeof doctorReportSchema>;
+export type TestAlertResult = z.infer<typeof testAlertResultSchema>;
+export type ReconfigureResult = z.infer<typeof reconfigureResultSchema>;
+export type TestImapResult = z.infer<typeof testImapResultSchema>;
+export type TestMatrixResult = z.infer<typeof testMatrixResultSchema>;
+export type StartInstallResult = z.infer<typeof startInstallResultSchema>;
+
