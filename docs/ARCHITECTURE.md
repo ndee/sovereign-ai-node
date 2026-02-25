@@ -231,13 +231,6 @@ Hard vs soft controls:
 - Prompts and skills guide behavior, but they are not hard enforcement.
 - Tool policy is the hard control for which tool names are callable.
 - Sandboxing controls where tools run and what filesystem/runtime surface is exposed.
-- Exec approvals/allowlists gate command execution trust, but they do not make a multi-command CLI semantically read-only.
-
-Current OpenClaw IMAP access path (today):
-
-- OpenClaw does not provide a built-in first-class IMAP core tool in the runtime surface.
-- The practical IMAP path is a CLI-based skill pattern (for example the bundled `himalaya` skill), which teaches use of an IMAP/SMTP-capable CLI and includes mutable mailbox operations.
-- Therefore, a prompt or skill instruction that says "read-only" is not a sufficient production guarantee by itself.
 
 Sentinel default (production):
 
@@ -251,19 +244,6 @@ Sentinel mailbox access contract (production):
 - Recommended tool names are explicit read-only verbs (for example `imap_list_folders`, `imap_list_messages`, `imap_search_messages`, `imap_get_message`, and optionally `imap_get_attachment` with size/path limits).
 - Do not expose mutable operations in the plugin at all (`delete`, `move`, `copy`, `flag`, `send`, `reply`, `forward`).
 - Prefer separate tool names over a single `imap` tool with mixed `action` values so OpenClaw tool policy can allow/deny at tool-name granularity.
-
-Why `exec` + IMAP CLI is not the primary design:
-
-- Exec allowlists/approvals trust executable paths and approval policy, not a safe subset of subcommands.
-- A wrapper CLI can be used as a transitional implementation, but it is weaker than a typed tool and should not be the long-term Sentinel boundary.
-
-MCP servers and `mcporter` in OpenClaw:
-
-- MCP is supported in OpenClaw primarily through the `mcporter` bridge model, not as a first-class core MCP runtime.
-- MCP can help if the MCP server itself is read-only (only read tools are exposed).
-- For Sentinel, prefer a typed OpenClaw plugin tool as the primary interface.
-- MCP/`mcporter` can be used behind that tool (or as an alternative integration path) when it improves isolation or operational flexibility.
-- Do not expose raw generic `exec`/`mcporter call` access to Sentinel in production.
 
 Sentinel runtime profile requirements (minimum):
 
