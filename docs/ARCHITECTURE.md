@@ -56,7 +56,7 @@ Owns:
 
 - Final policy decisions
 - Secrets authority and credential issuance
-- High-risk connector authority (especially production mail/files)
+- High-risk connector/tool policy and credential authority (especially production mail/files)
 - Durable audit/event log (system of record)
 - Product state and bot checkpoints
 - Runtime profile compilation/validation for OpenClaw deployments
@@ -96,7 +96,7 @@ This is a critical architectural clarification.
 - Process/container isolation reduces blast radius.
 - This is not a fine-grained capability sandbox.
 
-Sovereign policy can strongly constrain kernel-owned connectors/tools, but it cannot fully constrain arbitrary plugin internals after load.
+Sovereign policy can strongly constrain kernel-governed connector/tool surfaces, but it cannot fully constrain arbitrary plugin internals after load.
 
 ## Integration Strategy (Concrete)
 
@@ -146,6 +146,7 @@ The profile compiler controls:
 - Hooks enablement and token/session routing policy
 - Channel/plugin policy (including Matrix)
 - Tool/exec/fs restrictions by agent
+- Named least-privilege capability profiles for sensitive bots (for example read-only mail triage) expressed as per-agent tool policy, sandbox policy, and exec policy
 - Deployment assumptions (service user, workspace, mounts)
 
 ### Why It Is Core
@@ -174,6 +175,7 @@ This is where Sovereign turns OpenClaw from a flexible framework into a reproduc
 - Control workspace mounts to avoid unreviewed project/user skill sources
 - Use curated in-repo or managed skills by default
 - Do not assume skill config alone fully disables source classes; enforce via runtime environment and deployment layout
+- Do not rely on skill instructions alone for hard read-only/read-write boundaries; enforce those with tool policy, sandboxing, and exec approvals
 
 ### Hooks
 
@@ -217,16 +219,67 @@ Continuously evaluate inbound mail and alert on high-signal items.
 
 ### Key Boundary Decision
 
-Production mail ingestion remains kernel-owned.
-OpenClaw is used for agent execution/classification and operator-facing delivery/runtime surfaces.
+Mail Sentinel accesses mail through agent-invoked, least-privilege tools (read-only by default), not a kernel-owned ingestion pipeline.
+Sovereign Kernel remains the authority for policy, secrets, audit, and runtime profile enforcement.
+
+### Fine-Grained Tool Control (Mail Sentinel + General Pattern)
+
+This is the default control pattern for bots that touch sensitive systems (mail, files, ticketing, finance, production APIs).
+
+Hard vs soft controls:
+
+- Prompts and skills guide behavior, but they are not hard enforcement.
+- Tool policy is the hard control for which tool names are callable.
+- Sandboxing controls where tools run and what filesystem/runtime surface is exposed.
+- Exec approvals/allowlists gate command execution trust, but they do not make a multi-command CLI semantically read-only.
+
+Current OpenClaw IMAP access path (today):
+
+- OpenClaw does not provide a built-in first-class IMAP core tool in the runtime surface.
+- The practical IMAP path is a CLI-based skill pattern (for example the bundled `himalaya` skill), which teaches use of an IMAP/SMTP-capable CLI and includes mutable mailbox operations.
+- Therefore, a prompt or skill instruction that says "read-only" is not a sufficient production guarantee by itself.
+
+Sentinel default (production):
+
+- Sentinel runs inside OpenClaw and reads mail on demand through a constrained read-only tool surface.
+- Sovereign remains the authority for policy, secrets, and authoritative persistence/audit.
+- This is the V1 production path unless a kernel-ingest mode is explicitly introduced for a higher-assurance deployment profile.
+
+Sentinel mailbox access contract (production):
+
+- Expose a dedicated typed plugin tool surface that implements only read operations.
+- Recommended tool names are explicit read-only verbs (for example `imap_list_folders`, `imap_list_messages`, `imap_search_messages`, `imap_get_message`, and optionally `imap_get_attachment` with size/path limits).
+- Do not expose mutable operations in the plugin at all (`delete`, `move`, `copy`, `flag`, `send`, `reply`, `forward`).
+- Prefer separate tool names over a single `imap` tool with mixed `action` values so OpenClaw tool policy can allow/deny at tool-name granularity.
+
+Why `exec` + IMAP CLI is not the primary design:
+
+- Exec allowlists/approvals trust executable paths and approval policy, not a safe subset of subcommands.
+- A wrapper CLI can be used as a transitional implementation, but it is weaker than a typed tool and should not be the long-term Sentinel boundary.
+
+MCP servers and `mcporter` in OpenClaw:
+
+- MCP is supported in OpenClaw primarily through the `mcporter` bridge model, not as a first-class core MCP runtime.
+- MCP can help if the MCP server itself is read-only (only read tools are exposed).
+- For Sentinel, prefer a typed OpenClaw plugin tool as the primary interface.
+- MCP/`mcporter` can be used behind that tool (or as an alternative integration path) when it improves isolation or operational flexibility.
+- Do not expose raw generic `exec`/`mcporter call` access to Sentinel in production.
+
+Sentinel runtime profile requirements (minimum):
+
+- Use a restrictive per-agent tool profile (`minimal` or equivalent) plus explicit Sentinel tool allowlists.
+- Do not rely on plugin-only allowlists to narrow the full core tool surface; pair plugin tool enablement with an explicit restrictive base profile and core tool allowlist entries.
+- Deny runtime and filesystem mutation tools for Sentinel by default unless explicitly required (`exec`, `bash`, `process`, `write`, `edit`, `apply_patch`).
+- Run Sentinel sandboxed when processing untrusted message content.
+- Treat plugins/hooks/skills as trusted code once loaded: pin, review, and govern sources accordingly.
 
 ### V1 Flow (Revised)
 
-1. Sovereign mail connector ingests inbound message (`mail.received`).
-2. Sovereign kernel applies policy and routing.
-3. Kernel dispatches classification/extraction work via `OpenClawGatewayAdapter` (`agent`).
-4. OpenClaw agent executes with curated skills/tools under a Sovereign-managed runtime profile.
-5. Sovereign persists authoritative state/results and audit records.
+1. OpenClaw cron (or an explicit wake trigger) starts a Mail Sentinel agent run.
+2. OpenClaw agent executes with curated skills/tools under a Sovereign-managed runtime profile.
+3. Sentinel uses the read-only mail tool surface (`imap_*`) on demand to list/search/read candidate messages.
+4. Sentinel performs classification/extraction and emits structured findings.
+5. Sovereign kernel applies policy/routing, persists authoritative state/results, and records audit events (including polling/checkpoint state as needed).
 6. Alert is delivered through OpenClaw Matrix plugin by default (or a kernel-owned Matrix path in high-assurance mode).
 7. User feedback returns through Matrix/OpenClaw and is mirrored into Sovereign state/audit.
 
@@ -241,6 +294,7 @@ OpenClaw is used for agent execution/classification and operator-facing delivery
 Sovereign storage is authoritative for:
 
 - Message metadata index
+- Mail polling cursors/checkpoints (for tool-driven mailbox reads)
 - Classification results
 - Alert history
 - Feedback corrections
@@ -274,7 +328,7 @@ Includes:
 - OpenClaw Gateway adapter and compatibility matrix
 - OpenClaw runtime profile compiler + validators
 - Plugin/skill/hook governance policy and deployment checks
-- Base connector framework (including production mail path)
+- Base connector/tool framework (including read-only mail tool contracts/plugins)
 - Base bots (starting with Mail Sentinel)
 - Self-hosted config/CLI/manifests
 
@@ -329,3 +383,4 @@ Same as V1 plus:
 - Runtime profile schema/versioning strategy
 - Sovereign audit mirror granularity from OpenClaw hooks/events
 - When to introduce a separate high-assurance Matrix path (if ever)
+- Sentinel direct-mail tool backend: first-party `imap_readonly` OpenClaw plugin tool vs MCP-backed implementation behind the same read-only tool contract
