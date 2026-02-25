@@ -13,6 +13,8 @@ This document explains:
 
 This document focuses on the bundled setup path only. It does not define generic Matrix hosting beyond the `sovereign-ai-node` default profile.
 
+Normative installer request/response schemas, defaults, and rollback semantics are defined in `docs/INSTALLER_CONTRACTS.md`.
+
 ## Scope and Defaults
 
 The default bundled Matrix profile is:
@@ -116,6 +118,8 @@ Bundled profile guidance:
 - enable delegation only when you need custom branding/domain topology
 - if delegation is enabled, the installer should generate and validate the required `.well-known` JSON payloads
 
+The requirement flags for client/server discovery checks are exposed by the `TestMatrixResult` schema in `docs/INSTALLER_CONTRACTS.md`.
+
 ## Reverse Proxy Requirements
 
 The reverse proxy is part of the bundled stack and is not optional for public installs.
@@ -204,6 +208,8 @@ If federation is enabled:
 - validate `.well-known` configuration
 - restrict exposure to only required public endpoints
 - document additional operational responsibilities (abuse handling, upgrades, federation diagnostics)
+
+Failure and rollback behavior for partial bundled Matrix installs is defined in `docs/INSTALLER_CONTRACTS.md` and should be treated as part of the operator contract.
 
 ## Operations and Backup Expectations
 

@@ -13,6 +13,8 @@ This is the phase-A documentation contract for:
 
 If the `sovereign-node` CLI or Wizard UI is not implemented yet in your build, this document defines the intended operator flow and command contract.
 
+Normative command and API schemas are defined in `docs/INSTALLER_CONTRACTS.md`.
+
 ## Audience
 
 - Self-hosting operators who want the easiest possible setup path
@@ -38,7 +40,9 @@ The operator should not need to manually do these steps in the default path, but
 
 - Validate IMAP connectivity, TLS, and credentials
 - Store secrets securely and configure the read-only IMAP plugin
-- Install and configure OpenClaw with pinned plugins and agent config
+- Install OpenClaw itself (pinned version) using the official OpenClaw installer and skip OpenClaw onboarding
+- Install/repair the OpenClaw gateway service after Sovereign writes the runtime config
+- Configure OpenClaw with pinned plugins and agent config
 - Register the `mail-sentinel` agent and cron polling job
 - Provision the bundled Matrix stack (Synapse, Postgres, reverse proxy, TLS)
 - Create Matrix operator and bot accounts
@@ -76,6 +80,10 @@ Core rule:
 
 - The CLI and Wizard UI must call the same installer/provisioning backend logic.
 
+Contract note:
+
+- CLI JSON output formats and backend job API schemas are defined in `docs/INSTALLER_CONTRACTS.md`
+
 ## CLI-First Happy Path
 
 ### Prerequisites (Operator Inputs)
@@ -83,6 +91,7 @@ Core rule:
 The default bundled install still needs a few real inputs:
 
 - A Linux host you control
+- `sudo`/root access on that host (default system install path)
 - A public domain or subdomain for Matrix (for example `matrix.example.org`)
 - DNS access for that domain
 - IMAP server hostname, port, TLS mode, username, and password or app password
@@ -98,20 +107,62 @@ sovereign-node install
 
 This command is interactive by default and should complete the full default setup.
 
+For a fresh machine, the target two-command operator flow is:
+
+```bash
+curl -fsSL <sovereign-node-installer-url> | sudo bash
+sudo sovereign-node install
+```
+
+Notes:
+
+- `sovereign-node install` owns OpenClaw installation in the default path.
+- Operators should not run `openclaw onboard` in the default Sovereign flow.
+
 ### What `sovereign-node install` Must Do
 
 In the default bundled mode, the installer should perform these steps in order:
 
 1. Run preflight checks (ports, disk, DNS resolution, container runtime, clock).
-2. Collect and test IMAP credentials.
-3. Collect Matrix domain settings and apply safe defaults.
-4. Provision the bundled Matrix stack.
-5. Create Matrix operator account and bot account.
-6. Create a private alert room and invite both accounts.
-7. Install/configure OpenClaw and required plugins.
-8. Register `mail-sentinel` agent config, skills, and cron polling job.
-9. Run health checks and a synthetic test alert.
-10. Print Element connection details and next steps.
+2. Install OpenClaw CLI using the official OpenClaw installer script (pinned version, `--no-onboard`, non-interactive).
+3. Verify the installed OpenClaw version is the Sovereign-pinned compatible version.
+4. Collect and test IMAP credentials.
+5. Collect Matrix domain settings and apply safe defaults.
+6. Provision the bundled Matrix stack.
+7. Create Matrix operator account and bot account.
+8. Create a private alert room and invite both accounts.
+9. Write Sovereign-managed OpenClaw config/profile and secrets references.
+10. Install/repair the OpenClaw gateway service and start it.
+11. Install/configure required OpenClaw plugins.
+12. Register `mail-sentinel` agent config, skills, and cron polling job.
+13. Run health checks and a synthetic test alert.
+14. Print Element connection details and next steps.
+
+### OpenClaw Bootstrap in the Default Sovereign Flow
+
+Sovereign installs OpenClaw on the machine as part of `sovereign-node install`.
+
+Default bootstrap behavior:
+
+- use the official OpenClaw installer script (`install.sh`)
+- install a Sovereign-pinned OpenClaw version (not floating `latest`)
+- skip OpenClaw onboarding (`--no-onboard`)
+- run non-interactively in the installer backend
+
+The default internal command pattern is:
+
+```bash
+curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install.sh | \
+  bash -s -- --version <sovereign-pinned-openclaw-version> --no-onboard --no-prompt
+```
+
+Sovereign then installs the gateway service after writing Sovereign-managed config:
+
+```bash
+openclaw gateway install
+```
+
+Use `openclaw gateway install --force` when the installer needs to rewrite an existing service entry.
 
 ### CLI Commands for Ongoing Operations (Target Contract)
 
@@ -132,6 +183,16 @@ Recommended operator command set:
 - `openclaw cron list`
 - `openclaw cron runs --id <job-id>`
 - `openclaw security audit --deep`
+
+### Advanced / Manual OpenClaw Path (Supported, Not Default)
+
+If OpenClaw is already installed on the host, `sovereign-node install` should:
+
+- detect the existing OpenClaw CLI
+- reuse it when it matches the Sovereign-pinned compatible version
+- repair/reinstall only when incompatible or broken
+
+Even in this path, operators should not run `openclaw onboard` for the default Sovereign install flow.
 
 ## Element Connection (Operator Step 3)
 
@@ -197,6 +258,7 @@ If the simple flow fails, the operator should check these first:
 - `sovereign-node doctor`
 - `openclaw health`
 - `openclaw status --deep`
+- OpenClaw CLI/version install sanity (bootstrap script reachability, version pin match)
 - Matrix service health and reverse proxy status
 - IMAP connectivity test and credential validity
 - alert room target and bot membership
@@ -206,3 +268,4 @@ If the simple flow fails, the operator should check these first:
 - `docs/ARCHITECTURE.md`
 - `docs/MAIL_SENTINEL_DESIGN.md`
 - `docs/MATRIX_BUNDLED_SETUP.md`
+- `docs/INSTALLER_CONTRACTS.md`

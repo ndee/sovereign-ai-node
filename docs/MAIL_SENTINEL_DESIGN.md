@@ -84,6 +84,7 @@ Operator onboarding and bundled Matrix setup are specified in:
 
 - `docs/OPERATIONS_ONBOARDING.md`
 - `docs/MATRIX_BUNDLED_SETUP.md`
+- `docs/INSTALLER_CONTRACTS.md`
 
 ### Simple Flow vs Hidden Automation
 
@@ -103,6 +104,8 @@ This is the correct product-level UX target, but several setup steps must be aut
 - post-install health checks and a test alert
 
 This design assumes those steps are implemented by the operator surfaces described in the runbooks, while the bot itself remains a standard OpenClaw agent.
+
+In the default Sovereign install path, Sovereign installs and configures OpenClaw on the host; operators should not run `openclaw onboard` for this bot setup.
 
 ## Design Goals
 
@@ -598,6 +601,10 @@ Use the OpenClaw CLI as the operational source of truth for this bot.
 The simplified operator install/run flow, including the optional `sovereign-node` CLI and Wizard UI, is documented in `docs/OPERATIONS_ONBOARDING.md`.
 
 Bundled Matrix server setup requirements and defaults are documented in `docs/MATRIX_BUNDLED_SETUP.md`.
+
+Normative CLI/API contracts for installer and operator commands are documented in `docs/INSTALLER_CONTRACTS.md`.
+
+In the default Sovereign flow, `openclaw` is installed by Sovereign and then used as the runtime/operator CLI alongside `sovereign-node`.
 
 Typical operator commands for `Mail Sentinel`:
 

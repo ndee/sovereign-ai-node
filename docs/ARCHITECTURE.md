@@ -181,7 +181,8 @@ CLI policy:
 
 Typical lifecycle:
 
-- Install/OpenClaw onboarding (`openclaw setup` / `openclaw onboard`)
+- Default operator path: `sovereign-node install` bootstraps OpenClaw (official `install.sh`, pinned version, `--no-onboard`)
+- Install/repair the OpenClaw gateway service (`openclaw gateway install`) after Sovereign writes the runtime config
 - Install and enable required plugins
 - Create/configure agents (`openclaw agents ...`)
 - Apply runtime profile config
@@ -204,14 +205,17 @@ Supported surface model:
 Core rules:
 
 - `openclaw` remains available and documented
+- The default Sovereign install path owns host bootstrap, including OpenClaw installation
+- Sovereign uses the official OpenClaw installer flow and skips `openclaw onboard` in the default path
 - CLI and Wizard should use the same installer/provisioning backend logic (no duplicated provisioning implementations)
 - The wizard is an operator setup/status UI, not a replacement for Element or other end-user chat clients
 - Operator flows may simplify setup (for example bundled Matrix), but must preserve explicit configuration and auditability
 
-Related runbooks define the operator journey and deployment defaults:
+Related docs define the operator journey, deployment defaults, and installer contracts:
 
 - `docs/OPERATIONS_ONBOARDING.md`
 - `docs/MATRIX_BUNDLED_SETUP.md`
+- `docs/INSTALLER_CONTRACTS.md`
 
 ## Core Repo Artifacts
 
@@ -226,6 +230,7 @@ The core repo should contain:
 - Security and operations runbooks
 - Operator onboarding runbook (`docs/OPERATIONS_ONBOARDING.md`)
 - Bundled Matrix setup runbook (`docs/MATRIX_BUNDLED_SETUP.md`)
+- Installer/API/CLI contract doc (`docs/INSTALLER_CONTRACTS.md`)
 
 ## Stable Contracts (Core)
 
@@ -238,6 +243,8 @@ The following contracts should be kept stable and versioned in this repo:
 - Agent-vs-plugin packaging conventions (bot behavior vs reusable capability plugins)
 - Operator CLI coexistence policy (`openclaw` + optional `sovereign-node`)
 - CLI/Wizard backend reuse policy (one provisioning implementation, multiple operator surfaces)
+- Sovereign-managed OpenClaw bootstrap policy (official installer usage, pinning, `--no-onboard`)
+- Installer/CLI/API schema contracts and failure semantics (`docs/INSTALLER_CONTRACTS.md`)
 - Bot output schemas (defined in bot-specific design docs)
 - Operational runbook commands and validation checklist
 
