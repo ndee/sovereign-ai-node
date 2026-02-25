@@ -18,6 +18,7 @@ This document covers the core platform only:
 - Core extension model
 - Security baseline
 - Operational model
+- Operator install surfaces (CLI and wizard)
 - Stable repo-owned contracts
 
 This document does not include bot-specific design details.
@@ -190,6 +191,28 @@ Typical lifecycle:
 
 Repo helper scripts may automate repeated CLI sequences, but the runtime remains standard OpenClaw.
 
+## Operator Install Surfaces (CLI and Wizard)
+
+`sovereign-ai-node` may expose operator-friendly install and onboarding surfaces on top of the OpenClaw runtime, but these do not replace OpenClaw itself.
+
+Supported surface model:
+
+- `sovereign-node` CLI for opinionated install, reconfigure, status, and diagnostics workflows
+- Sovereign Wizard UI (web UI) for guided onboarding and day-1 operations
+- `openclaw` CLI for runtime-native inspection, debugging, and break-glass operations
+
+Core rules:
+
+- `openclaw` remains available and documented
+- CLI and Wizard should use the same installer/provisioning backend logic (no duplicated provisioning implementations)
+- The wizard is an operator setup/status UI, not a replacement for Element or other end-user chat clients
+- Operator flows may simplify setup (for example bundled Matrix), but must preserve explicit configuration and auditability
+
+Related runbooks define the operator journey and deployment defaults:
+
+- `docs/OPERATIONS_ONBOARDING.md`
+- `docs/MATRIX_BUNDLED_SETUP.md`
+
 ## Core Repo Artifacts
 
 The core repo should contain:
@@ -201,6 +224,8 @@ The core repo should contain:
 - First-party OpenClaw plugins/tools (when needed)
 - Optional helper CLI/wrappers that compose OpenClaw CLI (not replace it)
 - Security and operations runbooks
+- Operator onboarding runbook (`docs/OPERATIONS_ONBOARDING.md`)
+- Bundled Matrix setup runbook (`docs/MATRIX_BUNDLED_SETUP.md`)
 
 ## Stable Contracts (Core)
 
@@ -212,6 +237,7 @@ The following contracts should be kept stable and versioned in this repo:
 - Skill pack naming and activation conventions
 - Agent-vs-plugin packaging conventions (bot behavior vs reusable capability plugins)
 - Operator CLI coexistence policy (`openclaw` + optional `sovereign-node`)
+- CLI/Wizard backend reuse policy (one provisioning implementation, multiple operator surfaces)
 - Bot output schemas (defined in bot-specific design docs)
 - Operational runbook commands and validation checklist
 

@@ -76,6 +76,34 @@ Recommended split:
 
 This preserves transparency and reduces wrapper drift while still allowing a simpler operator experience for common tasks.
 
+## Operator Onboarding Context
+
+This document defines the bot design, not the full operator installation journey.
+
+Operator onboarding and bundled Matrix setup are specified in:
+
+- `docs/OPERATIONS_ONBOARDING.md`
+- `docs/MATRIX_BUNDLED_SETUP.md`
+
+### Simple Flow vs Hidden Automation
+
+The intended operator experience is intentionally simple:
+
+- set IMAP credentials
+- install
+- connect with Element to Matrix
+- wait for mail alerts
+
+This is the correct product-level UX target, but several setup steps must be automated behind it for reliability:
+
+- IMAP validation, secret storage, and read-only plugin configuration
+- OpenClaw install/profile application, plugin enablement, and agent/cron registration
+- bundled Matrix provisioning (Synapse, database, reverse proxy/TLS)
+- Matrix account bootstrap (operator + bot), private room creation, and room targeting
+- post-install health checks and a test alert
+
+This design assumes those steps are implemented by the operator surfaces described in the runbooks, while the bot itself remains a standard OpenClaw agent.
+
 ## Design Goals
 
 - Read-only mailbox access (no send/move/delete/reply)
@@ -566,6 +594,10 @@ Recommended for V1 reliability:
 ## Operator Workflow (CLI Policy for This Bot)
 
 Use the OpenClaw CLI as the operational source of truth for this bot.
+
+The simplified operator install/run flow, including the optional `sovereign-node` CLI and Wizard UI, is documented in `docs/OPERATIONS_ONBOARDING.md`.
+
+Bundled Matrix server setup requirements and defaults are documented in `docs/MATRIX_BUNDLED_SETUP.md`.
 
 Typical operator commands for `Mail Sentinel`:
 
