@@ -6,6 +6,7 @@ export type OpenClawInstallOptions = {
   noPrompt?: boolean;
   noOnboard?: boolean;
   forceReinstall?: boolean;
+  skipIfCompatibleInstalled?: boolean;
 };
 
 export type DetectedOpenClaw = {
@@ -38,28 +39,141 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
     if (result.exitCode !== 0) {
       return null;
     }
+    const parsedVersion = parseVersionToken(result.stdout);
     return {
       binaryPath: "openclaw",
-      version: result.stdout.trim() || "unknown",
+      version: (parsedVersion ?? result.stdout.trim()) || "unknown",
     };
   }
 
   async ensureInstalled(opts: OpenClawInstallOptions): Promise<OpenClawInstallInfo> {
+    const desiredVersion = opts.version.trim();
+    const detected = await this.detectInstalled();
+    if (
+      detected !== null
+      && !Boolean(opts.forceReinstall)
+      && (opts.skipIfCompatibleInstalled ?? true)
+      && versionsMatch(detected.version, desiredVersion)
+    ) {
+      this.logger.info(
+        {
+          openclawVersion: detected.version,
+          binaryPath: detected.binaryPath,
+        },
+        "OpenClaw already installed with compatible version; skipping reinstall",
+      );
+      return {
+        binaryPath: detected.binaryPath,
+        version: detected.version,
+        installMethod: "install_sh",
+      };
+    }
+
+    const shellScript = buildInstallShellScript({
+      version: desiredVersion,
+      noPrompt: opts.noPrompt ?? true,
+      noOnboard: opts.noOnboard ?? true,
+    });
     this.logger.info(
       {
-        openclawVersion: opts.version,
+        openclawVersion: desiredVersion,
         noPrompt: opts.noPrompt ?? true,
         noOnboard: opts.noOnboard ?? true,
+        forceReinstall: opts.forceReinstall ?? false,
+        skipIfCompatibleInstalled: opts.skipIfCompatibleInstalled ?? true,
       },
-      "OpenClaw bootstrap scaffold invoked (implementation pending)",
+      "Installing OpenClaw via official install.sh",
     );
 
-    // TODO: Execute official OpenClaw install.sh with pinned version and --no-onboard.
+    const installResult = await this.execRunner.run({
+      command: "bash",
+      args: ["-lc", shellScript],
+    });
+    if (installResult.exitCode !== 0) {
+      throw {
+        code: "OPENCLAW_INSTALL_FAILED",
+        message: "OpenClaw install.sh exited with a non-zero status",
+        retryable: true,
+        details: {
+          command: installResult.command,
+          exitCode: installResult.exitCode,
+          stderr: truncateText(installResult.stderr, 4000),
+          stdout: truncateText(installResult.stdout, 2000),
+        },
+      };
+    }
+
+    const installed = await this.detectInstalled();
+    if (installed === null) {
+      throw {
+        code: "OPENCLAW_INSTALL_FAILED",
+        message: "OpenClaw installer completed but the openclaw CLI was not detected",
+        retryable: true,
+      };
+    }
+
+    if (!versionsMatch(installed.version, desiredVersion)) {
+      this.logger.warn(
+        {
+          expectedVersion: desiredVersion,
+          detectedVersion: installed.version,
+        },
+        "OpenClaw install completed but detected version does not match requested version",
+      );
+    }
+
     return {
-      binaryPath: "openclaw",
-      version: opts.version,
+      binaryPath: installed.binaryPath,
+      version: installed.version,
       installMethod: "install_sh",
     };
   }
 }
 
+type InstallShellArgs = {
+  version: string;
+  noPrompt: boolean;
+  noOnboard: boolean;
+};
+
+const buildInstallShellScript = (args: InstallShellArgs): string => {
+  const installArgs = ["-s", "--", "--version", args.version];
+  if (args.noOnboard) {
+    installArgs.push("--no-onboard");
+  }
+  if (args.noPrompt) {
+    installArgs.push("--no-prompt");
+  }
+
+  return [
+    "set -euo pipefail",
+    "curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install.sh \\",
+    `  | bash ${installArgs.map(shellQuote).join(" ")}`,
+  ].join("\n");
+};
+
+const shellQuote = (value: string): string => `'${value.replaceAll("'", `'\"'\"'`)}'`;
+
+const parseVersionToken = (value: string): string | null => {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+  const semverMatch = trimmed.match(/\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b/);
+  return semverMatch?.[0] ?? trimmed.split(/\s+/)[0] ?? null;
+};
+
+const versionsMatch = (detectedVersion: string, requestedVersion: string): boolean => {
+  const normalizedDetected = normalizeVersion(detectedVersion);
+  const normalizedRequested = normalizeVersion(requestedVersion);
+  return normalizedDetected === normalizedRequested;
+};
+
+const normalizeVersion = (value: string): string => parseVersionToken(value) ?? value.trim();
+
+const truncateText = (value: string, maxChars: number): string => {
+  if (value.length <= maxChars) {
+    return value;
+  }
+  return `${value.slice(0, maxChars)}...(truncated)`;
+};

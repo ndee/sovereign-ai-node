@@ -27,6 +27,7 @@ import type {
 } from "../contracts/api.js";
 import type { Logger } from "../logging/logger.js";
 import type { SovereignPaths } from "../config/paths.js";
+import type { OpenClawBootstrapper } from "../openclaw/bootstrap.js";
 import {
   JobRunner,
   type InstallContext,
@@ -44,6 +45,10 @@ type PersistedInstallJobRecord = {
   updatedAt: string;
 };
 
+type RealInstallerServiceDeps = {
+  openclawBootstrapper: OpenClawBootstrapper;
+};
+
 export class RealInstallerService implements InstallerService {
   private readonly stubService: StubInstallerService;
 
@@ -51,11 +56,15 @@ export class RealInstallerService implements InstallerService {
 
   private resolvedInstallJobsDir: string | null = null;
 
+  private readonly openclawBootstrapper: OpenClawBootstrapper;
+
   constructor(
     private readonly logger: Logger,
     private readonly paths: SovereignPaths,
+    deps: RealInstallerServiceDeps,
   ) {
     this.stubService = new StubInstallerService(logger);
+    this.openclawBootstrapper = deps.openclawBootstrapper;
   }
 
   async preflight(input?: PreflightRequest): Promise<PreflightResult> {
@@ -147,12 +156,29 @@ export class RealInstallerService implements InstallerService {
         id: "openclaw_bootstrap_cli",
         label: "Install OpenClaw CLI",
         run: async () => {
-          throw {
-            code: "NOT_IMPLEMENTED",
-            message:
-              "OpenClaw bootstrap step is not implemented yet (job execution/persistence is now wired)",
-            retryable: true,
-          };
+          const openclaw = req.openclaw;
+          const manageInstallation = openclaw?.manageInstallation ?? true;
+
+          if (!manageInstallation) {
+            const detected = await this.openclawBootstrapper.detectInstalled();
+            if (detected === null) {
+              throw {
+                code: "OPENCLAW_MISSING",
+                message:
+                  "OpenClaw is not installed but the request disabled Sovereign-managed installation",
+                retryable: false,
+              };
+            }
+            return;
+          }
+
+          await this.openclawBootstrapper.ensureInstalled({
+            version: openclaw?.version ?? "pinned-by-sovereign",
+            noOnboard: true,
+            noPrompt: true,
+            forceReinstall: openclaw?.forceReinstall ?? false,
+            skipIfCompatibleInstalled: openclaw?.skipIfCompatibleInstalled ?? true,
+          });
         },
       },
       {

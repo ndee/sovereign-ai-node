@@ -7,6 +7,11 @@ import { describe, expect, it } from "vitest";
 import type { InstallRequest } from "../contracts/index.js";
 import { createLogger } from "../logging/logger.js";
 import type { SovereignPaths } from "../config/paths.js";
+import type {
+  OpenClawBootstrapper,
+  OpenClawInstallInfo,
+  OpenClawInstallOptions,
+} from "../openclaw/bootstrap.js";
 import { RealInstallerService } from "./real-service.js";
 
 const buildInstallRequest = (): InstallRequest => ({
@@ -58,7 +63,21 @@ describe("RealInstallerService", () => {
       installJobsDir: join(tempRoot, "install-jobs"),
       openclawServiceHome: join(tempRoot, "openclaw-home"),
     };
-    const service = new RealInstallerService(createLogger(), paths);
+    const ensureInstalledCalls: OpenClawInstallOptions[] = [];
+    const fakeBootstrapper: OpenClawBootstrapper = {
+      detectInstalled: async () => null,
+      ensureInstalled: async (opts): Promise<OpenClawInstallInfo> => {
+        ensureInstalledCalls.push(opts);
+        return {
+          binaryPath: "/usr/local/bin/openclaw",
+          version: opts.version,
+          installMethod: "install_sh",
+        };
+      },
+    };
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: fakeBootstrapper,
+    });
 
     try {
       const started = await service.startInstall(buildInstallRequest());
@@ -67,15 +86,25 @@ describe("RealInstallerService", () => {
       expect(started.job.steps[0]?.id).toBe("preflight");
       expect(started.job.steps[0]?.state).toBe("succeeded");
       expect(started.job.steps[1]?.id).toBe("openclaw_bootstrap_cli");
-      expect(started.job.steps[1]?.state).toBe("failed");
+      expect(started.job.steps[1]?.state).toBe("succeeded");
+      expect(started.job.steps[2]?.id).toBe("imap_validate");
+      expect(started.job.steps[2]?.state).toBe("failed");
 
       const stored = await service.getInstallJob(started.job.jobId);
       expect(stored.job.jobId).toBe(started.job.jobId);
       expect(stored.job.state).toBe("failed");
-      expect(stored.error?.code).toBe("NOT_IMPLEMENTED");
+      expect(stored.error?.code).toBe("IMAP_TEST_FAILED");
 
       const files = await readdir(paths.installJobsDir);
       expect(files.some((name) => name.includes(started.job.jobId))).toBe(true);
+      expect(ensureInstalledCalls).toHaveLength(1);
+      expect(ensureInstalledCalls[0]).toMatchObject({
+        version: "pinned-by-sovereign",
+        noOnboard: true,
+        noPrompt: true,
+        forceReinstall: false,
+        skipIfCompatibleInstalled: true,
+      });
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }

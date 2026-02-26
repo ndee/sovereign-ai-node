@@ -16,13 +16,14 @@ export const createApp = () => {
     logger,
   );
 
-  void openclawBootstrapper;
   void openclawGatewayServiceManager;
 
   return {
     logger,
     paths: DEFAULT_PATHS,
-    installerService: new RealInstallerService(logger, DEFAULT_PATHS),
+    installerService: new RealInstallerService(logger, DEFAULT_PATHS, {
+      openclawBootstrapper,
+    }),
   };
 };
 
