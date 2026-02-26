@@ -14,6 +14,7 @@ import type {
   TestMatrixResult,
 } from "../contracts/index.js";
 import type {
+  PreflightRequest,
   ReconfigureImapRequest,
   ReconfigureMatrixRequest,
   TestAlertRequest,
@@ -37,7 +38,7 @@ export class StubInstallerService implements InstallerService {
 
   constructor(private readonly logger: Logger) {}
 
-  async preflight(_input?: Partial<InstallRequest>): Promise<PreflightResult> {
+  async preflight(_input?: PreflightRequest): Promise<PreflightResult> {
     return {
       mode: "bundled_matrix",
       overall: "warn",
@@ -240,4 +241,3 @@ export class StubInstallerService implements InstallerService {
     };
   }
 }
-

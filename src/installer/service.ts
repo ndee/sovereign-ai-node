@@ -11,6 +11,7 @@ import type {
   TestMatrixResult,
 } from "../contracts/index.js";
 import type {
+  PreflightRequest,
   ReconfigureImapRequest,
   ReconfigureMatrixRequest,
   TestAlertRequest,
@@ -19,7 +20,7 @@ import type {
 } from "../contracts/api.js";
 
 export interface InstallerService {
-  preflight(input?: Partial<InstallRequest>): Promise<PreflightResult>;
+  preflight(input?: PreflightRequest): Promise<PreflightResult>;
   testImap(req: TestImapRequest): Promise<TestImapResult>;
   testMatrix(req: TestMatrixRequest): Promise<TestMatrixResult>;
   startInstall(req: InstallRequest): Promise<StartInstallResult>;
@@ -30,4 +31,3 @@ export interface InstallerService {
   reconfigureImap(req: ReconfigureImapRequest): Promise<ReconfigureResult>;
   reconfigureMatrix(req: ReconfigureMatrixRequest): Promise<ReconfigureResult>;
 }
-
