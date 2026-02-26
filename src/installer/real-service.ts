@@ -28,6 +28,7 @@ import type {
 import type { Logger } from "../logging/logger.js";
 import type { SovereignPaths } from "../config/paths.js";
 import type { OpenClawBootstrapper } from "../openclaw/bootstrap.js";
+import type { HostPreflightChecker } from "../system/preflight.js";
 import {
   JobRunner,
   type InstallContext,
@@ -47,6 +48,7 @@ type PersistedInstallJobRecord = {
 
 type RealInstallerServiceDeps = {
   openclawBootstrapper: OpenClawBootstrapper;
+  preflightChecker: HostPreflightChecker;
 };
 
 export class RealInstallerService implements InstallerService {
@@ -58,6 +60,8 @@ export class RealInstallerService implements InstallerService {
 
   private readonly openclawBootstrapper: OpenClawBootstrapper;
 
+  private readonly preflightChecker: HostPreflightChecker;
+
   constructor(
     private readonly logger: Logger,
     private readonly paths: SovereignPaths,
@@ -65,10 +69,11 @@ export class RealInstallerService implements InstallerService {
   ) {
     this.stubService = new StubInstallerService(logger);
     this.openclawBootstrapper = deps.openclawBootstrapper;
+    this.preflightChecker = deps.preflightChecker;
   }
 
   async preflight(input?: PreflightRequest): Promise<PreflightResult> {
-    return this.stubService.preflight(input);
+    return this.preflightChecker.run(input);
   }
 
   async testImap(req: TestImapRequest): Promise<TestImapResult> {

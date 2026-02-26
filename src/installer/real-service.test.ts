@@ -12,6 +12,7 @@ import type {
   OpenClawInstallInfo,
   OpenClawInstallOptions,
 } from "../openclaw/bootstrap.js";
+import type { HostPreflightChecker } from "../system/preflight.js";
 import { RealInstallerService } from "./real-service.js";
 
 const buildInstallRequest = (): InstallRequest => ({
@@ -64,6 +65,7 @@ describe("RealInstallerService", () => {
       openclawServiceHome: join(tempRoot, "openclaw-home"),
     };
     const ensureInstalledCalls: OpenClawInstallOptions[] = [];
+    let preflightCalls = 0;
     const fakeBootstrapper: OpenClawBootstrapper = {
       detectInstalled: async () => null,
       ensureInstalled: async (opts): Promise<OpenClawInstallInfo> => {
@@ -75,8 +77,20 @@ describe("RealInstallerService", () => {
         };
       },
     };
+    const fakePreflightChecker: HostPreflightChecker = {
+      run: async () => {
+        preflightCalls += 1;
+        return {
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        };
+      },
+    };
     const service = new RealInstallerService(createLogger(), paths, {
       openclawBootstrapper: fakeBootstrapper,
+      preflightChecker: fakePreflightChecker,
     });
 
     try {
@@ -97,6 +111,7 @@ describe("RealInstallerService", () => {
 
       const files = await readdir(paths.installJobsDir);
       expect(files.some((name) => name.includes(started.job.jobId))).toBe(true);
+      expect(preflightCalls).toBe(1);
       expect(ensureInstalledCalls).toHaveLength(1);
       expect(ensureInstalledCalls[0]).toMatchObject({
         version: "pinned-by-sovereign",
