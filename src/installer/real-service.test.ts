@@ -12,6 +12,7 @@ import type {
   OpenClawInstallInfo,
   OpenClawInstallOptions,
 } from "../openclaw/bootstrap.js";
+import type { ImapTester } from "../system/imap.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
 import { RealInstallerService } from "./real-service.js";
 
@@ -66,6 +67,7 @@ describe("RealInstallerService", () => {
     };
     const ensureInstalledCalls: OpenClawInstallOptions[] = [];
     let preflightCalls = 0;
+    let imapTestCalls = 0;
     const fakeBootstrapper: OpenClawBootstrapper = {
       detectInstalled: async () => null,
       ensureInstalled: async (opts): Promise<OpenClawInstallInfo> => {
@@ -88,9 +90,28 @@ describe("RealInstallerService", () => {
         };
       },
     };
+    const fakeImapTester: ImapTester = {
+      test: async (req) => {
+        imapTestCalls += 1;
+        return {
+          ok: false,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "failed",
+          mailbox: req.imap.mailbox ?? "INBOX",
+          error: {
+            code: "IMAP_AUTH_FAILED",
+            message: "Fake IMAP auth failure for installer-service unit test",
+            retryable: false,
+          },
+        };
+      },
+    };
     const service = new RealInstallerService(createLogger(), paths, {
       openclawBootstrapper: fakeBootstrapper,
       preflightChecker: fakePreflightChecker,
+      imapTester: fakeImapTester,
     });
 
     try {
@@ -113,6 +134,7 @@ describe("RealInstallerService", () => {
       expect(files.some((name) => name.includes(started.job.jobId))).toBe(true);
       expect(preflightCalls).toBe(1);
       expect(ensureInstalledCalls).toHaveLength(1);
+      expect(imapTestCalls).toBe(1);
       expect(ensureInstalledCalls[0]).toMatchObject({
         version: "pinned-by-sovereign",
         noOnboard: true,

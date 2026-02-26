@@ -28,6 +28,7 @@ import type {
 import type { Logger } from "../logging/logger.js";
 import type { SovereignPaths } from "../config/paths.js";
 import type { OpenClawBootstrapper } from "../openclaw/bootstrap.js";
+import type { ImapTester } from "../system/imap.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
 import {
   JobRunner,
@@ -49,6 +50,7 @@ type PersistedInstallJobRecord = {
 type RealInstallerServiceDeps = {
   openclawBootstrapper: OpenClawBootstrapper;
   preflightChecker: HostPreflightChecker;
+  imapTester: ImapTester;
 };
 
 export class RealInstallerService implements InstallerService {
@@ -62,6 +64,8 @@ export class RealInstallerService implements InstallerService {
 
   private readonly preflightChecker: HostPreflightChecker;
 
+  private readonly imapTester: ImapTester;
+
   constructor(
     private readonly logger: Logger,
     private readonly paths: SovereignPaths,
@@ -70,6 +74,7 @@ export class RealInstallerService implements InstallerService {
     this.stubService = new StubInstallerService(logger);
     this.openclawBootstrapper = deps.openclawBootstrapper;
     this.preflightChecker = deps.preflightChecker;
+    this.imapTester = deps.imapTester;
   }
 
   async preflight(input?: PreflightRequest): Promise<PreflightResult> {
@@ -77,7 +82,7 @@ export class RealInstallerService implements InstallerService {
   }
 
   async testImap(req: TestImapRequest): Promise<TestImapResult> {
-    return this.stubService.testImap(req);
+    return this.imapTester.test(req);
   }
 
   async testMatrix(req: TestMatrixRequest): Promise<TestMatrixResult> {
