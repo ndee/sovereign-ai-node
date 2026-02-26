@@ -1,5 +1,5 @@
 import { DEFAULT_PATHS } from "../config/paths.js";
-import { StubInstallerService } from "../installer/stub-service.js";
+import { RealInstallerService } from "../installer/real-service.js";
 import { createLogger } from "../logging/logger.js";
 import { ShellOpenClawBootstrapper } from "../openclaw/bootstrap.js";
 import { ShellOpenClawGatewayServiceManager } from "../openclaw/gateway-service.js";
@@ -22,7 +22,7 @@ export const createApp = () => {
   return {
     logger,
     paths: DEFAULT_PATHS,
-    installerService: new StubInstallerService(logger),
+    installerService: new RealInstallerService(logger, DEFAULT_PATHS),
   };
 };
 
