@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, chmod, mkdir, readdir, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import type { TestMatrixRequest } from "../contracts/api.js";
@@ -94,14 +94,20 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     const synapseDir = join(projectDir, "synapse");
     const postgresDir = join(projectDir, "postgres-data");
     const composeFilePath = join(projectDir, "compose.yaml");
+    const envFilePath = join(projectDir, ".env");
 
     await mkdir(synapseDir, { recursive: true });
     await mkdir(postgresDir, { recursive: true });
     await ensureDirectoryTreeWritable(synapseDir);
     await ensureDirectoryTreeWritable(postgresDir);
 
+    const existingEnv = await this.readExistingEnv(projectDir);
+    const existingPostgresPassword = existingEnv.POSTGRES_PASSWORD?.trim();
     const generated = {
-      postgresPassword: `pg_${randomUUID().replaceAll("-", "")}`,
+      postgresPassword:
+        existingPostgresPassword !== undefined && existingPostgresPassword.length > 0
+          ? existingPostgresPassword
+          : `pg_${randomUUID().replaceAll("-", "")}`,
       registrationSharedSecret: randomUUID().replaceAll("-", ""),
       macaroonSecret: randomUUID().replaceAll("-", ""),
       formSecret: randomUUID().replaceAll("-", ""),
@@ -131,7 +137,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
 
     await Promise.all([
       writeFile(composeFilePath, `${composeYaml}\n`, "utf8"),
-      writeFile(join(projectDir, ".env"), `${envFile}\n`, "utf8"),
+      writeFile(envFilePath, `${envFile}\n`, "utf8"),
       writeFile(join(synapseDir, "homeserver.yaml"), `${homeserverYaml}\n`, "utf8"),
       writeFile(join(synapseDir, generated.signingKeyFile), `${signingKey}\n`, "utf8"),
       writeFile(join(synapseDir, "log.config"), `${logConfig}\n`, "utf8"),
@@ -184,21 +190,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     provision: BundledMatrixProvisionResult,
   ): Promise<BundledMatrixAccountsResult> {
     await this.ensureStackRunning(provision);
-    try {
-      await this.waitForSynapseReady(provision.adminBaseUrl);
-    } catch (error) {
-      if (isStructuredError(error) && error.code === "MATRIX_WAIT_READY_TIMEOUT") {
-        const diagnostics = await this.collectComposeDiagnostics(provision);
-        throw {
-          ...error,
-          details: {
-            ...(error.details ?? {}),
-            ...diagnostics,
-          },
-        };
-      }
-      throw error;
-    }
+    await this.waitForSynapseReadyWithRecovery(provision);
 
     const operatorLocalpart = sanitizeMatrixLocalpart(req.operator.username, "operator");
     const botLocalpart = chooseBotLocalpart(operatorLocalpart);
@@ -608,6 +600,73 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     };
   }
 
+  private async waitForSynapseReadyWithRecovery(
+    provision: BundledMatrixProvisionResult,
+  ): Promise<void> {
+    try {
+      await this.waitForSynapseReady(provision.adminBaseUrl);
+      return;
+    } catch (error) {
+      if (!(isStructuredError(error) && error.code === "MATRIX_WAIT_READY_TIMEOUT")) {
+        throw error;
+      }
+
+      const diagnostics = await this.collectComposeDiagnostics(provision);
+      const synapseLogs =
+        typeof diagnostics.synapseLogs === "string" ? diagnostics.synapseLogs : "";
+      if (!isPostgresAuthFailure(synapseLogs)) {
+        throw {
+          ...error,
+          details: {
+            ...(error.details ?? {}),
+            ...diagnostics,
+          },
+        };
+      }
+
+      this.logger.warn(
+        {
+          projectDir: provision.projectDir,
+        },
+        "Detected bundled Matrix postgres credential mismatch; resetting postgres data and retrying",
+      );
+
+      await this.resetBundledPostgresState(provision);
+      await this.ensureStackRunning(provision);
+      try {
+        await this.waitForSynapseReady(provision.adminBaseUrl);
+        return;
+      } catch (retryError) {
+        const retryDiagnostics = await this.collectComposeDiagnostics(provision);
+        if (isStructuredError(retryError)) {
+          throw {
+            ...retryError,
+            details: {
+              ...(retryError.details ?? {}),
+              firstAttempt: diagnostics,
+              retryAttempt: retryDiagnostics,
+            },
+          };
+        }
+        throw retryError;
+      }
+    }
+  }
+
+  private async resetBundledPostgresState(
+    provision: BundledMatrixProvisionResult,
+  ): Promise<void> {
+    await this.runComposeCommand(
+      provision.projectDir,
+      provision.composeFilePath,
+      ["down", "--remove-orphans"],
+    );
+    const postgresDir = join(provision.projectDir, "postgres-data");
+    await rm(postgresDir, { recursive: true, force: true });
+    await mkdir(postgresDir, { recursive: true });
+    await ensureDirectoryTreeWritable(postgresDir);
+  }
+
   private async collectComposeDiagnostics(
     provision: BundledMatrixProvisionResult,
   ): Promise<Record<string, unknown>> {
@@ -829,6 +888,16 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       return fallback;
     }
   }
+
+  private async readExistingEnv(projectDir: string): Promise<Record<string, string>> {
+    const envPath = join(projectDir, ".env");
+    try {
+      const raw = await readFile(envPath, "utf8");
+      return parseSimpleEnv(raw);
+    } catch {
+      return {};
+    }
+  }
 }
 
 type EnvTemplateInput = {
@@ -960,6 +1029,30 @@ const ensureDirectoryTreeWritable = async (root: string): Promise<void> => {
       queue.push(join(current, entry.name));
     }
   }
+};
+
+const isPostgresAuthFailure = (value: string): boolean =>
+  /password authentication failed for user ["']synapse["']/i.test(value);
+
+const parseSimpleEnv = (raw: string): Record<string, string> => {
+  const out: Record<string, string> = {};
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || trimmed.startsWith("#")) {
+      continue;
+    }
+    const separator = trimmed.indexOf("=");
+    if (separator <= 0) {
+      continue;
+    }
+    const key = trimmed.slice(0, separator).trim();
+    const value = trimmed.slice(separator + 1).trim();
+    if (key.length === 0) {
+      continue;
+    }
+    out[key] = value;
+  }
+  return out;
 };
 
 const renderSynapseLogConfig = (): string => `

@@ -289,6 +289,52 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       await rm(tempRoot, { recursive: true, force: true });
     }
   });
+
+  it("reuses existing postgres password from prior env on reprovision", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-test-"));
+    const paths = buildPaths(tempRoot);
+    const fakeExecRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        if (input.command === "docker") {
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: "ok",
+            stderr: "",
+          };
+        }
+        return {
+          command: [input.command, ...(input.args ?? [])].join(" "),
+          exitCode: 127,
+          stdout: "",
+          stderr: "command not found",
+        };
+      },
+    };
+
+    const provisioner = new DockerComposeBundledMatrixProvisioner(
+      fakeExecRunner,
+      createLogger(),
+      paths,
+    );
+
+    try {
+      const req = buildInstallRequest();
+      const first = await provisioner.provision(req);
+      const firstEnv = await readFile(join(first.projectDir, ".env"), "utf8");
+      const expected = firstEnv
+        .split(/\r?\n/)
+        .find((line) => line.startsWith("POSTGRES_PASSWORD="))
+        ?.slice("POSTGRES_PASSWORD=".length);
+      expect(expected).toBeTruthy();
+
+      const second = await provisioner.provision(req);
+      const secondEnv = await readFile(join(second.projectDir, ".env"), "utf8");
+      expect(secondEnv).toContain(`POSTGRES_PASSWORD=${expected}`);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 const buildPaths = (tempRoot: string): SovereignPaths => ({
