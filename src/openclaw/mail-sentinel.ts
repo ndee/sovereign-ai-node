@@ -40,6 +40,27 @@ export class ShellOpenClawMailSentinelRegistrar
       commands: [
         [
           "agents",
+          "add",
+          input.agentId,
+          "--workspace",
+          input.workspaceDir,
+        ],
+        [
+          "agents",
+          "create",
+          input.agentId,
+          "--workspace",
+          input.workspaceDir,
+        ],
+        [
+          "agents",
+          "upsert",
+          input.agentId,
+          "--workspace",
+          input.workspaceDir,
+        ],
+        [
+          "agents",
           "upsert",
           "--id",
           input.agentId,

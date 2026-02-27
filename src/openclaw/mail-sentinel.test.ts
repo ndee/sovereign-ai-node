@@ -35,8 +35,7 @@ describe("ShellOpenClawMailSentinelRegistrar", () => {
       command: "openclaw",
       args: [
         "agents",
-        "upsert",
-        "--id",
+        "add",
         "mail-sentinel",
         "--workspace",
         "/var/lib/sovereign-node/mail-sentinel/workspace",
@@ -93,5 +92,62 @@ describe("ShellOpenClawMailSentinelRegistrar", () => {
 
     expect(result.cronCommand.includes("--replace")).toBe(false);
     expect(calls.some((entry) => entry.includes("--replace"))).toBe(true);
+  });
+
+  it("falls back to legacy agent flags when positional syntax is unavailable", async () => {
+    const calls: string[] = [];
+    const execRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        const serialized = [input.command, ...(input.args ?? [])].join(" ");
+        calls.push(serialized);
+        if (serialized === "openclaw agents add mail-sentinel --workspace /tmp/ws") {
+          return {
+            command: serialized,
+            exitCode: 1,
+            stdout: "",
+            stderr: "unknown command add",
+          };
+        }
+        if (serialized === "openclaw agents create mail-sentinel --workspace /tmp/ws") {
+          return {
+            command: serialized,
+            exitCode: 1,
+            stdout: "",
+            stderr: "unknown command create",
+          };
+        }
+        if (serialized === "openclaw agents upsert mail-sentinel --workspace /tmp/ws") {
+          return {
+            command: serialized,
+            exitCode: 1,
+            stdout: "",
+            stderr: "unknown command upsert",
+          };
+        }
+        return {
+          command: serialized,
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        };
+      },
+    };
+
+    const registrar = new ShellOpenClawMailSentinelRegistrar(execRunner, createLogger());
+    const result = await registrar.register({
+      agentId: "mail-sentinel",
+      workspaceDir: "/tmp/ws",
+      cronJobName: "mail-sentinel-poll",
+      pollInterval: "5m",
+      lookbackWindow: "15m",
+      roomId: "!alerts:matrix.example.org",
+    });
+
+    expect(result.agentCommand).toContain(
+      "openclaw agents upsert --id mail-sentinel --workspace /tmp/ws",
+    );
+    expect(calls).toContain(
+      "openclaw agents upsert --id mail-sentinel --workspace /tmp/ws",
+    );
   });
 });
