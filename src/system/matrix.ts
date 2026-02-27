@@ -110,7 +110,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       publicBaseUrl,
       federationEnabled,
       postgresPassword: generated.postgresPassword,
-      synapseConfigPath: "./synapse/homeserver.yaml",
+      synapseConfigPath: "/data/homeserver.yaml",
     });
     const homeserverYaml = renderSynapseConfig({
       homeserverDomain,

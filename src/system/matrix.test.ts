@@ -97,6 +97,8 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       const composeText = await readFile(result.composeFilePath, "utf8");
       expect(composeText).toContain("matrixdotorg/synapse:v1.125.0");
       expect(composeText).toContain("postgres:16-alpine");
+      const envText = await readFile(join(result.projectDir, ".env"), "utf8");
+      expect(envText).toContain("SYNAPSE_CONFIG_PATH=/data/homeserver.yaml");
 
       const homeserverText = await readFile(join(result.projectDir, "synapse", "homeserver.yaml"), "utf8");
       expect(homeserverText).toContain('server_name: "matrix.local.test"');
