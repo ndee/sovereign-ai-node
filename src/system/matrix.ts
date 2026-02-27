@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, chmod, mkdir, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import type { TestMatrixRequest } from "../contracts/api.js";
@@ -92,9 +92,13 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     const projectSlug = slugifyProjectName(homeserverDomain);
     const projectDir = join(baseDir, projectSlug);
     const synapseDir = join(projectDir, "synapse");
+    const postgresDir = join(projectDir, "postgres-data");
     const composeFilePath = join(projectDir, "compose.yaml");
 
     await mkdir(synapseDir, { recursive: true });
+    await mkdir(postgresDir, { recursive: true });
+    await ensureDirectoryTreeWritable(synapseDir);
+    await ensureDirectoryTreeWritable(postgresDir);
 
     const generated = {
       postgresPassword: `pg_${randomUUID().replaceAll("-", "")}`,
@@ -132,6 +136,8 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       writeFile(join(synapseDir, generated.signingKeyFile), `${signingKey}\n`, "utf8"),
       writeFile(join(synapseDir, "log.config"), `${logConfig}\n`, "utf8"),
     ]);
+    await ensureDirectoryTreeWritable(synapseDir);
+    await ensureDirectoryTreeWritable(postgresDir);
 
     const composeConfigCheck = await this.runComposeCommand(projectDir, composeFilePath, [
       "config",
@@ -936,6 +942,24 @@ const resolveSynapseImage = (): string => {
     return configured;
   }
   return DEFAULT_SYNAPSE_IMAGE;
+};
+
+const ensureDirectoryTreeWritable = async (root: string): Promise<void> => {
+  const queue: string[] = [root];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (current === undefined) {
+      break;
+    }
+    await chmod(current, 0o777);
+    const entries = await readdir(current, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      queue.push(join(current, entry.name));
+    }
+  }
 };
 
 const renderSynapseLogConfig = (): string => `

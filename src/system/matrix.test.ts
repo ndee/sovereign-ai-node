@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -99,6 +99,10 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(composeText).toContain("postgres:16-alpine");
       const envText = await readFile(join(result.projectDir, ".env"), "utf8");
       expect(envText).toContain("SYNAPSE_CONFIG_PATH=/data/homeserver.yaml");
+      const synapseDirStat = await stat(join(result.projectDir, "synapse"));
+      const postgresDirStat = await stat(join(result.projectDir, "postgres-data"));
+      expect(synapseDirStat.mode & 0o777).toBe(0o777);
+      expect(postgresDirStat.mode & 0o777).toBe(0o777);
 
       const homeserverText = await readFile(join(result.projectDir, "synapse", "homeserver.yaml"), "utf8");
       expect(homeserverText).toContain('server_name: "matrix.local.test"');
