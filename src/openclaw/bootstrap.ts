@@ -1,6 +1,9 @@
 import type { Logger } from "../logging/logger.js";
 import type { ExecRunner } from "../system/exec.js";
 
+const OPENCLAW_DETECT_TIMEOUT_MS = 20_000;
+const OPENCLAW_INSTALL_TIMEOUT_MS = 15 * 60_000;
+
 export type OpenClawInstallOptions = {
   version: string;
   noPrompt?: boolean;
@@ -37,6 +40,12 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
       result = await this.execRunner.run({
         command: "openclaw",
         args: ["--version"],
+        options: {
+          timeout: OPENCLAW_DETECT_TIMEOUT_MS,
+          env: {
+            CI: "1",
+          },
+        },
       });
     } catch {
       return null;
@@ -98,6 +107,12 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
     const installResult = await this.execRunner.run({
       command: "bash",
       args: ["-lc", shellScript],
+      options: {
+        timeout: OPENCLAW_INSTALL_TIMEOUT_MS,
+        env: {
+          CI: "1",
+        },
+      },
     });
     if (installResult.exitCode !== 0) {
       throw {

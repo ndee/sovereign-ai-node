@@ -26,6 +26,12 @@ describe("ShellOpenClawGatewayServiceManager", () => {
     expect(calls[0]).toMatchObject({
       command: "openclaw",
       args: ["gateway", "install", "--force"],
+      options: {
+        timeout: 120000,
+        env: {
+          CI: "1",
+        },
+      },
     });
   });
 

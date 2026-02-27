@@ -135,6 +135,7 @@ type GatewayState = "running" | "stopped" | "failed" | "unknown";
 const MAIL_SENTINEL_AGENT_ID = "mail-sentinel";
 const MAIL_SENTINEL_CRON_ID = "mail-sentinel-poll";
 const MAIL_SENTINEL_HELLO_MESSAGE = "Hello from Mail Sentinel";
+const INSTALLER_EXEC_TIMEOUT_MS = 60_000;
 
 export class RealInstallerService implements InstallerService {
   private readonly stubService: StubInstallerService;
@@ -905,6 +906,16 @@ export class RealInstallerService implements InstallerService {
       const result = await this.execRunner.run({
         command,
         args,
+        options: {
+          timeout: INSTALLER_EXEC_TIMEOUT_MS,
+          ...(command === "openclaw"
+            ? {
+                env: {
+                  CI: "1",
+                },
+              }
+            : {}),
+        },
       });
       return {
         ok: true,

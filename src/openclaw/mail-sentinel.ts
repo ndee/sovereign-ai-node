@@ -1,6 +1,8 @@
 import type { Logger } from "../logging/logger.js";
 import type { ExecResult, ExecRunner } from "../system/exec.js";
 
+const OPENCLAW_MAIL_SENTINEL_COMMAND_TIMEOUT_MS = 90_000;
+
 export type MailSentinelRegistrationInput = {
   agentId: string;
   workspaceDir: string;
@@ -135,6 +137,12 @@ export class ShellOpenClawMailSentinelRegistrar
       const result = await this.execRunner.run({
         command: "openclaw",
         args,
+        options: {
+          timeout: OPENCLAW_MAIL_SENTINEL_COMMAND_TIMEOUT_MS,
+          env: {
+            CI: "1",
+          },
+        },
       });
       if (result.exitCode === 0) {
         return result;

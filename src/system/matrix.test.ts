@@ -227,6 +227,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       );
       expect(registerCalls).toHaveLength(2);
       expect(registerCalls.some((call) => (call.args ?? []).includes("-a"))).toBe(true);
+      expect(registerCalls.some((call) => (call.args ?? []).includes("--no-admin"))).toBe(true);
 
       expect(recordedFetchUrls.some((url) => url.endsWith("/_matrix/client/v3/login"))).toBe(true);
       expect(recordedFetchUrls.some((url) => url.endsWith("/_matrix/client/v3/createRoom"))).toBe(

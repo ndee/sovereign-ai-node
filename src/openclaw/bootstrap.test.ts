@@ -80,6 +80,12 @@ describe("ShellOpenClawBootstrapper", () => {
     expect(calls[0]).toMatchObject({
       command: "openclaw",
       args: ["--version"],
+      options: {
+        timeout: 20000,
+        env: {
+          CI: "1",
+        },
+      },
     });
   });
 

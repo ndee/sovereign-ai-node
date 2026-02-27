@@ -682,7 +682,7 @@ wait_for_runtime_ready() {
   delay_s="${2:-2}"
 
   for attempt in $(seq 1 "$max_attempts"); do
-    status_output="$(sovereign-node status --json || true)"
+    status_output="$(timeout --foreground 20s sovereign-node status --json || true)"
     parsed="$(parse_runtime_readiness "$status_output")"
     readiness_flag="${parsed%%$'\t'*}"
     readiness_reason="${parsed#*$'\t'}"
@@ -703,7 +703,7 @@ wait_for_runtime_ready() {
 }
 
 run_install_flow() {
-  local install_output parsed install_state install_summary status_output doctor_output
+  local install_output install_exit_code parsed install_state install_summary status_output doctor_output
 
   if [[ "$RUN_INSTALL" != "1" ]]; then
     log "Skipping sovereign-node install run (--skip-install-run)"
@@ -715,8 +715,18 @@ run_install_flow() {
   fi
 
   log "Running sovereign-node install"
-  install_output="$(sovereign-node install --request-file "$REQUEST_FILE" --json)"
+  set +e
+  install_output="$(timeout --foreground 30m sovereign-node install --request-file "$REQUEST_FILE" --json)"
+  install_exit_code=$?
+  set -e
   printf '%s\n' "$install_output"
+
+  if [[ "$install_exit_code" -eq 124 ]]; then
+    die "Install did not complete within 30 minutes"
+  fi
+  if [[ "$install_exit_code" -ne 0 ]]; then
+    die "Install command exited with status ${install_exit_code}"
+  fi
 
   parsed="$(parse_install_result "$install_output")"
   install_state="${parsed%%$'\t'*}"

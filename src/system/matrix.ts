@@ -14,6 +14,7 @@ const MATRIX_INTERNAL_BASE_URL = "http://127.0.0.1:8008";
 const MATRIX_READY_TIMEOUT_MS = 180_000;
 const MATRIX_READY_POLL_INTERVAL_MS = 1_500;
 const MATRIX_HTTP_TIMEOUT_MS = 8_000;
+const MATRIX_COMPOSE_COMMAND_TIMEOUT_MS = 180_000;
 const MATRIX_BOOTSTRAP_SECRET_DIR = "bootstrap-secrets";
 const DEFAULT_SYNAPSE_IMAGE = "matrixdotorg/synapse:v1.125.0";
 
@@ -480,7 +481,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       input.localpart,
       "-p",
       input.password,
-      ...(input.admin ? ["-a"] : []),
+      ...(input.admin ? ["-a"] : ["--no-admin"]),
       "-c",
       "/data/homeserver.yaml",
       provision.adminBaseUrl,
@@ -848,6 +849,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         args,
         options: {
           cwd,
+          timeout: MATRIX_COMPOSE_COMMAND_TIMEOUT_MS,
         },
       });
       return { ok: true, result };

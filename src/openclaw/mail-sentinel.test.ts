@@ -41,6 +41,12 @@ describe("ShellOpenClawMailSentinelRegistrar", () => {
         "--workspace",
         "/var/lib/sovereign-node/mail-sentinel/workspace",
       ],
+      options: {
+        timeout: 90000,
+        env: {
+          CI: "1",
+        },
+      },
     });
     expect(calls[1]?.command).toBe("openclaw");
     expect(calls[1]?.args?.slice(0, 5)).toEqual([
