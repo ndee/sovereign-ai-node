@@ -3,6 +3,7 @@ import { RealInstallerService } from "../installer/real-service.js";
 import { createLogger } from "../logging/logger.js";
 import { ShellOpenClawBootstrapper } from "../openclaw/bootstrap.js";
 import { ShellOpenClawGatewayServiceManager } from "../openclaw/gateway-service.js";
+import { ShellOpenClawMailSentinelRegistrar } from "../openclaw/mail-sentinel.js";
 import { ExecaExecRunner } from "../system/exec.js";
 import { SocketImapTester } from "../system/imap.js";
 import { DockerComposeBundledMatrixProvisioner } from "../system/matrix.js";
@@ -24,6 +25,10 @@ export const createApp = () => {
     execRunner,
     logger,
   );
+  const mailSentinelRegistrar = new ShellOpenClawMailSentinelRegistrar(
+    execRunner,
+    logger,
+  );
 
   return {
     logger,
@@ -31,6 +36,7 @@ export const createApp = () => {
     installerService: new RealInstallerService(logger, DEFAULT_PATHS, {
       openclawBootstrapper,
       openclawGatewayServiceManager,
+      mailSentinelRegistrar,
       preflightChecker,
       imapTester,
       matrixProvisioner,

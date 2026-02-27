@@ -148,6 +148,11 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
+      mailSentinelRegistrar: {
+        register: async () => {
+          throw new Error("unexpected mail-sentinel register call");
+        },
+      },
       preflightChecker: fakePreflightChecker,
       imapTester: fakeImapTester,
       matrixProvisioner: fakeMatrixProvisioner,
@@ -223,6 +228,15 @@ describe("RealInstallerService", () => {
         },
         start: async () => {},
         restart: async () => {},
+      },
+      mailSentinelRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert --id mail-sentinel",
+          cronCommand: "openclaw cron add --name mail-sentinel-poll --every 5m",
+        }),
       },
       preflightChecker: {
         run: async () => ({
@@ -361,6 +375,15 @@ describe("RealInstallerService", () => {
         install: async () => {},
         start: async () => {},
         restart: async () => {},
+      },
+      mailSentinelRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert --id mail-sentinel",
+          cronCommand: "openclaw cron add --name mail-sentinel-poll --every 5m",
+        }),
       },
       preflightChecker: {
         run: async () => ({

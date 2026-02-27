@@ -30,6 +30,10 @@ import type { Logger } from "../logging/logger.js";
 import type { SovereignPaths } from "../config/paths.js";
 import type { OpenClawBootstrapper } from "../openclaw/bootstrap.js";
 import type { OpenClawGatewayServiceManager } from "../openclaw/gateway-service.js";
+import type {
+  MailSentinelRegistrationResult,
+  OpenClawMailSentinelRegistrar,
+} from "../openclaw/mail-sentinel.js";
 import type { ImapTester } from "../system/imap.js";
 import type {
   BundledMatrixAccountsResult,
@@ -72,6 +76,7 @@ type RuntimeConfig = {
 type RealInstallerServiceDeps = {
   openclawBootstrapper: OpenClawBootstrapper;
   openclawGatewayServiceManager: OpenClawGatewayServiceManager;
+  mailSentinelRegistrar: OpenClawMailSentinelRegistrar;
   preflightChecker: HostPreflightChecker;
   imapTester: ImapTester;
   matrixProvisioner: BundledMatrixProvisioner;
@@ -90,6 +95,8 @@ export class RealInstallerService implements InstallerService {
 
   private readonly openclawGatewayServiceManager: OpenClawGatewayServiceManager;
 
+  private readonly mailSentinelRegistrar: OpenClawMailSentinelRegistrar;
+
   private readonly preflightChecker: HostPreflightChecker;
 
   private readonly imapTester: ImapTester;
@@ -106,6 +113,7 @@ export class RealInstallerService implements InstallerService {
     this.stubService = new StubInstallerService(logger);
     this.openclawBootstrapper = deps.openclawBootstrapper;
     this.openclawGatewayServiceManager = deps.openclawGatewayServiceManager;
+    this.mailSentinelRegistrar = deps.mailSentinelRegistrar;
     this.preflightChecker = deps.preflightChecker;
     this.imapTester = deps.imapTester;
     this.matrixProvisioner = deps.matrixProvisioner;
@@ -268,6 +276,7 @@ export class RealInstallerService implements InstallerService {
       matrixProvision?: BundledMatrixProvisionResult;
       matrixAccounts?: BundledMatrixAccountsResult;
       matrixRoom?: BundledMatrixRoomBootstrapResult;
+      mailSentinelRegistration?: MailSentinelRegistrationResult;
     } = {};
 
     return [
@@ -435,7 +444,17 @@ export class RealInstallerService implements InstallerService {
         id: "mail_sentinel_register",
         label: "Register Mail Sentinel agent and cron",
         run: async () => {
-          await this.registerMailSentinel(req);
+          if (stepState.matrixRoom === undefined) {
+            throw {
+              code: "INSTALL_INTERNAL_STATE",
+              message: "Matrix room output is missing before Mail Sentinel registration",
+              retryable: false,
+            };
+          }
+          stepState.mailSentinelRegistration = await this.registerMailSentinel(
+            req,
+            stepState.matrixRoom,
+          );
         },
       },
       {
@@ -572,29 +591,17 @@ export class RealInstallerService implements InstallerService {
     }
   }
 
-  private async registerMailSentinel(req: InstallRequest): Promise<void> {
-    const openclaw = await this.openclawBootstrapper.detectInstalled();
-    if (openclaw === null) {
-      throw {
-        code: "OPENCLAW_MISSING",
-        message: "OpenClaw CLI is required before Mail Sentinel registration",
-        retryable: true,
-      };
-    }
-
+  private async registerMailSentinel(
+    req: InstallRequest,
+    matrixRoom: BundledMatrixRoomBootstrapResult,
+  ): Promise<MailSentinelRegistrationResult> {
     const registrationDir = join(this.paths.stateDir, "mail-sentinel");
     const workspaceDir = join(registrationDir, "workspace");
     const registrationFile = join(registrationDir, "registration.json");
-    const registrationPayload = {
-      agentId: "mail-sentinel" as const,
-      cronJobId: "mail-sentinel-poll",
-      pollInterval: req.mailSentinel?.pollInterval ?? "5m",
-      lookbackWindow: req.mailSentinel?.lookbackWindow ?? "15m",
-      configPath: this.paths.configPath,
-      openclawBinaryPath: openclaw.binaryPath,
-      openclawVersion: openclaw.version,
-      registeredAt: now(),
-    };
+    const pollInterval = req.mailSentinel?.pollInterval ?? "5m";
+    const lookbackWindow = req.mailSentinel?.lookbackWindow ?? "15m";
+    const agentId = "mail-sentinel";
+    const cronJobId = "mail-sentinel-poll";
 
     try {
       await mkdir(workspaceDir, { recursive: true });
@@ -603,10 +610,9 @@ export class RealInstallerService implements InstallerService {
         "# Mail Sentinel workspace",
         "",
         "Provisioned by sovereign-node install flow.",
-        "Agent registration integration with OpenClaw CLI will be expanded in subsequent stages.",
+        "Managed by Sovereign Node installer.",
       ].join("\n");
       await writeFile(readmePath, `${readme}\n`, "utf8");
-      await writeFile(registrationFile, `${JSON.stringify(registrationPayload, null, 2)}\n`, "utf8");
     } catch (error) {
       throw {
         code: "MAIL_SENTINEL_REGISTER_FAILED",
@@ -618,6 +624,44 @@ export class RealInstallerService implements InstallerService {
         },
       };
     }
+
+    const registration = await this.mailSentinelRegistrar.register({
+      agentId,
+      workspaceDir,
+      cronJobName: cronJobId,
+      pollInterval,
+      lookbackWindow,
+      roomId: matrixRoom.roomId,
+    });
+
+    const registrationPayload = {
+      agentId: registration.agentId,
+      cronJobId: registration.cronJobId,
+      pollInterval,
+      lookbackWindow,
+      roomId: matrixRoom.roomId,
+      roomName: matrixRoom.roomName,
+      configPath: this.paths.configPath,
+      agentCommand: registration.agentCommand,
+      cronCommand: registration.cronCommand,
+      registeredAt: now(),
+    };
+
+    try {
+      await writeFile(registrationFile, `${JSON.stringify(registrationPayload, null, 2)}\n`, "utf8");
+    } catch (error) {
+      throw {
+        code: "MAIL_SENTINEL_REGISTER_FAILED",
+        message: "Failed to persist Mail Sentinel registration record",
+        retryable: true,
+        details: {
+          registrationFile,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+
+    return registration;
   }
 
   private async runSmokeChecks(matrixProvision: BundledMatrixProvisionResult): Promise<void> {
@@ -798,6 +842,28 @@ export class RealInstallerService implements InstallerService {
         managedInstallation: input.req.openclaw?.manageInstallation ?? true,
         installMethod: input.req.openclaw?.installMethod ?? "install_sh",
         serviceHome: this.paths.openclawServiceHome,
+      },
+      openclawProfile: {
+        plugins: {
+          allow: ["matrix", "imap-readonly"],
+        },
+        channels: {
+          matrix: {
+            enabled: true,
+            homeserver: input.matrixProvision.publicBaseUrl,
+            roomId: input.matrixRoom.roomId,
+          },
+        },
+        agents: [
+          {
+            id: "mail-sentinel",
+            workspace: join(this.paths.stateDir, "mail-sentinel", "workspace"),
+          },
+        ],
+        cron: {
+          id: "mail-sentinel-poll",
+          every: input.req.mailSentinel?.pollInterval ?? "5m",
+        },
       },
       imap: {
         host: input.req.imap.host,
