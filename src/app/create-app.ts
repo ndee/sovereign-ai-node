@@ -12,7 +12,6 @@ export const createApp = () => {
   const logger = createLogger();
   const execRunner = new ExecaExecRunner();
 
-  // Scaffolds initialized now so the dependency graph is in place when implementation begins.
   const openclawBootstrapper = new ShellOpenClawBootstrapper(execRunner, logger);
   const imapTester = new SocketImapTester(logger);
   const matrixProvisioner = new DockerComposeBundledMatrixProvisioner(
@@ -26,13 +25,12 @@ export const createApp = () => {
     logger,
   );
 
-  void openclawGatewayServiceManager;
-
   return {
     logger,
     paths: DEFAULT_PATHS,
     installerService: new RealInstallerService(logger, DEFAULT_PATHS, {
       openclawBootstrapper,
+      openclawGatewayServiceManager,
       preflightChecker,
       imapTester,
       matrixProvisioner,

@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -138,8 +138,16 @@ describe("RealInstallerService", () => {
         checks: [],
       }),
     };
+    let gatewayInstallCalls = 0;
     const service = new RealInstallerService(createLogger(), paths, {
       openclawBootstrapper: fakeBootstrapper,
+      openclawGatewayServiceManager: {
+        install: async () => {
+          gatewayInstallCalls += 1;
+        },
+        start: async () => {},
+        restart: async () => {},
+      },
       preflightChecker: fakePreflightChecker,
       imapTester: fakeImapTester,
       matrixProvisioner: fakeMatrixProvisioner,
@@ -167,6 +175,7 @@ describe("RealInstallerService", () => {
       expect(ensureInstalledCalls).toHaveLength(1);
       expect(imapTestCalls).toBe(1);
       expect(matrixProvisionCalls).toBe(0);
+      expect(gatewayInstallCalls).toBe(0);
       expect(ensureInstalledCalls[0]).toMatchObject({
         version: "pinned-by-sovereign",
         noOnboard: true,
@@ -179,7 +188,7 @@ describe("RealInstallerService", () => {
     }
   });
 
-  it("runs matrix bootstrap steps and then stops at gateway-service TODO", async () => {
+  it("writes config after gateway install and then stops at mail_sentinel_register TODO", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {
       configPath: join(tempRoot, "etc", "sovereign-node.json5"),
@@ -193,6 +202,8 @@ describe("RealInstallerService", () => {
     let matrixProvisionCalls = 0;
     let matrixBootstrapAccountCalls = 0;
     let matrixBootstrapRoomCalls = 0;
+    let gatewayInstallCalls = 0;
+    let gatewayInstallForceArg: boolean | undefined;
     const service = new RealInstallerService(createLogger(), paths, {
       openclawBootstrapper: {
         detectInstalled: async () => null,
@@ -201,6 +212,14 @@ describe("RealInstallerService", () => {
           version: opts.version,
           installMethod: "install_sh",
         }),
+      },
+      openclawGatewayServiceManager: {
+        install: async (options) => {
+          gatewayInstallCalls += 1;
+          gatewayInstallForceArg = options?.force;
+        },
+        start: async () => {},
+        restart: async () => {},
       },
       preflightChecker: {
         run: async () => ({
@@ -273,6 +292,8 @@ describe("RealInstallerService", () => {
       expect(matrixProvisionCalls).toBe(1);
       expect(matrixBootstrapAccountCalls).toBe(1);
       expect(matrixBootstrapRoomCalls).toBe(1);
+      expect(gatewayInstallCalls).toBe(1);
+      expect(gatewayInstallForceArg).toBe(false);
 
       const stepStates = Object.fromEntries(
         started.job.steps.map((step) => [step.id, step.state]),
@@ -283,11 +304,25 @@ describe("RealInstallerService", () => {
       expect(stepStates.matrix_provision).toBe("succeeded");
       expect(stepStates.matrix_bootstrap_accounts).toBe("succeeded");
       expect(stepStates.matrix_bootstrap_room).toBe("succeeded");
-      expect(stepStates.openclaw_gateway_service_install).toBe("failed");
+      expect(stepStates.openclaw_gateway_service_install).toBe("succeeded");
+      expect(stepStates.openclaw_configure).toBe("succeeded");
+      expect(stepStates.mail_sentinel_register).toBe("failed");
 
       const stored = await service.getInstallJob(started.job.jobId);
       expect(stored.error?.code).toBe("NOT_IMPLEMENTED");
-      expect(stored.job.currentStepId).toBe("openclaw_gateway_service_install");
+      expect(stored.job.currentStepId).toBe("mail_sentinel_register");
+
+      const writtenConfigRaw = await readFile(paths.configPath, "utf8");
+      const writtenConfig = JSON.parse(writtenConfigRaw) as {
+        matrix?: {
+          alertRoom?: { roomId?: string };
+          bot?: { accessTokenSecretRef?: string };
+        };
+      };
+      expect(writtenConfig.matrix?.alertRoom?.roomId).toBe("!alerts:matrix.example.org");
+      expect(writtenConfig.matrix?.bot?.accessTokenSecretRef?.startsWith("file:")).toBe(
+        true,
+      );
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
