@@ -526,7 +526,116 @@ prepare_request_file() {
   run_install_wizard
 }
 
+parse_install_result() {
+  node <<'NODE'
+const fs = require("node:fs");
+
+const raw = fs.readFileSync(0, "utf8");
+let parsed;
+try {
+  parsed = JSON.parse(raw);
+} catch {
+  process.stdout.write("parse_error\tUnable to parse install command JSON output");
+  process.exit(0);
+}
+
+const state = parsed?.result?.job?.state;
+if (typeof state !== "string") {
+  process.stdout.write("unknown\tInstall response did not include a valid job state");
+  process.exit(0);
+}
+
+if (state === "succeeded") {
+  process.stdout.write("succeeded\tInstall job completed successfully");
+  process.exit(0);
+}
+
+const failedStep = Array.isArray(parsed?.result?.job?.steps)
+  ? parsed.result.job.steps.find((step) => step?.state === "failed")
+  : undefined;
+const errorCode = failedStep?.error?.code ?? parsed?.error?.code ?? "INSTALL_FAILED";
+const errorMessage =
+  failedStep?.error?.message
+  ?? parsed?.error?.message
+  ?? "Install job did not succeed";
+const failedStepId = typeof failedStep?.id === "string" ? failedStep.id : "unknown-step";
+process.stdout.write(`${state}\t${failedStepId}: ${errorCode}: ${errorMessage}`);
+NODE
+}
+
+parse_runtime_readiness() {
+  node <<'NODE'
+const fs = require("node:fs");
+
+const raw = fs.readFileSync(0, "utf8");
+let parsed;
+try {
+  parsed = JSON.parse(raw);
+} catch {
+  process.stdout.write("0\tstatus-json-parse-failed");
+  process.exit(0);
+}
+
+const result = parsed?.result ?? {};
+const matrix = result.matrix ?? {};
+const openclaw = result.openclaw ?? {};
+
+const matrixReady = matrix.health === "healthy" && matrix.roomReachable === true;
+const openclawReady =
+  openclaw.cliInstalled === true
+  && openclaw.serviceInstalled === true
+  && openclaw.health === "healthy"
+  && openclaw.agentPresent === true
+  && openclaw.cronPresent === true;
+
+if (matrixReady && openclawReady) {
+  process.stdout.write("1\tmatrix+openclaw-ready");
+  process.exit(0);
+}
+
+const reasons = [];
+if (!matrixReady) {
+  reasons.push(`matrix(health=${String(matrix.health)},roomReachable=${String(matrix.roomReachable)})`);
+}
+if (!openclawReady) {
+  reasons.push(
+    `openclaw(cliInstalled=${String(openclaw.cliInstalled)},serviceInstalled=${String(openclaw.serviceInstalled)},health=${String(openclaw.health)},agentPresent=${String(openclaw.agentPresent)},cronPresent=${String(openclaw.cronPresent)})`,
+  );
+}
+
+process.stdout.write(`0\t${reasons.join(";")}`);
+NODE
+}
+
+wait_for_runtime_ready() {
+  local max_attempts delay_s attempt status_output parsed readiness_flag readiness_reason
+  max_attempts="${1:-45}"
+  delay_s="${2:-2}"
+
+  for attempt in $(seq 1 "$max_attempts"); do
+    status_output="$(sovereign-node status --json || true)"
+    parsed="$(printf '%s' "$status_output" | parse_runtime_readiness)"
+    readiness_flag="${parsed%%$'\t'*}"
+    readiness_reason="${parsed#*$'\t'}"
+
+    if [[ "$readiness_flag" == "1" ]]; then
+      printf '%s\n' "$status_output"
+      return 0
+    fi
+
+    if [[ "$attempt" -lt "$max_attempts" ]]; then
+      log "Runtime not ready yet (${attempt}/${max_attempts}): ${readiness_reason}"
+      sleep "$delay_s"
+    else
+      printf '%s\n' "$status_output"
+      return 1
+    fi
+  done
+}
+
 run_install_flow() {
+  local install_output parsed install_state install_summary status_output doctor_output
+
   if [[ "$RUN_INSTALL" != "1" ]]; then
     log "Skipping sovereign-node install run (--skip-install-run)"
     return
@@ -537,10 +646,26 @@ run_install_flow() {
   fi
 
   log "Running sovereign-node install"
-  sovereign-node install --request-file "$REQUEST_FILE" --json
-  log "Install finished. Checking status"
-  sovereign-node status --json || true
-  sovereign-node doctor --json || true
+  install_output="$(sovereign-node install --request-file "$REQUEST_FILE" --json)"
+  printf '%s\n' "$install_output"
+
+  parsed="$(printf '%s' "$install_output" | parse_install_result)"
+  install_state="${parsed%%$'\t'*}"
+  install_summary="${parsed#*$'\t'}"
+  if [[ "$install_state" != "succeeded" ]]; then
+    die "Install did not complete successfully (${install_summary})"
+  fi
+
+  log "Install job succeeded. Waiting for Matrix and OpenClaw runtime readiness"
+  if ! status_output="$(wait_for_runtime_ready 45 2)"; then
+    printf '%s\n' "$status_output"
+    die "Runtime did not reach healthy state for Matrix/OpenClaw within timeout"
+  fi
+  printf '%s\n' "$status_output"
+
+  log "Running post-install diagnostics"
+  doctor_output="$(sovereign-node doctor --json || true)"
+  printf '%s\n' "$doctor_output"
 }
 
 main() {

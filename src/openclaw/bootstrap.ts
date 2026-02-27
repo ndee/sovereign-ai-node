@@ -48,6 +48,7 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
 
   async ensureInstalled(opts: OpenClawInstallOptions): Promise<OpenClawInstallInfo> {
     const desiredVersion = opts.version.trim();
+    const installVersion = resolveInstallVersion(desiredVersion);
     const detected = await this.detectInstalled();
     if (
       detected !== null
@@ -70,13 +71,13 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
     }
 
     const shellScript = buildInstallShellScript({
-      version: desiredVersion,
+      version: installVersion,
       noPrompt: opts.noPrompt ?? true,
       noOnboard: opts.noOnboard ?? true,
     });
     this.logger.info(
       {
-        openclawVersion: desiredVersion,
+        openclawVersion: installVersion ?? "default-channel",
         noPrompt: opts.noPrompt ?? true,
         noOnboard: opts.noOnboard ?? true,
         forceReinstall: opts.forceReinstall ?? false,
@@ -131,13 +132,16 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
 }
 
 type InstallShellArgs = {
-  version: string;
+  version?: string;
   noPrompt: boolean;
   noOnboard: boolean;
 };
 
 const buildInstallShellScript = (args: InstallShellArgs): string => {
-  const installArgs = ["-s", "--", "--version", args.version];
+  const installArgs = ["-s", "--"];
+  if (args.version !== undefined) {
+    installArgs.push("--version", args.version);
+  }
   if (args.noOnboard) {
     installArgs.push("--no-onboard");
   }
@@ -164,10 +168,24 @@ const parseVersionToken = (value: string): string | null => {
 };
 
 const versionsMatch = (detectedVersion: string, requestedVersion: string): boolean => {
+  if (isAbstractSovereignPin(requestedVersion)) {
+    return true;
+  }
   const normalizedDetected = normalizeVersion(detectedVersion);
   const normalizedRequested = normalizeVersion(requestedVersion);
   return normalizedDetected === normalizedRequested;
 };
+
+const resolveInstallVersion = (requestedVersion: string): string | undefined => {
+  const trimmed = requestedVersion.trim();
+  if (trimmed.length === 0 || isAbstractSovereignPin(trimmed)) {
+    return undefined;
+  }
+  return trimmed;
+};
+
+const isAbstractSovereignPin = (value: string): boolean =>
+  value.trim().toLowerCase() === "pinned-by-sovereign";
 
 const normalizeVersion = (value: string): string => parseVersionToken(value) ?? value.trim();
 
