@@ -118,4 +118,35 @@ describe("ShellOpenClawBootstrapper", () => {
     });
     expect(calls.some((call) => call.command === "bash")).toBe(true);
   });
+
+  it("treats missing openclaw binary during detection as not installed", async () => {
+    const calls: ExecInput[] = [];
+    const execRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        calls.push(input);
+        if (input.command === "openclaw") {
+          throw new Error("spawn openclaw ENOENT");
+        }
+        return {
+          command: [input.command, ...(input.args ?? [])].join(" "),
+          exitCode: 0,
+          stdout: "ok",
+          stderr: "",
+        };
+      },
+    };
+
+    const bootstrapper = new ShellOpenClawBootstrapper(execRunner, createLogger());
+    await expect(
+      bootstrapper.ensureInstalled({
+        version: "pinned-by-sovereign",
+        noOnboard: true,
+        noPrompt: true,
+        skipIfCompatibleInstalled: true,
+      }),
+    ).rejects.toMatchObject({
+      code: "OPENCLAW_INSTALL_FAILED",
+    });
+    expect(calls.some((call) => call.command === "bash")).toBe(true);
+  });
 });

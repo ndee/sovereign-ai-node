@@ -603,52 +603,49 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
   private async waitForSynapseReadyWithRecovery(
     provision: BundledMatrixProvisionResult,
   ): Promise<void> {
-    try {
-      await this.waitForSynapseReady(provision.adminBaseUrl);
-      return;
-    } catch (error) {
-      if (!(isStructuredError(error) && error.code === "MATRIX_WAIT_READY_TIMEOUT")) {
-        throw error;
-      }
+    const diagnosticsTrail: Array<Record<string, unknown>> = [];
+    const maxRecoveries = 2;
 
-      const diagnostics = await this.collectComposeDiagnostics(provision);
-      const synapseLogs =
-        typeof diagnostics.synapseLogs === "string" ? diagnostics.synapseLogs : "";
-      if (!isPostgresAuthFailure(synapseLogs)) {
-        throw {
-          ...error,
-          details: {
-            ...(error.details ?? {}),
-            ...diagnostics,
-          },
-        };
-      }
-
-      this.logger.warn(
-        {
-          projectDir: provision.projectDir,
-        },
-        "Detected bundled Matrix postgres credential mismatch; resetting postgres data and retrying",
-      );
-
-      await this.resetBundledPostgresState(provision);
-      await this.ensureStackRunning(provision);
+    for (let attempt = 0; attempt <= maxRecoveries; attempt += 1) {
       try {
         await this.waitForSynapseReady(provision.adminBaseUrl);
         return;
-      } catch (retryError) {
-        const retryDiagnostics = await this.collectComposeDiagnostics(provision);
-        if (isStructuredError(retryError)) {
+      } catch (error) {
+        if (!(isStructuredError(error) && error.code === "MATRIX_WAIT_READY_TIMEOUT")) {
+          throw error;
+        }
+
+        const diagnostics = await this.collectComposeDiagnostics(provision);
+        const synapseLogs =
+          typeof diagnostics.synapseLogs === "string" ? diagnostics.synapseLogs : "";
+        const recoverable = isRecoverablePostgresBootstrapFailure(synapseLogs);
+        diagnosticsTrail.push({
+          attempt: attempt + 1,
+          recoverable,
+          diagnostics,
+        });
+
+        if (!recoverable || attempt === maxRecoveries) {
           throw {
-            ...retryError,
+            ...error,
             details: {
-              ...(retryError.details ?? {}),
-              firstAttempt: diagnostics,
-              retryAttempt: retryDiagnostics,
+              ...(error.details ?? {}),
+              recoveryAttempts: diagnosticsTrail,
             },
           };
         }
-        throw retryError;
+
+        this.logger.warn(
+          {
+            projectDir: provision.projectDir,
+            recoveryAttempt: attempt + 1,
+            maxRecoveries,
+          },
+          "Detected recoverable bundled Matrix Postgres bootstrap mismatch; resetting postgres data and retrying",
+        );
+
+        await this.resetBundledPostgresState(provision);
+        await this.ensureStackRunning(provision);
       }
     }
   }
@@ -1033,8 +1030,10 @@ const ensureDirectoryTreeWritable = async (root: string): Promise<void> => {
   }
 };
 
-const isPostgresAuthFailure = (value: string): boolean =>
-  /password authentication failed for user ["']synapse["']/i.test(value);
+const isRecoverablePostgresBootstrapFailure = (value: string): boolean =>
+  /password authentication failed for user ["']synapse["']/i.test(value)
+  || /incorrect collation/i.test(value)
+  || /incorrectdatabasesetup/i.test(value);
 
 const parseSimpleEnv = (raw: string): Record<string, string> => {
   const out: Record<string, string> = {};

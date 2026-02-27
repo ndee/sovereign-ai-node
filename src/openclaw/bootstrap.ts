@@ -32,10 +32,15 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
   ) {}
 
   async detectInstalled(): Promise<DetectedOpenClaw | null> {
-    const result = await this.execRunner.run({
-      command: "openclaw",
-      args: ["--version"],
-    });
+    let result;
+    try {
+      result = await this.execRunner.run({
+        command: "openclaw",
+        args: ["--version"],
+      });
+    } catch {
+      return null;
+    }
     if (result.exitCode !== 0) {
       return null;
     }
