@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { access, chmod, chown, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 import JSON5 from "json5";
@@ -77,6 +77,8 @@ type RuntimeConfig = {
     runtimeConfigPath: string;
     runtimeProfilePath: string;
     gatewayEnvPath: string;
+    serviceUser?: string;
+    serviceGroup?: string;
   };
   openclawProfile: {
     plugins: {
@@ -137,6 +139,8 @@ const MAIL_SENTINEL_CRON_ID = "mail-sentinel-poll";
 const MAIL_SENTINEL_HELLO_MESSAGE = "Hello from Mail Sentinel";
 const INSTALLER_EXEC_TIMEOUT_MS = 60_000;
 const SOVEREIGN_GATEWAY_SYSTEMD_UNIT = "sovereign-openclaw-gateway.service";
+const DEFAULT_SERVICE_USER = "root";
+const DEFAULT_SERVICE_GROUP = "root";
 
 export class RealInstallerService implements InstallerService {
   private readonly stubService: StubInstallerService;
@@ -145,6 +149,8 @@ export class RealInstallerService implements InstallerService {
 
   private resolvedInstallJobsDir: string | null = null;
   private resolvedSecretsDir: string | null = null;
+  private resolvedRuntimeOwnership: { uid: number; gid: number } | null | undefined = undefined;
+  private managedOpenClawEnv: Record<string, string> | null | undefined = undefined;
 
   private readonly openclawBootstrapper: OpenClawBootstrapper;
 
@@ -907,6 +913,9 @@ export class RealInstallerService implements InstallerService {
       };
     }
 
+    const openclawEnv =
+      command === "openclaw" ? await this.resolveManagedOpenClawEnv() : null;
+
     try {
       const result = await this.execRunner.run({
         command,
@@ -917,6 +926,7 @@ export class RealInstallerService implements InstallerService {
             ? {
                 env: {
                   CI: "1",
+                  ...(openclawEnv ?? {}),
                 },
               }
             : {}),
@@ -956,6 +966,39 @@ export class RealInstallerService implements InstallerService {
       runtimeProfilePath: join(this.paths.openclawServiceHome, "profiles", "sovereign-runtime-profile.json5"),
       gatewayEnvPath: join(this.paths.openclawServiceHome, "gateway.env"),
     };
+  }
+
+  private buildManagedOpenClawEnv(runtimeConfig: RuntimeConfig): Record<string, string> {
+    return {
+      OPENCLAW_HOME: runtimeConfig.openclaw.openclawHome,
+      OPENCLAW_CONFIG: runtimeConfig.openclaw.runtimeConfigPath,
+      OPENCLAW_CONFIG_PATH: runtimeConfig.openclaw.runtimeConfigPath,
+      SOVEREIGN_NODE_CONFIG: this.paths.configPath,
+    };
+  }
+
+  private setManagedOpenClawEnv(runtimeConfig: RuntimeConfig): void {
+    const env = this.buildManagedOpenClawEnv(runtimeConfig);
+    this.managedOpenClawEnv = env;
+    for (const [key, value] of Object.entries(env)) {
+      process.env[key] = value;
+    }
+  }
+
+  private async resolveManagedOpenClawEnv(): Promise<Record<string, string> | null> {
+    if (this.managedOpenClawEnv !== undefined) {
+      return this.managedOpenClawEnv;
+    }
+
+    const runtimeConfig = await this.tryReadRuntimeConfig();
+    if (runtimeConfig === null) {
+      this.managedOpenClawEnv = null;
+      return null;
+    }
+
+    const env = this.buildManagedOpenClawEnv(runtimeConfig);
+    this.managedOpenClawEnv = env;
+    return env;
   }
 
   private buildInstallSteps(req: InstallRequest): InstallStep[] {
@@ -1095,6 +1138,17 @@ export class RealInstallerService implements InstallerService {
             };
           }
 
+          if (this.shouldPreferSystemGatewayService()) {
+            stepState.gatewayServiceSkipped = true;
+            this.logger.info(
+              {
+                serviceUser: this.getConfiguredServiceIdentity().user,
+              },
+              "Skipping OpenClaw user-service gateway install in root install context; using system-level service flow",
+            );
+            return;
+          }
+
           try {
             await this.openclawGatewayServiceManager.install({
               force: req.openclaw?.forceReinstall ?? false,
@@ -1147,6 +1201,7 @@ export class RealInstallerService implements InstallerService {
             matrixRoom: stepState.matrixRoom,
           });
           await this.writeOpenClawRuntimeArtifacts(runtimeConfig);
+          this.setManagedOpenClawEnv(runtimeConfig);
 
           if (stepState.gatewayServiceSkipped === true) {
             const fallbackStarted = await this.ensureSystemGatewayServiceFallback(runtimeConfig);
@@ -1374,6 +1429,7 @@ export class RealInstallerService implements InstallerService {
     const cronJobId = "mail-sentinel-poll";
 
     try {
+      await mkdir(registrationDir, { recursive: true });
       await mkdir(workspaceDir, { recursive: true });
       const readmePath = join(workspaceDir, "README.md");
       const readme = [
@@ -1383,6 +1439,9 @@ export class RealInstallerService implements InstallerService {
         "Managed by Sovereign Node installer.",
       ].join("\n");
       await writeFile(readmePath, `${readme}\n`, "utf8");
+      await this.applyRuntimeOwnership(registrationDir);
+      await this.applyRuntimeOwnership(workspaceDir);
+      await this.applyRuntimeOwnership(readmePath);
     } catch (error) {
       throw {
         code: "MAIL_SENTINEL_REGISTER_FAILED",
@@ -1473,6 +1532,7 @@ export class RealInstallerService implements InstallerService {
 
     try {
       await writeFile(input.registrationFile, `${JSON.stringify(registrationPayload, null, 2)}\n`, "utf8");
+      await this.applyRuntimeOwnership(input.registrationFile);
     } catch (error) {
       throw {
         code: "MAIL_SENTINEL_REGISTER_FAILED",
@@ -1491,6 +1551,7 @@ export class RealInstallerService implements InstallerService {
       return false;
     }
 
+    const serviceIdentity = this.getConfiguredServiceIdentity(runtimeConfig);
     const unitName = SOVEREIGN_GATEWAY_SYSTEMD_UNIT;
     const unitPath =
       process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH?.trim()
@@ -1503,7 +1564,10 @@ export class RealInstallerService implements InstallerService {
       "",
       "[Service]",
       "Type=simple",
+      `User=${serviceIdentity.user}`,
+      `Group=${serviceIdentity.group}`,
       `WorkingDirectory=${this.paths.openclawServiceHome}`,
+      `Environment=HOME=${this.paths.openclawServiceHome}`,
       `EnvironmentFile=-${runtimeConfig.openclaw.gatewayEnvPath}`,
       "ExecStart=/usr/bin/env openclaw gateway run --allow-unconfigured --bind loopback",
       "Restart=always",
@@ -1516,6 +1580,7 @@ export class RealInstallerService implements InstallerService {
 
     try {
       await mkdir(this.paths.openclawServiceHome, { recursive: true });
+      await this.applyRuntimeOwnership(this.paths.openclawServiceHome);
       await mkdir(dirname(unitPath), { recursive: true });
       await writeFile(unitPath, unitContents, "utf8");
     } catch (error) {
@@ -1787,6 +1852,7 @@ export class RealInstallerService implements InstallerService {
       "matrix-bot-access-token",
       input.matrixAccounts.bot.accessToken,
     );
+    const serviceIdentity = this.getConfiguredServiceIdentity();
     const openclawPaths = this.getOpenClawRuntimePaths();
     const runtimeConfig: RuntimeConfig = {
       openclaw: {
@@ -1797,6 +1863,8 @@ export class RealInstallerService implements InstallerService {
         runtimeConfigPath: openclawPaths.runtimeConfigPath,
         runtimeProfilePath: openclawPaths.runtimeProfilePath,
         gatewayEnvPath: openclawPaths.gatewayEnvPath,
+        serviceUser: serviceIdentity.user,
+        serviceGroup: serviceIdentity.group,
       },
       openrouter: {
         model: openrouterModel,
@@ -1857,6 +1925,8 @@ export class RealInstallerService implements InstallerService {
         runtimeConfigPath: runtimeConfig.openclaw.runtimeConfigPath,
         runtimeProfilePath: runtimeConfig.openclaw.runtimeProfilePath,
         gatewayEnvPath: runtimeConfig.openclaw.gatewayEnvPath,
+        serviceUser: runtimeConfig.openclaw.serviceUser,
+        serviceGroup: runtimeConfig.openclaw.serviceGroup,
         serviceHome: this.paths.openclawServiceHome,
       },
       openclawProfile: {
@@ -1932,6 +2002,7 @@ export class RealInstallerService implements InstallerService {
       await writeFile(tempPath, `${JSON.stringify(configPayload, null, 2)}\n`, "utf8");
       await chmod(tempPath, 0o600);
       await rename(tempPath, this.paths.configPath);
+      await this.applyRuntimeOwnership(this.paths.configPath);
     } catch (error) {
       throw {
         code: "OPENCLAW_CONFIG_WRITE_FAILED",
@@ -2036,6 +2107,9 @@ export class RealInstallerService implements InstallerService {
       await mkdir(this.paths.openclawServiceHome, { recursive: true });
       await mkdir(runtimeConfig.openclaw.openclawHome, { recursive: true });
       await mkdir(dirname(runtimeConfig.openclaw.runtimeProfilePath), { recursive: true });
+      await this.applyRuntimeOwnership(this.paths.openclawServiceHome);
+      await this.applyRuntimeOwnership(runtimeConfig.openclaw.openclawHome);
+      await this.applyRuntimeOwnership(dirname(runtimeConfig.openclaw.runtimeProfilePath));
       await this.writeProtectedJsonFile(
         runtimeConfig.openclaw.runtimeConfigPath,
         runtimePayload,
@@ -2056,6 +2130,7 @@ export class RealInstallerService implements InstallerService {
       await writeFile(envTempPath, `${envFileLines.join("\n")}\n`, "utf8");
       await chmod(envTempPath, 0o600);
       await rename(envTempPath, runtimeConfig.openclaw.gatewayEnvPath);
+      await this.applyRuntimeOwnership(runtimeConfig.openclaw.gatewayEnvPath);
     } catch (error) {
       throw {
         code: "OPENCLAW_CONFIG_WRITE_FAILED",
@@ -2077,6 +2152,7 @@ export class RealInstallerService implements InstallerService {
     await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
     await chmod(tempPath, 0o600);
     await rename(tempPath, path);
+    await this.applyRuntimeOwnership(path);
   }
 
   private async resolveImapConfig(
@@ -2146,6 +2222,7 @@ export class RealInstallerService implements InstallerService {
     await writeFile(tempPath, `${value}\n`, "utf8");
     await chmod(tempPath, 0o600);
     await rename(tempPath, filePath);
+    await this.applyRuntimeOwnership(filePath);
     return `file:${filePath}`;
   }
 
@@ -2157,6 +2234,7 @@ export class RealInstallerService implements InstallerService {
     try {
       await mkdir(this.paths.secretsDir, { recursive: true });
       await chmod(this.paths.secretsDir, 0o700);
+      await this.applyRuntimeOwnership(this.paths.secretsDir);
       await access(this.paths.secretsDir, fsConstants.W_OK);
       this.resolvedSecretsDir = this.paths.secretsDir;
       return this.resolvedSecretsDir;
@@ -2174,6 +2252,102 @@ export class RealInstallerService implements InstallerService {
       );
       this.resolvedSecretsDir = fallback;
       return fallback;
+    }
+  }
+
+  private getConfiguredServiceIdentity(
+    runtimeConfig?: RuntimeConfig,
+  ): { user: string; group: string } {
+    const envUser = process.env.SOVEREIGN_NODE_SERVICE_USER?.trim();
+    const envGroup = process.env.SOVEREIGN_NODE_SERVICE_GROUP?.trim();
+    const configUser = runtimeConfig?.openclaw.serviceUser?.trim();
+    const configGroup = runtimeConfig?.openclaw.serviceGroup?.trim();
+    const user =
+      (envUser !== undefined && envUser.length > 0
+        ? envUser
+        : configUser !== undefined && configUser.length > 0
+          ? configUser
+          : DEFAULT_SERVICE_USER);
+    const group =
+      (envGroup !== undefined && envGroup.length > 0
+        ? envGroup
+        : configGroup !== undefined && configGroup.length > 0
+          ? configGroup
+          : user || DEFAULT_SERVICE_GROUP);
+    return {
+      user,
+      group,
+    };
+  }
+
+  private shouldPreferSystemGatewayService(runtimeConfig?: RuntimeConfig): boolean {
+    if (typeof process.getuid !== "function" || process.getuid() !== 0) {
+      return false;
+    }
+    const serviceIdentity = this.getConfiguredServiceIdentity(runtimeConfig);
+    return serviceIdentity.user !== "root";
+  }
+
+  private async resolveRuntimeOwnership(): Promise<{ uid: number; gid: number } | null> {
+    if (this.resolvedRuntimeOwnership !== undefined) {
+      return this.resolvedRuntimeOwnership;
+    }
+
+    if (typeof process.getuid === "function" && process.getuid() !== 0) {
+      this.resolvedRuntimeOwnership = null;
+      return null;
+    }
+
+    const candidates = [
+      this.paths.stateDir,
+      this.paths.openclawServiceHome,
+      this.paths.secretsDir,
+      dirname(this.paths.configPath),
+    ];
+    for (const candidate of candidates) {
+      try {
+        const info = await stat(candidate);
+        this.resolvedRuntimeOwnership = {
+          uid: info.uid,
+          gid: info.gid,
+        };
+        return this.resolvedRuntimeOwnership;
+      } catch (error) {
+        if (
+          isNodeError(error)
+          && (error.code === "ENOENT" || error.code === "ENOTDIR")
+        ) {
+          continue;
+        }
+      }
+    }
+
+    this.resolvedRuntimeOwnership = null;
+    return null;
+  }
+
+  private async applyRuntimeOwnership(path: string): Promise<void> {
+    const ownership = await this.resolveRuntimeOwnership();
+    if (ownership === null) {
+      return;
+    }
+
+    try {
+      await chown(path, ownership.uid, ownership.gid);
+    } catch (error) {
+      if (
+        isNodeError(error)
+        && (error.code === "ENOENT" || error.code === "EPERM" || error.code === "EACCES")
+      ) {
+        return;
+      }
+      this.logger.debug(
+        {
+          path,
+          error: describeError(error),
+        },
+        "Failed to apply runtime ownership to installer artifact",
+      );
     }
   }
 }
@@ -2258,6 +2432,14 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
     typeof openclaw.gatewayEnvPath === "string" && openclaw.gatewayEnvPath.length > 0
       ? openclaw.gatewayEnvPath
       : join(openclawServiceHome, "gateway.env");
+  const serviceUser =
+    typeof openclaw.serviceUser === "string" && openclaw.serviceUser.length > 0
+      ? openclaw.serviceUser
+      : undefined;
+  const serviceGroup =
+    typeof openclaw.serviceGroup === "string" && openclaw.serviceGroup.length > 0
+      ? openclaw.serviceGroup
+      : undefined;
   const openclawProfile = isRecord(parsed.openclawProfile) ? parsed.openclawProfile : {};
   const openclawPlugins = isRecord(openclawProfile.plugins) ? openclawProfile.plugins : {};
   const openclawAgents = Array.isArray(openclawProfile.agents)
@@ -2302,6 +2484,8 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
       runtimeConfigPath,
       runtimeProfilePath,
       gatewayEnvPath,
+      ...(serviceUser === undefined ? {} : { serviceUser }),
+      ...(serviceGroup === undefined ? {} : { serviceGroup }),
     },
     openrouter: {
       model:

@@ -9,8 +9,8 @@ REF="${SOVEREIGN_NODE_REF:-main}"
 INSTALL_ROOT="${SOVEREIGN_NODE_INSTALL_ROOT:-/opt/sovereign-ai-node}"
 APP_DIR="${INSTALL_ROOT}/app"
 SERVICE_NAME="${SOVEREIGN_NODE_SERVICE_NAME:-sovereign-node-api}"
-SERVICE_USER="${SOVEREIGN_NODE_SERVICE_USER:-root}"
-SERVICE_GROUP="${SOVEREIGN_NODE_SERVICE_GROUP:-root}"
+SERVICE_USER="${SOVEREIGN_NODE_SERVICE_USER:-sovereign-node}"
+SERVICE_GROUP="${SOVEREIGN_NODE_SERVICE_GROUP:-}"
 ENV_FILE="${SOVEREIGN_NODE_ENV_FILE:-/etc/default/sovereign-node-api}"
 API_HOST="${SOVEREIGN_NODE_API_HOST:-127.0.0.1}"
 API_PORT="${SOVEREIGN_NODE_API_PORT:-8787}"
@@ -36,8 +36,8 @@ Options:
   --source-dir <path>      Local source directory (alternative to --repo-url)
   --ref <ref>              Git ref (default: main)
   --install-root <path>    Install root (default: /opt/sovereign-ai-node)
-  --service-user <user>    systemd service user (default: root)
-  --service-group <group>  systemd service group (default: root)
+  --service-user <user>    systemd service user (default: sovereign-node)
+  --service-group <group>  systemd service group (default: same as service user)
   --api-host <host>        API bind host (default: 127.0.0.1)
   --api-port <port>        API bind port (default: 8787)
   --request-file <path>    Install request output path (default: /etc/sovereign-node/install-request.json)
@@ -45,6 +45,12 @@ Options:
   --non-interactive        Do not prompt; keep/generate request file and exit
   -h, --help               Show help
 EOF
+}
+
+normalize_service_identity() {
+  if [[ -z "$SERVICE_GROUP" ]]; then
+    SERVICE_GROUP="$SERVICE_USER"
+  fi
 }
 
 parse_args() {
@@ -186,6 +192,10 @@ ensure_service_account() {
       --create-home \
       --shell /usr/sbin/nologin \
       "$SERVICE_USER"
+  fi
+
+  if getent group docker >/dev/null 2>&1; then
+    usermod -aG docker "$SERVICE_USER" || true
   fi
 }
 
@@ -715,7 +725,12 @@ run_install_flow() {
 
   log "Running sovereign-node install"
   set +e
-  install_output="$(timeout --foreground 30m sovereign-node install --request-file "$REQUEST_FILE" --json)"
+  install_output="$(
+    timeout --foreground 30m env \
+      "SOVEREIGN_NODE_SERVICE_USER=$SERVICE_USER" \
+      "SOVEREIGN_NODE_SERVICE_GROUP=$SERVICE_GROUP" \
+      sovereign-node install --request-file "$REQUEST_FILE" --json
+  )"
   install_exit_code=$?
   set -e
   printf '%s\n' "$install_output"
@@ -748,6 +763,7 @@ run_install_flow() {
 
 main() {
   parse_args "$@"
+  normalize_service_identity
   require_root
   ensure_supported_os
   resolve_source_mode

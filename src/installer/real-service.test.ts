@@ -783,11 +783,15 @@ describe("RealInstallerService", () => {
   it("starts system-level gateway fallback when user services are unavailable", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const priorGatewayUnitPath = process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH;
+    const priorServiceUser = process.env.SOVEREIGN_NODE_SERVICE_USER;
+    const priorServiceGroup = process.env.SOVEREIGN_NODE_SERVICE_GROUP;
     process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH = join(
       tempRoot,
       "systemd",
       "sovereign-openclaw-gateway.service",
     );
+    process.env.SOVEREIGN_NODE_SERVICE_USER = "sovereign-node";
+    process.env.SOVEREIGN_NODE_SERVICE_GROUP = "sovereign-node";
     const paths: SovereignPaths = {
       configPath: join(tempRoot, "etc", "sovereign-node.json5"),
       secretsDir: join(tempRoot, "etc", "secrets"),
@@ -992,6 +996,13 @@ describe("RealInstallerService", () => {
       expect(stepStates.test_alert).toBe("succeeded");
       expect(sentMessageBody).toContain("Hello from Mail Sentinel");
 
+      const unitRaw = await readFile(
+        process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH!,
+        "utf8",
+      );
+      expect(unitRaw).toContain("User=sovereign-node");
+      expect(unitRaw).toContain("Group=sovereign-node");
+
       const registrationRaw = await readFile(
         join(paths.stateDir, "mail-sentinel", "registration.json"),
         "utf8",
@@ -1005,6 +1016,16 @@ describe("RealInstallerService", () => {
         delete process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH;
       } else {
         process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH = priorGatewayUnitPath;
+      }
+      if (priorServiceUser === undefined) {
+        delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+      } else {
+        process.env.SOVEREIGN_NODE_SERVICE_USER = priorServiceUser;
+      }
+      if (priorServiceGroup === undefined) {
+        delete process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+      } else {
+        process.env.SOVEREIGN_NODE_SERVICE_GROUP = priorServiceGroup;
       }
       await rm(tempRoot, { recursive: true, force: true });
     }
