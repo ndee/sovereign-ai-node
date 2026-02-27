@@ -97,6 +97,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       const composeText = await readFile(result.composeFilePath, "utf8");
       expect(composeText).toContain("matrixdotorg/synapse:v1.125.0");
       expect(composeText).toContain("postgres:16-alpine");
+      expect(composeText).toContain('POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"');
       const envText = await readFile(join(result.projectDir, ".env"), "utf8");
       expect(envText).toContain("SYNAPSE_CONFIG_PATH=/data/homeserver.yaml");
       const synapseDirStat = await stat(join(result.projectDir, "synapse"));
@@ -107,6 +108,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       const homeserverText = await readFile(join(result.projectDir, "synapse", "homeserver.yaml"), "utf8");
       expect(homeserverText).toContain('server_name: "matrix.local.test"');
       expect(homeserverText).toContain('public_baseurl: "http://matrix.local.test:8008/"');
+      expect(homeserverText).toContain("allow_unsafe_locale: true");
       const signingKey = await readFile(
         join(result.projectDir, "synapse", "matrix.local.test.signing.key"),
         "utf8",

@@ -917,6 +917,7 @@ services:
       POSTGRES_USER: synapse
       POSTGRES_PASSWORD: \${POSTGRES_PASSWORD}
       POSTGRES_DB: synapse
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
     volumes:
       - ./postgres-data:/var/lib/postgresql/data
 
@@ -975,6 +976,7 @@ const renderSynapseConfig = (input: SynapseConfigInput): string => {
     "",
     "database:",
     "  name: psycopg2",
+    "  allow_unsafe_locale: true",
     "  args:",
     "    user: synapse",
     `    password: "${input.postgresPassword}"`,
