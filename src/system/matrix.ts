@@ -1,24 +1,62 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, mkdir, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import type { InstallRequest } from "../contracts/index.js";
+import type { TestMatrixRequest } from "../contracts/api.js";
+import type { CheckResult } from "../contracts/common.js";
+import type { InstallRequest, TestMatrixResult } from "../contracts/index.js";
 import type { SovereignPaths } from "../config/paths.js";
 import type { Logger } from "../logging/logger.js";
 import type { ExecRunner, ExecResult } from "./exec.js";
+
+const MATRIX_INTERNAL_BASE_URL = "http://127.0.0.1:8008";
+const MATRIX_READY_TIMEOUT_MS = 45_000;
+const MATRIX_READY_POLL_INTERVAL_MS = 1_500;
+const MATRIX_HTTP_TIMEOUT_MS = 8_000;
+const MATRIX_BOOTSTRAP_SECRET_DIR = "bootstrap-secrets";
+
+type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
 export type BundledMatrixProvisionResult = {
   projectDir: string;
   composeFilePath: string;
   homeserverDomain: string;
   publicBaseUrl: string;
+  adminBaseUrl: string;
   federationEnabled: boolean;
   tlsMode: "local-dev";
 };
 
+type MatrixBootstrapAccount = {
+  localpart: string;
+  userId: string;
+  passwordSecretRef: string;
+  accessToken: string;
+};
+
+export type BundledMatrixAccountsResult = {
+  operator: MatrixBootstrapAccount;
+  bot: MatrixBootstrapAccount;
+};
+
+export type BundledMatrixRoomBootstrapResult = {
+  roomId: string;
+  roomName: string;
+};
+
 export interface BundledMatrixProvisioner {
   provision(req: InstallRequest): Promise<BundledMatrixProvisionResult>;
+  bootstrapAccounts(
+    req: InstallRequest,
+    provision: BundledMatrixProvisionResult,
+  ): Promise<BundledMatrixAccountsResult>;
+  bootstrapRoom(
+    req: InstallRequest,
+    provision: BundledMatrixProvisionResult,
+    accounts: BundledMatrixAccountsResult,
+  ): Promise<BundledMatrixRoomBootstrapResult>;
+  test(req: TestMatrixRequest): Promise<TestMatrixResult>;
 }
 
 export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvisioner {
@@ -28,6 +66,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     private readonly execRunner: ExecRunner,
     private readonly logger: Logger,
     private readonly paths: SovereignPaths,
+    private readonly fetchImpl: FetchLike = defaultFetch,
   ) {}
 
   async provision(req: InstallRequest): Promise<BundledMatrixProvisionResult> {
@@ -127,9 +166,491 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       composeFilePath,
       homeserverDomain,
       publicBaseUrl,
+      adminBaseUrl: MATRIX_INTERNAL_BASE_URL,
       federationEnabled,
       tlsMode: "local-dev",
     };
+  }
+
+  async bootstrapAccounts(
+    req: InstallRequest,
+    provision: BundledMatrixProvisionResult,
+  ): Promise<BundledMatrixAccountsResult> {
+    await this.ensureStackRunning(provision);
+    await this.waitForSynapseReady(provision.adminBaseUrl);
+
+    const operatorLocalpart = sanitizeMatrixLocalpart(req.operator.username, "operator");
+    const botLocalpart = chooseBotLocalpart(operatorLocalpart);
+    const operatorPassword = generatePassword();
+    const botPassword = generatePassword();
+    const secretsDir = await this.ensureBootstrapSecretsDir(provision.projectDir);
+
+    const operatorPasswordSecretRef = await this.writeSecretFile(
+      secretsDir,
+      `${operatorLocalpart}.password`,
+      operatorPassword,
+    );
+    const botPasswordSecretRef = await this.writeSecretFile(
+      secretsDir,
+      `${botLocalpart}.password`,
+      botPassword,
+    );
+
+    await this.registerSynapseUser(provision, {
+      localpart: operatorLocalpart,
+      password: operatorPassword,
+      admin: true,
+    });
+    await this.registerSynapseUser(provision, {
+      localpart: botLocalpart,
+      password: botPassword,
+      admin: false,
+    });
+
+    const operatorSession = await this.loginUser(
+      provision.adminBaseUrl,
+      operatorLocalpart,
+      operatorPassword,
+    );
+    const botSession = await this.loginUser(provision.adminBaseUrl, botLocalpart, botPassword);
+
+    const accounts: BundledMatrixAccountsResult = {
+      operator: {
+        localpart: operatorLocalpart,
+        userId: operatorSession.userId,
+        passwordSecretRef: operatorPasswordSecretRef,
+        accessToken: operatorSession.accessToken,
+      },
+      bot: {
+        localpart: botLocalpart,
+        userId: botSession.userId,
+        passwordSecretRef: botPasswordSecretRef,
+        accessToken: botSession.accessToken,
+      },
+    };
+
+    this.logger.info(
+      {
+        projectDir: provision.projectDir,
+        homeserverDomain: provision.homeserverDomain,
+        operatorUserId: accounts.operator.userId,
+        botUserId: accounts.bot.userId,
+      },
+      "Bundled Matrix accounts bootstrapped",
+    );
+
+    return accounts;
+  }
+
+  async bootstrapRoom(
+    req: InstallRequest,
+    provision: BundledMatrixProvisionResult,
+    accounts: BundledMatrixAccountsResult,
+  ): Promise<BundledMatrixRoomBootstrapResult> {
+    await this.waitForSynapseReady(provision.adminBaseUrl);
+
+    const roomName = req.matrix.alertRoomName?.trim() || "Sovereign Alerts";
+    const created = await this.matrixJsonRequest<{ room_id?: unknown }>({
+      baseUrl: provision.adminBaseUrl,
+      path: "/_matrix/client/v3/createRoom",
+      method: "POST",
+      accessToken: accounts.operator.accessToken,
+      body: {
+        name: roomName,
+        preset: "private_chat",
+        visibility: "private",
+      },
+      errorCode: "MATRIX_ROOM_CREATE_FAILED",
+      errorMessage: "Failed to create the Matrix alert room",
+      retryable: true,
+    });
+
+    const roomId = typeof created.room_id === "string" ? created.room_id.trim() : "";
+    if (roomId.length === 0) {
+      throw {
+        code: "MATRIX_ROOM_CREATE_FAILED",
+        message: "Matrix room creation returned an invalid room_id",
+        retryable: true,
+      };
+    }
+
+    await this.matrixJsonRequest({
+      baseUrl: provision.adminBaseUrl,
+      path: `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`,
+      method: "POST",
+      accessToken: accounts.operator.accessToken,
+      body: {
+        user_id: accounts.bot.userId,
+      },
+      errorCode: "MATRIX_ROOM_INVITE_FAILED",
+      errorMessage: "Failed to invite bot account into the Matrix alert room",
+      retryable: true,
+    });
+
+    await this.matrixJsonRequest({
+      baseUrl: provision.adminBaseUrl,
+      path: `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/join`,
+      method: "POST",
+      accessToken: accounts.bot.accessToken,
+      body: {},
+      errorCode: "MATRIX_ROOM_JOIN_FAILED",
+      errorMessage: "Bot account could not join the Matrix alert room",
+      retryable: true,
+    });
+
+    const result: BundledMatrixRoomBootstrapResult = {
+      roomId,
+      roomName,
+    };
+    this.logger.info(
+      {
+        projectDir: provision.projectDir,
+        roomId: result.roomId,
+        roomName: result.roomName,
+      },
+      "Bundled Matrix alert room bootstrapped",
+    );
+    return result;
+  }
+
+  async test(req: TestMatrixRequest): Promise<TestMatrixResult> {
+    const homeserverUrl = normalizePublicBaseUrl(req.publicBaseUrl);
+    const checks: CheckResult[] = [];
+
+    const clientProbe = await this.runProbe({
+      id: "matrix-client-api",
+      name: "Matrix client API",
+      passMessage: "Matrix client API is reachable",
+      failMessage: "Matrix client API is not reachable",
+      run: async () => {
+        const payload = await this.matrixJsonRequest<{ versions?: unknown }>({
+          baseUrl: homeserverUrl,
+          path: "/_matrix/client/versions",
+          method: "GET",
+          errorCode: "MATRIX_CLIENT_API_UNREACHABLE",
+          errorMessage: "Matrix client API probe failed",
+          retryable: true,
+        });
+        if (!Array.isArray(payload.versions)) {
+          throw new Error("Matrix client versions response did not include a versions array");
+        }
+      },
+    });
+    checks.push(clientProbe.check);
+
+    const federationEnabled = req.federationEnabled ?? false;
+    let serverDiscovery: { required: boolean; ok: boolean };
+    if (federationEnabled) {
+      const federationProbe = await this.runProbe({
+        id: "matrix-federation-api",
+        name: "Matrix federation API",
+        passMessage: "Matrix federation API is reachable",
+        failMessage: "Matrix federation API is not reachable",
+        run: async () => {
+          const payload = await this.matrixJsonRequest<{ server?: unknown }>({
+            baseUrl: homeserverUrl,
+            path: "/_matrix/federation/v1/version",
+            method: "GET",
+            errorCode: "MATRIX_FEDERATION_API_UNREACHABLE",
+            errorMessage: "Matrix federation probe failed",
+            retryable: true,
+          });
+          if (!isRecord(payload.server)) {
+            throw new Error("Matrix federation response did not include server metadata");
+          }
+        },
+      });
+      checks.push(federationProbe.check);
+      serverDiscovery = {
+        required: true,
+        ok: federationProbe.ok,
+      };
+    } else {
+      checks.push(
+        check(
+          "matrix-federation-api",
+          "Matrix federation API",
+          "skip",
+          "Matrix federation is disabled; federation probe skipped",
+        ),
+      );
+      serverDiscovery = {
+        required: false,
+        ok: true,
+      };
+    }
+
+    return {
+      ok: checks.every((entry) => entry.status !== "fail"),
+      homeserverUrl,
+      clientDiscovery: {
+        required: false,
+        ok: true,
+      },
+      serverDiscovery,
+      checks,
+    };
+  }
+
+  private async ensureStackRunning(provision: BundledMatrixProvisionResult): Promise<void> {
+    const composeUp = await this.runComposeCommand(
+      provision.projectDir,
+      provision.composeFilePath,
+      ["up", "-d", "postgres", "synapse"],
+    );
+    if (composeUp.exitCode !== 0) {
+      throw {
+        code: "MATRIX_STACK_START_FAILED",
+        message: "Failed to start bundled Matrix services with Docker Compose",
+        retryable: true,
+        details: {
+          exitCode: composeUp.exitCode,
+          stderr: truncateText(composeUp.stderr, 4000),
+          stdout: truncateText(composeUp.stdout, 4000),
+          projectDir: provision.projectDir,
+          composeFilePath: provision.composeFilePath,
+        },
+      };
+    }
+  }
+
+  private async registerSynapseUser(
+    provision: BundledMatrixProvisionResult,
+    input: {
+      localpart: string;
+      password: string;
+      admin: boolean;
+    },
+  ): Promise<void> {
+    const args = [
+      "exec",
+      "-T",
+      "synapse",
+      "register_new_matrix_user",
+      "-u",
+      input.localpart,
+      "-p",
+      input.password,
+      ...(input.admin ? ["-a"] : []),
+      "-c",
+      "/data/homeserver.yaml",
+      provision.adminBaseUrl,
+    ];
+    let registerResult: ExecResult;
+    try {
+      registerResult = await this.runComposeCommand(
+        provision.projectDir,
+        provision.composeFilePath,
+        args,
+      );
+    } catch (error) {
+      throw {
+        code: "MATRIX_ACCOUNT_BOOTSTRAP_FAILED",
+        message: `Failed to register Matrix account '${input.localpart}'`,
+        retryable: true,
+        details: {
+          localpart: input.localpart,
+          admin: input.admin,
+          projectDir: provision.projectDir,
+          error: describeError(error),
+        },
+      };
+    }
+    if (registerResult.exitCode !== 0) {
+      throw {
+        code: "MATRIX_ACCOUNT_BOOTSTRAP_FAILED",
+        message: `Failed to register Matrix account '${input.localpart}'`,
+        retryable: true,
+        details: {
+          localpart: input.localpart,
+          admin: input.admin,
+          exitCode: registerResult.exitCode,
+          stderr: truncateText(registerResult.stderr, 4000),
+          stdout: truncateText(registerResult.stdout, 4000),
+          projectDir: provision.projectDir,
+        },
+      };
+    }
+  }
+
+  private async loginUser(
+    baseUrl: string,
+    localpart: string,
+    password: string,
+  ): Promise<{ accessToken: string; userId: string }> {
+    const payload = await this.matrixJsonRequest<{
+      access_token?: unknown;
+      user_id?: unknown;
+    }>({
+      baseUrl,
+      path: "/_matrix/client/v3/login",
+      method: "POST",
+      body: {
+        type: "m.login.password",
+        identifier: {
+          type: "m.id.user",
+          user: localpart,
+        },
+        password,
+      },
+      errorCode: "MATRIX_LOGIN_FAILED",
+      errorMessage: `Matrix login failed for '${localpart}'`,
+      retryable: false,
+    });
+
+    const accessToken = typeof payload.access_token === "string" ? payload.access_token : "";
+    const userId = typeof payload.user_id === "string" ? payload.user_id : "";
+    if (accessToken.length === 0 || userId.length === 0) {
+      throw {
+        code: "MATRIX_LOGIN_FAILED",
+        message: `Matrix login response for '${localpart}' did not include an access token`,
+        retryable: false,
+      };
+    }
+
+    return {
+      accessToken,
+      userId,
+    };
+  }
+
+  private async waitForSynapseReady(baseUrl: string): Promise<void> {
+    const deadline = Date.now() + MATRIX_READY_TIMEOUT_MS;
+    let lastError = "unknown";
+
+    while (Date.now() < deadline) {
+      try {
+        const payload = await this.matrixJsonRequest<{ versions?: unknown }>({
+          baseUrl,
+          path: "/_matrix/client/versions",
+          method: "GET",
+          errorCode: "MATRIX_READY_CHECK_FAILED",
+          errorMessage: "Matrix readiness check failed",
+          retryable: true,
+        });
+        if (Array.isArray(payload.versions)) {
+          return;
+        }
+        lastError = "versions array missing from readiness response";
+      } catch (error) {
+        lastError = describeError(error);
+      }
+
+      await delay(MATRIX_READY_POLL_INTERVAL_MS);
+    }
+
+    throw {
+      code: "MATRIX_WAIT_READY_TIMEOUT",
+      message: "Timed out waiting for bundled Matrix homeserver readiness",
+      retryable: true,
+      details: {
+        baseUrl,
+        timeoutMs: MATRIX_READY_TIMEOUT_MS,
+        lastError,
+      },
+    };
+  }
+
+  private async runProbe(input: {
+    id: string;
+    name: string;
+    passMessage: string;
+    failMessage: string;
+    run: () => Promise<void>;
+  }): Promise<{ ok: boolean; check: CheckResult }> {
+    try {
+      await input.run();
+      return {
+        ok: true,
+        check: check(input.id, input.name, "pass", input.passMessage),
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        check: check(input.id, input.name, "fail", input.failMessage, {
+          error: describeError(error),
+        }),
+      };
+    }
+  }
+
+  private async matrixJsonRequest<T>(input: {
+    baseUrl: string;
+    path: string;
+    method: "GET" | "POST";
+    accessToken?: string;
+    body?: unknown;
+    errorCode: string;
+    errorMessage: string;
+    retryable: boolean;
+  }): Promise<T> {
+    const url = new URL(input.path, ensureTrailingSlash(input.baseUrl)).toString();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), MATRIX_HTTP_TIMEOUT_MS);
+    try {
+      const response = await this.fetchImpl(url, {
+        method: input.method,
+        headers: {
+          Accept: "application/json",
+          ...(input.body === undefined ? {} : { "Content-Type": "application/json" }),
+          ...(input.accessToken === undefined
+            ? {}
+            : { Authorization: `Bearer ${input.accessToken}` }),
+        },
+        ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
+        signal: controller.signal,
+      });
+
+      const rawBody = await response.text();
+      const parsedBody = parseJsonSafely(rawBody);
+      if (!response.ok) {
+        throw {
+          code: input.errorCode,
+          message: input.errorMessage,
+          retryable: input.retryable,
+          details: {
+            url,
+            status: response.status,
+            body: summarizeUnknown(parsedBody),
+          },
+        };
+      }
+
+      return parsedBody as T;
+    } catch (error) {
+      if (isStructuredError(error)) {
+        throw error;
+      }
+      throw {
+        code: input.errorCode,
+        message: input.errorMessage,
+        retryable: input.retryable,
+        details: {
+          url,
+          error: describeError(error),
+        },
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private async ensureBootstrapSecretsDir(projectDir: string): Promise<string> {
+    const dir = join(projectDir, MATRIX_BOOTSTRAP_SECRET_DIR);
+    await mkdir(dir, { recursive: true });
+    await chmod(dir, 0o700);
+    return dir;
+  }
+
+  private async writeSecretFile(
+    secretsDir: string,
+    fileName: string,
+    value: string,
+  ): Promise<string> {
+    const secretPath = join(secretsDir, fileName);
+    await writeFile(secretPath, `${value}\n`, "utf8");
+    await chmod(secretPath, 0o600);
+    return `file:${secretPath}`;
   }
 
   private async runComposeCommand(
@@ -354,4 +875,107 @@ const truncateText = (value: string, maxChars: number): string => {
     return value;
   }
   return `${value.slice(0, maxChars)}...(truncated)`;
+};
+
+const defaultFetch: FetchLike = (input, init) => globalThis.fetch(input, init);
+
+const delay = async (ms: number): Promise<void> =>
+  new Promise<void>((resolveTimeout) => {
+    setTimeout(resolveTimeout, ms);
+  });
+
+const chooseBotLocalpart = (operatorLocalpart: string): string =>
+  operatorLocalpart === "mail-sentinel" ? "mail-sentinel-bot" : "mail-sentinel";
+
+const sanitizeMatrixLocalpart = (value: string, fallback: string): string => {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._=+\-/]/g, "_")
+    .replace(/^_+|_+$/g, "");
+  if (normalized.length > 0) {
+    return normalized;
+  }
+  return fallback;
+};
+
+const generatePassword = (): string => `sn_${randomBytes(24).toString("base64url")}`;
+
+const normalizePublicBaseUrl = (value: string): string => {
+  const parsed = new URL(value);
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw {
+      code: "MATRIX_URL_INVALID",
+      message: "Matrix publicBaseUrl must use http or https",
+      retryable: false,
+      details: {
+        publicBaseUrl: value,
+      },
+    };
+  }
+  parsed.pathname = "/";
+  parsed.search = "";
+  parsed.hash = "";
+  const normalized = parsed.toString();
+  return normalized.endsWith("/") ? normalized.slice(0, -1) : normalized;
+};
+
+const parseJsonSafely = (raw: string): unknown => {
+  if (raw.trim().length === 0) {
+    return {};
+  }
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return raw;
+  }
+};
+
+const summarizeUnknown = (value: unknown): string => {
+  if (typeof value === "string") {
+    return truncateText(value, 800);
+  }
+  try {
+    return truncateText(JSON.stringify(value), 800);
+  } catch {
+    return truncateText(String(value), 800);
+  }
+};
+
+const describeError = (error: unknown): string =>
+  error instanceof Error ? error.message : summarizeUnknown(error);
+
+const check = (
+  id: string,
+  name: string,
+  status: CheckResult["status"],
+  message: string,
+  details?: Record<string, unknown>,
+): CheckResult => ({
+  id,
+  name,
+  status,
+  message,
+  ...(details === undefined ? {} : { details }),
+});
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
+
+const isStructuredError = (
+  value: unknown,
+): value is {
+  code: string;
+  message: string;
+  retryable: boolean;
+  details?: Record<string, unknown>;
+} => {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    typeof value.code === "string"
+    && typeof value.message === "string"
+    && typeof value.retryable === "boolean"
+  );
 };

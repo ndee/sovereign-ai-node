@@ -30,8 +30,10 @@ import type { SovereignPaths } from "../config/paths.js";
 import type { OpenClawBootstrapper } from "../openclaw/bootstrap.js";
 import type { ImapTester } from "../system/imap.js";
 import type {
+  BundledMatrixAccountsResult,
   BundledMatrixProvisionResult,
   BundledMatrixProvisioner,
+  BundledMatrixRoomBootstrapResult,
 } from "../system/matrix.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
 import {
@@ -94,7 +96,7 @@ export class RealInstallerService implements InstallerService {
   }
 
   async testMatrix(req: TestMatrixRequest): Promise<TestMatrixResult> {
-    return this.stubService.testMatrix(req);
+    return this.matrixProvisioner.test(req);
   }
 
   async startInstall(req: InstallRequest): Promise<StartInstallResult> {
@@ -154,6 +156,8 @@ export class RealInstallerService implements InstallerService {
   private buildInstallSteps(req: InstallRequest): InstallStep[] {
     const stepState: {
       matrixProvision?: BundledMatrixProvisionResult;
+      matrixAccounts?: BundledMatrixAccountsResult;
+      matrixRoom?: BundledMatrixRoomBootstrapResult;
     } = {};
 
     return [
@@ -228,32 +232,62 @@ export class RealInstallerService implements InstallerService {
         id: "matrix_bootstrap_accounts",
         label: "Bootstrap Matrix accounts",
         run: async () => {
-          throw {
-            code: "NOT_IMPLEMENTED",
-            message:
-              "Matrix account bootstrap is not implemented yet (compose bundle generation is wired for local-dev)",
-            retryable: true,
-            details: {
-              matrixProvision:
-                stepState.matrixProvision === undefined
-                  ? "missing"
-                  : {
-                      homeserverDomain: stepState.matrixProvision.homeserverDomain,
-                      publicBaseUrl: stepState.matrixProvision.publicBaseUrl,
-                      projectDir: stepState.matrixProvision.projectDir,
-                    },
-            },
-          };
+          if (stepState.matrixProvision === undefined) {
+            throw {
+              code: "INSTALL_INTERNAL_STATE",
+              message: "Matrix provisioning output is missing before account bootstrap",
+              retryable: false,
+            };
+          }
+          stepState.matrixAccounts = await this.matrixProvisioner.bootstrapAccounts(
+            req,
+            stepState.matrixProvision,
+          );
         },
       },
       {
         id: "matrix_bootstrap_room",
         label: "Bootstrap Matrix alert room",
         run: async () => {
+          if (stepState.matrixProvision === undefined) {
+            throw {
+              code: "INSTALL_INTERNAL_STATE",
+              message: "Matrix provisioning output is missing before room bootstrap",
+              retryable: false,
+            };
+          }
+          if (stepState.matrixAccounts === undefined) {
+            throw {
+              code: "INSTALL_INTERNAL_STATE",
+              message: "Matrix account bootstrap output is missing before room bootstrap",
+              retryable: false,
+            };
+          }
+          stepState.matrixRoom = await this.matrixProvisioner.bootstrapRoom(
+            req,
+            stepState.matrixProvision,
+            stepState.matrixAccounts,
+          );
+        },
+      },
+      {
+        id: "openclaw_gateway_service_install",
+        label: "Install OpenClaw gateway service",
+        run: async () => {
           throw {
             code: "NOT_IMPLEMENTED",
-            message: "Matrix room bootstrap is not implemented yet",
+            message:
+              "OpenClaw gateway service install/configure stage is not implemented yet",
             retryable: true,
+            details: {
+              matrixRoom:
+                stepState.matrixRoom === undefined
+                  ? "missing"
+                  : {
+                      roomId: stepState.matrixRoom.roomId,
+                      roomName: stepState.matrixRoom.roomName,
+                    },
+            },
           };
         },
       },

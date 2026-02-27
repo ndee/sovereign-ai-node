@@ -121,10 +121,22 @@ describe("RealInstallerService", () => {
           composeFilePath: "/tmp/fake-matrix/compose.yaml",
           homeserverDomain: "matrix.example.org",
           publicBaseUrl: "https://matrix.example.org",
+          adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: false,
           tlsMode: "local-dev",
         };
       },
+      bootstrapAccounts: async () => {
+        throw new Error("unexpected bootstrapAccounts call");
+      },
+      bootstrapRoom: async () => {
+        throw new Error("unexpected bootstrapRoom call");
+      },
+      test: async (req) => ({
+        ok: false,
+        homeserverUrl: req.publicBaseUrl,
+        checks: [],
+      }),
     };
     const service = new RealInstallerService(createLogger(), paths, {
       openclawBootstrapper: fakeBootstrapper,
@@ -167,7 +179,7 @@ describe("RealInstallerService", () => {
     }
   });
 
-  it("runs matrix_provision after IMAP validation and then stops at account bootstrap TODO", async () => {
+  it("runs matrix bootstrap steps and then stops at gateway-service TODO", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {
       configPath: join(tempRoot, "etc", "sovereign-node.json5"),
@@ -179,6 +191,8 @@ describe("RealInstallerService", () => {
     };
 
     let matrixProvisionCalls = 0;
+    let matrixBootstrapAccountCalls = 0;
+    let matrixBootstrapRoomCalls = 0;
     const service = new RealInstallerService(createLogger(), paths, {
       openclawBootstrapper: {
         detectInstalled: async () => null,
@@ -215,10 +229,40 @@ describe("RealInstallerService", () => {
             composeFilePath: join(tempRoot, "matrix", "compose.yaml"),
             homeserverDomain: req.matrix.homeserverDomain,
             publicBaseUrl: req.matrix.publicBaseUrl,
+            adminBaseUrl: "http://127.0.0.1:8008",
             federationEnabled: req.matrix.federationEnabled ?? false,
             tlsMode: "local-dev",
           };
         },
+        bootstrapAccounts: async () => {
+          matrixBootstrapAccountCalls += 1;
+          return {
+            operator: {
+              localpart: "operator",
+              userId: "@operator:matrix.example.org",
+              passwordSecretRef: "file:/tmp/operator.password",
+              accessToken: "operator-token",
+            },
+            bot: {
+              localpart: "mail-sentinel",
+              userId: "@mail-sentinel:matrix.example.org",
+              passwordSecretRef: "file:/tmp/mail-sentinel.password",
+              accessToken: "bot-token",
+            },
+          };
+        },
+        bootstrapRoom: async (req) => {
+          matrixBootstrapRoomCalls += 1;
+          return {
+            roomId: "!alerts:matrix.example.org",
+            roomName: req.matrix.alertRoomName ?? "Sovereign Alerts",
+          };
+        },
+        test: async (req) => ({
+          ok: false,
+          homeserverUrl: req.publicBaseUrl,
+          checks: [],
+        }),
       },
     });
 
@@ -227,6 +271,8 @@ describe("RealInstallerService", () => {
 
       expect(started.job.state).toBe("failed");
       expect(matrixProvisionCalls).toBe(1);
+      expect(matrixBootstrapAccountCalls).toBe(1);
+      expect(matrixBootstrapRoomCalls).toBe(1);
 
       const stepStates = Object.fromEntries(
         started.job.steps.map((step) => [step.id, step.state]),
@@ -235,12 +281,13 @@ describe("RealInstallerService", () => {
       expect(stepStates.openclaw_bootstrap_cli).toBe("succeeded");
       expect(stepStates.imap_validate).toBe("succeeded");
       expect(stepStates.matrix_provision).toBe("succeeded");
-      expect(stepStates.matrix_bootstrap_accounts).toBe("failed");
-      expect(stepStates.matrix_bootstrap_room).toBe("pending");
+      expect(stepStates.matrix_bootstrap_accounts).toBe("succeeded");
+      expect(stepStates.matrix_bootstrap_room).toBe("succeeded");
+      expect(stepStates.openclaw_gateway_service_install).toBe("failed");
 
       const stored = await service.getInstallJob(started.job.jobId);
       expect(stored.error?.code).toBe("NOT_IMPLEMENTED");
-      expect(stored.job.currentStepId).toBe("matrix_bootstrap_accounts");
+      expect(stored.job.currentStepId).toBe("openclaw_gateway_service_install");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
