@@ -959,6 +959,7 @@ export class RealInstallerService implements InstallerService {
       matrixAccounts?: BundledMatrixAccountsResult;
       matrixRoom?: BundledMatrixRoomBootstrapResult;
       mailSentinelRegistration?: MailSentinelRegistrationResult;
+      gatewayServiceSkipped?: boolean;
     } = {};
 
     return [
@@ -1089,10 +1090,23 @@ export class RealInstallerService implements InstallerService {
             };
           }
 
-          await this.openclawGatewayServiceManager.install({
-            force: req.openclaw?.forceReinstall ?? false,
-          });
-          await this.openclawGatewayServiceManager.start();
+          try {
+            await this.openclawGatewayServiceManager.install({
+              force: req.openclaw?.forceReinstall ?? false,
+            });
+            await this.openclawGatewayServiceManager.start();
+          } catch (error) {
+            if (!isGatewayUserSystemdUnavailableError(error)) {
+              throw error;
+            }
+            stepState.gatewayServiceSkipped = true;
+            this.logger.warn(
+              {
+                error: describeError(error),
+              },
+              "OpenClaw gateway service install/start skipped because systemd user services are unavailable",
+            );
+          }
         },
       },
       {
@@ -1129,16 +1143,48 @@ export class RealInstallerService implements InstallerService {
           });
           await this.writeOpenClawRuntimeArtifacts(runtimeConfig);
 
+          if (stepState.gatewayServiceSkipped === true) {
+            this.logger.info(
+              "OpenClaw gateway restart skipped because service install/start was skipped",
+            );
+            return;
+          }
+
           try {
             await this.openclawGatewayServiceManager.restart();
           } catch (error) {
+            if (isGatewayUserSystemdUnavailableError(error)) {
+              stepState.gatewayServiceSkipped = true;
+              this.logger.warn(
+                {
+                  error: describeError(error),
+                },
+                "OpenClaw gateway restart skipped because systemd user services are unavailable",
+              );
+              return;
+            }
+
             this.logger.warn(
               {
                 error: error instanceof Error ? error.message : String(error),
               },
               "OpenClaw gateway restart failed after runtime configure; retrying with start",
             );
-            await this.openclawGatewayServiceManager.start();
+            try {
+              await this.openclawGatewayServiceManager.start();
+            } catch (startError) {
+              if (isGatewayUserSystemdUnavailableError(startError)) {
+                stepState.gatewayServiceSkipped = true;
+                this.logger.warn(
+                  {
+                    error: describeError(startError),
+                  },
+                  "OpenClaw gateway start skipped because systemd user services are unavailable",
+                );
+                return;
+              }
+              throw startError;
+            }
           }
         },
       },
@@ -1174,6 +1220,7 @@ export class RealInstallerService implements InstallerService {
             stepState.matrixProvision,
             stepState.mailSentinelRegistration?.agentId ?? MAIL_SENTINEL_AGENT_ID,
             stepState.mailSentinelRegistration?.cronJobId ?? MAIL_SENTINEL_CRON_ID,
+            stepState.gatewayServiceSkipped ?? false,
           );
         },
       },
@@ -1375,6 +1422,7 @@ export class RealInstallerService implements InstallerService {
     matrixProvision: BundledMatrixProvisionResult,
     expectedAgentId: string,
     expectedCronJobId: string,
+    gatewayServiceSkipped: boolean,
   ): Promise<void> {
     const matrix = await this.testMatrix({
       publicBaseUrl: matrixProvision.publicBaseUrl,
@@ -1422,7 +1470,7 @@ export class RealInstallerService implements InstallerService {
       };
     }
 
-    if (this.execRunner !== null) {
+    if (this.execRunner !== null && !gatewayServiceSkipped) {
       const gateway = await this.inspectGatewayService();
       if (!gateway.installed || gateway.state !== "running") {
         throw {
@@ -2278,6 +2326,46 @@ const summarizeText = (value: string, maxChars = 400): string =>
 const isMissingBinaryError = (value: string): boolean =>
   /command not found|no such file or directory|enoent/i.test(value);
 
+const isGatewayUserSystemdUnavailableError = (error: unknown): boolean => {
+  const messages: string[] = [];
+  let gatewayCommandFailure = false;
+
+  if (error instanceof Error) {
+    messages.push(error.message);
+  }
+
+  if (isRecord(error)) {
+    if (typeof error.code === "string") {
+      gatewayCommandFailure =
+        error.code === "OPENCLAW_GATEWAY_INSTALL_FAILED"
+        || error.code === "OPENCLAW_GATEWAY_START_FAILED"
+        || error.code === "OPENCLAW_GATEWAY_RESTART_FAILED";
+    }
+
+    if (typeof error.message === "string") {
+      messages.push(error.message);
+    }
+
+    if (isRecord(error.details)) {
+      if (typeof error.details.stderr === "string") {
+        messages.push(error.details.stderr);
+      }
+      if (typeof error.details.stdout === "string") {
+        messages.push(error.details.stdout);
+      }
+    }
+  }
+
+  const combined = messages.join("\n");
+  if (!gatewayCommandFailure) {
+    return false;
+  }
+
+  return /systemctl --user unavailable|failed to connect to bus|no medium found/i.test(
+    combined,
+  );
+};
+
 const resolveVersionPinStatus = (
   runtimeConfig: RuntimeConfig | null,
   detectedOpenClaw: { version: string } | null,
@@ -2377,6 +2465,16 @@ const truncateText = (value: string, maxChars: number): string => {
     return value;
   }
   return `${value.slice(0, maxChars)}...(truncated)`;
+};
+
+const describeError = (error: unknown): string => {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (isRecord(error) && typeof error.message === "string") {
+    return error.message;
+  }
+  return String(error);
 };
 
 const stripSingleTrailingNewline = (value: string): string =>

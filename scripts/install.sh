@@ -620,8 +620,7 @@ const openclaw = result.openclaw ?? {};
 const matrixReady = matrix.health === "healthy" && matrix.roomReachable === true;
 const openclawReady =
   openclaw.cliInstalled === true
-  && openclaw.serviceInstalled === true
-  && openclaw.health === "healthy"
+  && (openclaw.health === "healthy" || openclaw.health === "degraded")
   && openclaw.agentPresent === true
   && openclaw.cronPresent === true;
 
@@ -636,7 +635,7 @@ if (!matrixReady) {
 }
 if (!openclawReady) {
   reasons.push(
-    `openclaw(cliInstalled=${String(openclaw.cliInstalled)},serviceInstalled=${String(openclaw.serviceInstalled)},health=${String(openclaw.health)},agentPresent=${String(openclaw.agentPresent)},cronPresent=${String(openclaw.cronPresent)})`,
+    `openclaw(cliInstalled=${String(openclaw.cliInstalled)},serviceInstalled=${String(openclaw.serviceInstalled)},serviceState=${String(openclaw.serviceState)},health=${String(openclaw.health)},agentPresent=${String(openclaw.agentPresent)},cronPresent=${String(openclaw.cronPresent)})`,
   );
 }
 
