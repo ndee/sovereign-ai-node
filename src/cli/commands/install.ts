@@ -10,6 +10,7 @@ type InstallOptions = {
   openclawVersion?: string;
   skipOpenclawInstall?: boolean;
   forceOpenclawReinstall?: boolean;
+  matrixTlsMode?: "auto" | "manual" | "local-dev";
 };
 
 const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => ({
@@ -34,7 +35,7 @@ const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => ({
     homeserverDomain: "matrix.example.org",
     publicBaseUrl: "https://matrix.example.org",
     federationEnabled: false,
-    tlsMode: "auto",
+    tlsMode: opts.matrixTlsMode ?? "auto",
     alertRoomName: "Sovereign Alerts",
   },
   operator: {
@@ -59,6 +60,10 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
     .option("--openclaw-version <ver>", "Override pinned OpenClaw version (advanced)")
     .option("--skip-openclaw-install", "Reuse existing OpenClaw install only (advanced)")
     .option("--force-openclaw-reinstall", "Force OpenClaw reinstall (repair path)")
+    .option(
+      "--matrix-tls-mode <mode>",
+      "Matrix TLS mode (auto|manual|local-dev) (scaffold/dev)",
+    )
     .action(async (opts: InstallOptions) => {
       const command = "install";
       try {
@@ -71,4 +76,3 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
       }
     });
 };
-

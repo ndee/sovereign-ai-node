@@ -29,6 +29,10 @@ import type { Logger } from "../logging/logger.js";
 import type { SovereignPaths } from "../config/paths.js";
 import type { OpenClawBootstrapper } from "../openclaw/bootstrap.js";
 import type { ImapTester } from "../system/imap.js";
+import type {
+  BundledMatrixProvisionResult,
+  BundledMatrixProvisioner,
+} from "../system/matrix.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
 import {
   JobRunner,
@@ -51,6 +55,7 @@ type RealInstallerServiceDeps = {
   openclawBootstrapper: OpenClawBootstrapper;
   preflightChecker: HostPreflightChecker;
   imapTester: ImapTester;
+  matrixProvisioner: BundledMatrixProvisioner;
 };
 
 export class RealInstallerService implements InstallerService {
@@ -66,6 +71,8 @@ export class RealInstallerService implements InstallerService {
 
   private readonly imapTester: ImapTester;
 
+  private readonly matrixProvisioner: BundledMatrixProvisioner;
+
   constructor(
     private readonly logger: Logger,
     private readonly paths: SovereignPaths,
@@ -75,6 +82,7 @@ export class RealInstallerService implements InstallerService {
     this.openclawBootstrapper = deps.openclawBootstrapper;
     this.preflightChecker = deps.preflightChecker;
     this.imapTester = deps.imapTester;
+    this.matrixProvisioner = deps.matrixProvisioner;
   }
 
   async preflight(input?: PreflightRequest): Promise<PreflightResult> {
@@ -144,6 +152,10 @@ export class RealInstallerService implements InstallerService {
   }
 
   private buildInstallSteps(req: InstallRequest): InstallStep[] {
+    const stepState: {
+      matrixProvision?: BundledMatrixProvisionResult;
+    } = {};
+
     return [
       {
         id: "preflight",
@@ -203,6 +215,46 @@ export class RealInstallerService implements InstallerService {
               retryable: result.error?.retryable ?? true,
             };
           }
+        },
+      },
+      {
+        id: "matrix_provision",
+        label: "Provision bundled Matrix stack",
+        run: async () => {
+          stepState.matrixProvision = await this.matrixProvisioner.provision(req);
+        },
+      },
+      {
+        id: "matrix_bootstrap_accounts",
+        label: "Bootstrap Matrix accounts",
+        run: async () => {
+          throw {
+            code: "NOT_IMPLEMENTED",
+            message:
+              "Matrix account bootstrap is not implemented yet (compose bundle generation is wired for local-dev)",
+            retryable: true,
+            details: {
+              matrixProvision:
+                stepState.matrixProvision === undefined
+                  ? "missing"
+                  : {
+                      homeserverDomain: stepState.matrixProvision.homeserverDomain,
+                      publicBaseUrl: stepState.matrixProvision.publicBaseUrl,
+                      projectDir: stepState.matrixProvision.projectDir,
+                    },
+            },
+          };
+        },
+      },
+      {
+        id: "matrix_bootstrap_room",
+        label: "Bootstrap Matrix alert room",
+        run: async () => {
+          throw {
+            code: "NOT_IMPLEMENTED",
+            message: "Matrix room bootstrap is not implemented yet",
+            retryable: true,
+          };
         },
       },
     ];

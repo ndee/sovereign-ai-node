@@ -13,6 +13,10 @@ import type {
   OpenClawInstallOptions,
 } from "../openclaw/bootstrap.js";
 import type { ImapTester } from "../system/imap.js";
+import type {
+  BundledMatrixProvisioner,
+  BundledMatrixProvisionResult,
+} from "../system/matrix.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
 import { RealInstallerService } from "./real-service.js";
 
@@ -68,6 +72,7 @@ describe("RealInstallerService", () => {
     const ensureInstalledCalls: OpenClawInstallOptions[] = [];
     let preflightCalls = 0;
     let imapTestCalls = 0;
+    let matrixProvisionCalls = 0;
     const fakeBootstrapper: OpenClawBootstrapper = {
       detectInstalled: async () => null,
       ensureInstalled: async (opts): Promise<OpenClawInstallInfo> => {
@@ -108,10 +113,24 @@ describe("RealInstallerService", () => {
         };
       },
     };
+    const fakeMatrixProvisioner: BundledMatrixProvisioner = {
+      provision: async (): Promise<BundledMatrixProvisionResult> => {
+        matrixProvisionCalls += 1;
+        return {
+          projectDir: "/tmp/fake-matrix",
+          composeFilePath: "/tmp/fake-matrix/compose.yaml",
+          homeserverDomain: "matrix.example.org",
+          publicBaseUrl: "https://matrix.example.org",
+          federationEnabled: false,
+          tlsMode: "local-dev",
+        };
+      },
+    };
     const service = new RealInstallerService(createLogger(), paths, {
       openclawBootstrapper: fakeBootstrapper,
       preflightChecker: fakePreflightChecker,
       imapTester: fakeImapTester,
+      matrixProvisioner: fakeMatrixProvisioner,
     });
 
     try {
@@ -135,6 +154,7 @@ describe("RealInstallerService", () => {
       expect(preflightCalls).toBe(1);
       expect(ensureInstalledCalls).toHaveLength(1);
       expect(imapTestCalls).toBe(1);
+      expect(matrixProvisionCalls).toBe(0);
       expect(ensureInstalledCalls[0]).toMatchObject({
         version: "pinned-by-sovereign",
         noOnboard: true,
@@ -142,6 +162,85 @@ describe("RealInstallerService", () => {
         forceReinstall: false,
         skipIfCompatibleInstalled: true,
       });
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("runs matrix_provision after IMAP validation and then stops at account bootstrap TODO", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+
+    let matrixProvisionCalls = 0;
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async (opts) => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: opts.version,
+          installMethod: "install_sh",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+          capabilities: ["IMAP4rev1"],
+        }),
+      },
+      matrixProvisioner: {
+        provision: async (req) => {
+          matrixProvisionCalls += 1;
+          return {
+            projectDir: join(tempRoot, "matrix"),
+            composeFilePath: join(tempRoot, "matrix", "compose.yaml"),
+            homeserverDomain: req.matrix.homeserverDomain,
+            publicBaseUrl: req.matrix.publicBaseUrl,
+            federationEnabled: req.matrix.federationEnabled ?? false,
+            tlsMode: "local-dev",
+          };
+        },
+      },
+    });
+
+    try {
+      const started = await service.startInstall(buildInstallRequest());
+
+      expect(started.job.state).toBe("failed");
+      expect(matrixProvisionCalls).toBe(1);
+
+      const stepStates = Object.fromEntries(
+        started.job.steps.map((step) => [step.id, step.state]),
+      );
+      expect(stepStates.preflight).toBe("succeeded");
+      expect(stepStates.openclaw_bootstrap_cli).toBe("succeeded");
+      expect(stepStates.imap_validate).toBe("succeeded");
+      expect(stepStates.matrix_provision).toBe("succeeded");
+      expect(stepStates.matrix_bootstrap_accounts).toBe("failed");
+      expect(stepStates.matrix_bootstrap_room).toBe("pending");
+
+      const stored = await service.getInstallJob(started.job.jobId);
+      expect(stored.error?.code).toBe("NOT_IMPLEMENTED");
+      expect(stored.job.currentStepId).toBe("matrix_bootstrap_accounts");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
