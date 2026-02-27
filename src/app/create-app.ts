@@ -40,6 +40,7 @@ export const createApp = () => {
       preflightChecker,
       imapTester,
       matrixProvisioner,
+      execRunner,
     }),
   };
 };

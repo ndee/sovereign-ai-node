@@ -7,7 +7,7 @@ import { writeCliError, writeCliSuccess } from "../output.js";
 export const registerStatusCommand = (program: Command, app: AppContainer): void => {
   program
     .command("status")
-    .description("Show Sovereign Node status (scaffold)")
+    .description("Show Sovereign Node status")
     .option("--json", "Emit JSON output")
     .action(async (opts: { json?: boolean }) => {
       const command = "status";
@@ -20,4 +20,3 @@ export const registerStatusCommand = (program: Command, app: AppContainer): void
       }
     });
 };
-

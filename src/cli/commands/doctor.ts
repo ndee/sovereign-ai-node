@@ -7,7 +7,7 @@ import { writeCliError, writeCliSuccess } from "../output.js";
 export const registerDoctorCommand = (program: Command, app: AppContainer): void => {
   program
     .command("doctor")
-    .description("Run diagnostics (scaffold)")
+    .description("Run diagnostics")
     .option("--json", "Emit JSON output")
     .action(async (opts: { json?: boolean }) => {
       const command = "doctor";
@@ -20,4 +20,3 @@ export const registerDoctorCommand = (program: Command, app: AppContainer): void
       }
     });
 };
-

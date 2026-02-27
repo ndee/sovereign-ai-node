@@ -3,7 +3,9 @@ import { constants as fsConstants } from "node:fs";
 import { access, chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
-import { CONTRACT_VERSION } from "../contracts/common.js";
+import JSON5 from "json5";
+
+import { CONTRACT_VERSION, type CheckResult, type ComponentHealth } from "../contracts/common.js";
 import {
   installJobStatusResponseSchema,
   installRequestSchema,
@@ -42,6 +44,7 @@ import type {
   BundledMatrixRoomBootstrapResult,
 } from "../system/matrix.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
+import type { ExecResult, ExecRunner } from "../system/exec.js";
 import {
   JobRunner,
   type InstallContext,
@@ -62,13 +65,51 @@ type PersistedInstallJobRecord = {
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
 type RuntimeConfig = {
+  openclaw: {
+    managedInstallation: boolean;
+    installMethod: "install_sh";
+    requestedVersion: string;
+    openclawHome: string;
+    runtimeConfigPath: string;
+    runtimeProfilePath: string;
+    gatewayEnvPath: string;
+  };
+  openclawProfile: {
+    plugins: {
+      allow: string[];
+    };
+    agents: Array<{
+      id: string;
+      workspace: string;
+    }>;
+    cron: {
+      id: string;
+      every: string;
+    };
+  };
+  imap: {
+    host: string;
+    mailbox: string;
+    secretRef: string;
+  };
+  mailSentinel: {
+    pollInterval: string;
+    lookbackWindow: string;
+    e2eeAlertRoom: boolean;
+  };
   matrix: {
+    federationEnabled: boolean;
     publicBaseUrl: string;
+    operator: {
+      userId: string;
+    };
     bot: {
+      userId: string;
       accessTokenSecretRef: string;
     };
     alertRoom: {
       roomId: string;
+      roomName: string;
     };
   };
 };
@@ -80,8 +121,14 @@ type RealInstallerServiceDeps = {
   preflightChecker: HostPreflightChecker;
   imapTester: ImapTester;
   matrixProvisioner: BundledMatrixProvisioner;
+  execRunner?: ExecRunner;
   fetchImpl?: FetchLike;
 };
+
+type GatewayState = "running" | "stopped" | "failed" | "unknown";
+
+const MAIL_SENTINEL_AGENT_ID = "mail-sentinel";
+const MAIL_SENTINEL_CRON_ID = "mail-sentinel-poll";
 
 export class RealInstallerService implements InstallerService {
   private readonly stubService: StubInstallerService;
@@ -103,6 +150,8 @@ export class RealInstallerService implements InstallerService {
 
   private readonly matrixProvisioner: BundledMatrixProvisioner;
 
+  private readonly execRunner: ExecRunner | null;
+
   private readonly fetchImpl: FetchLike;
 
   constructor(
@@ -117,6 +166,7 @@ export class RealInstallerService implements InstallerService {
     this.preflightChecker = deps.preflightChecker;
     this.imapTester = deps.imapTester;
     this.matrixProvisioner = deps.matrixProvisioner;
+    this.execRunner = deps.execRunner ?? null;
     this.fetchImpl = deps.fetchImpl ?? defaultFetch;
   }
 
@@ -256,11 +306,245 @@ export class RealInstallerService implements InstallerService {
   }
 
   async getStatus(): Promise<SovereignStatus> {
-    return this.stubService.getStatus();
+    const runtimeConfig = await this.tryReadRuntimeConfig();
+    const detectedOpenClaw = await this.safeDetectOpenClaw();
+    const expectedAgentId =
+      runtimeConfig?.openclawProfile.agents[0]?.id ?? MAIL_SENTINEL_AGENT_ID;
+    const expectedCronId = runtimeConfig?.openclawProfile.cron.id ?? MAIL_SENTINEL_CRON_ID;
+    const registration = await this.tryReadMailSentinelRegistration();
+    const expectedFromRegistrationAgent = registration?.agentId;
+    const expectedFromRegistrationCron = registration?.cronJobId;
+
+    const gateway = await this.inspectGatewayService();
+    const healthProbe = await this.probeOpenClawHealth();
+    const agentProbe = await this.inspectOpenClawListContains(
+      ["agents", "list"],
+      expectedFromRegistrationAgent ?? expectedAgentId,
+    );
+    const cronProbe = await this.inspectOpenClawListContains(
+      ["cron", "list"],
+      expectedFromRegistrationCron ?? expectedCronId,
+    );
+    const matrixStatus = await this.inspectMatrixStatus(runtimeConfig);
+
+    const cliInstalled = detectedOpenClaw !== null;
+    const managedBySovereign = runtimeConfig?.openclaw.managedInstallation ?? true;
+    const pluginIds = runtimeConfig?.openclawProfile.plugins.allow;
+    const openclawHealth = deriveOpenClawHealth({
+      cliInstalled,
+      gatewayState: gateway.state,
+      healthProbeOk: healthProbe.ok,
+      agentPresent: agentProbe.present || registration?.agentId !== undefined,
+      cronPresent: cronProbe.present || registration?.cronJobId !== undefined,
+    });
+    const sovereignHealth: ComponentHealth =
+      runtimeConfig === null ? "degraded" : "healthy";
+
+    return {
+      mode: "bundled_matrix",
+      services: [
+        {
+          name: "sovereign-node",
+          kind: "sovereign-node",
+          health: sovereignHealth,
+          state: "running",
+          ...(runtimeConfig === null
+            ? { message: "Sovereign runtime config is not readable" }
+            : {}),
+        },
+        {
+          name: "openclaw-gateway",
+          kind: "openclaw",
+          health: openclawHealth,
+          state: gateway.state,
+          ...(gateway.message === undefined ? {} : { message: gateway.message }),
+        },
+        {
+          name: "synapse",
+          kind: "synapse",
+          health: matrixStatus.health,
+          state: mapHealthToServiceState(matrixStatus.health),
+          ...(matrixStatus.message === undefined ? {} : { message: matrixStatus.message }),
+        },
+      ],
+      matrix: {
+        ...(runtimeConfig?.matrix.publicBaseUrl === undefined
+          ? {}
+          : { homeserverUrl: runtimeConfig.matrix.publicBaseUrl }),
+        health: matrixStatus.health,
+        roomReachable: matrixStatus.roomReachable,
+        federationEnabled: runtimeConfig?.matrix.federationEnabled ?? false,
+        ...(runtimeConfig?.matrix.alertRoom.roomId === undefined
+          ? {}
+          : { alertRoomId: runtimeConfig.matrix.alertRoom.roomId }),
+      },
+      openclaw: {
+        managedBySovereign,
+        cliInstalled,
+        ...(detectedOpenClaw?.binaryPath === undefined
+          ? {}
+          : { binaryPath: detectedOpenClaw.binaryPath }),
+        ...(detectedOpenClaw?.version === undefined ? {} : { version: detectedOpenClaw.version }),
+        health: openclawHealth,
+        serviceInstalled: gateway.installed,
+        ...(gateway.state === "unknown" ? {} : { serviceState: gateway.state }),
+        ...(runtimeConfig?.openclaw.runtimeConfigPath === undefined
+          ? {}
+          : { configPath: runtimeConfig.openclaw.runtimeConfigPath }),
+        agentPresent: agentProbe.present || registration?.agentId !== undefined,
+        cronPresent: cronProbe.present || registration?.cronJobId !== undefined,
+        ...(pluginIds === undefined ? {} : { pluginIds }),
+      },
+      mailSentinel: {
+        agentId: (registration?.agentId as "mail-sentinel") ?? MAIL_SENTINEL_AGENT_ID,
+        consecutiveFailures: 0,
+      },
+      imap: {
+        authStatus: "unknown",
+        ...(runtimeConfig?.imap.host === undefined ? {} : { host: runtimeConfig.imap.host }),
+        ...(runtimeConfig?.imap.mailbox === undefined
+          ? {}
+          : { mailbox: runtimeConfig.imap.mailbox }),
+      },
+      version: {
+        sovereignNode: process.env.npm_package_version ?? "0.1.0",
+        contractVersion: CONTRACT_VERSION,
+        ...(detectedOpenClaw?.version === undefined ? {} : { openclaw: detectedOpenClaw.version }),
+        ...(pluginIds === undefined
+          ? {}
+          : {
+              plugins: Object.fromEntries(
+                pluginIds.map((pluginId) => [pluginId, "managed-by-sovereign"]),
+              ),
+            }),
+      },
+    };
   }
 
   async getDoctorReport(): Promise<DoctorReport> {
-    return this.stubService.getDoctorReport();
+    const checks: CheckResult[] = [];
+    const runtimeConfig = await this.tryReadRuntimeConfig();
+    const detectedOpenClaw = await this.safeDetectOpenClaw();
+    const gateway = await this.inspectGatewayService();
+    const healthProbe = await this.probeOpenClawHealth();
+    const expectedAgentId =
+      runtimeConfig?.openclawProfile.agents[0]?.id ?? MAIL_SENTINEL_AGENT_ID;
+    const expectedCronId = runtimeConfig?.openclawProfile.cron.id ?? MAIL_SENTINEL_CRON_ID;
+    const agentProbe = await this.inspectOpenClawListContains(
+      ["agents", "list"],
+      expectedAgentId,
+    );
+    const cronProbe = await this.inspectOpenClawListContains(
+      ["cron", "list"],
+      expectedCronId,
+    );
+    const wiringCheck = await this.inspectOpenClawRuntimeWiring(runtimeConfig);
+
+    checks.push(
+      check(
+        "openclaw-cli",
+        "OpenClaw CLI",
+        detectedOpenClaw === null ? "fail" : "pass",
+        detectedOpenClaw === null
+          ? "OpenClaw CLI is not detectable"
+          : `OpenClaw CLI detected (${detectedOpenClaw.version})`,
+      ),
+    );
+
+    checks.push(
+      check(
+        "openclaw-version-pin",
+        "OpenClaw version pin",
+        resolveVersionPinStatus(runtimeConfig, detectedOpenClaw),
+        describeVersionPin(runtimeConfig, detectedOpenClaw),
+        {
+          expectedVersion: runtimeConfig?.openclaw.requestedVersion,
+          detectedVersion: detectedOpenClaw?.version,
+        },
+      ),
+    );
+
+    checks.push(
+      check(
+        "gateway-service-install",
+        "OpenClaw gateway service install",
+        gateway.installed ? "pass" : "fail",
+        gateway.installed
+          ? "OpenClaw gateway service appears installed"
+          : "OpenClaw gateway service is not installed or not detectable",
+        gateway.message === undefined ? undefined : { message: gateway.message },
+      ),
+    );
+
+    checks.push(
+      check(
+        "gateway-service-health",
+        "OpenClaw gateway service health",
+        !gateway.installed
+          ? "fail"
+          : gateway.state === "running" && healthProbe.ok
+            ? "pass"
+            : gateway.state === "failed" || !healthProbe.ok
+              ? "fail"
+              : "warn",
+        gateway.state === "running" && healthProbe.ok
+          ? "OpenClaw gateway service is running and health probe succeeded"
+          : "OpenClaw gateway service health probe failed or service is not running",
+        {
+          state: gateway.state,
+          healthProbe: healthProbe.message,
+        },
+      ),
+    );
+
+    checks.push(wiringCheck);
+
+    checks.push(
+      check(
+        "mail-sentinel-registration",
+        "Mail Sentinel agent/cron registration",
+        agentProbe.verified && cronProbe.verified
+          ? agentProbe.present && cronProbe.present
+            ? "pass"
+            : "fail"
+          : "warn",
+        agentProbe.verified && cronProbe.verified
+          ? agentProbe.present && cronProbe.present
+            ? "Mail Sentinel agent and cron entries are present in OpenClaw"
+            : "Mail Sentinel agent and/or cron entries are missing in OpenClaw"
+          : "Could not fully verify Mail Sentinel registration via OpenClaw CLI",
+      ),
+    );
+
+    const matrixStatus = await this.inspectMatrixStatus(runtimeConfig);
+    checks.push(
+      check(
+        "matrix-runtime-health",
+        "Matrix runtime health",
+        matrixStatus.health === "healthy"
+          ? "pass"
+          : matrixStatus.health === "unknown"
+            ? "warn"
+            : "fail",
+        matrixStatus.health === "healthy"
+          ? "Matrix homeserver probe succeeded"
+          : matrixStatus.message ?? "Matrix homeserver probe failed",
+      ),
+    );
+
+    return {
+      overall: summarizeChecksOverall(checks),
+      checks,
+      suggestedCommands: buildSuggestedCommands({
+        runtimeConfig,
+        gateway,
+        healthProbe,
+        cliDetected: detectedOpenClaw !== null,
+        agentPresent: agentProbe.present,
+        cronPresent: cronProbe.present,
+        wiringCheck,
+      }),
+    };
   }
 
   async reconfigureImap(req: ReconfigureImapRequest): Promise<ReconfigureResult> {
@@ -269,6 +553,385 @@ export class RealInstallerService implements InstallerService {
 
   async reconfigureMatrix(req: ReconfigureMatrixRequest): Promise<ReconfigureResult> {
     return this.stubService.reconfigureMatrix(req);
+  }
+
+  private async tryReadRuntimeConfig(): Promise<RuntimeConfig | null> {
+    try {
+      const raw = await readFile(this.paths.configPath, "utf8");
+      return parseRuntimeConfigDocument(raw);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return null;
+      }
+      this.logger.warn(
+        {
+          configPath: this.paths.configPath,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Failed to read runtime config for status/doctor probes",
+      );
+      return null;
+    }
+  }
+
+  private async tryReadMailSentinelRegistration(): Promise<
+    | {
+        agentId: string;
+        cronJobId: string;
+      }
+    | null
+  > {
+    const registrationFile = join(
+      this.paths.stateDir,
+      "mail-sentinel",
+      "registration.json",
+    );
+    try {
+      const raw = await readFile(registrationFile, "utf8");
+      const parsed = parseJsonDocument(raw);
+      if (!isRecord(parsed)) {
+        return null;
+      }
+      if (typeof parsed.agentId !== "string" || typeof parsed.cronJobId !== "string") {
+        return null;
+      }
+      return {
+        agentId: parsed.agentId,
+        cronJobId: parsed.cronJobId,
+      };
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return null;
+      }
+      this.logger.warn(
+        {
+          registrationFile,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Failed to read Mail Sentinel registration file",
+      );
+      return null;
+    }
+  }
+
+  private async safeDetectOpenClaw(): Promise<
+    | {
+        binaryPath: string;
+        version: string;
+      }
+    | null
+  > {
+    try {
+      return await this.openclawBootstrapper.detectInstalled();
+    } catch (error) {
+      this.logger.warn(
+        {
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "OpenClaw CLI detection failed during status/doctor probe",
+      );
+      return null;
+    }
+  }
+
+  private async inspectGatewayService(): Promise<{
+    installed: boolean;
+    state: GatewayState;
+    message?: string;
+  }> {
+    const openclawGatewayStatus = await this.safeExec("openclaw", ["gateway", "status"]);
+    if (openclawGatewayStatus.ok) {
+      const output = `${openclawGatewayStatus.result.stdout}\n${openclawGatewayStatus.result.stderr}`;
+      const state = parseGatewayState(output);
+      if (
+        openclawGatewayStatus.result.exitCode === 0
+        || state !== "unknown"
+        || !looksLikeMissingGateway(output)
+      ) {
+        return {
+          installed: !looksLikeMissingGateway(output),
+          state,
+          message: summarizeText(output, 220),
+        };
+      }
+    }
+
+    const systemctl = await this.inspectGatewayViaSystemctl();
+    if (systemctl !== null) {
+      return systemctl;
+    }
+
+    return {
+      installed: false,
+      state: "unknown",
+      message:
+        openclawGatewayStatus.ok
+          ? summarizeText(
+              `${openclawGatewayStatus.result.stdout}\n${openclawGatewayStatus.result.stderr}`,
+              220,
+            )
+          : openclawGatewayStatus.error,
+    };
+  }
+
+  private async inspectGatewayViaSystemctl(): Promise<{
+    installed: boolean;
+    state: GatewayState;
+    message?: string;
+  } | null> {
+    const candidates = ["openclaw-gateway.service", "openclaw-gateway"];
+    for (const unit of candidates) {
+      const result = await this.safeExec("systemctl", ["is-active", unit]);
+      if (!result.ok) {
+        if (isMissingBinaryError(result.error)) {
+          return null;
+        }
+        continue;
+      }
+
+      const output = `${result.result.stdout}\n${result.result.stderr}`;
+      const state = parseGatewayState(output);
+      if (result.result.exitCode === 0 || state !== "unknown") {
+        return {
+          installed: !/not-found|could not be found|no such file/i.test(output),
+          state,
+          message: summarizeText(output, 220),
+        };
+      }
+    }
+
+    return null;
+  }
+
+  private async probeOpenClawHealth(): Promise<{
+    ok: boolean;
+    message: string;
+  }> {
+    const probe = await this.safeExec("openclaw", ["health"]);
+    if (!probe.ok) {
+      return {
+        ok: false,
+        message: probe.error,
+      };
+    }
+    if (probe.result.exitCode === 0) {
+      return {
+        ok: true,
+        message: summarizeText(probe.result.stdout, 220) || "openclaw health ok",
+      };
+    }
+    return {
+      ok: false,
+      message: summarizeText(`${probe.result.stdout}\n${probe.result.stderr}`, 220),
+    };
+  }
+
+  private async inspectOpenClawListContains(
+    baseArgs: string[],
+    expectedId: string,
+  ): Promise<{ present: boolean; verified: boolean }> {
+    const attempts = [baseArgs, [...baseArgs, "--json"]];
+    for (const args of attempts) {
+      const probe = await this.safeExec("openclaw", args);
+      if (!probe.ok) {
+        continue;
+      }
+      if (probe.result.exitCode !== 0) {
+        continue;
+      }
+      const body = `${probe.result.stdout}\n${probe.result.stderr}`;
+      return {
+        present: textContainsId(body, expectedId),
+        verified: true,
+      };
+    }
+
+    return {
+      present: false,
+      verified: false,
+    };
+  }
+
+  private async inspectMatrixStatus(
+    runtimeConfig: RuntimeConfig | null,
+  ): Promise<{
+    health: ComponentHealth;
+    roomReachable: boolean;
+    message?: string;
+  }> {
+    if (runtimeConfig === null) {
+      return {
+        health: "unknown",
+        roomReachable: false,
+        message: "Sovereign runtime config does not exist yet",
+      };
+    }
+
+    const matrixResult = await this.testMatrix({
+      publicBaseUrl: runtimeConfig.matrix.publicBaseUrl,
+      federationEnabled: runtimeConfig.matrix.federationEnabled,
+    });
+    if (!matrixResult.ok) {
+      return {
+        health: "unhealthy",
+        roomReachable: false,
+        message: "Matrix endpoint probe failed",
+      };
+    }
+
+    const roomReachable = await this.probeMatrixRoomReachable(runtimeConfig);
+    return {
+      health: roomReachable ? "healthy" : "degraded",
+      roomReachable,
+      ...(roomReachable
+        ? {}
+        : { message: "Matrix homeserver is reachable but alert room probe failed" }),
+    };
+  }
+
+  private async inspectOpenClawRuntimeWiring(
+    runtimeConfig: RuntimeConfig | null,
+  ): Promise<CheckResult> {
+    const defaults = this.getOpenClawRuntimePaths();
+    const openclawHome = runtimeConfig?.openclaw.openclawHome ?? defaults.openclawHome;
+    const runtimeConfigPath =
+      runtimeConfig?.openclaw.runtimeConfigPath ?? defaults.runtimeConfigPath;
+    const runtimeProfilePath =
+      runtimeConfig?.openclaw.runtimeProfilePath ?? defaults.runtimeProfilePath;
+    const gatewayEnvPath = runtimeConfig?.openclaw.gatewayEnvPath ?? defaults.gatewayEnvPath;
+    const missing: string[] = [];
+
+    for (const path of [openclawHome, runtimeConfigPath, runtimeProfilePath, gatewayEnvPath]) {
+      const exists = await this.pathExists(path);
+      if (!exists) {
+        missing.push(path);
+      }
+    }
+
+    if (missing.length > 0) {
+      return check(
+        "openclaw-runtime-wiring",
+        "OpenClaw runtime wiring",
+        "fail",
+        "OpenClaw runtime files are missing",
+        { missing },
+      );
+    }
+
+    try {
+      const envRaw = await readFile(gatewayEnvPath, "utf8");
+      const env = parseEnvFile(envRaw);
+      const configRef = env.OPENCLAW_CONFIG ?? env.OPENCLAW_CONFIG_PATH;
+      const homeRef = env.OPENCLAW_HOME;
+      const matches = configRef === runtimeConfigPath && homeRef === openclawHome;
+
+      return check(
+        "openclaw-runtime-wiring",
+        "OpenClaw runtime wiring",
+        matches ? "pass" : "warn",
+        matches
+          ? "OpenClaw runtime env wiring matches Sovereign-managed paths"
+          : "OpenClaw runtime env wiring is present but does not match expected paths",
+        {
+          expectedConfigPath: runtimeConfigPath,
+          expectedOpenclawHome: openclawHome,
+          envConfigPath: configRef,
+          envOpenclawHome: homeRef,
+        },
+      );
+    } catch (error) {
+      return check(
+        "openclaw-runtime-wiring",
+        "OpenClaw runtime wiring",
+        "fail",
+        "OpenClaw runtime env file is not readable",
+        {
+          gatewayEnvPath,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      );
+    }
+  }
+
+  private async probeMatrixRoomReachable(runtimeConfig: RuntimeConfig): Promise<boolean> {
+    try {
+      const accessToken = await this.resolveSecretRef(runtimeConfig.matrix.bot.accessTokenSecretRef);
+      const endpoint = new URL(
+        `/_matrix/client/v3/rooms/${encodeURIComponent(runtimeConfig.matrix.alertRoom.roomId)}/joined_members`,
+        ensureTrailingSlash(runtimeConfig.matrix.publicBaseUrl),
+      ).toString();
+      const response = await this.fetchImpl(endpoint, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/json",
+        },
+      });
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  private async safeExec(
+    command: string,
+    args: string[],
+  ): Promise<
+    | {
+        ok: true;
+        result: ExecResult;
+      }
+    | {
+        ok: false;
+        error: string;
+      }
+  > {
+    if (this.execRunner === null) {
+      return {
+        ok: false,
+        error: "Exec runner is not configured",
+      };
+    }
+
+    try {
+      const result = await this.execRunner.run({
+        command,
+        args,
+      });
+      return {
+        ok: true,
+        result,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  private async pathExists(path: string): Promise<boolean> {
+    try {
+      await access(path, fsConstants.F_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private getOpenClawRuntimePaths(): {
+    openclawHome: string;
+    runtimeConfigPath: string;
+    runtimeProfilePath: string;
+    gatewayEnvPath: string;
+  } {
+    const openclawHome = join(this.paths.openclawServiceHome, ".openclaw");
+    return {
+      openclawHome,
+      runtimeConfigPath: join(openclawHome, "openclaw.json5"),
+      runtimeProfilePath: join(this.paths.openclawServiceHome, "profiles", "sovereign-runtime-profile.json5"),
+      gatewayEnvPath: join(this.paths.openclawServiceHome, "gateway.env"),
+    };
   }
 
   private buildInstallSteps(req: InstallRequest): InstallStep[] {
@@ -404,6 +1067,7 @@ export class RealInstallerService implements InstallerService {
           await this.openclawGatewayServiceManager.install({
             force: req.openclaw?.forceReinstall ?? false,
           });
+          await this.openclawGatewayServiceManager.start();
         },
       },
       {
@@ -432,12 +1096,25 @@ export class RealInstallerService implements InstallerService {
             };
           }
 
-          await this.writeSovereignConfig({
+          const runtimeConfig = await this.writeSovereignConfig({
             req,
             matrixProvision: stepState.matrixProvision,
             matrixAccounts: stepState.matrixAccounts,
             matrixRoom: stepState.matrixRoom,
           });
+          await this.writeOpenClawRuntimeArtifacts(runtimeConfig);
+
+          try {
+            await this.openclawGatewayServiceManager.restart();
+          } catch (error) {
+            this.logger.warn(
+              {
+                error: error instanceof Error ? error.message : String(error),
+              },
+              "OpenClaw gateway restart failed after runtime configure; retrying with start",
+            );
+            await this.openclawGatewayServiceManager.start();
+          }
         },
       },
       {
@@ -468,7 +1145,11 @@ export class RealInstallerService implements InstallerService {
               retryable: false,
             };
           }
-          await this.runSmokeChecks(stepState.matrixProvision);
+          await this.runSmokeChecks(
+            stepState.matrixProvision,
+            stepState.mailSentinelRegistration?.agentId ?? MAIL_SENTINEL_AGENT_ID,
+            stepState.mailSentinelRegistration?.cronJobId ?? MAIL_SENTINEL_CRON_ID,
+          );
         },
       },
       {
@@ -664,7 +1345,11 @@ export class RealInstallerService implements InstallerService {
     return registration;
   }
 
-  private async runSmokeChecks(matrixProvision: BundledMatrixProvisionResult): Promise<void> {
+  private async runSmokeChecks(
+    matrixProvision: BundledMatrixProvisionResult,
+    expectedAgentId: string,
+    expectedCronJobId: string,
+  ): Promise<void> {
     const matrix = await this.testMatrix({
       publicBaseUrl: matrixProvision.publicBaseUrl,
       federationEnabled: matrixProvision.federationEnabled,
@@ -680,7 +1365,7 @@ export class RealInstallerService implements InstallerService {
       };
     }
 
-    const openclaw = await this.openclawBootstrapper.detectInstalled();
+    const openclaw = await this.safeDetectOpenClaw();
     if (openclaw === null) {
       throw {
         code: "SMOKE_CHECKS_FAILED",
@@ -689,18 +1374,77 @@ export class RealInstallerService implements InstallerService {
       };
     }
 
-    try {
-      await readFile(this.paths.configPath, "utf8");
-    } catch (error) {
+    const runtimeConfig = await this.readRuntimeConfig();
+    if (!(await this.probeMatrixRoomReachable(runtimeConfig))) {
       throw {
         code: "SMOKE_CHECKS_FAILED",
-        message: "Sovereign runtime config file is not readable during smoke checks",
+        message: "Matrix alert room is not reachable with the configured bot token",
         retryable: true,
         details: {
-          configPath: this.paths.configPath,
-          error: error instanceof Error ? error.message : String(error),
+          roomId: runtimeConfig.matrix.alertRoom.roomId,
         },
       };
+    }
+
+    const wiringCheck = await this.inspectOpenClawRuntimeWiring(runtimeConfig);
+    if (wiringCheck.status === "fail") {
+      throw {
+        code: "SMOKE_CHECKS_FAILED",
+        message: "OpenClaw runtime wiring check failed",
+        retryable: true,
+        details: wiringCheck.details,
+      };
+    }
+
+    if (this.execRunner !== null) {
+      const gateway = await this.inspectGatewayService();
+      if (!gateway.installed || gateway.state !== "running") {
+        throw {
+          code: "SMOKE_CHECKS_FAILED",
+          message: "OpenClaw gateway service is not running during smoke checks",
+          retryable: true,
+          details: {
+            state: gateway.state,
+            message: gateway.message,
+          },
+        };
+      }
+
+      const health = await this.probeOpenClawHealth();
+      if (!health.ok) {
+        throw {
+          code: "SMOKE_CHECKS_FAILED",
+          message: "OpenClaw health probe failed during smoke checks",
+          retryable: true,
+          details: {
+            health: health.message,
+          },
+        };
+      }
+
+      const agentProbe = await this.inspectOpenClawListContains(["agents", "list"], expectedAgentId);
+      if (agentProbe.verified && !agentProbe.present) {
+        throw {
+          code: "SMOKE_CHECKS_FAILED",
+          message: "Mail Sentinel agent is missing from OpenClaw runtime",
+          retryable: true,
+          details: {
+            agentId: expectedAgentId,
+          },
+        };
+      }
+
+      const cronProbe = await this.inspectOpenClawListContains(["cron", "list"], expectedCronJobId);
+      if (cronProbe.verified && !cronProbe.present) {
+        throw {
+          code: "SMOKE_CHECKS_FAILED",
+          message: "Mail Sentinel cron job is missing from OpenClaw runtime",
+          retryable: true,
+          details: {
+            cronJobId: expectedCronJobId,
+          },
+        };
+      }
     }
   }
 
@@ -720,11 +1464,11 @@ export class RealInstallerService implements InstallerService {
       };
     }
 
-    const parsed = parseJsonSafely(raw);
-    if (!isRecord(parsed)) {
+    const parsed = parseRuntimeConfigDocument(raw);
+    if (parsed === null) {
       throw {
         code: "CONFIG_INVALID",
-        message: "Sovereign runtime config is not a JSON object",
+        message: "Sovereign runtime config does not match expected shape",
         retryable: false,
         details: {
           configPath: this.paths.configPath,
@@ -732,46 +1476,7 @@ export class RealInstallerService implements InstallerService {
       };
     }
 
-    const matrix = parsed.matrix;
-    if (!isRecord(matrix)) {
-      throw {
-        code: "CONFIG_INVALID",
-        message: "Sovereign runtime config is missing matrix section",
-        retryable: false,
-      };
-    }
-
-    const bot = matrix.bot;
-    const alertRoom = matrix.alertRoom;
-    const publicBaseUrl = matrix.publicBaseUrl;
-    if (
-      !isRecord(bot)
-      || !isRecord(alertRoom)
-      || typeof publicBaseUrl !== "string"
-      || publicBaseUrl.length === 0
-      || typeof bot.accessTokenSecretRef !== "string"
-      || bot.accessTokenSecretRef.length === 0
-      || typeof alertRoom.roomId !== "string"
-      || alertRoom.roomId.length === 0
-    ) {
-      throw {
-        code: "CONFIG_INVALID",
-        message: "Sovereign runtime config is missing required Matrix bot/room fields",
-        retryable: false,
-      };
-    }
-
-    return {
-      matrix: {
-        publicBaseUrl,
-        bot: {
-          accessTokenSecretRef: bot.accessTokenSecretRef,
-        },
-        alertRoom: {
-          roomId: alertRoom.roomId,
-        },
-      },
-    };
+    return parsed;
   }
 
   private async resolveSecretRef(secretRef: string): Promise<string> {
@@ -823,7 +1528,7 @@ export class RealInstallerService implements InstallerService {
     matrixProvision: BundledMatrixProvisionResult;
     matrixAccounts: BundledMatrixAccountsResult;
     matrixRoom: BundledMatrixRoomBootstrapResult;
-  }): Promise<void> {
+  }): Promise<RuntimeConfig> {
     const imapSecretRef = await this.resolveImapSecretRef(input.req.imap);
     const operatorTokenSecretRef = await this.writeSecretFile(
       "matrix-operator-access-token",
@@ -833,61 +1538,45 @@ export class RealInstallerService implements InstallerService {
       "matrix-bot-access-token",
       input.matrixAccounts.bot.accessToken,
     );
-
-    const configPayload = {
-      contractVersion: CONTRACT_VERSION,
-      mode: "bundled_matrix" as const,
-      generatedAt: now(),
+    const openclawPaths = this.getOpenClawRuntimePaths();
+    const runtimeConfig: RuntimeConfig = {
       openclaw: {
         managedInstallation: input.req.openclaw?.manageInstallation ?? true,
         installMethod: input.req.openclaw?.installMethod ?? "install_sh",
-        serviceHome: this.paths.openclawServiceHome,
+        requestedVersion: input.req.openclaw?.version ?? "pinned-by-sovereign",
+        openclawHome: openclawPaths.openclawHome,
+        runtimeConfigPath: openclawPaths.runtimeConfigPath,
+        runtimeProfilePath: openclawPaths.runtimeProfilePath,
+        gatewayEnvPath: openclawPaths.gatewayEnvPath,
       },
       openclawProfile: {
         plugins: {
           allow: ["matrix", "imap-readonly"],
         },
-        channels: {
-          matrix: {
-            enabled: true,
-            homeserver: input.matrixProvision.publicBaseUrl,
-            roomId: input.matrixRoom.roomId,
-          },
-        },
         agents: [
           {
-            id: "mail-sentinel",
-            workspace: join(this.paths.stateDir, "mail-sentinel", "workspace"),
+            id: MAIL_SENTINEL_AGENT_ID,
+            workspace: join(this.paths.stateDir, MAIL_SENTINEL_AGENT_ID, "workspace"),
           },
         ],
         cron: {
-          id: "mail-sentinel-poll",
+          id: MAIL_SENTINEL_CRON_ID,
           every: input.req.mailSentinel?.pollInterval ?? "5m",
         },
       },
       imap: {
         host: input.req.imap.host,
-        port: input.req.imap.port,
-        tls: input.req.imap.tls,
-        username: input.req.imap.username,
-        secretRef: imapSecretRef,
         mailbox: input.req.imap.mailbox ?? "INBOX",
+        secretRef: imapSecretRef,
       },
       matrix: {
-        homeserverDomain: input.matrixProvision.homeserverDomain,
-        publicBaseUrl: input.matrixProvision.publicBaseUrl,
         federationEnabled: input.matrixProvision.federationEnabled,
-        tlsMode: input.matrixProvision.tlsMode,
+        publicBaseUrl: input.matrixProvision.publicBaseUrl,
         operator: {
-          localpart: input.matrixAccounts.operator.localpart,
           userId: input.matrixAccounts.operator.userId,
-          passwordSecretRef: input.matrixAccounts.operator.passwordSecretRef,
-          accessTokenSecretRef: operatorTokenSecretRef,
         },
         bot: {
-          localpart: input.matrixAccounts.bot.localpart,
           userId: input.matrixAccounts.bot.userId,
-          passwordSecretRef: input.matrixAccounts.bot.passwordSecretRef,
           accessTokenSecretRef: botTokenSecretRef,
         },
         alertRoom: {
@@ -899,6 +1588,74 @@ export class RealInstallerService implements InstallerService {
         pollInterval: input.req.mailSentinel?.pollInterval ?? "5m",
         lookbackWindow: input.req.mailSentinel?.lookbackWindow ?? "15m",
         e2eeAlertRoom: input.req.mailSentinel?.e2eeAlertRoom ?? false,
+      },
+    };
+
+    const configPayload = {
+      contractVersion: CONTRACT_VERSION,
+      mode: "bundled_matrix" as const,
+      generatedAt: now(),
+      openclaw: {
+        managedInstallation: runtimeConfig.openclaw.managedInstallation,
+        installMethod: runtimeConfig.openclaw.installMethod,
+        requestedVersion: runtimeConfig.openclaw.requestedVersion,
+        openclawHome: runtimeConfig.openclaw.openclawHome,
+        runtimeConfigPath: runtimeConfig.openclaw.runtimeConfigPath,
+        runtimeProfilePath: runtimeConfig.openclaw.runtimeProfilePath,
+        gatewayEnvPath: runtimeConfig.openclaw.gatewayEnvPath,
+        serviceHome: this.paths.openclawServiceHome,
+      },
+      openclawProfile: {
+        plugins: {
+          allow: runtimeConfig.openclawProfile.plugins.allow,
+        },
+        channels: {
+          matrix: {
+            enabled: true,
+            homeserver: runtimeConfig.matrix.publicBaseUrl,
+            roomId: runtimeConfig.matrix.alertRoom.roomId,
+          },
+        },
+        agents: runtimeConfig.openclawProfile.agents,
+        cron: {
+          id: runtimeConfig.openclawProfile.cron.id,
+          every: runtimeConfig.openclawProfile.cron.every,
+        },
+      },
+      imap: {
+        host: runtimeConfig.imap.host,
+        port: input.req.imap.port,
+        tls: input.req.imap.tls,
+        username: input.req.imap.username,
+        secretRef: runtimeConfig.imap.secretRef,
+        mailbox: runtimeConfig.imap.mailbox,
+      },
+      matrix: {
+        homeserverDomain: input.matrixProvision.homeserverDomain,
+        publicBaseUrl: runtimeConfig.matrix.publicBaseUrl,
+        federationEnabled: runtimeConfig.matrix.federationEnabled,
+        tlsMode: input.matrixProvision.tlsMode,
+        operator: {
+          localpart: input.matrixAccounts.operator.localpart,
+          userId: runtimeConfig.matrix.operator.userId,
+          passwordSecretRef: input.matrixAccounts.operator.passwordSecretRef,
+          accessTokenSecretRef: operatorTokenSecretRef,
+        },
+        bot: {
+          localpart: input.matrixAccounts.bot.localpart,
+          userId: runtimeConfig.matrix.bot.userId,
+          passwordSecretRef: input.matrixAccounts.bot.passwordSecretRef,
+          accessTokenSecretRef: runtimeConfig.matrix.bot.accessTokenSecretRef,
+        },
+        alertRoom: {
+          roomId: runtimeConfig.matrix.alertRoom.roomId,
+          roomName: runtimeConfig.matrix.alertRoom.roomName,
+        },
+      },
+      mailSentinel: {
+        pollInterval: runtimeConfig.mailSentinel.pollInterval,
+        lookbackWindow: runtimeConfig.mailSentinel.lookbackWindow,
+        e2eeAlertRoom: runtimeConfig.mailSentinel.e2eeAlertRoom,
       },
     };
 
@@ -920,6 +1677,123 @@ export class RealInstallerService implements InstallerService {
         },
       };
     }
+
+    return runtimeConfig;
+  }
+
+  private async writeOpenClawRuntimeArtifacts(runtimeConfig: RuntimeConfig): Promise<void> {
+    const openclawPaths = this.getOpenClawRuntimePaths();
+    const runtimePayload = {
+      generatedAt: now(),
+      source: "sovereign-node",
+      profileRef: openclawPaths.runtimeProfilePath,
+      plugins: {
+        allow: runtimeConfig.openclawProfile.plugins.allow,
+        entries: {
+          matrix: {
+            enabled: true,
+            config: {
+              homeserver: runtimeConfig.matrix.publicBaseUrl,
+              accessTokenSecretRef: runtimeConfig.matrix.bot.accessTokenSecretRef,
+              roomId: runtimeConfig.matrix.alertRoom.roomId,
+            },
+          },
+          "imap-readonly": {
+            enabled: true,
+            config: {
+              account: {
+                host: runtimeConfig.imap.host,
+                mailbox: runtimeConfig.imap.mailbox,
+                secretRef: runtimeConfig.imap.secretRef,
+              },
+            },
+          },
+        },
+      },
+      agents: {
+        list: [
+          {
+            id: runtimeConfig.openclawProfile.agents[0]?.id ?? MAIL_SENTINEL_AGENT_ID,
+            workspace:
+              runtimeConfig.openclawProfile.agents[0]?.workspace
+              ?? join(this.paths.stateDir, MAIL_SENTINEL_AGENT_ID, "workspace"),
+          },
+        ],
+      },
+      cron: {
+        jobs: [
+          {
+            id: runtimeConfig.openclawProfile.cron.id,
+            every: runtimeConfig.openclawProfile.cron.every,
+            lookbackWindow: runtimeConfig.mailSentinel.lookbackWindow,
+          },
+        ],
+      },
+      matrix: {
+        publicBaseUrl: runtimeConfig.matrix.publicBaseUrl,
+        roomId: runtimeConfig.matrix.alertRoom.roomId,
+      },
+    };
+
+    const profilePayload = {
+      generatedAt: now(),
+      source: "sovereign-node",
+      openclawProfile: runtimeConfig.openclawProfile,
+      mailSentinel: runtimeConfig.mailSentinel,
+      matrix: {
+        publicBaseUrl: runtimeConfig.matrix.publicBaseUrl,
+        roomId: runtimeConfig.matrix.alertRoom.roomId,
+      },
+      imap: {
+        host: runtimeConfig.imap.host,
+        mailbox: runtimeConfig.imap.mailbox,
+      },
+    };
+
+    try {
+      await mkdir(this.paths.openclawServiceHome, { recursive: true });
+      await mkdir(runtimeConfig.openclaw.openclawHome, { recursive: true });
+      await mkdir(dirname(runtimeConfig.openclaw.runtimeProfilePath), { recursive: true });
+      await this.writeProtectedJsonFile(
+        runtimeConfig.openclaw.runtimeConfigPath,
+        runtimePayload,
+      );
+      await this.writeProtectedJsonFile(
+        runtimeConfig.openclaw.runtimeProfilePath,
+        profilePayload,
+      );
+
+      const envFileLines = [
+        `OPENCLAW_HOME=${runtimeConfig.openclaw.openclawHome}`,
+        `OPENCLAW_CONFIG=${runtimeConfig.openclaw.runtimeConfigPath}`,
+        `OPENCLAW_CONFIG_PATH=${runtimeConfig.openclaw.runtimeConfigPath}`,
+        `SOVEREIGN_NODE_CONFIG=${this.paths.configPath}`,
+      ];
+      const envTempPath = `${runtimeConfig.openclaw.gatewayEnvPath}.${randomUUID()}.tmp`;
+      await writeFile(envTempPath, `${envFileLines.join("\n")}\n`, "utf8");
+      await chmod(envTempPath, 0o600);
+      await rename(envTempPath, runtimeConfig.openclaw.gatewayEnvPath);
+    } catch (error) {
+      throw {
+        code: "OPENCLAW_CONFIG_WRITE_FAILED",
+        message: "Failed to write OpenClaw runtime artifacts",
+        retryable: true,
+        details: {
+          openclawHome: runtimeConfig.openclaw.openclawHome,
+          runtimeConfigPath: runtimeConfig.openclaw.runtimeConfigPath,
+          runtimeProfilePath: runtimeConfig.openclaw.runtimeProfilePath,
+          gatewayEnvPath: runtimeConfig.openclaw.gatewayEnvPath,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+  }
+
+  private async writeProtectedJsonFile(path: string, value: unknown): Promise<void> {
+    const tempPath = `${path}.${randomUUID()}.tmp`;
+    await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    await chmod(tempPath, 0o600);
+    await rename(tempPath, path);
   }
 
   private async resolveImapSecretRef(
@@ -995,6 +1869,368 @@ const parseJsonSafely = (raw: string): unknown => {
   } catch {
     return raw;
   }
+};
+
+const parseJsonDocument = (raw: string): unknown => {
+  if (raw.trim().length === 0) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    try {
+      return JSON5.parse(raw) as unknown;
+    } catch {
+      return raw;
+    }
+  }
+};
+
+const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
+  const parsed = parseJsonDocument(raw);
+  if (!isRecord(parsed)) {
+    return null;
+  }
+
+  const matrix = parsed.matrix;
+  if (!isRecord(matrix)) {
+    return null;
+  }
+  const bot = matrix.bot;
+  const alertRoom = matrix.alertRoom;
+  if (
+    typeof matrix.publicBaseUrl !== "string"
+    || matrix.publicBaseUrl.length === 0
+    || !isRecord(bot)
+    || typeof bot.accessTokenSecretRef !== "string"
+    || bot.accessTokenSecretRef.length === 0
+    || !isRecord(alertRoom)
+    || typeof alertRoom.roomId !== "string"
+    || alertRoom.roomId.length === 0
+  ) {
+    return null;
+  }
+
+  const openclaw = isRecord(parsed.openclaw) ? parsed.openclaw : {};
+  const openclawServiceHome =
+    typeof openclaw.serviceHome === "string" && openclaw.serviceHome.length > 0
+      ? openclaw.serviceHome
+      : "/var/lib/sovereign-node/openclaw-home";
+  const openclawHome =
+    typeof openclaw.openclawHome === "string" && openclaw.openclawHome.length > 0
+      ? openclaw.openclawHome
+      : join(openclawServiceHome, ".openclaw");
+  const runtimeConfigPath =
+    typeof openclaw.runtimeConfigPath === "string" && openclaw.runtimeConfigPath.length > 0
+      ? openclaw.runtimeConfigPath
+      : join(openclawHome, "openclaw.json5");
+  const runtimeProfilePath =
+    typeof openclaw.runtimeProfilePath === "string" && openclaw.runtimeProfilePath.length > 0
+      ? openclaw.runtimeProfilePath
+      : join(openclawServiceHome, "profiles", "sovereign-runtime-profile.json5");
+  const gatewayEnvPath =
+    typeof openclaw.gatewayEnvPath === "string" && openclaw.gatewayEnvPath.length > 0
+      ? openclaw.gatewayEnvPath
+      : join(openclawServiceHome, "gateway.env");
+  const openclawProfile = isRecord(parsed.openclawProfile) ? parsed.openclawProfile : {};
+  const openclawPlugins = isRecord(openclawProfile.plugins) ? openclawProfile.plugins : {};
+  const openclawAgents = Array.isArray(openclawProfile.agents)
+    ? openclawProfile.agents
+        .filter(
+          (agent): agent is { id: string; workspace: string } =>
+            isRecord(agent)
+            && typeof agent.id === "string"
+            && agent.id.length > 0
+            && typeof agent.workspace === "string"
+            && agent.workspace.length > 0,
+        )
+    : [
+        {
+          id: MAIL_SENTINEL_AGENT_ID,
+          workspace: join("/var/lib/sovereign-node", MAIL_SENTINEL_AGENT_ID, "workspace"),
+        },
+      ];
+  const openclawCron = isRecord(openclawProfile.cron) ? openclawProfile.cron : {};
+  const imap = isRecord(parsed.imap) ? parsed.imap : {};
+  const mailSentinel = isRecord(parsed.mailSentinel) ? parsed.mailSentinel : {};
+  const operator = isRecord(matrix.operator) ? matrix.operator : {};
+
+  return {
+    openclaw: {
+      managedInstallation:
+        typeof openclaw.managedInstallation === "boolean" ? openclaw.managedInstallation : true,
+      installMethod:
+        openclaw.installMethod === "install_sh" ? openclaw.installMethod : "install_sh",
+      requestedVersion:
+        typeof openclaw.requestedVersion === "string" && openclaw.requestedVersion.length > 0
+          ? openclaw.requestedVersion
+          : "pinned-by-sovereign",
+      openclawHome,
+      runtimeConfigPath,
+      runtimeProfilePath,
+      gatewayEnvPath,
+    },
+    openclawProfile: {
+      plugins: {
+        allow: Array.isArray(openclawPlugins.allow)
+          ? openclawPlugins.allow.filter(
+              (entry): entry is string => typeof entry === "string" && entry.length > 0,
+            )
+          : ["matrix", "imap-readonly"],
+      },
+      agents: openclawAgents,
+      cron: {
+        id:
+          typeof openclawCron.id === "string" && openclawCron.id.length > 0
+            ? openclawCron.id
+            : MAIL_SENTINEL_CRON_ID,
+        every:
+          typeof openclawCron.every === "string" && openclawCron.every.length > 0
+            ? openclawCron.every
+            : "5m",
+      },
+    },
+    imap: {
+      host: typeof imap.host === "string" && imap.host.length > 0 ? imap.host : "unknown",
+      mailbox:
+        typeof imap.mailbox === "string" && imap.mailbox.length > 0 ? imap.mailbox : "INBOX",
+      secretRef:
+        typeof imap.secretRef === "string" && imap.secretRef.length > 0
+          ? imap.secretRef
+          : "env:SOVEREIGN_IMAP_SECRET_UNSET",
+    },
+    matrix: {
+      federationEnabled:
+        typeof matrix.federationEnabled === "boolean" ? matrix.federationEnabled : false,
+      publicBaseUrl: matrix.publicBaseUrl,
+      operator: {
+        userId:
+          typeof operator.userId === "string" && operator.userId.length > 0
+            ? operator.userId
+            : "@operator:local",
+      },
+      bot: {
+        userId:
+          typeof bot.userId === "string" && bot.userId.length > 0
+            ? bot.userId
+            : "@mail-sentinel:local",
+        accessTokenSecretRef: bot.accessTokenSecretRef,
+      },
+      alertRoom: {
+        roomId: alertRoom.roomId,
+        roomName:
+          typeof alertRoom.roomName === "string" && alertRoom.roomName.length > 0
+            ? alertRoom.roomName
+            : "Sovereign Alerts",
+      },
+    },
+    mailSentinel: {
+      pollInterval:
+        typeof mailSentinel.pollInterval === "string" && mailSentinel.pollInterval.length > 0
+          ? mailSentinel.pollInterval
+          : "5m",
+      lookbackWindow:
+        typeof mailSentinel.lookbackWindow === "string" && mailSentinel.lookbackWindow.length > 0
+          ? mailSentinel.lookbackWindow
+          : "15m",
+      e2eeAlertRoom:
+        typeof mailSentinel.e2eeAlertRoom === "boolean" ? mailSentinel.e2eeAlertRoom : false,
+    },
+  };
+};
+
+const check = (
+  id: string,
+  name: string,
+  status: CheckResult["status"],
+  message: string,
+  details?: Record<string, unknown>,
+): CheckResult => ({
+  id,
+  name,
+  status,
+  message,
+  ...(details === undefined ? {} : { details }),
+});
+
+const summarizeChecksOverall = (checks: CheckResult[]): DoctorReport["overall"] => {
+  if (checks.some((entry) => entry.status === "fail")) {
+    return "fail";
+  }
+  if (checks.some((entry) => entry.status === "warn")) {
+    return "warn";
+  }
+  return "pass";
+};
+
+const mapHealthToServiceState = (
+  health: ComponentHealth,
+): "running" | "stopped" | "failed" | "unknown" => {
+  if (health === "healthy" || health === "degraded") {
+    return "running";
+  }
+  if (health === "unhealthy") {
+    return "failed";
+  }
+  return "unknown";
+};
+
+const deriveOpenClawHealth = (input: {
+  cliInstalled: boolean;
+  gatewayState: GatewayState;
+  healthProbeOk: boolean;
+  agentPresent: boolean;
+  cronPresent: boolean;
+}): ComponentHealth => {
+  if (!input.cliInstalled || input.gatewayState === "failed") {
+    return "unhealthy";
+  }
+  if (input.gatewayState !== "running" || !input.healthProbeOk) {
+    return "degraded";
+  }
+  if (!input.agentPresent || !input.cronPresent) {
+    return "degraded";
+  }
+  return "healthy";
+};
+
+const parseGatewayState = (value: string): GatewayState => {
+  const normalized = value.toLowerCase();
+  if (/running|active/.test(normalized)) {
+    return "running";
+  }
+  if (/inactive|stopped|dead/.test(normalized)) {
+    return "stopped";
+  }
+  if (/failed|error/.test(normalized)) {
+    return "failed";
+  }
+  return "unknown";
+};
+
+const looksLikeMissingGateway = (value: string): boolean =>
+  /not\s+installed|not-found|could not be found|unknown command|no such/i.test(value);
+
+const textContainsId = (value: string, id: string): boolean => {
+  if (id.length === 0) {
+    return false;
+  }
+  const escaped = escapeRegExp(id);
+  const regex = new RegExp(`(^|[^A-Za-z0-9_\\-])${escaped}([^A-Za-z0-9_\\-]|$)`);
+  return regex.test(value);
+};
+
+const escapeRegExp = (value: string): string =>
+  value.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const parseEnvFile = (raw: string): Record<string, string> => {
+  const out: Record<string, string> = {};
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || trimmed.startsWith("#")) {
+      continue;
+    }
+    const index = trimmed.indexOf("=");
+    if (index <= 0) {
+      continue;
+    }
+    const key = trimmed.slice(0, index).trim();
+    const value = trimmed.slice(index + 1).trim();
+    if (key.length > 0) {
+      out[key] = value;
+    }
+  }
+  return out;
+};
+
+const summarizeText = (value: string, maxChars = 400): string =>
+  truncateText(value.replace(/\s+/g, " ").trim(), maxChars);
+
+const isMissingBinaryError = (value: string): boolean =>
+  /command not found|no such file or directory|enoent/i.test(value);
+
+const resolveVersionPinStatus = (
+  runtimeConfig: RuntimeConfig | null,
+  detectedOpenClaw: { version: string } | null,
+): CheckResult["status"] => {
+  if (detectedOpenClaw === null) {
+    return "fail";
+  }
+  if (runtimeConfig === null) {
+    return "warn";
+  }
+
+  const expected = runtimeConfig.openclaw.requestedVersion;
+  if (expected === "pinned-by-sovereign") {
+    return "warn";
+  }
+  return normalizeVersionToken(expected) === normalizeVersionToken(detectedOpenClaw.version)
+    ? "pass"
+    : "fail";
+};
+
+const describeVersionPin = (
+  runtimeConfig: RuntimeConfig | null,
+  detectedOpenClaw: { version: string } | null,
+): string => {
+  if (detectedOpenClaw === null) {
+    return "OpenClaw version cannot be validated because CLI is missing";
+  }
+  if (runtimeConfig === null) {
+    return "Sovereign runtime config is missing, so version pin cannot be validated";
+  }
+
+  const expected = runtimeConfig.openclaw.requestedVersion;
+  if (expected === "pinned-by-sovereign") {
+    return "Configured OpenClaw version is abstract (pinned-by-sovereign); exact pin comparison skipped";
+  }
+
+  if (normalizeVersionToken(expected) === normalizeVersionToken(detectedOpenClaw.version)) {
+    return "OpenClaw version matches configured pin";
+  }
+  return "OpenClaw version does not match configured pin";
+};
+
+const normalizeVersionToken = (value: string): string => {
+  const match = value.match(/\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?/);
+  return (match?.[0] ?? value).trim().toLowerCase();
+};
+
+const buildSuggestedCommands = (input: {
+  runtimeConfig: RuntimeConfig | null;
+  gateway: { installed: boolean; state: GatewayState };
+  healthProbe: { ok: boolean };
+  cliDetected: boolean;
+  agentPresent: boolean;
+  cronPresent: boolean;
+  wiringCheck: CheckResult;
+}): string[] => {
+  const commands: string[] = [];
+  if (!input.cliDetected) {
+    commands.push(
+      "curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install.sh | bash -s -- --version <pinned-version> --no-onboard --no-prompt",
+    );
+  }
+  if (!input.gateway.installed) {
+    commands.push("openclaw gateway install --force");
+  }
+  if (input.gateway.state !== "running" || !input.healthProbe.ok) {
+    commands.push("openclaw gateway restart");
+    commands.push("openclaw health");
+  }
+  if (input.wiringCheck.status !== "pass") {
+    const runtimeConfigPath =
+      input.runtimeConfig?.openclaw.runtimeConfigPath
+      ?? "/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5";
+    commands.push(`ls -l ${runtimeConfigPath}`);
+  }
+  if (!input.agentPresent || !input.cronPresent) {
+    commands.push("openclaw agents list");
+    commands.push("openclaw cron list");
+  }
+  commands.push("sovereign-node doctor --json");
+  return Array.from(new Set(commands));
 };
 
 const summarizeUnknown = (value: unknown): string => {
