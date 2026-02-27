@@ -238,6 +238,97 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
     }
   });
 
+  it("recovers account bootstrap by resetting bundled postgres when login credentials drift", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-test-"));
+    const recordedExecCalls: ExecInput[] = [];
+    let operatorLoginAttempts = 0;
+
+    const fakeExecRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        recordedExecCalls.push(input);
+        if (input.command === "docker") {
+          const args = input.args ?? [];
+          if (
+            args.includes("config")
+            || args.includes("up")
+            || args.includes("down")
+            || args.includes("register_new_matrix_user")
+          ) {
+            return {
+              command: [input.command, ...args].join(" "),
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+        }
+        return {
+          command: [input.command, ...(input.args ?? [])].join(" "),
+          exitCode: 127,
+          stdout: "",
+          stderr: "command not found",
+        };
+      },
+    };
+
+    const fakeFetch = async (url: string, init?: RequestInit): Promise<Response> => {
+      if (url.endsWith("/_matrix/client/versions")) {
+        return jsonResponse({
+          versions: ["v1.1", "v1.2"],
+        });
+      }
+
+      if (url.endsWith("/_matrix/client/v3/login")) {
+        const payload = parseBody(init?.body);
+        const localpart = readLoginLocalpart(payload) ?? "unknown";
+        if (localpart === "operator" && operatorLoginAttempts === 0) {
+          operatorLoginAttempts += 1;
+          return jsonResponse(
+            {
+              errcode: "M_FORBIDDEN",
+              error: "Invalid username or password",
+            },
+            403,
+          );
+        }
+        return jsonResponse({
+          access_token: `token-${localpart}`,
+          user_id: `@${localpart}:matrix.local.test`,
+        });
+      }
+
+      return jsonResponse({});
+    };
+
+    const paths = buildPaths(tempRoot);
+    const provisioner = new DockerComposeBundledMatrixProvisioner(
+      fakeExecRunner,
+      createLogger(),
+      paths,
+      fakeFetch,
+    );
+
+    try {
+      const req = buildInstallRequest();
+      const provision = await provisioner.provision(req);
+      const accounts = await provisioner.bootstrapAccounts(req, provision);
+
+      expect(accounts.operator.userId).toBe("@operator:matrix.local.test");
+      expect(accounts.bot.userId).toBe("@mail-sentinel:matrix.local.test");
+
+      const downCalls = recordedExecCalls.filter(
+        (call) => call.command === "docker" && (call.args ?? []).includes("down"),
+      );
+      const upCalls = recordedExecCalls.filter(
+        (call) => call.command === "docker" && (call.args ?? []).includes("up"),
+      );
+      expect(downCalls).toHaveLength(1);
+      expect(upCalls).toHaveLength(2);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("returns pass checks when matrix client and federation probes succeed", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-test-"));
     const paths = buildPaths(tempRoot);

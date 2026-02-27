@@ -195,58 +195,115 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
 
     const operatorLocalpart = sanitizeMatrixLocalpart(req.operator.username, "operator");
     const botLocalpart = chooseBotLocalpart(operatorLocalpart);
-    const operatorPassword = generatePassword();
-    const botPassword = generatePassword();
     const secretsDir = await this.ensureBootstrapSecretsDir(provision.projectDir);
+    const operatorSecretName = `${operatorLocalpart}.password`;
+    const botSecretName = `${botLocalpart}.password`;
+    const operatorPassword =
+      (await this.readSecretFile(secretsDir, operatorSecretName)) ?? generatePassword();
+    const botPassword = (await this.readSecretFile(secretsDir, botSecretName)) ?? generatePassword();
 
     const operatorPasswordSecretRef = await this.writeSecretFile(
       secretsDir,
-      `${operatorLocalpart}.password`,
+      operatorSecretName,
       operatorPassword,
     );
     const botPasswordSecretRef = await this.writeSecretFile(
       secretsDir,
-      `${botLocalpart}.password`,
+      botSecretName,
       botPassword,
     );
 
-    await this.registerSynapseUser(provision, {
-      localpart: operatorLocalpart,
-      password: operatorPassword,
+    try {
+      return await this.bootstrapAccountsWithKnownPasswords({
+        provision,
+        operatorLocalpart,
+        operatorPassword,
+        operatorPasswordSecretRef,
+        botLocalpart,
+        botPassword,
+        botPasswordSecretRef,
+      });
+    } catch (error) {
+      if (!isRecoverableAccountCredentialFailure(error)) {
+        throw error;
+      }
+
+      this.logger.warn(
+        {
+          projectDir: provision.projectDir,
+          homeserverDomain: provision.homeserverDomain,
+          operatorLocalpart,
+          botLocalpart,
+        },
+        "Detected stale Matrix bootstrap credentials; resetting bundled Matrix Postgres state and retrying account bootstrap",
+      );
+
+      await this.resetBundledPostgresState(provision);
+      await this.ensureStackRunning(provision);
+      await this.waitForSynapseReadyWithRecovery(provision);
+
+      return this.bootstrapAccountsWithKnownPasswords({
+        provision,
+        operatorLocalpart,
+        operatorPassword,
+        operatorPasswordSecretRef,
+        botLocalpart,
+        botPassword,
+        botPasswordSecretRef,
+      });
+    }
+  }
+
+  private async bootstrapAccountsWithKnownPasswords(input: {
+    provision: BundledMatrixProvisionResult;
+    operatorLocalpart: string;
+    operatorPassword: string;
+    operatorPasswordSecretRef: string;
+    botLocalpart: string;
+    botPassword: string;
+    botPasswordSecretRef: string;
+  }): Promise<BundledMatrixAccountsResult> {
+    await this.registerSynapseUser(input.provision, {
+      localpart: input.operatorLocalpart,
+      password: input.operatorPassword,
       admin: true,
     });
-    await this.registerSynapseUser(provision, {
-      localpart: botLocalpart,
-      password: botPassword,
+    await this.registerSynapseUser(input.provision, {
+      localpart: input.botLocalpart,
+      password: input.botPassword,
       admin: false,
     });
 
     const operatorSession = await this.loginUser(
-      provision.adminBaseUrl,
-      operatorLocalpart,
-      operatorPassword,
+      input.provision.adminBaseUrl,
+      input.operatorLocalpart,
+      input.operatorPassword,
     );
-    const botSession = await this.loginUser(provision.adminBaseUrl, botLocalpart, botPassword);
+    const botSession = await this.loginUser(
+      input.provision.adminBaseUrl,
+      input.botLocalpart,
+      input.botPassword,
+    );
 
     const accounts: BundledMatrixAccountsResult = {
       operator: {
-        localpart: operatorLocalpart,
+        localpart: input.operatorLocalpart,
         userId: operatorSession.userId,
-        passwordSecretRef: operatorPasswordSecretRef,
+        passwordSecretRef: input.operatorPasswordSecretRef,
         accessToken: operatorSession.accessToken,
       },
       bot: {
-        localpart: botLocalpart,
+        localpart: input.botLocalpart,
         userId: botSession.userId,
-        passwordSecretRef: botPasswordSecretRef,
+        passwordSecretRef: input.botPasswordSecretRef,
         accessToken: botSession.accessToken,
       },
     };
 
     this.logger.info(
       {
-        projectDir: provision.projectDir,
-        homeserverDomain: provision.homeserverDomain,
+        projectDir: input.provision.projectDir,
+        homeserverDomain: input.provision.homeserverDomain,
         operatorUserId: accounts.operator.userId,
         botUserId: accounts.bot.userId,
       },
@@ -803,6 +860,17 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     return `file:${secretPath}`;
   }
 
+  private async readSecretFile(secretsDir: string, fileName: string): Promise<string | null> {
+    const secretPath = join(secretsDir, fileName);
+    try {
+      const raw = await readFile(secretPath, "utf8");
+      const value = stripSingleTrailingNewline(raw);
+      return value.length > 0 ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
   private async runComposeCommand(
     projectDir: string,
     composeFilePath: string,
@@ -1037,6 +1105,26 @@ const isRecoverablePostgresBootstrapFailure = (value: string): boolean =>
   || /incorrect collation/i.test(value)
   || /incorrectdatabasesetup/i.test(value);
 
+const isRecoverableAccountCredentialFailure = (error: unknown): boolean => {
+  if (!isStructuredError(error) || error.code !== "MATRIX_LOGIN_FAILED") {
+    return false;
+  }
+  if (!isRecord(error.details)) {
+    return false;
+  }
+
+  const status = error.details.status;
+  if (status === 403) {
+    return true;
+  }
+
+  const body = error.details.body;
+  return (
+    typeof body === "string"
+    && /invalid username or password|m_forbidden/i.test(body)
+  );
+};
+
 const parseSimpleEnv = (raw: string): Record<string, string> => {
   const out: Record<string, string> = {};
   for (const line of raw.split(/\r?\n/)) {
@@ -1160,6 +1248,9 @@ const summarizeUnknown = (value: unknown): string => {
 
 const describeError = (error: unknown): string =>
   error instanceof Error ? error.message : summarizeUnknown(error);
+
+const stripSingleTrailingNewline = (value: string): string =>
+  value.endsWith("\n") ? value.slice(0, -1) : value;
 
 const check = (
   id: string,
