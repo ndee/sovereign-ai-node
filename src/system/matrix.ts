@@ -11,10 +11,11 @@ import type { Logger } from "../logging/logger.js";
 import type { ExecRunner, ExecResult } from "./exec.js";
 
 const MATRIX_INTERNAL_BASE_URL = "http://127.0.0.1:8008";
-const MATRIX_READY_TIMEOUT_MS = 45_000;
+const MATRIX_READY_TIMEOUT_MS = 180_000;
 const MATRIX_READY_POLL_INTERVAL_MS = 1_500;
 const MATRIX_HTTP_TIMEOUT_MS = 8_000;
 const MATRIX_BOOTSTRAP_SECRET_DIR = "bootstrap-secrets";
+const DEFAULT_SYNAPSE_IMAGE = "matrixdotorg/synapse:v1.125.0";
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -103,7 +104,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       signingKeyFile: `${homeserverDomain}.signing.key`,
     };
 
-    const composeYaml = renderComposeYaml();
+    const composeYaml = renderComposeYaml(resolveSynapseImage());
     const envFile = renderEnvFile({
       homeserverDomain,
       publicBaseUrl,
@@ -121,7 +122,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       formSecret: generated.formSecret,
       signingKeyFile: generated.signingKeyFile,
     });
-    const signingKey = renderSigningKey(generated.signingKeyFile);
+    const signingKey = renderSigningKey();
     const logConfig = renderSynapseLogConfig();
 
     await Promise.all([
@@ -177,7 +178,21 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     provision: BundledMatrixProvisionResult,
   ): Promise<BundledMatrixAccountsResult> {
     await this.ensureStackRunning(provision);
-    await this.waitForSynapseReady(provision.adminBaseUrl);
+    try {
+      await this.waitForSynapseReady(provision.adminBaseUrl);
+    } catch (error) {
+      if (isStructuredError(error) && error.code === "MATRIX_WAIT_READY_TIMEOUT") {
+        const diagnostics = await this.collectComposeDiagnostics(provision);
+        throw {
+          ...error,
+          details: {
+            ...(error.details ?? {}),
+            ...diagnostics,
+          },
+        };
+      }
+      throw error;
+    }
 
     const operatorLocalpart = sanitizeMatrixLocalpart(req.operator.username, "operator");
     const botLocalpart = chooseBotLocalpart(operatorLocalpart);
@@ -393,25 +408,61 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
   }
 
   private async ensureStackRunning(provision: BundledMatrixProvisionResult): Promise<void> {
+    const upArgs = ["up", "-d", "--remove-orphans", "--force-recreate", "postgres", "synapse"];
     const composeUp = await this.runComposeCommand(
       provision.projectDir,
       provision.composeFilePath,
-      ["up", "-d", "postgres", "synapse"],
+      upArgs,
     );
-    if (composeUp.exitCode !== 0) {
-      throw {
-        code: "MATRIX_STACK_START_FAILED",
-        message: "Failed to start bundled Matrix services with Docker Compose",
-        retryable: true,
-        details: {
+    if (composeUp.exitCode === 0) {
+      return;
+    }
+
+    const composeDown = await this.runComposeCommand(
+      provision.projectDir,
+      provision.composeFilePath,
+      ["down", "--remove-orphans"],
+    );
+    const retryUp = await this.runComposeCommand(
+      provision.projectDir,
+      provision.composeFilePath,
+      upArgs,
+    );
+    if (retryUp.exitCode === 0) {
+      this.logger.warn(
+        {
+          projectDir: provision.projectDir,
+          firstAttemptExitCode: composeUp.exitCode,
+        },
+        "Bundled Matrix stack start failed once and recovered after compose down/up retry",
+      );
+      return;
+    }
+
+    throw {
+      code: "MATRIX_STACK_START_FAILED",
+      message: "Failed to start bundled Matrix services with Docker Compose",
+      retryable: true,
+      details: {
+        firstAttempt: {
           exitCode: composeUp.exitCode,
           stderr: truncateText(composeUp.stderr, 4000),
           stdout: truncateText(composeUp.stdout, 4000),
-          projectDir: provision.projectDir,
-          composeFilePath: provision.composeFilePath,
         },
-      };
-    }
+        downAttempt: {
+          exitCode: composeDown.exitCode,
+          stderr: truncateText(composeDown.stderr, 3000),
+          stdout: truncateText(composeDown.stdout, 3000),
+        },
+        retryAttempt: {
+          exitCode: retryUp.exitCode,
+          stderr: truncateText(retryUp.stderr, 4000),
+          stdout: truncateText(retryUp.stdout, 4000),
+        },
+        projectDir: provision.projectDir,
+        composeFilePath: provision.composeFilePath,
+      },
+    };
   }
 
   private async registerSynapseUser(
@@ -549,6 +600,42 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         lastError,
       },
     };
+  }
+
+  private async collectComposeDiagnostics(
+    provision: BundledMatrixProvisionResult,
+  ): Promise<Record<string, unknown>> {
+    const ps = await this.safeComposeDiagnosticCommand(
+      provision,
+      ["ps", "-a"],
+      "ps-unavailable",
+    );
+    const logs = await this.safeComposeDiagnosticCommand(
+      provision,
+      ["logs", "--no-color", "--tail", "200", "synapse"],
+      "logs-unavailable",
+    );
+    return {
+      composePs: ps,
+      synapseLogs: logs,
+    };
+  }
+
+  private async safeComposeDiagnosticCommand(
+    provision: BundledMatrixProvisionResult,
+    args: string[],
+    fallback: string,
+  ): Promise<string> {
+    try {
+      const result = await this.runComposeCommand(
+        provision.projectDir,
+        provision.composeFilePath,
+        args,
+      );
+      return truncateText(`${result.stdout}\n${result.stderr}`, 6000);
+    } catch (error) {
+      return `${fallback}: ${describeError(error)}`;
+    }
   }
 
   private async runProbe(input: {
@@ -746,7 +833,7 @@ type EnvTemplateInput = {
   synapseConfigPath: string;
 };
 
-const renderComposeYaml = (): string => `
+const renderComposeYaml = (synapseImage: string): string => `
 services:
   postgres:
     image: postgres:16-alpine
@@ -759,7 +846,7 @@ services:
       - ./postgres-data:/var/lib/postgresql/data
 
   synapse:
-    image: matrixdotorg/synapse:latest
+    image: ${synapseImage}
     restart: unless-stopped
     depends_on:
       - postgres
@@ -836,10 +923,19 @@ const renderSynapseConfig = (input: SynapseConfigInput): string => {
     .join("\n");
 };
 
-const renderSigningKey = (fileName: string): string => {
-  const keyId = "ed25519:a_1";
-  const seed = randomUUID().replaceAll("-", "");
-  return `${fileName} ${keyId} ${seed}`;
+const renderSigningKey = (): string => {
+  const keyType = "ed25519";
+  const keyId = "a_1";
+  const seed = randomBytes(32).toString("base64").replace(/=+$/g, "");
+  return `${keyType} ${keyId} ${seed}`;
+};
+
+const resolveSynapseImage = (): string => {
+  const configured = process.env.SOVEREIGN_MATRIX_SYNAPSE_IMAGE?.trim();
+  if (configured !== undefined && configured.length > 0) {
+    return configured;
+  }
+  return DEFAULT_SYNAPSE_IMAGE;
 };
 
 const renderSynapseLogConfig = (): string => `

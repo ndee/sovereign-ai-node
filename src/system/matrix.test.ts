@@ -95,12 +95,17 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(result.adminBaseUrl).toBe("http://127.0.0.1:8008");
 
       const composeText = await readFile(result.composeFilePath, "utf8");
-      expect(composeText).toContain("matrixdotorg/synapse");
+      expect(composeText).toContain("matrixdotorg/synapse:v1.125.0");
       expect(composeText).toContain("postgres:16-alpine");
 
       const homeserverText = await readFile(join(result.projectDir, "synapse", "homeserver.yaml"), "utf8");
       expect(homeserverText).toContain('server_name: "matrix.local.test"');
       expect(homeserverText).toContain('public_baseurl: "http://matrix.local.test:8008/"');
+      const signingKey = await readFile(
+        join(result.projectDir, "synapse", "matrix.local.test.signing.key"),
+        "utf8",
+      );
+      expect(signingKey).toMatch(/^ed25519\s+a_1\s+[A-Za-z0-9+/]+/);
 
       expect(recordedExecCalls).toHaveLength(1);
       expect(recordedExecCalls[0]?.command).toBe("docker");

@@ -39,10 +39,14 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
     if (result.exitCode !== 0) {
       return null;
     }
-    const parsedVersion = parseVersionToken(result.stdout);
+    const versionOutput = `${result.stdout}\n${result.stderr}`.trim();
+    const parsedVersion = parseVersionToken(versionOutput);
+    if (parsedVersion === null) {
+      return null;
+    }
     return {
       binaryPath: "openclaw",
-      version: (parsedVersion ?? result.stdout.trim()) || "unknown",
+      version: parsedVersion,
     };
   }
 

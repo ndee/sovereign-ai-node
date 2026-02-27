@@ -527,16 +527,19 @@ prepare_request_file() {
 }
 
 parse_install_result() {
-  node <<'NODE'
-const fs = require("node:fs");
-
-const raw = fs.readFileSync(0, "utf8");
+  node - "$1" <<'NODE'
+const raw = process.argv[2] ?? "";
 let parsed;
 try {
   parsed = JSON.parse(raw);
 } catch {
-  process.stdout.write("parse_error\tUnable to parse install command JSON output");
-  process.exit(0);
+  const recovered = recoverJsonObject(raw);
+  if (recovered === null) {
+    process.stdout.write("parse_error\tUnable to parse install command JSON output");
+    process.exit(0);
+  }
+
+  parsed = recovered;
 }
 
 const state = parsed?.result?.job?.state;
@@ -560,20 +563,54 @@ const errorMessage =
   ?? "Install job did not succeed";
 const failedStepId = typeof failedStep?.id === "string" ? failedStep.id : "unknown-step";
 process.stdout.write(`${state}\t${failedStepId}: ${errorCode}: ${errorMessage}`);
+
+function recoverJsonObject(input) {
+  const lines = input.split(/\r?\n/);
+
+  for (let start = 0; start < lines.length; start += 1) {
+    const candidate = lines.slice(start).join("\n").trim();
+    if (!candidate.startsWith("{")) {
+      continue;
+    }
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // keep trying smaller tails
+    }
+  }
+
+  for (let start = 0; start < lines.length; start += 1) {
+    for (let end = lines.length; end > start; end -= 1) {
+      const candidate = lines.slice(start, end).join("\n").trim();
+      if (!candidate.startsWith("{") || !candidate.endsWith("}")) {
+        continue;
+      }
+      try {
+        return JSON.parse(candidate);
+      } catch {
+        // keep scanning
+      }
+    }
+  }
+
+  return null;
+}
 NODE
 }
 
 parse_runtime_readiness() {
-  node <<'NODE'
-const fs = require("node:fs");
-
-const raw = fs.readFileSync(0, "utf8");
+  node - "$1" <<'NODE'
+const raw = process.argv[2] ?? "";
 let parsed;
 try {
   parsed = JSON.parse(raw);
 } catch {
-  process.stdout.write("0\tstatus-json-parse-failed");
-  process.exit(0);
+  const recovered = recoverJsonObject(raw);
+  if (recovered === null) {
+    process.stdout.write("0\tstatus-json-parse-failed");
+    process.exit(0);
+  }
+  parsed = recovered;
 }
 
 const result = parsed?.result ?? {};
@@ -604,6 +641,38 @@ if (!openclawReady) {
 }
 
 process.stdout.write(`0\t${reasons.join(";")}`);
+
+function recoverJsonObject(input) {
+  const lines = input.split(/\r?\n/);
+
+  for (let start = 0; start < lines.length; start += 1) {
+    const candidate = lines.slice(start).join("\n").trim();
+    if (!candidate.startsWith("{")) {
+      continue;
+    }
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // keep trying
+    }
+  }
+
+  for (let start = 0; start < lines.length; start += 1) {
+    for (let end = lines.length; end > start; end -= 1) {
+      const candidate = lines.slice(start, end).join("\n").trim();
+      if (!candidate.startsWith("{") || !candidate.endsWith("}")) {
+        continue;
+      }
+      try {
+        return JSON.parse(candidate);
+      } catch {
+        // keep scanning
+      }
+    }
+  }
+
+  return null;
+}
 NODE
 }
 
@@ -614,7 +683,7 @@ wait_for_runtime_ready() {
 
   for attempt in $(seq 1 "$max_attempts"); do
     status_output="$(sovereign-node status --json || true)"
-    parsed="$(printf '%s' "$status_output" | parse_runtime_readiness)"
+    parsed="$(parse_runtime_readiness "$status_output")"
     readiness_flag="${parsed%%$'\t'*}"
     readiness_reason="${parsed#*$'\t'}"
 
@@ -649,7 +718,7 @@ run_install_flow() {
   install_output="$(sovereign-node install --request-file "$REQUEST_FILE" --json)"
   printf '%s\n' "$install_output"
 
-  parsed="$(printf '%s' "$install_output" | parse_install_result)"
+  parsed="$(parse_install_result "$install_output")"
   install_state="${parsed%%$'\t'*}"
   install_summary="${parsed#*$'\t'}"
   if [[ "$install_state" != "succeeded" ]]; then
