@@ -136,6 +136,7 @@ const MAIL_SENTINEL_AGENT_ID = "mail-sentinel";
 const MAIL_SENTINEL_CRON_ID = "mail-sentinel-poll";
 const MAIL_SENTINEL_HELLO_MESSAGE = "Hello from Mail Sentinel";
 const INSTALLER_EXEC_TIMEOUT_MS = 60_000;
+const SOVEREIGN_GATEWAY_SYSTEMD_UNIT = "sovereign-openclaw-gateway.service";
 
 export class RealInstallerService implements InstallerService {
   private readonly stubService: StubInstallerService;
@@ -688,7 +689,11 @@ export class RealInstallerService implements InstallerService {
     state: GatewayState;
     message?: string;
   } | null> {
-    const candidates = ["openclaw-gateway.service", "openclaw-gateway"];
+    const candidates = [
+      "openclaw-gateway.service",
+      "openclaw-gateway",
+      SOVEREIGN_GATEWAY_SYSTEMD_UNIT,
+    ];
     for (const unit of candidates) {
       const result = await this.safeExec("systemctl", ["is-active", unit]);
       if (!result.ok) {
@@ -1144,8 +1149,13 @@ export class RealInstallerService implements InstallerService {
           await this.writeOpenClawRuntimeArtifacts(runtimeConfig);
 
           if (stepState.gatewayServiceSkipped === true) {
-            this.logger.info(
-              "OpenClaw gateway restart skipped because service install/start was skipped",
+            const fallbackStarted = await this.ensureSystemGatewayServiceFallback(runtimeConfig);
+            if (fallbackStarted) {
+              stepState.gatewayServiceSkipped = false;
+              return;
+            }
+            this.logger.warn(
+              "OpenClaw gateway restart skipped because neither user-service nor system-service startup succeeded",
             );
             return;
           }
@@ -1202,6 +1212,9 @@ export class RealInstallerService implements InstallerService {
           stepState.mailSentinelRegistration = await this.registerMailSentinel(
             req,
             stepState.matrixRoom,
+            {
+              allowGatewayUnavailableFallback: stepState.gatewayServiceSkipped === true,
+            },
           );
         },
       },
@@ -1348,6 +1361,9 @@ export class RealInstallerService implements InstallerService {
   private async registerMailSentinel(
     req: InstallRequest,
     matrixRoom: BundledMatrixRoomBootstrapResult,
+    options?: {
+      allowGatewayUnavailableFallback?: boolean;
+    },
   ): Promise<MailSentinelRegistrationResult> {
     const registrationDir = join(this.paths.stateDir, "mail-sentinel");
     const workspaceDir = join(registrationDir, "workspace");
@@ -1379,43 +1395,199 @@ export class RealInstallerService implements InstallerService {
       };
     }
 
-    const registration = await this.mailSentinelRegistrar.register({
-      agentId,
-      workspaceDir,
-      cronJobName: cronJobId,
-      pollInterval,
-      lookbackWindow,
-      roomId: matrixRoom.roomId,
-    });
+    let registration: MailSentinelRegistrationResult;
+    let deferredReason: string | undefined;
+    try {
+      registration = await this.mailSentinelRegistrar.register({
+        agentId,
+        workspaceDir,
+        cronJobName: cronJobId,
+        pollInterval,
+        lookbackWindow,
+        roomId: matrixRoom.roomId,
+      });
+    } catch (error) {
+      if (
+        options?.allowGatewayUnavailableFallback !== true
+        || !isMailSentinelGatewayUnavailableError(error)
+      ) {
+        throw error;
+      }
 
-    const registrationPayload = {
-      agentId: registration.agentId,
-      cronJobId: registration.cronJobId,
+      deferredReason = describeError(error);
+      this.logger.warn(
+        {
+          error: deferredReason,
+        },
+        "Mail Sentinel cron registration deferred because OpenClaw gateway is unavailable",
+      );
+      registration = {
+        agentId,
+        cronJobId,
+        workspaceDir,
+        agentCommand: "deferred: gateway unavailable",
+        cronCommand: "deferred: gateway unavailable",
+      };
+    }
+
+    await this.persistMailSentinelRegistrationRecord({
+      registrationFile,
+      registration,
       pollInterval,
       lookbackWindow,
       roomId: matrixRoom.roomId,
       roomName: matrixRoom.roomName,
+      ...(deferredReason === undefined ? {} : { deferredReason }),
+    });
+
+    return registration;
+  }
+
+  private async persistMailSentinelRegistrationRecord(input: {
+    registrationFile: string;
+    registration: MailSentinelRegistrationResult;
+    pollInterval: string;
+    lookbackWindow: string;
+    roomId: string;
+    roomName: string;
+    deferredReason?: string;
+  }): Promise<void> {
+    const registrationPayload = {
+      agentId: input.registration.agentId,
+      cronJobId: input.registration.cronJobId,
+      pollInterval: input.pollInterval,
+      lookbackWindow: input.lookbackWindow,
+      roomId: input.roomId,
+      roomName: input.roomName,
       configPath: this.paths.configPath,
-      agentCommand: registration.agentCommand,
-      cronCommand: registration.cronCommand,
+      agentCommand: input.registration.agentCommand,
+      cronCommand: input.registration.cronCommand,
       registeredAt: now(),
+      ...(input.deferredReason === undefined
+        ? {}
+        : {
+            deferred: true,
+            deferredReason: input.deferredReason,
+          }),
     };
 
     try {
-      await writeFile(registrationFile, `${JSON.stringify(registrationPayload, null, 2)}\n`, "utf8");
+      await writeFile(input.registrationFile, `${JSON.stringify(registrationPayload, null, 2)}\n`, "utf8");
     } catch (error) {
       throw {
         code: "MAIL_SENTINEL_REGISTER_FAILED",
         message: "Failed to persist Mail Sentinel registration record",
         retryable: true,
         details: {
-          registrationFile,
+          registrationFile: input.registrationFile,
           error: error instanceof Error ? error.message : String(error),
         },
       };
     }
+  }
 
-    return registration;
+  private async ensureSystemGatewayServiceFallback(runtimeConfig: RuntimeConfig): Promise<boolean> {
+    if (this.execRunner === null) {
+      return false;
+    }
+
+    const unitName = SOVEREIGN_GATEWAY_SYSTEMD_UNIT;
+    const unitPath =
+      process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH?.trim()
+      || `/etc/systemd/system/${unitName}`;
+    const unitContents = [
+      "[Unit]",
+      "Description=Sovereign OpenClaw Gateway",
+      "After=network-online.target",
+      "Wants=network-online.target",
+      "",
+      "[Service]",
+      "Type=simple",
+      `WorkingDirectory=${this.paths.openclawServiceHome}`,
+      `EnvironmentFile=-${runtimeConfig.openclaw.gatewayEnvPath}`,
+      "ExecStart=/usr/bin/env openclaw gateway run --allow-unconfigured --bind loopback",
+      "Restart=always",
+      "RestartSec=3",
+      "",
+      "[Install]",
+      "WantedBy=multi-user.target",
+      "",
+    ].join("\n");
+
+    try {
+      await mkdir(this.paths.openclawServiceHome, { recursive: true });
+      await mkdir(dirname(unitPath), { recursive: true });
+      await writeFile(unitPath, unitContents, "utf8");
+    } catch (error) {
+      this.logger.warn(
+        {
+          unitPath,
+          error: describeError(error),
+        },
+        "Failed to write system-level OpenClaw gateway unit",
+      );
+      return false;
+    }
+
+    const commands: string[][] = [
+      ["daemon-reload"],
+      ["enable", "--now", unitName],
+      ["restart", unitName],
+      ["is-active", unitName],
+    ];
+    for (const args of commands) {
+      const result = await this.safeExec("systemctl", args);
+      if (!result.ok) {
+        this.logger.warn(
+          {
+            command: ["systemctl", ...args].join(" "),
+            error: result.error,
+          },
+          "System-level OpenClaw gateway command failed",
+        );
+        return false;
+      }
+      if (result.result.exitCode !== 0) {
+        this.logger.warn(
+          {
+            command: result.result.command,
+            exitCode: result.result.exitCode,
+            stderr: truncateText(result.result.stderr, 1200),
+            stdout: truncateText(result.result.stdout, 1200),
+          },
+          "System-level OpenClaw gateway command exited non-zero",
+        );
+        return false;
+      }
+    }
+
+    for (let attempt = 1; attempt <= 20; attempt += 1) {
+      const health = await this.probeOpenClawHealth();
+      if (health.ok) {
+        this.logger.info(
+          {
+            unitName,
+            unitPath,
+            health: health.message,
+          },
+          "System-level OpenClaw gateway service started successfully",
+        );
+        return true;
+      }
+      if (attempt < 20) {
+        await delay(1000);
+      } else {
+        this.logger.warn(
+          {
+            unitName,
+            health: health.message,
+          },
+          "System-level OpenClaw gateway service did not become healthy in time",
+        );
+      }
+    }
+
+    return false;
   }
 
   private async runSmokeChecks(
@@ -2366,6 +2538,38 @@ const isGatewayUserSystemdUnavailableError = (error: unknown): boolean => {
   );
 };
 
+const isMailSentinelGatewayUnavailableError = (error: unknown): boolean => {
+  if (!isRecord(error) || error.code !== "MAIL_SENTINEL_REGISTER_FAILED") {
+    return false;
+  }
+
+  const messages: string[] = [];
+  if (typeof error.message === "string") {
+    messages.push(error.message);
+  }
+  if (isRecord(error.details)) {
+    const failures = error.details.failures;
+    if (Array.isArray(failures)) {
+      for (const failure of failures) {
+        if (!isRecord(failure)) {
+          continue;
+        }
+        if (typeof failure.stderr === "string") {
+          messages.push(failure.stderr);
+        }
+        if (typeof failure.stdout === "string") {
+          messages.push(failure.stdout);
+        }
+      }
+    }
+  }
+
+  const combined = messages.join("\n");
+  return /gateway closed|failed to connect|connection refused|econnrefused|no medium found/i.test(
+    combined,
+  );
+};
+
 const resolveVersionPinStatus = (
   runtimeConfig: RuntimeConfig | null,
   detectedOpenClaw: { version: string } | null,
@@ -2465,6 +2669,12 @@ const truncateText = (value: string, maxChars: number): string => {
     return value;
   }
   return `${value.slice(0, maxChars)}...(truncated)`;
+};
+
+const delay = async (ms: number): Promise<void> => {
+  await new Promise<void>((resolveDelay) => {
+    setTimeout(resolveDelay, ms);
+  });
 };
 
 const describeError = (error: unknown): string => {
