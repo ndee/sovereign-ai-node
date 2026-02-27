@@ -1,7 +1,13 @@
+import { readFile } from "node:fs/promises";
+
 import type { Command } from "commander";
 
 import type { AppContainer } from "../../app/create-app.js";
-import { startInstallResultSchema, type InstallRequest } from "../../contracts/index.js";
+import {
+  installRequestSchema,
+  startInstallResultSchema,
+  type InstallRequest,
+} from "../../contracts/index.js";
 import { writeCliError, writeCliSuccess } from "../output.js";
 
 type InstallOptions = {
@@ -11,6 +17,7 @@ type InstallOptions = {
   skipOpenclawInstall?: boolean;
   forceOpenclawReinstall?: boolean;
   matrixTlsMode?: "auto" | "manual" | "local-dev";
+  requestFile?: string;
 };
 
 const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => ({
@@ -64,10 +71,17 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
       "--matrix-tls-mode <mode>",
       "Matrix TLS mode (auto|manual|local-dev) (scaffold/dev)",
     )
+    .option(
+      "--request-file <path>",
+      "Path to an InstallRequest JSON file (overrides scaffold defaults)",
+    )
     .action(async (opts: InstallOptions) => {
       const command = "install";
       try {
-        const req = buildScaffoldInstallRequest(opts);
+        const req =
+          opts.requestFile === undefined
+            ? buildScaffoldInstallRequest(opts)
+            : await readInstallRequestFromFile(opts.requestFile);
         const result = await app.installerService.startInstall(req);
         writeCliSuccess(command, result, startInstallResultSchema, Boolean(opts.json));
       } catch (error) {
@@ -75,4 +89,10 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
         process.exitCode = 1;
       }
     });
+};
+
+const readInstallRequestFromFile = async (path: string): Promise<InstallRequest> => {
+  const raw = await readFile(path, "utf8");
+  const parsed = JSON.parse(raw) as unknown;
+  return installRequestSchema.parse(parsed);
 };

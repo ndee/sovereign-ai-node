@@ -55,12 +55,27 @@ type PersistedInstallJobRecord = {
   updatedAt: string;
 };
 
+type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
+
+type RuntimeConfig = {
+  matrix: {
+    publicBaseUrl: string;
+    bot: {
+      accessTokenSecretRef: string;
+    };
+    alertRoom: {
+      roomId: string;
+    };
+  };
+};
+
 type RealInstallerServiceDeps = {
   openclawBootstrapper: OpenClawBootstrapper;
   openclawGatewayServiceManager: OpenClawGatewayServiceManager;
   preflightChecker: HostPreflightChecker;
   imapTester: ImapTester;
   matrixProvisioner: BundledMatrixProvisioner;
+  fetchImpl?: FetchLike;
 };
 
 export class RealInstallerService implements InstallerService {
@@ -81,6 +96,8 @@ export class RealInstallerService implements InstallerService {
 
   private readonly matrixProvisioner: BundledMatrixProvisioner;
 
+  private readonly fetchImpl: FetchLike;
+
   constructor(
     private readonly logger: Logger,
     private readonly paths: SovereignPaths,
@@ -92,6 +109,7 @@ export class RealInstallerService implements InstallerService {
     this.preflightChecker = deps.preflightChecker;
     this.imapTester = deps.imapTester;
     this.matrixProvisioner = deps.matrixProvisioner;
+    this.fetchImpl = deps.fetchImpl ?? defaultFetch;
   }
 
   async preflight(input?: PreflightRequest): Promise<PreflightResult> {
@@ -141,7 +159,92 @@ export class RealInstallerService implements InstallerService {
   }
 
   async testAlert(req: TestAlertRequest): Promise<TestAlertResult> {
-    return this.stubService.testAlert(req);
+    const channel = req.channel ?? "matrix";
+    const unknownRoom = req.roomId ?? "!unknown:local";
+    if (channel !== "matrix") {
+      return {
+        delivered: false,
+        target: {
+          channel: "matrix",
+          roomId: unknownRoom,
+        },
+        error: {
+          code: "TEST_ALERT_CHANNEL_UNSUPPORTED",
+          message: "Only Matrix test alerts are currently supported",
+          retryable: false,
+          details: { requestedChannel: channel },
+        },
+      };
+    }
+
+    try {
+      const config = await this.readRuntimeConfig();
+      const roomId = req.roomId ?? config.matrix.alertRoom.roomId;
+      const accessToken = await this.resolveSecretRef(config.matrix.bot.accessTokenSecretRef);
+      const transactionId = `sovereign_${Date.now()}_${randomUUID().slice(0, 8)}`;
+      const endpoint = new URL(
+        `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(
+          transactionId,
+        )}`,
+        ensureTrailingSlash(config.matrix.publicBaseUrl),
+      ).toString();
+
+      const response = await this.fetchImpl(endpoint, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          msgtype: "m.text",
+          body: req.text ?? `Sovereign test alert (${now()})`,
+        }),
+      });
+
+      const rawBody = await response.text();
+      const parsed = parseJsonSafely(rawBody);
+      if (!response.ok) {
+        return {
+          delivered: false,
+          target: {
+            channel: "matrix",
+            roomId,
+          },
+          error: {
+            code: "TEST_ALERT_FAILED",
+            message: "Matrix test alert delivery failed",
+            retryable: true,
+            details: {
+              status: response.status,
+              body: summarizeUnknown(parsed),
+            },
+          },
+        };
+      }
+
+      const messageId =
+        isRecord(parsed) && typeof parsed.event_id === "string" ? parsed.event_id : undefined;
+
+      return {
+        delivered: true,
+        target: {
+          channel: "matrix",
+          roomId,
+        },
+        ...(messageId === undefined ? {} : { messageId }),
+        sentAt: now(),
+      };
+    } catch (error) {
+      return {
+        delivered: false,
+        target: {
+          channel: "matrix",
+          roomId: unknownRoom,
+        },
+        error: normalizeTestAlertError(error),
+      };
+    }
   }
 
   async getStatus(): Promise<SovereignStatus> {
@@ -332,15 +435,40 @@ export class RealInstallerService implements InstallerService {
         id: "mail_sentinel_register",
         label: "Register Mail Sentinel agent and cron",
         run: async () => {
-          throw {
-            code: "NOT_IMPLEMENTED",
-            message:
-              "Mail Sentinel agent/cron registration is not implemented yet",
-            retryable: true,
-            details: {
-              configPath: this.paths.configPath,
-            },
-          };
+          await this.registerMailSentinel(req);
+        },
+      },
+      {
+        id: "smoke_checks",
+        label: "Run smoke checks",
+        run: async () => {
+          if (stepState.matrixProvision === undefined) {
+            throw {
+              code: "INSTALL_INTERNAL_STATE",
+              message: "Matrix provisioning output is missing before smoke checks",
+              retryable: false,
+            };
+          }
+          await this.runSmokeChecks(stepState.matrixProvision);
+        },
+      },
+      {
+        id: "test_alert",
+        label: "Send test alert",
+        run: async () => {
+          const testAlert = await this.testAlert({
+            channel: "matrix",
+          });
+          if (!testAlert.delivered) {
+            throw {
+              code: testAlert.error?.code ?? "TEST_ALERT_FAILED",
+              message: testAlert.error?.message ?? "Test alert delivery failed",
+              retryable: testAlert.error?.retryable ?? true,
+              ...(testAlert.error?.details === undefined
+                ? {}
+                : { details: testAlert.error.details }),
+            };
+          }
         },
       },
     ];
@@ -442,6 +570,208 @@ export class RealInstallerService implements InstallerService {
       this.resolvedInstallJobsDir = fallback;
       return fallback;
     }
+  }
+
+  private async registerMailSentinel(req: InstallRequest): Promise<void> {
+    const openclaw = await this.openclawBootstrapper.detectInstalled();
+    if (openclaw === null) {
+      throw {
+        code: "OPENCLAW_MISSING",
+        message: "OpenClaw CLI is required before Mail Sentinel registration",
+        retryable: true,
+      };
+    }
+
+    const registrationDir = join(this.paths.stateDir, "mail-sentinel");
+    const workspaceDir = join(registrationDir, "workspace");
+    const registrationFile = join(registrationDir, "registration.json");
+    const registrationPayload = {
+      agentId: "mail-sentinel" as const,
+      cronJobId: "mail-sentinel-poll",
+      pollInterval: req.mailSentinel?.pollInterval ?? "5m",
+      lookbackWindow: req.mailSentinel?.lookbackWindow ?? "15m",
+      configPath: this.paths.configPath,
+      openclawBinaryPath: openclaw.binaryPath,
+      openclawVersion: openclaw.version,
+      registeredAt: now(),
+    };
+
+    try {
+      await mkdir(workspaceDir, { recursive: true });
+      const readmePath = join(workspaceDir, "README.md");
+      const readme = [
+        "# Mail Sentinel workspace",
+        "",
+        "Provisioned by sovereign-node install flow.",
+        "Agent registration integration with OpenClaw CLI will be expanded in subsequent stages.",
+      ].join("\n");
+      await writeFile(readmePath, `${readme}\n`, "utf8");
+      await writeFile(registrationFile, `${JSON.stringify(registrationPayload, null, 2)}\n`, "utf8");
+    } catch (error) {
+      throw {
+        code: "MAIL_SENTINEL_REGISTER_FAILED",
+        message: "Failed to persist Mail Sentinel registration artifacts",
+        retryable: true,
+        details: {
+          registrationDir,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+  }
+
+  private async runSmokeChecks(matrixProvision: BundledMatrixProvisionResult): Promise<void> {
+    const matrix = await this.testMatrix({
+      publicBaseUrl: matrixProvision.publicBaseUrl,
+      federationEnabled: matrixProvision.federationEnabled,
+    });
+    if (!matrix.ok) {
+      throw {
+        code: "SMOKE_CHECKS_FAILED",
+        message: "Matrix smoke check failed",
+        retryable: true,
+        details: {
+          checks: matrix.checks,
+        },
+      };
+    }
+
+    const openclaw = await this.openclawBootstrapper.detectInstalled();
+    if (openclaw === null) {
+      throw {
+        code: "SMOKE_CHECKS_FAILED",
+        message: "OpenClaw CLI is not detectable during smoke checks",
+        retryable: true,
+      };
+    }
+
+    try {
+      await readFile(this.paths.configPath, "utf8");
+    } catch (error) {
+      throw {
+        code: "SMOKE_CHECKS_FAILED",
+        message: "Sovereign runtime config file is not readable during smoke checks",
+        retryable: true,
+        details: {
+          configPath: this.paths.configPath,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+  }
+
+  private async readRuntimeConfig(): Promise<RuntimeConfig> {
+    let raw = "";
+    try {
+      raw = await readFile(this.paths.configPath, "utf8");
+    } catch (error) {
+      throw {
+        code: "CONFIG_NOT_FOUND",
+        message: "Sovereign runtime config does not exist yet",
+        retryable: false,
+        details: {
+          configPath: this.paths.configPath,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+
+    const parsed = parseJsonSafely(raw);
+    if (!isRecord(parsed)) {
+      throw {
+        code: "CONFIG_INVALID",
+        message: "Sovereign runtime config is not a JSON object",
+        retryable: false,
+        details: {
+          configPath: this.paths.configPath,
+        },
+      };
+    }
+
+    const matrix = parsed.matrix;
+    if (!isRecord(matrix)) {
+      throw {
+        code: "CONFIG_INVALID",
+        message: "Sovereign runtime config is missing matrix section",
+        retryable: false,
+      };
+    }
+
+    const bot = matrix.bot;
+    const alertRoom = matrix.alertRoom;
+    const publicBaseUrl = matrix.publicBaseUrl;
+    if (
+      !isRecord(bot)
+      || !isRecord(alertRoom)
+      || typeof publicBaseUrl !== "string"
+      || publicBaseUrl.length === 0
+      || typeof bot.accessTokenSecretRef !== "string"
+      || bot.accessTokenSecretRef.length === 0
+      || typeof alertRoom.roomId !== "string"
+      || alertRoom.roomId.length === 0
+    ) {
+      throw {
+        code: "CONFIG_INVALID",
+        message: "Sovereign runtime config is missing required Matrix bot/room fields",
+        retryable: false,
+      };
+    }
+
+    return {
+      matrix: {
+        publicBaseUrl,
+        bot: {
+          accessTokenSecretRef: bot.accessTokenSecretRef,
+        },
+        alertRoom: {
+          roomId: alertRoom.roomId,
+        },
+      },
+    };
+  }
+
+  private async resolveSecretRef(secretRef: string): Promise<string> {
+    if (secretRef.startsWith("file:")) {
+      const filePath = secretRef.slice("file:".length);
+      const raw = await readFile(filePath, "utf8");
+      const value = stripSingleTrailingNewline(raw);
+      if (value.length === 0) {
+        throw {
+          code: "SECRET_READ_FAILED",
+          message: "Secret file is empty",
+          retryable: false,
+          details: {
+            secretRef,
+          },
+        };
+      }
+      return value;
+    }
+
+    if (secretRef.startsWith("env:")) {
+      const key = secretRef.slice("env:".length);
+      const value = process.env[key];
+      if (value !== undefined && value.length > 0) {
+        return value;
+      }
+      throw {
+        code: "SECRET_READ_FAILED",
+        message: "Secret environment variable is not set",
+        retryable: false,
+        details: {
+          secretRef,
+        },
+      };
+    }
+
+    throw {
+      code: "SECRET_REF_UNSUPPORTED",
+      message: "Unsupported secretRef format",
+      retryable: false,
+      details: {
+        secretRef,
+      },
+    };
   }
 
   private async writeSovereignConfig(input: {
@@ -584,6 +914,94 @@ export class RealInstallerService implements InstallerService {
 }
 
 const now = () => new Date().toISOString();
+
+const defaultFetch: FetchLike = (input, init) => globalThis.fetch(input, init);
+
+const ensureTrailingSlash = (value: string): string =>
+  value.endsWith("/") ? value : `${value}/`;
+
+const parseJsonSafely = (raw: string): unknown => {
+  if (raw.trim().length === 0) {
+    return {};
+  }
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return raw;
+  }
+};
+
+const summarizeUnknown = (value: unknown): string => {
+  if (typeof value === "string") {
+    return truncateText(value, 800);
+  }
+  try {
+    return truncateText(JSON.stringify(value), 800);
+  } catch {
+    return truncateText(String(value), 800);
+  }
+};
+
+const truncateText = (value: string, maxChars: number): string => {
+  if (value.length <= maxChars) {
+    return value;
+  }
+  return `${value.slice(0, maxChars)}...(truncated)`;
+};
+
+const stripSingleTrailingNewline = (value: string): string =>
+  value.endsWith("\r\n")
+    ? value.slice(0, -2)
+    : value.endsWith("\n")
+      ? value.slice(0, -1)
+      : value;
+
+const normalizeTestAlertError = (error: unknown): {
+  code: string;
+  message: string;
+  retryable: boolean;
+  details?: Record<string, unknown>;
+} => {
+  if (isStructuredError(error)) {
+    return error;
+  }
+
+  if (error instanceof Error) {
+    return {
+      code: "TEST_ALERT_FAILED",
+      message: error.message,
+      retryable: true,
+    };
+  }
+
+  return {
+    code: "TEST_ALERT_FAILED",
+    message: String(error),
+    retryable: true,
+  };
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
+
+const isStructuredError = (
+  value: unknown,
+): value is {
+  code: string;
+  message: string;
+  retryable: boolean;
+  details?: Record<string, unknown>;
+} => {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return (
+    typeof value.code === "string"
+    && typeof value.message === "string"
+    && typeof value.retryable === "boolean"
+  );
+};
 
 const isNodeError = (error: unknown): error is NodeJS.ErrnoException =>
   typeof error === "object" && error !== null && "code" in error;

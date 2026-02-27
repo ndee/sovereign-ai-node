@@ -188,7 +188,7 @@ describe("RealInstallerService", () => {
     }
   });
 
-  it("writes config after gateway install and then stops at mail_sentinel_register TODO", async () => {
+  it("runs through mail_sentinel_register and fails at smoke_checks when matrix probe fails", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {
       configPath: join(tempRoot, "etc", "sovereign-node.json5"),
@@ -206,7 +206,10 @@ describe("RealInstallerService", () => {
     let gatewayInstallForceArg: boolean | undefined;
     const service = new RealInstallerService(createLogger(), paths, {
       openclawBootstrapper: {
-        detectInstalled: async () => null,
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
         ensureInstalled: async (opts) => ({
           binaryPath: "/usr/local/bin/openclaw",
           version: opts.version,
@@ -306,11 +309,13 @@ describe("RealInstallerService", () => {
       expect(stepStates.matrix_bootstrap_room).toBe("succeeded");
       expect(stepStates.openclaw_gateway_service_install).toBe("succeeded");
       expect(stepStates.openclaw_configure).toBe("succeeded");
-      expect(stepStates.mail_sentinel_register).toBe("failed");
+      expect(stepStates.mail_sentinel_register).toBe("succeeded");
+      expect(stepStates.smoke_checks).toBe("failed");
+      expect(stepStates.test_alert).toBe("pending");
 
       const stored = await service.getInstallJob(started.job.jobId);
-      expect(stored.error?.code).toBe("NOT_IMPLEMENTED");
-      expect(stored.job.currentStepId).toBe("mail_sentinel_register");
+      expect(stored.error?.code).toBe("SMOKE_CHECKS_FAILED");
+      expect(stored.job.currentStepId).toBe("smoke_checks");
 
       const writtenConfigRaw = await readFile(paths.configPath, "utf8");
       const writtenConfig = JSON.parse(writtenConfigRaw) as {
@@ -323,6 +328,138 @@ describe("RealInstallerService", () => {
       expect(writtenConfig.matrix?.bot?.accessTokenSecretRef?.startsWith("file:")).toBe(
         true,
       );
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("completes install flow through test_alert when smoke checks and alert delivery pass", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+
+    let matrixTestCalls = 0;
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async (opts) => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: opts.version,
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+          capabilities: ["IMAP4rev1"],
+        }),
+      },
+      matrixProvisioner: {
+        provision: async (req) => ({
+          projectDir: join(tempRoot, "matrix"),
+          composeFilePath: join(tempRoot, "matrix", "compose.yaml"),
+          homeserverDomain: req.matrix.homeserverDomain,
+          publicBaseUrl: "http://matrix.example.org",
+          adminBaseUrl: "http://127.0.0.1:8008",
+          federationEnabled: req.matrix.federationEnabled ?? false,
+          tlsMode: "local-dev",
+        }),
+        bootstrapAccounts: async () => ({
+          operator: {
+            localpart: "operator",
+            userId: "@operator:matrix.example.org",
+            passwordSecretRef: "file:/tmp/operator.password",
+            accessToken: "operator-token",
+          },
+          bot: {
+            localpart: "mail-sentinel",
+            userId: "@mail-sentinel:matrix.example.org",
+            passwordSecretRef: "file:/tmp/mail-sentinel.password",
+            accessToken: "bot-token",
+          },
+        }),
+        bootstrapRoom: async () => ({
+          roomId: "!alerts:matrix.example.org",
+          roomName: "Sovereign Alerts",
+        }),
+        test: async (req) => {
+          matrixTestCalls += 1;
+          return {
+            ok: true,
+            homeserverUrl: req.publicBaseUrl,
+            checks: [],
+          };
+        },
+      },
+      fetchImpl: async (url) => {
+        if (!url.includes("/_matrix/client/v3/rooms/")) {
+          return new Response("not found", { status: 404 });
+        }
+        return new Response(JSON.stringify({ event_id: "$evt1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+
+    try {
+      const started = await service.startInstall(buildInstallRequest());
+
+      expect(started.job.state).toBe("succeeded");
+      expect(matrixTestCalls).toBe(1);
+
+      const stepStates = Object.fromEntries(
+        started.job.steps.map((step) => [step.id, step.state]),
+      );
+      expect(stepStates.preflight).toBe("succeeded");
+      expect(stepStates.openclaw_bootstrap_cli).toBe("succeeded");
+      expect(stepStates.imap_validate).toBe("succeeded");
+      expect(stepStates.matrix_provision).toBe("succeeded");
+      expect(stepStates.matrix_bootstrap_accounts).toBe("succeeded");
+      expect(stepStates.matrix_bootstrap_room).toBe("succeeded");
+      expect(stepStates.openclaw_gateway_service_install).toBe("succeeded");
+      expect(stepStates.openclaw_configure).toBe("succeeded");
+      expect(stepStates.mail_sentinel_register).toBe("succeeded");
+      expect(stepStates.smoke_checks).toBe("succeeded");
+      expect(stepStates.test_alert).toBe("succeeded");
+
+      const stored = await service.getInstallJob(started.job.jobId);
+      expect(stored.job.state).toBe("succeeded");
+      expect(stored.error).toBeUndefined();
+
+      const registrationRaw = await readFile(
+        join(paths.stateDir, "mail-sentinel", "registration.json"),
+        "utf8",
+      );
+      const registration = JSON.parse(registrationRaw) as { agentId?: string };
+      expect(registration.agentId).toBe("mail-sentinel");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
