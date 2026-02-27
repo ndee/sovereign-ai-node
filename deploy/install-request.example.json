@@ -8,13 +8,9 @@
     "forceReinstall": false,
     "runOnboard": false
   },
-  "imap": {
-    "host": "imap.example.org",
-    "port": 993,
-    "tls": true,
-    "username": "operator@example.org",
-    "secretRef": "file:/etc/sovereign-node/secrets/imap-password",
-    "mailbox": "INBOX"
+  "openrouter": {
+    "model": "openrouter/anthropic/claude-sonnet-4-5",
+    "secretRef": "file:/etc/sovereign-node/secrets/openrouter-api-key"
   },
   "matrix": {
     "homeserverDomain": "matrix.example.org",

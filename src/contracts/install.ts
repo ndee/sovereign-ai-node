@@ -78,6 +78,17 @@ export const imapInstallInputSchema = z.object({
   mailbox: z.string().min(1).optional(),
 });
 
+export const openrouterInstallInputSchema = z
+  .object({
+    model: z.string().min(1).optional(),
+    apiKey: z.string().min(1).optional(),
+    secretRef: z.string().min(1).optional(),
+  })
+  .refine((value) => value.apiKey !== undefined || value.secretRef !== undefined, {
+    message: "openrouter.apiKey or openrouter.secretRef is required",
+    path: ["secretRef"],
+  });
+
 export const matrixInstallInputSchema = z.object({
   homeserverDomain: z.string().min(1),
   publicBaseUrl: z.string().min(1),
@@ -108,7 +119,8 @@ export const advancedInstallInputSchema = z.object({
 export const installRequestSchema = z.object({
   mode: z.literal("bundled_matrix"),
   openclaw: openclawInstallRequestSchema.optional(),
-  imap: imapInstallInputSchema,
+  openrouter: openrouterInstallInputSchema,
+  imap: imapInstallInputSchema.optional(),
   matrix: matrixInstallInputSchema,
   operator: operatorInstallInputSchema,
   mailSentinel: mailSentinelInstallInputSchema.optional(),
@@ -304,4 +316,3 @@ export type ReconfigureResult = z.infer<typeof reconfigureResultSchema>;
 export type TestImapResult = z.infer<typeof testImapResultSchema>;
 export type TestMatrixResult = z.infer<typeof testMatrixResultSchema>;
 export type StartInstallResult = z.infer<typeof startInstallResultSchema>;
-

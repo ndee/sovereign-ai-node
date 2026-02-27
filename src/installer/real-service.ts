@@ -65,6 +65,10 @@ type PersistedInstallJobRecord = {
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
 type RuntimeConfig = {
+  openrouter: {
+    model: string;
+    apiKeySecretRef: string;
+  };
   openclaw: {
     managedInstallation: boolean;
     installMethod: "install_sh";
@@ -88,6 +92,7 @@ type RuntimeConfig = {
     };
   };
   imap: {
+    status: "configured" | "pending";
     host: string;
     mailbox: string;
     secretRef: string;
@@ -129,6 +134,7 @@ type GatewayState = "running" | "stopped" | "failed" | "unknown";
 
 const MAIL_SENTINEL_AGENT_ID = "mail-sentinel";
 const MAIL_SENTINEL_CRON_ID = "mail-sentinel-poll";
+const MAIL_SENTINEL_HELLO_MESSAGE = "Hello from Mail Sentinel";
 
 export class RealInstallerService implements InstallerService {
   private readonly stubService: StubInstallerService;
@@ -401,8 +407,10 @@ export class RealInstallerService implements InstallerService {
       },
       imap: {
         authStatus: "unknown",
-        ...(runtimeConfig?.imap.host === undefined ? {} : { host: runtimeConfig.imap.host }),
-        ...(runtimeConfig?.imap.mailbox === undefined
+        ...(runtimeConfig?.imap.status !== "configured" || runtimeConfig.imap.host === undefined
+          ? {}
+          : { host: runtimeConfig.imap.host }),
+        ...(runtimeConfig?.imap.status !== "configured" || runtimeConfig.imap.mailbox === undefined
           ? {}
           : { mailbox: runtimeConfig.imap.mailbox }),
       },
@@ -993,6 +1001,12 @@ export class RealInstallerService implements InstallerService {
         id: "imap_validate",
         label: "Validate IMAP",
         run: async () => {
+          if (req.imap === undefined) {
+            this.logger.info(
+              "IMAP validation skipped because install request left IMAP in pending mode",
+            );
+            return;
+          }
           const result = await this.testImap({ imap: req.imap });
           if (!result.ok) {
             throw {
@@ -1154,10 +1168,11 @@ export class RealInstallerService implements InstallerService {
       },
       {
         id: "test_alert",
-        label: "Send test alert",
+        label: "Send hello alert",
         run: async () => {
           const testAlert = await this.testAlert({
             channel: "matrix",
+            text: MAIL_SENTINEL_HELLO_MESSAGE,
           });
           if (!testAlert.delivered) {
             throw {
@@ -1529,7 +1544,10 @@ export class RealInstallerService implements InstallerService {
     matrixAccounts: BundledMatrixAccountsResult;
     matrixRoom: BundledMatrixRoomBootstrapResult;
   }): Promise<RuntimeConfig> {
-    const imapSecretRef = await this.resolveImapSecretRef(input.req.imap);
+    const imapConfig = await this.resolveImapConfig(input.req.imap);
+    const openrouterSecretRef = await this.resolveOpenRouterSecretRef(input.req.openrouter);
+    const openrouterModel =
+      input.req.openrouter.model ?? "openrouter/anthropic/claude-sonnet-4-5";
     const operatorTokenSecretRef = await this.writeSecretFile(
       "matrix-operator-access-token",
       input.matrixAccounts.operator.accessToken,
@@ -1549,9 +1567,13 @@ export class RealInstallerService implements InstallerService {
         runtimeProfilePath: openclawPaths.runtimeProfilePath,
         gatewayEnvPath: openclawPaths.gatewayEnvPath,
       },
+      openrouter: {
+        model: openrouterModel,
+        apiKeySecretRef: openrouterSecretRef,
+      },
       openclawProfile: {
         plugins: {
-          allow: ["matrix", "imap-readonly"],
+          allow: imapConfig.status === "configured" ? ["matrix", "imap-readonly"] : ["matrix"],
         },
         agents: [
           {
@@ -1565,9 +1587,10 @@ export class RealInstallerService implements InstallerService {
         },
       },
       imap: {
-        host: input.req.imap.host,
-        mailbox: input.req.imap.mailbox ?? "INBOX",
-        secretRef: imapSecretRef,
+        status: imapConfig.status,
+        host: imapConfig.host,
+        mailbox: imapConfig.mailbox,
+        secretRef: imapConfig.secretRef,
       },
       matrix: {
         federationEnabled: input.matrixProvision.federationEnabled,
@@ -1622,14 +1645,26 @@ export class RealInstallerService implements InstallerService {
           every: runtimeConfig.openclawProfile.cron.every,
         },
       },
-      imap: {
-        host: runtimeConfig.imap.host,
-        port: input.req.imap.port,
-        tls: input.req.imap.tls,
-        username: input.req.imap.username,
-        secretRef: runtimeConfig.imap.secretRef,
-        mailbox: runtimeConfig.imap.mailbox,
+      openrouter: {
+        provider: "openrouter",
+        model: runtimeConfig.openrouter.model,
+        apiKeySecretRef: runtimeConfig.openrouter.apiKeySecretRef,
       },
+      imap:
+        runtimeConfig.imap.status === "configured" && input.req.imap !== undefined
+          ? {
+              status: "configured",
+              host: runtimeConfig.imap.host,
+              port: input.req.imap.port,
+              tls: input.req.imap.tls,
+              username: input.req.imap.username,
+              secretRef: runtimeConfig.imap.secretRef,
+              mailbox: runtimeConfig.imap.mailbox,
+            }
+          : {
+              status: "pending",
+              mailbox: runtimeConfig.imap.mailbox,
+            },
       matrix: {
         homeserverDomain: input.matrixProvision.homeserverDomain,
         publicBaseUrl: runtimeConfig.matrix.publicBaseUrl,
@@ -1683,34 +1718,48 @@ export class RealInstallerService implements InstallerService {
 
   private async writeOpenClawRuntimeArtifacts(runtimeConfig: RuntimeConfig): Promise<void> {
     const openclawPaths = this.getOpenClawRuntimePaths();
+    const openrouterApiKey = await this.resolveSecretRef(runtimeConfig.openrouter.apiKeySecretRef);
+    const imapConfigured = runtimeConfig.imap.status === "configured";
+    const pluginEntries: Record<string, unknown> = {
+      matrix: {
+        enabled: true,
+        config: {
+          homeserver: runtimeConfig.matrix.publicBaseUrl,
+          accessTokenSecretRef: runtimeConfig.matrix.bot.accessTokenSecretRef,
+          roomId: runtimeConfig.matrix.alertRoom.roomId,
+        },
+      },
+    };
+    if (imapConfigured) {
+      pluginEntries["imap-readonly"] = {
+        enabled: true,
+        config: {
+          account: {
+            host: runtimeConfig.imap.host,
+            mailbox: runtimeConfig.imap.mailbox,
+            secretRef: runtimeConfig.imap.secretRef,
+          },
+        },
+      };
+    }
+
     const runtimePayload = {
       generatedAt: now(),
       source: "sovereign-node",
       profileRef: openclawPaths.runtimeProfilePath,
       plugins: {
         allow: runtimeConfig.openclawProfile.plugins.allow,
-        entries: {
-          matrix: {
-            enabled: true,
-            config: {
-              homeserver: runtimeConfig.matrix.publicBaseUrl,
-              accessTokenSecretRef: runtimeConfig.matrix.bot.accessTokenSecretRef,
-              roomId: runtimeConfig.matrix.alertRoom.roomId,
-            },
-          },
-          "imap-readonly": {
-            enabled: true,
-            config: {
-              account: {
-                host: runtimeConfig.imap.host,
-                mailbox: runtimeConfig.imap.mailbox,
-                secretRef: runtimeConfig.imap.secretRef,
-              },
-            },
-          },
-        },
+        entries: pluginEntries,
       },
       agents: {
+        defaults: {
+          model: {
+            primary: runtimeConfig.openrouter.model,
+          },
+          models: {
+            [runtimeConfig.openrouter.model]: {},
+          },
+        },
         list: [
           {
             id: runtimeConfig.openclawProfile.agents[0]?.id ?? MAIL_SENTINEL_AGENT_ID,
@@ -1745,9 +1794,11 @@ export class RealInstallerService implements InstallerService {
         roomId: runtimeConfig.matrix.alertRoom.roomId,
       },
       imap: {
+        status: runtimeConfig.imap.status,
         host: runtimeConfig.imap.host,
         mailbox: runtimeConfig.imap.mailbox,
       },
+      openrouter: runtimeConfig.openrouter,
     };
 
     try {
@@ -1768,6 +1819,7 @@ export class RealInstallerService implements InstallerService {
         `OPENCLAW_CONFIG=${runtimeConfig.openclaw.runtimeConfigPath}`,
         `OPENCLAW_CONFIG_PATH=${runtimeConfig.openclaw.runtimeConfigPath}`,
         `SOVEREIGN_NODE_CONFIG=${this.paths.configPath}`,
+        `OPENROUTER_API_KEY=${openrouterApiKey}`,
       ];
       const envTempPath = `${runtimeConfig.openclaw.gatewayEnvPath}.${randomUUID()}.tmp`;
       await writeFile(envTempPath, `${envFileLines.join("\n")}\n`, "utf8");
@@ -1796,20 +1848,62 @@ export class RealInstallerService implements InstallerService {
     await rename(tempPath, path);
   }
 
-  private async resolveImapSecretRef(
+  private async resolveImapConfig(
     imap: InstallRequest["imap"],
-  ): Promise<string> {
+  ): Promise<RuntimeConfig["imap"]> {
+    if (imap === undefined) {
+      return {
+        status: "pending",
+        host: "pending",
+        mailbox: "INBOX",
+        secretRef: "env:SOVEREIGN_IMAP_SECRET_UNSET",
+      };
+    }
+
     if (imap.secretRef !== undefined && imap.secretRef.length > 0) {
-      return imap.secretRef;
+      return {
+        status: "configured",
+        host: imap.host,
+        mailbox: imap.mailbox ?? "INBOX",
+        secretRef: imap.secretRef,
+      };
     }
 
     if (imap.password !== undefined && imap.password.length > 0) {
-      return this.writeSecretFile("imap-password", imap.password);
+      return {
+        status: "configured",
+        host: imap.host,
+        mailbox: imap.mailbox ?? "INBOX",
+        secretRef: await this.writeSecretFile("imap-password", imap.password),
+      };
+    }
+
+    return {
+      status: "pending",
+      host: imap.host,
+      mailbox: imap.mailbox ?? "INBOX",
+      secretRef: "env:SOVEREIGN_IMAP_SECRET_UNSET",
+    };
+  }
+
+  private async resolveOpenRouterSecretRef(
+    openrouter: InstallRequest["openrouter"],
+  ): Promise<string> {
+    if (openrouter.secretRef !== undefined && openrouter.secretRef.length > 0) {
+      return openrouter.secretRef;
+    }
+
+    if (openrouter.apiKey !== undefined && openrouter.apiKey.length > 0) {
+      return this.writeSecretFile("openrouter-api-key", openrouter.apiKey);
+    }
+
+    if (process.env.OPENROUTER_API_KEY !== undefined && process.env.OPENROUTER_API_KEY.length > 0) {
+      return "env:OPENROUTER_API_KEY";
     }
 
     throw {
-      code: "IMAP_SECRET_MISSING",
-      message: "IMAP configuration is missing both secretRef and password",
+      code: "OPENROUTER_SECRET_MISSING",
+      message: "OpenRouter credentials are missing (provide openrouter.apiKey or openrouter.secretRef)",
       retryable: false,
     };
   }
@@ -1952,9 +2046,16 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
         },
       ];
   const openclawCron = isRecord(openclawProfile.cron) ? openclawProfile.cron : {};
+  const openrouter = isRecord(parsed.openrouter) ? parsed.openrouter : {};
   const imap = isRecord(parsed.imap) ? parsed.imap : {};
   const mailSentinel = isRecord(parsed.mailSentinel) ? parsed.mailSentinel : {};
   const operator = isRecord(matrix.operator) ? matrix.operator : {};
+  const inferredImapConfigured =
+    typeof imap.host === "string"
+    && imap.host.length > 0
+    && imap.host !== "pending"
+    && typeof imap.secretRef === "string"
+    && imap.secretRef.length > 0;
 
   return {
     openclaw: {
@@ -1971,13 +2072,23 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
       runtimeProfilePath,
       gatewayEnvPath,
     },
+    openrouter: {
+      model:
+        typeof openrouter.model === "string" && openrouter.model.length > 0
+          ? openrouter.model
+          : "openrouter/anthropic/claude-sonnet-4-5",
+      apiKeySecretRef:
+        typeof openrouter.apiKeySecretRef === "string" && openrouter.apiKeySecretRef.length > 0
+          ? openrouter.apiKeySecretRef
+          : "env:OPENROUTER_API_KEY",
+    },
     openclawProfile: {
       plugins: {
         allow: Array.isArray(openclawPlugins.allow)
           ? openclawPlugins.allow.filter(
               (entry): entry is string => typeof entry === "string" && entry.length > 0,
             )
-          : ["matrix", "imap-readonly"],
+          : ["matrix"],
       },
       agents: openclawAgents,
       cron: {
@@ -1992,6 +2103,12 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
       },
     },
     imap: {
+      status:
+        imap.status === "configured" || imap.status === "pending"
+          ? imap.status
+          : inferredImapConfigured
+            ? "configured"
+            : "pending",
       host: typeof imap.host === "string" && imap.host.length > 0 ? imap.host : "unknown",
       mailbox:
         typeof imap.mailbox === "string" && imap.mailbox.length > 0 ? imap.mailbox : "INBOX",

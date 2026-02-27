@@ -30,13 +30,9 @@ const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => ({
     forceReinstall: opts.forceOpenclawReinstall ?? false,
     runOnboard: false,
   },
-  imap: {
-    host: "imap.example.org",
-    port: 993,
-    tls: true,
-    username: "operator@example.org",
-    secretRef: "file:/etc/sovereign-node/secrets/imap-password",
-    mailbox: "INBOX",
+  openrouter: {
+    model: "openrouter/anthropic/claude-sonnet-4-5",
+    secretRef: "env:OPENROUTER_API_KEY",
   },
   matrix: {
     homeserverDomain: "matrix.example.org",

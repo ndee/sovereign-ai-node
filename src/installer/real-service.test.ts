@@ -30,6 +30,10 @@ const buildInstallRequest = (): InstallRequest => ({
     forceReinstall: false,
     runOnboard: false,
   },
+  openrouter: {
+    model: "openrouter/anthropic/claude-sonnet-4-5",
+    apiKey: "sk-or-test",
+  },
   imap: {
     host: "imap.example.org",
     port: 993,
@@ -90,6 +94,10 @@ const writeRuntimeArtifacts = async (paths: SovereignPaths): Promise<void> => {
           runtimeConfigPath,
           runtimeProfilePath,
           gatewayEnvPath,
+        },
+        openrouter: {
+          model: "openrouter/anthropic/claude-sonnet-4-5",
+          apiKeySecretRef: "env:OPENROUTER_API_KEY",
         },
         openclawProfile: {
           plugins: {
@@ -465,6 +473,7 @@ describe("RealInstallerService", () => {
     };
 
     let matrixTestCalls = 0;
+    let sentMessageBody = "";
     const service = new RealInstallerService(createLogger(), paths, {
       openclawBootstrapper: {
         detectInstalled: async () => ({
@@ -547,10 +556,11 @@ describe("RealInstallerService", () => {
           };
         },
       },
-      fetchImpl: async (url) => {
+      fetchImpl: async (url, init) => {
         if (!url.includes("/_matrix/client/v3/rooms/")) {
           return new Response("not found", { status: 404 });
         }
+        sentMessageBody = typeof init?.body === "string" ? init.body : "";
         return new Response(JSON.stringify({ event_id: "$evt1" }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
@@ -578,6 +588,7 @@ describe("RealInstallerService", () => {
       expect(stepStates.mail_sentinel_register).toBe("succeeded");
       expect(stepStates.smoke_checks).toBe("succeeded");
       expect(stepStates.test_alert).toBe("succeeded");
+      expect(sentMessageBody).toContain("Hello from Mail Sentinel");
 
       const stored = await service.getInstallJob(started.job.jobId);
       expect(stored.job.state).toBe("succeeded");

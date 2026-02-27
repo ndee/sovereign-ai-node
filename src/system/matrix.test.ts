@@ -20,6 +20,10 @@ const buildInstallRequest = (): InstallRequest => ({
     forceReinstall: false,
     runOnboard: false,
   },
+  openrouter: {
+    model: "openrouter/anthropic/claude-sonnet-4-5",
+    apiKey: "sk-or-test",
+  },
   imap: {
     host: "imap.example.org",
     port: 993,

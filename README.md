@@ -138,7 +138,7 @@ That means:
 
 ## Ubuntu VM Install (WIP)
 
-This repo now includes a host bootstrap script for a fresh Ubuntu VM:
+This repo now includes a guided bootstrap installer for a fresh Ubuntu VM:
 
 ```bash
 sudo bash scripts/install.sh --source-dir "$(pwd)"
@@ -147,16 +147,18 @@ sudo bash scripts/install.sh --source-dir "$(pwd)"
 For remote bootstrap (`curl | bash`), pass a repo URL:
 
 ```bash
-curl -fsSL <installer-url> | sudo bash -s -- --repo-url <git-url> --ref main
+curl -fsSL https://raw.githubusercontent.com/ndee/sovereign-ai-node/main/scripts/install.sh | sudo bash
 ```
 
-After bootstrap:
+The guided flow now:
 
-1. Create IMAP secret at `/etc/sovereign-node/secrets/imap-password`
-2. Copy request template:
-   `cp /etc/sovereign-node/install-request.example.json /etc/sovereign-node/install-request.json`
-3. Edit request values and run:
-   `sovereign-node install --request-file /etc/sovereign-node/install-request.json --json`
-4. Verify:
-   `sovereign-node status --json`
-   `sovereign-node doctor --json`
+1. Prompts for OpenRouter API key + model
+2. Provisions Sovereign Node + OpenClaw + bundled Matrix
+3. Installs/registers Mail Sentinel
+4. Sends a hello alert message to the Matrix room
+5. Lets you keep IMAP pending (configure now or later)
+
+Manual verify:
+
+- `sovereign-node status --json`
+- `sovereign-node doctor --json`

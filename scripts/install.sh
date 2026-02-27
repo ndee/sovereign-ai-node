@@ -14,6 +14,9 @@ SERVICE_GROUP="${SOVEREIGN_NODE_SERVICE_GROUP:-root}"
 ENV_FILE="${SOVEREIGN_NODE_ENV_FILE:-/etc/default/sovereign-node-api}"
 API_HOST="${SOVEREIGN_NODE_API_HOST:-127.0.0.1}"
 API_PORT="${SOVEREIGN_NODE_API_PORT:-8787}"
+REQUEST_FILE="${SOVEREIGN_NODE_REQUEST_FILE:-/etc/sovereign-node/install-request.json}"
+RUN_INSTALL="${SOVEREIGN_NODE_RUN_INSTALL:-1}"
+NON_INTERACTIVE="${SOVEREIGN_NODE_NON_INTERACTIVE:-0}"
 
 log() {
   printf '[%s] %s\n' "$SCRIPT_NAME" "$*"
@@ -37,6 +40,9 @@ Options:
   --service-group <group>  systemd service group (default: root)
   --api-host <host>        API bind host (default: 127.0.0.1)
   --api-port <port>        API bind port (default: 8787)
+  --request-file <path>    Install request output path (default: /etc/sovereign-node/install-request.json)
+  --skip-install-run       Only bootstrap host; do not run sovereign-node install
+  --non-interactive        Do not prompt; keep/generate request file and exit
   -h, --help               Show help
 EOF
 }
@@ -76,6 +82,18 @@ parse_args() {
       --api-port)
         API_PORT="$2"
         shift 2
+        ;;
+      --request-file)
+        REQUEST_FILE="$2"
+        shift 2
+        ;;
+      --skip-install-run)
+        RUN_INSTALL="0"
+        shift
+        ;;
+      --non-interactive)
+        NON_INTERACTIVE="1"
+        shift
         ;;
       -h|--help)
         usage
@@ -288,6 +306,243 @@ install_request_template() {
   chmod 0640 "$dst"
 }
 
+has_tty() {
+  [[ -e /dev/tty ]]
+}
+
+prompt_value() {
+  local prompt default value
+  prompt="$1"
+  default="${2:-}"
+  if [[ -n "$default" ]]; then
+    printf "%s [%s]: " "$prompt" "$default" > /dev/tty
+  else
+    printf "%s: " "$prompt" > /dev/tty
+  fi
+  IFS= read -r value < /dev/tty || true
+  if [[ -z "$value" ]]; then
+    value="$default"
+  fi
+  printf '%s' "$value"
+}
+
+prompt_secret() {
+  local prompt value
+  prompt="$1"
+  printf "%s: " "$prompt" > /dev/tty
+  stty -echo < /dev/tty
+  IFS= read -r value < /dev/tty || true
+  stty echo < /dev/tty
+  printf "\n" > /dev/tty
+  printf '%s' "$value"
+}
+
+prompt_yes_no() {
+  local prompt default answer normalized
+  prompt="$1"
+  default="$2"
+  while true; do
+    printf "%s [%s/%s] (default: %s): " \
+      "$prompt" \
+      "y" \
+      "n" \
+      "$default" > /dev/tty
+    IFS= read -r answer < /dev/tty || true
+    normalized="$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')"
+    if [[ -z "$normalized" ]]; then
+      normalized="$default"
+    fi
+    case "$normalized" in
+      y|yes)
+        printf '1'
+        return
+        ;;
+      n|no)
+        printf '0'
+        return
+        ;;
+    esac
+  done
+}
+
+write_secret_file() {
+  local path value
+  path="$1"
+  value="$2"
+  install -d -m 0700 "$(dirname "$path")"
+  printf '%s\n' "$value" > "$path"
+  chmod 0600 "$path"
+  chown "${SERVICE_USER}:${SERVICE_GROUP}" "$path" || true
+}
+
+run_install_wizard() {
+  local openrouter_api_key openrouter_model matrix_domain matrix_public_base_url
+  local operator_username alert_room_name poll_interval lookback_window federation_enabled
+  local configure_imap imap_host imap_port imap_tls imap_username imap_password imap_mailbox
+  local openrouter_secret_path imap_secret_path
+
+  log "Starting guided Sovereign Node install wizard"
+
+  openrouter_api_key="$(prompt_secret "OpenRouter API key (sk-or-...)")"
+  while [[ -z "$openrouter_api_key" ]]; do
+    printf "OpenRouter API key is required.\n" > /dev/tty
+    openrouter_api_key="$(prompt_secret "OpenRouter API key (sk-or-...)")"
+  done
+
+  openrouter_model="$(prompt_value "OpenRouter model" "openrouter/anthropic/claude-sonnet-4-5")"
+  matrix_domain="$(prompt_value "Matrix homeserver domain" "matrix.local.test")"
+  matrix_public_base_url="$(prompt_value "Matrix public base URL" "http://127.0.0.1:8008")"
+  operator_username="$(prompt_value "Operator username" "operator")"
+  alert_room_name="$(prompt_value "Alert room name" "Sovereign Alerts")"
+  poll_interval="$(prompt_value "Mail Sentinel poll interval" "5m")"
+  lookback_window="$(prompt_value "Mail Sentinel lookback window" "15m")"
+  federation_enabled="$(prompt_yes_no "Enable Matrix federation?" "n")"
+  configure_imap="$(prompt_yes_no "Configure IMAP now? (choose no to keep IMAP pending)" "n")"
+
+  imap_host=""
+  imap_port="993"
+  imap_tls="1"
+  imap_username=""
+  imap_password=""
+  imap_mailbox="INBOX"
+
+  if [[ "$configure_imap" == "1" ]]; then
+    imap_host="$(prompt_value "IMAP host" "imap.example.org")"
+    imap_port="$(prompt_value "IMAP port" "993")"
+    imap_tls="$(prompt_yes_no "Use TLS for IMAP?" "y")"
+    imap_username="$(prompt_value "IMAP username" "operator@example.org")"
+    imap_password="$(prompt_secret "IMAP password/app password")"
+    while [[ -z "$imap_password" ]]; do
+      printf "IMAP password is required when IMAP is configured.\n" > /dev/tty
+      imap_password="$(prompt_secret "IMAP password/app password")"
+    done
+    imap_mailbox="$(prompt_value "IMAP mailbox" "INBOX")"
+  fi
+
+  openrouter_secret_path="/etc/sovereign-node/secrets/openrouter-api-key"
+  write_secret_file "$openrouter_secret_path" "$openrouter_api_key"
+
+  imap_secret_path="/etc/sovereign-node/secrets/imap-password"
+  if [[ "$configure_imap" == "1" ]]; then
+    write_secret_file "$imap_secret_path" "$imap_password"
+  fi
+
+  export SN_REQUEST_FILE="$REQUEST_FILE"
+  export SN_OPENROUTER_MODEL="$openrouter_model"
+  export SN_OPENROUTER_SECRET_REF="file:${openrouter_secret_path}"
+  export SN_MATRIX_DOMAIN="$matrix_domain"
+  export SN_MATRIX_PUBLIC_BASE_URL="$matrix_public_base_url"
+  export SN_MATRIX_FEDERATION_ENABLED="$federation_enabled"
+  export SN_OPERATOR_USERNAME="$operator_username"
+  export SN_ALERT_ROOM_NAME="$alert_room_name"
+  export SN_POLL_INTERVAL="$poll_interval"
+  export SN_LOOKBACK_WINDOW="$lookback_window"
+  export SN_IMAP_CONFIGURE="$configure_imap"
+  export SN_IMAP_HOST="$imap_host"
+  export SN_IMAP_PORT="$imap_port"
+  export SN_IMAP_TLS="$imap_tls"
+  export SN_IMAP_USERNAME="$imap_username"
+  export SN_IMAP_SECRET_REF="file:${imap_secret_path}"
+  export SN_IMAP_MAILBOX="$imap_mailbox"
+
+  node <<'NODE'
+const fs = require("node:fs");
+const req = {
+  mode: "bundled_matrix",
+  openclaw: {
+    manageInstallation: true,
+    installMethod: "install_sh",
+    version: "pinned-by-sovereign",
+    skipIfCompatibleInstalled: true,
+    forceReinstall: false,
+    runOnboard: false,
+  },
+  openrouter: {
+    model: process.env.SN_OPENROUTER_MODEL,
+    secretRef: process.env.SN_OPENROUTER_SECRET_REF,
+  },
+  matrix: {
+    homeserverDomain: process.env.SN_MATRIX_DOMAIN,
+    publicBaseUrl: process.env.SN_MATRIX_PUBLIC_BASE_URL,
+    federationEnabled: process.env.SN_MATRIX_FEDERATION_ENABLED === "1",
+    tlsMode: "local-dev",
+    alertRoomName: process.env.SN_ALERT_ROOM_NAME,
+  },
+  operator: {
+    username: process.env.SN_OPERATOR_USERNAME,
+  },
+  mailSentinel: {
+    pollInterval: process.env.SN_POLL_INTERVAL,
+    lookbackWindow: process.env.SN_LOOKBACK_WINDOW,
+    e2eeAlertRoom: false,
+  },
+  advanced: {
+    nonInteractive: true,
+  },
+};
+
+if (process.env.SN_IMAP_CONFIGURE === "1") {
+  req.imap = {
+    host: process.env.SN_IMAP_HOST,
+    port: Number(process.env.SN_IMAP_PORT || "993"),
+    tls: process.env.SN_IMAP_TLS === "1",
+    username: process.env.SN_IMAP_USERNAME,
+    secretRef: process.env.SN_IMAP_SECRET_REF,
+    mailbox: process.env.SN_IMAP_MAILBOX || "INBOX",
+  };
+}
+
+fs.mkdirSync(require("node:path").dirname(process.env.SN_REQUEST_FILE), { recursive: true });
+fs.writeFileSync(process.env.SN_REQUEST_FILE, `${JSON.stringify(req, null, 2)}\n`, "utf8");
+NODE
+
+  chmod 0640 "$REQUEST_FILE"
+  chown "${SERVICE_USER}:${SERVICE_GROUP}" "$REQUEST_FILE" || true
+  log "Wrote install request: $REQUEST_FILE"
+}
+
+prepare_request_file() {
+  if [[ "$NON_INTERACTIVE" == "1" ]]; then
+    if [[ ! -f "$REQUEST_FILE" ]]; then
+      cp /etc/sovereign-node/install-request.example.json "$REQUEST_FILE"
+      chmod 0640 "$REQUEST_FILE"
+      chown "${SERVICE_USER}:${SERVICE_GROUP}" "$REQUEST_FILE" || true
+      log "Non-interactive mode: wrote template request to $REQUEST_FILE"
+    fi
+    return
+  fi
+
+  if ! has_tty; then
+    if [[ ! -f "$REQUEST_FILE" ]]; then
+      cp /etc/sovereign-node/install-request.example.json "$REQUEST_FILE"
+      chmod 0640 "$REQUEST_FILE"
+      chown "${SERVICE_USER}:${SERVICE_GROUP}" "$REQUEST_FILE" || true
+    fi
+    log "No TTY available; skipping interactive installer wizard"
+    RUN_INSTALL="0"
+    return
+  fi
+
+  run_install_wizard
+}
+
+run_install_flow() {
+  if [[ "$RUN_INSTALL" != "1" ]]; then
+    log "Skipping sovereign-node install run (--skip-install-run)"
+    return
+  fi
+
+  if [[ ! -f "$REQUEST_FILE" ]]; then
+    die "Install request file not found: $REQUEST_FILE"
+  fi
+
+  log "Running sovereign-node install"
+  sovereign-node install --request-file "$REQUEST_FILE" --json
+  log "Install finished. Checking status"
+  sovereign-node status --json || true
+  sovereign-node doctor --json || true
+}
+
 main() {
   parse_args "$@"
   require_root
@@ -302,21 +557,18 @@ main() {
   install_wrappers
   install_systemd_unit
   install_request_template
+  prepare_request_file
+  run_install_flow
 
-  cat <<'EOF'
-Install completed.
+  cat <<EOF
+Bootstrap completed.
 
-Next steps:
-1. Create IMAP secret:
-   printf '%s\n' '<imap-password>' > /etc/sovereign-node/secrets/imap-password
-   chmod 600 /etc/sovereign-node/secrets/imap-password
-2. Copy and edit the request file:
-   cp /etc/sovereign-node/install-request.example.json /etc/sovereign-node/install-request.json
-3. Run install flow:
-   sovereign-node install --request-file /etc/sovereign-node/install-request.json --json
-4. Verify:
-   sovereign-node status --json
-   sovereign-node doctor --json
+Request file: ${REQUEST_FILE}
+
+Useful commands:
+- sovereign-node install --request-file ${REQUEST_FILE} --json
+- sovereign-node status --json
+- sovereign-node doctor --json
 EOF
 }
 
