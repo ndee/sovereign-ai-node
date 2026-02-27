@@ -1,0 +1,19 @@
+[Unit]
+Description=Sovereign Node API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+Group=__SERVICE_GROUP__
+EnvironmentFile=-__ENV_FILE__
+WorkingDirectory=__APP_DIR__
+ExecStart=/usr/local/bin/sovereign-node-api
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

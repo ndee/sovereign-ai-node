@@ -136,4 +136,27 @@ That means:
 - High-risk capabilities (mail, files, secrets, outbound APIs) should be brokered by the kernel, not granted directly to arbitrary plugins
 - OpenClaw can be replaced or supplemented later without redesigning the platform
 
-# sovereign-ai-node
+## Ubuntu VM Install (WIP)
+
+This repo now includes a host bootstrap script for a fresh Ubuntu VM:
+
+```bash
+sudo bash scripts/install.sh --source-dir "$(pwd)"
+```
+
+For remote bootstrap (`curl | bash`), pass a repo URL:
+
+```bash
+curl -fsSL <installer-url> | sudo bash -s -- --repo-url <git-url> --ref main
+```
+
+After bootstrap:
+
+1. Create IMAP secret at `/etc/sovereign-node/secrets/imap-password`
+2. Copy request template:
+   `cp /etc/sovereign-node/install-request.example.json /etc/sovereign-node/install-request.json`
+3. Edit request values and run:
+   `sovereign-node install --request-file /etc/sovereign-node/install-request.json --json`
+4. Verify:
+   `sovereign-node status --json`
+   `sovereign-node doctor --json`

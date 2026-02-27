@@ -1,0 +1,37 @@
+{
+  "mode": "bundled_matrix",
+  "openclaw": {
+    "manageInstallation": true,
+    "installMethod": "install_sh",
+    "version": "pinned-by-sovereign",
+    "skipIfCompatibleInstalled": true,
+    "forceReinstall": false,
+    "runOnboard": false
+  },
+  "imap": {
+    "host": "imap.example.org",
+    "port": 993,
+    "tls": true,
+    "username": "operator@example.org",
+    "secretRef": "file:/etc/sovereign-node/secrets/imap-password",
+    "mailbox": "INBOX"
+  },
+  "matrix": {
+    "homeserverDomain": "matrix.example.org",
+    "publicBaseUrl": "https://matrix.example.org",
+    "federationEnabled": false,
+    "tlsMode": "local-dev",
+    "alertRoomName": "Sovereign Alerts"
+  },
+  "operator": {
+    "username": "operator"
+  },
+  "mailSentinel": {
+    "pollInterval": "5m",
+    "lookbackWindow": "15m",
+    "e2eeAlertRoom": false
+  },
+  "advanced": {
+    "nonInteractive": true
+  }
+}
