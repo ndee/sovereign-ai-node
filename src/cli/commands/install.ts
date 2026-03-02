@@ -16,7 +16,7 @@ type InstallOptions = {
   openclawVersion?: string;
   skipOpenclawInstall?: boolean;
   forceOpenclawReinstall?: boolean;
-  matrixTlsMode?: "auto" | "manual" | "local-dev";
+  matrixTlsMode?: "auto" | "internal" | "manual" | "local-dev";
   requestFile?: string;
 };
 
@@ -65,7 +65,7 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
     .option("--force-openclaw-reinstall", "Force OpenClaw reinstall (repair path)")
     .option(
       "--matrix-tls-mode <mode>",
-      "Matrix TLS mode (auto|manual|local-dev) (scaffold/dev)",
+      "Matrix TLS mode (auto|internal|manual|local-dev) (scaffold/dev)",
     )
     .option(
       "--request-file <path>",

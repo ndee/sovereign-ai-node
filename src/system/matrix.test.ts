@@ -258,6 +258,67 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
     }
   });
 
+  it("writes an internal-TLS reverse-proxy bundle for LAN-only installs", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-test-"));
+    const recordedExecCalls: ExecInput[] = [];
+
+    const fakeExecRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        recordedExecCalls.push(input);
+        if (input.command === "docker") {
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: "services:\n  postgres: {}\n  synapse: {}\n  reverse-proxy: {}\n",
+            stderr: "",
+          };
+        }
+        return {
+          command: [input.command, ...(input.args ?? [])].join(" "),
+          exitCode: 127,
+          stdout: "",
+          stderr: "command not found",
+        };
+      },
+    };
+
+    const paths = buildPaths(tempRoot);
+    const provisioner = new DockerComposeBundledMatrixProvisioner(
+      fakeExecRunner,
+      createLogger(),
+      paths,
+    );
+
+    try {
+      const req = buildInstallRequest();
+      req.matrix.homeserverDomain = "192.168.0.54";
+      req.matrix.publicBaseUrl = "https://192.168.0.54:8448";
+      req.matrix.tlsMode = "internal";
+      const result = await provisioner.provision(req);
+
+      expect(result.tlsMode).toBe("internal");
+      expect(result.adminBaseUrl).toBe("http://127.0.0.1:8008");
+
+      const composeText = await readFile(result.composeFilePath, "utf8");
+      expect(composeText).toContain("reverse-proxy:");
+      expect(composeText).toContain('"127.0.0.1:8008:8008"');
+      expect(composeText).toContain('"8448:443"');
+
+      const caddyText = await readFile(join(result.projectDir, "reverse-proxy", "Caddyfile"), "utf8");
+      expect(caddyText).toContain("192.168.0.54 {");
+      expect(caddyText).toContain("tls internal");
+
+      const wellKnownServer = await readFile(
+        join(result.projectDir, "well-known", ".well-known", "matrix", "server"),
+        "utf8",
+      );
+      expect(wellKnownServer).toContain('"m.server": "192.168.0.54:8448"');
+      expect(recordedExecCalls).toHaveLength(1);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("bootstraps operator/bot accounts and creates alert room in local-dev mode", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-test-"));
     const recordedExecCalls: ExecInput[] = [];

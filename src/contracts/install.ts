@@ -93,7 +93,7 @@ export const matrixInstallInputSchema = z.object({
   homeserverDomain: z.string().min(1),
   publicBaseUrl: z.string().min(1),
   federationEnabled: z.boolean().optional(),
-  tlsMode: z.enum(["auto", "manual", "local-dev"]).optional(),
+  tlsMode: z.enum(["auto", "internal", "manual", "local-dev"]).optional(),
   alertRoomName: z.string().min(1).optional(),
 });
 

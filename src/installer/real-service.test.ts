@@ -122,6 +122,7 @@ const writeRuntimeArtifacts = async (paths: SovereignPaths): Promise<void> => {
         },
         matrix: {
           publicBaseUrl: "https://matrix.example.org",
+          adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: false,
           operator: {
             userId: "@operator:matrix.example.org",
@@ -474,6 +475,8 @@ describe("RealInstallerService", () => {
     };
 
     let matrixTestCalls = 0;
+    const matrixProbeUrls: string[] = [];
+    const observedMatrixUrls: string[] = [];
     let sentMessageBody = "";
     const service = new RealInstallerService(createLogger(), paths, {
       openclawBootstrapper: {
@@ -550,6 +553,7 @@ describe("RealInstallerService", () => {
         }),
         test: async (req) => {
           matrixTestCalls += 1;
+          matrixProbeUrls.push(req.publicBaseUrl);
           return {
             ok: true,
             homeserverUrl: req.publicBaseUrl,
@@ -561,6 +565,7 @@ describe("RealInstallerService", () => {
         if (!url.includes("/_matrix/client/v3/rooms/")) {
           return new Response("not found", { status: 404 });
         }
+        observedMatrixUrls.push(url);
         sentMessageBody = typeof init?.body === "string" ? init.body : "";
         return new Response(JSON.stringify({ event_id: "$evt1" }), {
           status: 200,
@@ -589,6 +594,11 @@ describe("RealInstallerService", () => {
       expect(stepStates.mail_sentinel_register).toBe("succeeded");
       expect(stepStates.smoke_checks).toBe("succeeded");
       expect(stepStates.test_alert).toBe("succeeded");
+      expect(matrixProbeUrls).toEqual(["http://127.0.0.1:8008"]);
+      expect(observedMatrixUrls).toHaveLength(2);
+      expect(observedMatrixUrls.every((url) => url.startsWith("http://127.0.0.1:8008/"))).toBe(
+        true,
+      );
       expect(sentMessageBody).toContain("Hello from Mail Sentinel");
 
       const stored = await service.getInstallJob(started.job.jobId);
@@ -628,7 +638,7 @@ describe("RealInstallerService", () => {
       expect(openclawConfig.plugins?.entries?.matrix?.enabled).toBe(true);
       expect(openclawConfig.plugins?.entries?.matrix?.config).toBeUndefined();
       expect(openclawConfig.channels?.matrix?.enabled).toBe(true);
-      expect(openclawConfig.channels?.matrix?.homeserver).toBe("http://matrix.example.org");
+      expect(openclawConfig.channels?.matrix?.homeserver).toBe("http://127.0.0.1:8008");
       expect(openclawConfig.channels?.matrix?.userId).toBe("@mail-sentinel:matrix.example.org");
       expect(openclawConfig.agents?.defaults?.model).toBe(
         "openai/gpt-5-nano",

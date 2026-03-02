@@ -21,7 +21,7 @@ const DEFAULT_CADDY_IMAGE = "caddy:2.10.2-alpine";
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
-type BundledMatrixTlsMode = "auto" | "local-dev";
+type BundledMatrixTlsMode = "auto" | "internal" | "local-dev";
 
 export type BundledMatrixProvisionResult = {
   projectDir: string;
@@ -84,11 +84,11 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         retryable: false,
         details: {
           requestedTlsMode: tlsMode,
-          supportedTlsModes: ["auto", "local-dev"],
+          supportedTlsModes: ["auto", "internal", "local-dev"],
         },
       };
     }
-    if (tlsMode !== "local-dev" && tlsMode !== "auto") {
+    if (tlsMode !== "local-dev" && tlsMode !== "auto" && tlsMode !== "internal") {
       throw {
         code: "MATRIX_TLS_MODE_UNSUPPORTED",
         message: "Bundled Matrix provisioning received an unknown tlsMode",
@@ -121,7 +121,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
 
     await mkdir(synapseDir, { recursive: true });
     await mkdir(postgresDir, { recursive: true });
-    if (tlsMode === "auto") {
+    if (tlsMode !== "local-dev") {
       await mkdir(wellKnownDir, { recursive: true });
       await mkdir(join(wellKnownDir, ".well-known", "matrix"), { recursive: true });
       await mkdir(proxyDir, { recursive: true });
@@ -130,7 +130,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     }
     await ensureDirectoryTreeWritable(synapseDir);
     await ensureDirectoryTreeWritable(postgresDir);
-    if (tlsMode === "auto") {
+    if (tlsMode !== "local-dev") {
       await ensureDirectoryTreeWritable(wellKnownDir);
       await ensureDirectoryTreeWritable(proxyDir);
       await ensureDirectoryTreeWritable(proxyDataDir);
@@ -155,11 +155,11 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       caddyImage: DEFAULT_CADDY_IMAGE,
       tlsMode,
       localSynapsePortBinding:
-        tlsMode === "auto"
+        tlsMode !== "local-dev"
           ? "127.0.0.1:8008:8008"
           : resolveLocalDevSynapsePortBinding(publicBaseUrl),
       httpsProxyPortBinding:
-        tlsMode === "auto" ? resolveAutoHttpsProxyPortBinding(publicBaseUrl) : undefined,
+        tlsMode !== "local-dev" ? resolveAutoHttpsProxyPortBinding(publicBaseUrl) : undefined,
     });
     const envFile = renderEnvFile({
       homeserverDomain,
@@ -172,7 +172,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       homeserverDomain,
       publicBaseUrl,
       federationEnabled,
-      behindReverseProxy: tlsMode === "auto",
+      behindReverseProxy: tlsMode !== "local-dev",
       postgresPassword: generated.postgresPassword,
       registrationSharedSecret: generated.registrationSharedSecret,
       macaroonSecret: generated.macaroonSecret,
@@ -189,13 +189,17 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       writeFile(join(synapseDir, generated.signingKeyFile), `${signingKey}\n`, "utf8"),
       writeFile(join(synapseDir, "log.config"), `${logConfig}\n`, "utf8"),
     ];
-    if (tlsMode === "auto") {
+    if (tlsMode !== "local-dev") {
       const wellKnown = renderWellKnownFiles({
         homeserverDomain,
         publicBaseUrl,
       });
       writes.push(
-        writeFile(join(proxyDir, "Caddyfile"), `${renderCaddyfile(homeserverDomain)}\n`, "utf8"),
+        writeFile(
+          join(proxyDir, "Caddyfile"),
+          `${renderCaddyfile(homeserverDomain, tlsMode)}\n`,
+          "utf8",
+        ),
         writeFile(
           join(wellKnownDir, ".well-known", "matrix", "client"),
           `${wellKnown.client}\n`,
@@ -212,7 +216,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     await Promise.all(writes);
     await ensureDirectoryTreeWritable(synapseDir);
     await ensureDirectoryTreeWritable(postgresDir);
-    if (tlsMode === "auto") {
+    if (tlsMode !== "local-dev") {
       await ensureDirectoryTreeWritable(wellKnownDir);
       await ensureDirectoryTreeWritable(proxyDir);
       await ensureDirectoryTreeWritable(proxyDataDir);
@@ -538,7 +542,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
 
   private async ensureStackRunning(provision: BundledMatrixProvisionResult): Promise<void> {
     const services = ["postgres", "synapse"];
-    if (provision.tlsMode === "auto") {
+    if (provision.tlsMode !== "local-dev") {
       services.push("reverse-proxy");
     }
     const upArgs = ["up", "-d", "--remove-orphans", "--force-recreate", ...services];
@@ -1084,7 +1088,7 @@ services:
       - "${input.localSynapsePortBinding}"
     volumes:
       - ./synapse:/data
-${input.tlsMode === "auto"
+${input.tlsMode !== "local-dev"
   ? `
 
   reverse-proxy:
@@ -1209,12 +1213,22 @@ const isLoopbackHostname = (value: string): boolean =>
 const isIpAddressHostname = (value: string): boolean =>
   /^[0-9]{1,3}(?:\.[0-9]{1,3}){3}$/.test(value) || value.includes(":");
 
+const isLikelyLanOnlyHostname = (value: string): boolean =>
+  isLoopbackHostname(value)
+  || isIpAddressHostname(value)
+  || !value.includes(".")
+  || value.endsWith(".local")
+  || value.endsWith(".localhost")
+  || value.endsWith(".home.arpa")
+  || value.endsWith(".internal")
+  || value.endsWith(".lan");
+
 const validateBundledTlsMode = (input: {
   tlsMode: BundledMatrixTlsMode;
   homeserverDomain: string;
   publicBaseUrl: string;
 }): void => {
-  if (input.tlsMode !== "auto") {
+  if (input.tlsMode === "local-dev") {
     return;
   }
 
@@ -1226,7 +1240,7 @@ const validateBundledTlsMode = (input: {
   if (parsed.protocol !== "https:") {
     throw {
       code: "MATRIX_TLS_MODE_INVALID",
-      message: "Bundled Matrix tlsMode=auto requires an https publicBaseUrl",
+      message: `Bundled Matrix tlsMode=${input.tlsMode} requires an https publicBaseUrl`,
       retryable: false,
       details: {
         tlsMode: input.tlsMode,
@@ -1234,10 +1248,11 @@ const validateBundledTlsMode = (input: {
       },
     };
   }
-  if (isLoopbackHostname(publicHost) || isIpAddressHostname(publicHost)) {
+  if (input.tlsMode === "auto" && isLikelyLanOnlyHostname(publicHost)) {
     throw {
       code: "MATRIX_TLS_MODE_INVALID",
-      message: "Bundled Matrix tlsMode=auto requires a public DNS hostname, not a loopback address or IP literal",
+      message:
+        "Bundled Matrix tlsMode=auto requires a public DNS hostname, not a LAN-only hostname, loopback address, or IP literal",
       retryable: false,
       details: {
         tlsMode: input.tlsMode,
@@ -1248,7 +1263,7 @@ const validateBundledTlsMode = (input: {
   if (publicHost !== homeserverDomain) {
     throw {
       code: "MATRIX_TLS_MODE_INVALID",
-      message: "Bundled Matrix tlsMode=auto currently requires homeserverDomain to match the publicBaseUrl hostname",
+      message: `Bundled Matrix tlsMode=${input.tlsMode} currently requires homeserverDomain to match the publicBaseUrl hostname`,
       retryable: false,
       details: {
         homeserverDomain: input.homeserverDomain,
@@ -1259,7 +1274,18 @@ const validateBundledTlsMode = (input: {
   if (publicPort === "80") {
     throw {
       code: "MATRIX_TLS_MODE_INVALID",
-      message: "Bundled Matrix tlsMode=auto cannot use HTTPS on port 80",
+      message: `Bundled Matrix tlsMode=${input.tlsMode} cannot use HTTPS on port 80`,
+      retryable: false,
+      details: {
+        publicBaseUrl: input.publicBaseUrl,
+      },
+    };
+  }
+  if (publicPort === "8008") {
+    throw {
+      code: "MATRIX_TLS_MODE_INVALID",
+      message:
+        `Bundled Matrix tlsMode=${input.tlsMode} cannot publish HTTPS on port 8008 because that port is reserved for the local Synapse admin endpoint`,
       retryable: false,
       details: {
         publicBaseUrl: input.publicBaseUrl,
@@ -1268,13 +1294,17 @@ const validateBundledTlsMode = (input: {
   }
 };
 
-const renderCaddyfile = (homeserverDomain: string): string =>
+const renderCaddyfile = (
+  homeserverDomain: string,
+  tlsMode: Exclude<BundledMatrixTlsMode, "local-dev">,
+): string =>
   [
     "{",
     "  admin off",
     "}",
     "",
     `${homeserverDomain} {`,
+    ...(tlsMode === "internal" ? ["  tls internal"] : []),
     "  @wellKnown path /.well-known/matrix/client /.well-known/matrix/server",
     "  handle @wellKnown {",
     "    root * /srv",

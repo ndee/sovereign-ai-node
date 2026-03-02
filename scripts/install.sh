@@ -768,6 +768,44 @@ warn_if_missing_secret_ref() {
   return 0
 }
 
+infer_matrix_tls_mode_from_url() {
+  node - "$1" <<'NODE'
+const raw = process.argv[2] || "";
+
+const isLoopback = (value) =>
+  value === "localhost"
+  || value === "127.0.0.1"
+  || value === "::1"
+  || value === "[::1]";
+
+const isIpLiteral = (value) =>
+  /^[0-9]{1,3}(?:\.[0-9]{1,3}){3}$/.test(value) || value.includes(":");
+
+const isLikelyLanOnly = (value) =>
+  isLoopback(value)
+  || isIpLiteral(value)
+  || !value.includes(".")
+  || value.endsWith(".local")
+  || value.endsWith(".localhost")
+  || value.endsWith(".home.arpa")
+  || value.endsWith(".internal")
+  || value.endsWith(".lan");
+
+let mode = "local-dev";
+try {
+  const parsed = new URL(raw);
+  if (parsed.protocol === "https:") {
+    const host = parsed.hostname.trim().toLowerCase();
+    mode = isLikelyLanOnly(host) ? "internal" : "auto";
+  }
+} catch {
+  mode = raw.startsWith("https://") ? "auto" : "local-dev";
+}
+
+process.stdout.write(mode);
+NODE
+}
+
 resolve_action() {
   local default_choice selected_choice subtitle
 
@@ -839,7 +877,36 @@ write_request_file_from_env() {
   node <<'NODE'
 const fs = require("node:fs");
 const matrixPublicBaseUrl = process.env.SN_MATRIX_PUBLIC_BASE_URL || "";
-const matrixTlsMode = /^https:\/\//i.test(matrixPublicBaseUrl) ? "auto" : "local-dev";
+const inferMatrixTlsMode = (value) => {
+  const isLoopback = (host) =>
+    host === "localhost"
+    || host === "127.0.0.1"
+    || host === "::1"
+    || host === "[::1]";
+  const isIpLiteral = (host) =>
+    /^[0-9]{1,3}(?:\.[0-9]{1,3}){3}$/.test(host) || host.includes(":");
+  const isLikelyLanOnly = (host) =>
+    isLoopback(host)
+    || isIpLiteral(host)
+    || !host.includes(".")
+    || host.endsWith(".local")
+    || host.endsWith(".localhost")
+    || host.endsWith(".home.arpa")
+    || host.endsWith(".internal")
+    || host.endsWith(".lan");
+
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "https:") {
+      return "local-dev";
+    }
+    return isLikelyLanOnly(parsed.hostname.trim().toLowerCase()) ? "internal" : "auto";
+  } catch {
+    return value.startsWith("https://") ? "auto" : "local-dev";
+  }
+};
+
+const matrixTlsMode = process.env.SN_MATRIX_TLS_MODE || inferMatrixTlsMode(matrixPublicBaseUrl);
 const req = {
   mode: "bundled_matrix",
   openclaw: {
@@ -900,8 +967,10 @@ review_install_request() {
   ui_info "OpenRouter secret: ${SN_OPENROUTER_SECRET_MODE}"
   ui_info "Matrix homeserver domain: ${SN_MATRIX_DOMAIN}"
   ui_info "Matrix public base URL: ${SN_MATRIX_PUBLIC_BASE_URL}"
-  if [[ "${SN_MATRIX_PUBLIC_BASE_URL}" == https://* ]]; then
+  if [[ "${SN_MATRIX_TLS_MODE}" == "auto" ]]; then
     ui_info "Matrix TLS mode: auto (bundled HTTPS reverse proxy)"
+  elif [[ "${SN_MATRIX_TLS_MODE}" == "internal" ]]; then
+    ui_info "Matrix TLS mode: internal (LAN HTTPS with Caddy local CA)"
   else
     ui_info "Matrix TLS mode: local-dev"
   fi
@@ -927,6 +996,7 @@ review_install_request() {
 run_install_wizard() {
   local defaults_status openrouter_api_key openrouter_model matrix_domain matrix_public_base_url
   local operator_username alert_room_name poll_interval lookback_window federation_enabled
+  local matrix_tls_mode
   local openrouter_secret_ref openrouter_secret_path openrouter_secret_mode
   local configure_imap imap_choice imap_host imap_port imap_tls imap_username imap_password
   local imap_mailbox imap_secret_ref imap_secret_path imap_secret_mode
@@ -980,6 +1050,7 @@ run_install_wizard() {
   ui_section "Matrix"
   matrix_domain="$(prompt_value "Matrix homeserver domain" "$matrix_domain")"
   matrix_public_base_url="$(prompt_value "Matrix public base URL" "$matrix_public_base_url")"
+  matrix_tls_mode="$(infer_matrix_tls_mode_from_url "$matrix_public_base_url")"
   operator_username="$(prompt_value "Operator username" "$operator_username")"
   alert_room_name="$(prompt_value "Alert room name" "$alert_room_name")"
   if ui_confirm "Enable Matrix federation?" "$( [[ "$federation_enabled" == "1" ]] && printf 'y' || printf 'n' )"; then
@@ -1078,6 +1149,7 @@ run_install_wizard() {
   export SN_OPENROUTER_SECRET_MODE="$openrouter_secret_mode"
   export SN_MATRIX_DOMAIN="$matrix_domain"
   export SN_MATRIX_PUBLIC_BASE_URL="$matrix_public_base_url"
+  export SN_MATRIX_TLS_MODE="$matrix_tls_mode"
   export SN_MATRIX_FEDERATION_ENABLED="$federation_enabled"
   export SN_OPERATOR_USERNAME="$operator_username"
   export SN_ALERT_ROOM_NAME="$alert_room_name"

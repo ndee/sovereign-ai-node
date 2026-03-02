@@ -108,6 +108,7 @@ type RuntimeConfig = {
   matrix: {
     federationEnabled: boolean;
     publicBaseUrl: string;
+    adminBaseUrl: string;
     operator: {
       userId: string;
     };
@@ -261,7 +262,7 @@ export class RealInstallerService implements InstallerService {
         `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(
           transactionId,
         )}`,
-        ensureTrailingSlash(config.matrix.publicBaseUrl),
+        ensureTrailingSlash(config.matrix.adminBaseUrl),
       ).toString();
 
       const response = await this.fetchImpl(endpoint, {
@@ -899,8 +900,9 @@ export class RealInstallerService implements InstallerService {
       };
     }
 
+    const matrixBaseUrl = runtimeConfig.matrix.adminBaseUrl;
     const matrixResult = await this.testMatrix({
-      publicBaseUrl: runtimeConfig.matrix.publicBaseUrl,
+      publicBaseUrl: matrixBaseUrl,
       federationEnabled: runtimeConfig.matrix.federationEnabled,
     });
     if (!matrixResult.ok) {
@@ -990,7 +992,7 @@ export class RealInstallerService implements InstallerService {
       const accessToken = await this.resolveSecretRef(runtimeConfig.matrix.bot.accessTokenSecretRef);
       const endpoint = new URL(
         `/_matrix/client/v3/rooms/${encodeURIComponent(runtimeConfig.matrix.alertRoom.roomId)}/joined_members`,
-        ensureTrailingSlash(runtimeConfig.matrix.publicBaseUrl),
+        ensureTrailingSlash(runtimeConfig.matrix.adminBaseUrl),
       ).toString();
       const response = await this.fetchImpl(endpoint, {
         method: "GET",
@@ -1774,7 +1776,7 @@ export class RealInstallerService implements InstallerService {
     gatewayServiceSkipped: boolean,
   ): Promise<void> {
     const matrix = await this.testMatrix({
-      publicBaseUrl: matrixProvision.publicBaseUrl,
+      publicBaseUrl: matrixProvision.adminBaseUrl,
       federationEnabled: matrixProvision.federationEnabled,
     });
     if (!matrix.ok) {
@@ -2178,6 +2180,7 @@ export class RealInstallerService implements InstallerService {
       matrix: {
         federationEnabled: input.matrixProvision.federationEnabled,
         publicBaseUrl: input.matrixProvision.publicBaseUrl,
+        adminBaseUrl: input.matrixProvision.adminBaseUrl,
         operator: {
           userId: input.matrixAccounts.operator.userId,
         },
@@ -2220,7 +2223,7 @@ export class RealInstallerService implements InstallerService {
         channels: {
           matrix: {
             enabled: true,
-            homeserver: runtimeConfig.matrix.publicBaseUrl,
+            homeserver: runtimeConfig.matrix.adminBaseUrl,
             roomId: runtimeConfig.matrix.alertRoom.roomId,
           },
         },
@@ -2253,6 +2256,7 @@ export class RealInstallerService implements InstallerService {
       matrix: {
         homeserverDomain: input.matrixProvision.homeserverDomain,
         publicBaseUrl: runtimeConfig.matrix.publicBaseUrl,
+        adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
         federationEnabled: runtimeConfig.matrix.federationEnabled,
         tlsMode: input.matrixProvision.tlsMode,
         operator: {
@@ -2335,7 +2339,7 @@ export class RealInstallerService implements InstallerService {
       channels: {
         matrix: {
           enabled: true,
-          homeserver: runtimeConfig.matrix.publicBaseUrl,
+          homeserver: runtimeConfig.matrix.adminBaseUrl,
           userId: runtimeConfig.matrix.bot.userId,
           dm: {
             policy: "disabled" as const,
@@ -2374,6 +2378,7 @@ export class RealInstallerService implements InstallerService {
       mailSentinel: runtimeConfig.mailSentinel,
       matrix: {
         publicBaseUrl: runtimeConfig.matrix.publicBaseUrl,
+        adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
         roomId: runtimeConfig.matrix.alertRoom.roomId,
       },
       imap: {
@@ -2406,7 +2411,7 @@ export class RealInstallerService implements InstallerService {
         `OPENCLAW_CONFIG_PATH=${runtimeConfig.openclaw.runtimeConfigPath}`,
         `SOVEREIGN_NODE_CONFIG=${this.paths.configPath}`,
         `OPENROUTER_API_KEY=${openrouterApiKey}`,
-        `MATRIX_HOMESERVER=${runtimeConfig.matrix.publicBaseUrl}`,
+        `MATRIX_HOMESERVER=${runtimeConfig.matrix.adminBaseUrl}`,
         `MATRIX_USER_ID=${runtimeConfig.matrix.bot.userId}`,
       ];
       const matrixAccessToken = await this.resolveSecretRef(
@@ -2712,9 +2717,15 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
   }
   const bot = matrix.bot;
   const alertRoom = matrix.alertRoom;
+  const adminBaseUrl =
+    typeof matrix.adminBaseUrl === "string" && matrix.adminBaseUrl.length > 0
+      ? matrix.adminBaseUrl
+      : matrix.publicBaseUrl;
   if (
     typeof matrix.publicBaseUrl !== "string"
     || matrix.publicBaseUrl.length === 0
+    || typeof adminBaseUrl !== "string"
+    || adminBaseUrl.length === 0
     || !isRecord(bot)
     || typeof bot.accessTokenSecretRef !== "string"
     || bot.accessTokenSecretRef.length === 0
@@ -2850,6 +2861,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
       federationEnabled:
         typeof matrix.federationEnabled === "boolean" ? matrix.federationEnabled : false,
       publicBaseUrl: matrix.publicBaseUrl,
+      adminBaseUrl,
       operator: {
         userId:
           typeof operator.userId === "string" && operator.userId.length > 0
