@@ -87,7 +87,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     }
 
     const homeserverDomain = req.matrix.homeserverDomain;
-    const publicBaseUrl = req.matrix.publicBaseUrl;
+    const publicBaseUrl = normalizePublicBaseUrl(req.matrix.publicBaseUrl);
     const federationEnabled = req.matrix.federationEnabled ?? false;
     const baseDir = await this.ensureBaseDir();
     const projectSlug = slugifyProjectName(homeserverDomain);
@@ -115,7 +115,10 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       signingKeyFile: `${homeserverDomain}.signing.key`,
     };
 
-    const composeYaml = renderComposeYaml(resolveSynapseImage());
+    const composeYaml = renderComposeYaml({
+      synapseImage: resolveSynapseImage(),
+      synapsePortBinding: resolveSynapsePortBinding(publicBaseUrl),
+    });
     const envFile = renderEnvFile({
       homeserverDomain,
       publicBaseUrl,
@@ -975,7 +978,12 @@ type EnvTemplateInput = {
   synapseConfigPath: string;
 };
 
-const renderComposeYaml = (synapseImage: string): string => `
+type ComposeTemplateInput = {
+  synapseImage: string;
+  synapsePortBinding: string;
+};
+
+const renderComposeYaml = (input: ComposeTemplateInput): string => `
 services:
   postgres:
     image: postgres:16-alpine
@@ -989,14 +997,14 @@ services:
       - ./postgres-data:/var/lib/postgresql/data
 
   synapse:
-    image: ${synapseImage}
+    image: ${input.synapseImage}
     restart: unless-stopped
     depends_on:
       - postgres
     environment:
       SYNAPSE_CONFIG_PATH: \${SYNAPSE_CONFIG_PATH}
     ports:
-      - "127.0.0.1:8008:8008"
+      - "${input.synapsePortBinding}"
     volumes:
       - ./synapse:/data
 `.trim();
@@ -1081,6 +1089,21 @@ const resolveSynapseImage = (): string => {
   }
   return DEFAULT_SYNAPSE_IMAGE;
 };
+
+const resolveSynapsePortBinding = (publicBaseUrl: string): string => {
+  const parsed = new URL(publicBaseUrl);
+  const host = parsed.hostname.trim().toLowerCase();
+  const hostBind = isLoopbackHostname(host) ? "127.0.0.1" : "0.0.0.0";
+  const publicPort =
+    parsed.port.length > 0 ? parsed.port : parsed.protocol === "https:" ? "443" : "80";
+  return `${hostBind}:${publicPort}:8008`;
+};
+
+const isLoopbackHostname = (value: string): boolean =>
+  value === "localhost"
+  || value === "127.0.0.1"
+  || value === "::1"
+  || value === "[::1]";
 
 const ensureDirectoryTreeWritable = async (root: string): Promise<void> => {
   const queue: string[] = [root];

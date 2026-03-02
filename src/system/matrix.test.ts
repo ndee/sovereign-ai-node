@@ -98,6 +98,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(composeText).toContain("matrixdotorg/synapse:v1.125.0");
       expect(composeText).toContain("postgres:16-alpine");
       expect(composeText).toContain('POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"');
+      expect(composeText).toContain('"0.0.0.0:8008:8008"');
       const envText = await readFile(join(result.projectDir, ".env"), "utf8");
       expect(envText).toContain("SYNAPSE_CONFIG_PATH=/data/homeserver.yaml");
       const synapseDirStat = await stat(join(result.projectDir, "synapse"));
@@ -119,6 +120,58 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(recordedExecCalls[0]?.command).toBe("docker");
       expect(recordedExecCalls[0]?.args).toContain("compose");
       expect(recordedExecCalls[0]?.args).toContain("config");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps Synapse bound to loopback when the public base URL uses a loopback host", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-test-"));
+    const recordedExecCalls: ExecInput[] = [];
+
+    const fakeExecRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        recordedExecCalls.push(input);
+        if (input.command === "docker") {
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: "services:\n  postgres: {}\n  synapse: {}\n",
+            stderr: "",
+          };
+        }
+        return {
+          command: [input.command, ...(input.args ?? [])].join(" "),
+          exitCode: 127,
+          stdout: "",
+          stderr: "command not found",
+        };
+      },
+    };
+
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "state"),
+      logsDir: join(tempRoot, "logs"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+
+    const provisioner = new DockerComposeBundledMatrixProvisioner(
+      fakeExecRunner,
+      createLogger(),
+      paths,
+    );
+
+    try {
+      const req = buildInstallRequest();
+      req.matrix.publicBaseUrl = "http://127.0.0.1:8008";
+      const result = await provisioner.provision(req);
+
+      const composeText = await readFile(result.composeFilePath, "utf8");
+      expect(composeText).toContain('"127.0.0.1:8008:8008"');
+      expect(recordedExecCalls).toHaveLength(1);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
