@@ -2025,11 +2025,6 @@ export class RealInstallerService implements InstallerService {
     const pluginEntries: Record<string, unknown> = {
       matrix: {
         enabled: true,
-        config: {
-          homeserver: runtimeConfig.matrix.publicBaseUrl,
-          accessTokenSecretRef: runtimeConfig.matrix.bot.accessTokenSecretRef,
-          roomId: runtimeConfig.matrix.alertRoom.roomId,
-        },
       },
     };
     if (imapConfigured) {
@@ -2052,6 +2047,23 @@ export class RealInstallerService implements InstallerService {
       plugins: {
         allow: runtimeConfig.openclawProfile.plugins.allow,
         entries: pluginEntries,
+      },
+      channels: {
+        matrix: {
+          enabled: true,
+          homeserver: runtimeConfig.matrix.publicBaseUrl,
+          userId: runtimeConfig.matrix.bot.userId,
+          dm: {
+            policy: "disabled" as const,
+          },
+          groupPolicy: "allowlist" as const,
+          groups: {
+            [runtimeConfig.matrix.alertRoom.roomId]: {
+              enabled: true,
+              autoReply: false,
+            },
+          },
+        },
       },
       agents: {
         defaults: {
@@ -2110,7 +2122,13 @@ export class RealInstallerService implements InstallerService {
         `OPENCLAW_CONFIG_PATH=${runtimeConfig.openclaw.runtimeConfigPath}`,
         `SOVEREIGN_NODE_CONFIG=${this.paths.configPath}`,
         `OPENROUTER_API_KEY=${openrouterApiKey}`,
+        `MATRIX_HOMESERVER=${runtimeConfig.matrix.publicBaseUrl}`,
+        `MATRIX_USER_ID=${runtimeConfig.matrix.bot.userId}`,
       ];
+      const matrixAccessToken = await this.resolveSecretRef(
+        runtimeConfig.matrix.bot.accessTokenSecretRef,
+      );
+      envFileLines.push(`MATRIX_ACCESS_TOKEN=${matrixAccessToken}`);
       const envTempPath = `${runtimeConfig.openclaw.gatewayEnvPath}.${randomUUID()}.tmp`;
       await writeFile(envTempPath, `${envFileLines.join("\n")}\n`, "utf8");
       await chmod(envTempPath, 0o600);

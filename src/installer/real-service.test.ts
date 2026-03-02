@@ -613,6 +613,8 @@ describe("RealInstallerService", () => {
         matrix?: unknown;
         cron?: { enabled?: boolean; jobs?: unknown };
         agents?: { defaults?: { model?: string } };
+        plugins?: { entries?: { matrix?: { enabled?: boolean; config?: unknown } } };
+        channels?: { matrix?: { enabled?: boolean; homeserver?: string; userId?: string } };
       };
       expect(openclawConfig.generatedAt).toBeUndefined();
       expect(openclawConfig.source).toBeUndefined();
@@ -620,6 +622,11 @@ describe("RealInstallerService", () => {
       expect(openclawConfig.matrix).toBeUndefined();
       expect(openclawConfig.cron?.enabled).toBe(true);
       expect(openclawConfig.cron?.jobs).toBeUndefined();
+      expect(openclawConfig.plugins?.entries?.matrix?.enabled).toBe(true);
+      expect(openclawConfig.plugins?.entries?.matrix?.config).toBeUndefined();
+      expect(openclawConfig.channels?.matrix?.enabled).toBe(true);
+      expect(openclawConfig.channels?.matrix?.homeserver).toBe("http://matrix.example.org");
+      expect(openclawConfig.channels?.matrix?.userId).toBe("@mail-sentinel:matrix.example.org");
       expect(openclawConfig.agents?.defaults?.model).toBe(
         "openrouter/anthropic/claude-sonnet-4-5",
       );
