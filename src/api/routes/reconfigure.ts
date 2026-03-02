@@ -5,6 +5,7 @@ import { reconfigureResultSchema } from "../../contracts/index.js";
 import {
   reconfigureImapRequestSchema,
   reconfigureMatrixRequestSchema,
+  reconfigureOpenrouterRequestSchema,
 } from "../../contracts/api.js";
 import { sendApiError, sendApiSuccess } from "../response.js";
 
@@ -31,5 +32,14 @@ export const registerReconfigureRoutes = (
       return sendApiError(reply, 400, error);
     }
   });
-};
 
+  server.post("/api/reconfigure/openrouter", async (request, reply) => {
+    try {
+      const body = reconfigureOpenrouterRequestSchema.parse(request.body);
+      const result = await app.installerService.reconfigureOpenrouter(body);
+      return sendApiSuccess(reply, result, reconfigureResultSchema);
+    } catch (error) {
+      return sendApiError(reply, 400, error);
+    }
+  });
+};

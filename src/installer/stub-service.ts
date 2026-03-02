@@ -17,6 +17,7 @@ import type {
   PreflightRequest,
   ReconfigureImapRequest,
   ReconfigureMatrixRequest,
+  ReconfigureOpenrouterRequest,
   TestAlertRequest,
   TestImapRequest,
   TestMatrixRequest,
@@ -238,6 +239,15 @@ export class StubInstallerService implements InstallerService {
       changed: [],
       restartRequiredServices: [],
       validation: [check("matrix-config", "Reconfigure Matrix scaffold only", "warn")],
+    };
+  }
+
+  async reconfigureOpenrouter(_req: ReconfigureOpenrouterRequest): Promise<ReconfigureResult> {
+    return {
+      target: "openrouter",
+      changed: [],
+      restartRequiredServices: [],
+      validation: [check("openrouter-config", "Reconfigure OpenRouter scaffold only", "warn")],
     };
   }
 }

@@ -31,7 +31,7 @@ const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => ({
     runOnboard: false,
   },
   openrouter: {
-    model: "openrouter/anthropic/claude-sonnet-4-5",
+    model: "openai/gpt-5-nano",
     secretRef: "env:OPENROUTER_API_KEY",
   },
   matrix: {

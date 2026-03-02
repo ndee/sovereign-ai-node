@@ -50,6 +50,27 @@ export const reconfigureMatrixRequestSchema = z.object({
     .optional(),
 });
 
+export const reconfigureOpenrouterRequestSchema = z.object({
+  openrouter: z
+    .object({
+      model: z.string().min(1).optional(),
+      apiKey: z.string().min(1).optional(),
+      secretRef: z.string().min(1).optional(),
+    })
+    .refine(
+      (value) =>
+        value.model !== undefined || value.apiKey !== undefined || value.secretRef !== undefined,
+      {
+        message: "Provide at least one of openrouter.model, openrouter.apiKey, or openrouter.secretRef",
+        path: ["model"],
+      },
+    )
+    .refine((value) => !(value.apiKey !== undefined && value.secretRef !== undefined), {
+      message: "Provide openrouter.apiKey or openrouter.secretRef, not both",
+      path: ["secretRef"],
+    }),
+});
+
 export const installJobParamsSchema = z.object({
   jobId: idSchema,
 });
@@ -74,4 +95,4 @@ export type TestMatrixRequest = z.infer<typeof testMatrixRequestSchema>;
 export type TestAlertRequest = z.infer<typeof testAlertRequestSchema>;
 export type ReconfigureImapRequest = z.infer<typeof reconfigureImapRequestSchema>;
 export type ReconfigureMatrixRequest = z.infer<typeof reconfigureMatrixRequestSchema>;
-
+export type ReconfigureOpenrouterRequest = z.infer<typeof reconfigureOpenrouterRequestSchema>;

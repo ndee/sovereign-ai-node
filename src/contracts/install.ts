@@ -263,7 +263,7 @@ export const doctorReportSchema = z.object({
 });
 
 export const reconfigureResultSchema = z.object({
-  target: z.enum(["imap", "matrix"]),
+  target: z.enum(["imap", "matrix", "openrouter"]),
   changed: z.array(z.string()),
   restartRequiredServices: z.array(z.string()),
   validation: z.array(checkResultSchema),

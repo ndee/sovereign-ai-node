@@ -21,7 +21,7 @@ const buildInstallRequest = (): InstallRequest => ({
     runOnboard: false,
   },
   openrouter: {
-    model: "openrouter/anthropic/claude-sonnet-4-5",
+    model: "openai/gpt-5-nano",
     apiKey: "sk-or-test",
   },
   imap: {

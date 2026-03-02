@@ -32,7 +32,7 @@ const buildInstallRequest = (): InstallRequest => ({
     runOnboard: false,
   },
   openrouter: {
-    model: "openrouter/anthropic/claude-sonnet-4-5",
+    model: "openai/gpt-5-nano",
     apiKey: "sk-or-test",
   },
   imap: {
@@ -97,7 +97,7 @@ const writeRuntimeArtifacts = async (paths: SovereignPaths): Promise<void> => {
           gatewayEnvPath,
         },
         openrouter: {
-          model: "openrouter/anthropic/claude-sonnet-4-5",
+          model: "openai/gpt-5-nano",
           apiKeySecretRef: "env:OPENROUTER_API_KEY",
         },
         openclawProfile: {
@@ -631,7 +631,7 @@ describe("RealInstallerService", () => {
       expect(openclawConfig.channels?.matrix?.homeserver).toBe("http://matrix.example.org");
       expect(openclawConfig.channels?.matrix?.userId).toBe("@mail-sentinel:matrix.example.org");
       expect(openclawConfig.agents?.defaults?.model).toBe(
-        "openrouter/anthropic/claude-sonnet-4-5",
+        "openai/gpt-5-nano",
       );
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
@@ -1199,6 +1199,144 @@ describe("RealInstallerService", () => {
       expect(status.openclaw.cronPresent).toBe(true);
       expect(status.matrix.roomReachable).toBe(true);
       expect(status.services.some((entry) => entry.kind === "openclaw")).toBe(true);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reconfigures OpenRouter settings and syncs the saved install request", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+    await writeRuntimeArtifacts(paths);
+
+    const requestPath = join(dirname(paths.configPath), "install-request.json");
+    await writeFile(requestPath, `${JSON.stringify(buildInstallRequest(), null, 2)}\n`, "utf8");
+
+    let gatewayRestartCalls = 0;
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {
+          gatewayRestartCalls += 1;
+        },
+      },
+      mailSentinelRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents add",
+          cronCommand: "openclaw cron add",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+    });
+
+    try {
+      const result = await service.reconfigureOpenrouter({
+        openrouter: {
+          model: "openai/gpt-5",
+          apiKey: "sk-or-updated",
+        },
+      });
+
+      expect(result.target).toBe("openrouter");
+      expect(result.changed).toEqual(
+        expect.arrayContaining([
+          "openrouter.model",
+          "openrouter.apiKeySecretRef",
+          "request.openrouter.model",
+          "request.openrouter.secretRef",
+        ]),
+      );
+      expect(result.restartRequiredServices).toEqual(["openclaw-gateway"]);
+      expect(gatewayRestartCalls).toBe(1);
+
+      const updatedConfigRaw = await readFile(paths.configPath, "utf8");
+      const updatedConfig = JSON.parse(updatedConfigRaw) as {
+        openrouter?: { model?: string; apiKeySecretRef?: string };
+      };
+      const expectedSecretRef = `file:${join(paths.secretsDir, "openrouter-api-key")}`;
+      expect(updatedConfig.openrouter?.model).toBe("openai/gpt-5");
+      expect(updatedConfig.openrouter?.apiKeySecretRef).toBe(expectedSecretRef);
+
+      const secretRaw = await readFile(join(paths.secretsDir, "openrouter-api-key"), "utf8");
+      expect(secretRaw).toBe("sk-or-updated\n");
+
+      const openclawConfigRaw = await readFile(
+        join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
+        "utf8",
+      );
+      const openclawConfig = JSON.parse(openclawConfigRaw) as {
+        agents?: { defaults?: { model?: string } };
+      };
+      expect(openclawConfig.agents?.defaults?.model).toBe("openai/gpt-5");
+
+      const gatewayEnvRaw = await readFile(
+        join(paths.openclawServiceHome, "gateway.env"),
+        "utf8",
+      );
+      expect(gatewayEnvRaw).toContain("OPENROUTER_API_KEY=sk-or-updated");
+
+      const updatedRequestRaw = await readFile(requestPath, "utf8");
+      const updatedRequest = JSON.parse(updatedRequestRaw) as {
+        openrouter?: { model?: string; secretRef?: string; apiKey?: string };
+      };
+      expect(updatedRequest.openrouter?.model).toBe("openai/gpt-5");
+      expect(updatedRequest.openrouter?.secretRef).toBe(expectedSecretRef);
+      expect(updatedRequest.openrouter?.apiKey).toBeUndefined();
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }

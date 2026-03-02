@@ -24,6 +24,7 @@ import type {
   PreflightRequest,
   ReconfigureImapRequest,
   ReconfigureMatrixRequest,
+  ReconfigureOpenrouterRequest,
   TestAlertRequest,
   TestImapRequest,
   TestMatrixRequest,
@@ -139,6 +140,8 @@ const MAIL_SENTINEL_CRON_ID = "mail-sentinel-poll";
 const MAIL_SENTINEL_HELLO_MESSAGE = "Hello from Mail Sentinel";
 const INSTALLER_EXEC_TIMEOUT_MS = 60_000;
 const SOVEREIGN_GATEWAY_SYSTEMD_UNIT = "sovereign-openclaw-gateway.service";
+const DEFAULT_OPENROUTER_MODEL = "openai/gpt-5-nano";
+const DEFAULT_INSTALL_REQUEST_FILE = "/etc/sovereign-node/install-request.json";
 const DEFAULT_SERVICE_USER = "root";
 const DEFAULT_SERVICE_GROUP = "root";
 
@@ -569,6 +572,110 @@ export class RealInstallerService implements InstallerService {
 
   async reconfigureMatrix(req: ReconfigureMatrixRequest): Promise<ReconfigureResult> {
     return this.stubService.reconfigureMatrix(req);
+  }
+
+  async reconfigureOpenrouter(req: ReconfigureOpenrouterRequest): Promise<ReconfigureResult> {
+    const runtimeConfig = await this.readRuntimeConfig();
+    const raw = await readFile(this.paths.configPath, "utf8");
+    const parsed = parseJsonDocument(raw);
+    if (!isRecord(parsed)) {
+      throw {
+        code: "CONFIG_INVALID",
+        message: "Sovereign runtime config does not match expected shape",
+        retryable: false,
+        details: {
+          configPath: this.paths.configPath,
+        },
+      };
+    }
+
+    const requestedModel = req.openrouter.model?.trim();
+    const nextModel =
+      requestedModel !== undefined && requestedModel.length > 0
+        ? requestedModel
+        : runtimeConfig.openrouter.model;
+    const modelChanged = nextModel !== runtimeConfig.openrouter.model;
+
+    let nextSecretRef = runtimeConfig.openrouter.apiKeySecretRef;
+    let credentialsChanged = false;
+    if (req.openrouter.apiKey !== undefined) {
+      nextSecretRef = await this.writeManagedSecretFile(
+        "openrouter-api-key",
+        req.openrouter.apiKey,
+      );
+      credentialsChanged = true;
+    } else if (req.openrouter.secretRef !== undefined) {
+      nextSecretRef = req.openrouter.secretRef;
+      credentialsChanged = nextSecretRef !== runtimeConfig.openrouter.apiKeySecretRef;
+    }
+
+    const runtimeChanged = modelChanged || credentialsChanged;
+    const changed: string[] = [];
+    if (modelChanged) {
+      changed.push("openrouter.model");
+    }
+    if (credentialsChanged) {
+      changed.push("openrouter.apiKeySecretRef");
+    }
+
+    let gatewayRestarted = false;
+    if (runtimeChanged) {
+      const openrouterConfig = isRecord(parsed.openrouter) ? parsed.openrouter : {};
+      openrouterConfig["provider"] = "openrouter";
+      openrouterConfig["model"] = nextModel;
+      openrouterConfig["apiKeySecretRef"] = nextSecretRef;
+      delete openrouterConfig["apiKey"];
+      parsed["openrouter"] = openrouterConfig;
+      parsed["generatedAt"] = now();
+      await this.writeInstallerJsonFile(this.paths.configPath, parsed, 0o644);
+
+      const nextRuntimeConfig: RuntimeConfig = {
+        ...runtimeConfig,
+        openrouter: {
+          model: nextModel,
+          apiKeySecretRef: nextSecretRef,
+        },
+      };
+      await this.writeOpenClawRuntimeArtifacts(nextRuntimeConfig);
+      this.setManagedOpenClawEnv(nextRuntimeConfig);
+      await this.refreshGatewayAfterRuntimeConfig(nextRuntimeConfig);
+      gatewayRestarted = true;
+    }
+
+    const requestUpdate = await this.updateInstallRequestOpenrouter({
+      model: nextModel,
+      secretRef: nextSecretRef,
+      modelChanged,
+      credentialsChanged,
+    });
+    changed.push(...requestUpdate.changed);
+
+    return {
+      target: "openrouter",
+      changed,
+      restartRequiredServices: gatewayRestarted ? ["openclaw-gateway"] : [],
+      validation: [
+        check(
+          "openrouter-runtime",
+          "OpenRouter runtime config",
+          "pass",
+          runtimeChanged
+            ? "OpenRouter runtime config updated"
+            : "OpenRouter runtime config already matched the requested values",
+        ),
+        ...(gatewayRestarted
+          ? [
+              check(
+                "openclaw-gateway-restart",
+                "OpenClaw gateway restart",
+                "pass",
+                "OpenClaw gateway restarted with updated OpenRouter settings",
+              ),
+            ]
+          : []),
+        ...requestUpdate.validation,
+      ],
+    };
   }
 
   private async tryReadRuntimeConfig(): Promise<RuntimeConfig | null> {
@@ -1795,6 +1902,179 @@ export class RealInstallerService implements InstallerService {
     return parsed;
   }
 
+  private getInstallRequestPath(): string {
+    const configured = process.env.SOVEREIGN_NODE_REQUEST_FILE?.trim();
+    if (configured !== undefined && configured.length > 0) {
+      return configured;
+    }
+    const configDir = dirname(this.paths.configPath);
+    if (configDir.length > 0 && configDir !== ".") {
+      return join(configDir, "install-request.json");
+    }
+    return DEFAULT_INSTALL_REQUEST_FILE;
+  }
+
+  private async writeInstallerJsonFile(
+    path: string,
+    value: unknown,
+    mode: number,
+  ): Promise<void> {
+    const tempPath = `${path}.${randomUUID()}.tmp`;
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    await chmod(tempPath, mode);
+    await rename(tempPath, path);
+    await this.applyRuntimeOwnership(path);
+  }
+
+  private async updateInstallRequestOpenrouter(input: {
+    model: string;
+    secretRef: string;
+    modelChanged: boolean;
+    credentialsChanged: boolean;
+  }): Promise<{ changed: string[]; validation: CheckResult[] }> {
+    const requestPath = this.getInstallRequestPath();
+    let raw = "";
+    try {
+      raw = await readFile(requestPath, "utf8");
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return {
+          changed: [],
+          validation: [
+            check(
+              "install-request-sync",
+              "Saved install request sync",
+              "warn",
+              "Saved install request file was not found; future installer updates will keep the previous OpenRouter settings until the request file is refreshed",
+              {
+                requestFile: requestPath,
+              },
+            ),
+          ],
+        };
+      }
+      throw {
+        code: "REQUEST_UPDATE_FAILED",
+        message: "Failed to read the saved install request file",
+        retryable: false,
+        details: {
+          requestFile: requestPath,
+          error: describeError(error),
+        },
+      };
+    }
+
+    const parsed = parseJsonDocument(raw);
+    const validated = installRequestSchema.safeParse(parsed);
+    if (!validated.success) {
+      return {
+        changed: [],
+        validation: [
+          check(
+            "install-request-sync",
+            "Saved install request sync",
+            "warn",
+            "Saved install request could not be updated because it is invalid",
+            {
+              requestFile: requestPath,
+            },
+          ),
+        ],
+      };
+    }
+
+    const requestPayload = validated.data;
+    const changed: string[] = [];
+    if (input.modelChanged && requestPayload.openrouter.model !== input.model) {
+      requestPayload.openrouter.model = input.model;
+      changed.push("request.openrouter.model");
+    }
+    if (input.credentialsChanged) {
+      requestPayload.openrouter.secretRef = input.secretRef;
+      delete requestPayload.openrouter.apiKey;
+      changed.push("request.openrouter.secretRef");
+    }
+
+    if (changed.length === 0) {
+      return {
+        changed,
+        validation: [
+          check(
+            "install-request-sync",
+            "Saved install request sync",
+            "pass",
+            "Saved install request already matched the current OpenRouter settings",
+            {
+              requestFile: requestPath,
+            },
+          ),
+        ],
+      };
+    }
+
+    try {
+      await this.writeInstallerJsonFile(requestPath, requestPayload, 0o640);
+    } catch (error) {
+      throw {
+        code: "REQUEST_UPDATE_FAILED",
+        message: "Failed to write the saved install request file",
+        retryable: false,
+        details: {
+          requestFile: requestPath,
+          error: describeError(error),
+        },
+      };
+    }
+
+    return {
+      changed,
+      validation: [
+        check(
+          "install-request-sync",
+          "Saved install request sync",
+          "pass",
+          "Saved install request updated to match the new OpenRouter settings",
+          {
+            requestFile: requestPath,
+          },
+        ),
+      ],
+    };
+  }
+
+  private async refreshGatewayAfterRuntimeConfig(runtimeConfig: RuntimeConfig): Promise<void> {
+    if (this.shouldPreferSystemGatewayService(runtimeConfig)) {
+      const started = await this.ensureSystemGatewayServiceFallback(runtimeConfig);
+      if (started) {
+        return;
+      }
+      throw {
+        code: "OPENCLAW_GATEWAY_RESTART_FAILED",
+        message: "Failed to restart the system-level OpenClaw gateway service",
+        retryable: true,
+      };
+    }
+
+    try {
+      await this.openclawGatewayServiceManager.restart();
+      return;
+    } catch (error) {
+      if (isGatewayUserSystemdUnavailableError(error)) {
+        throw {
+          code: "OPENCLAW_GATEWAY_RESTART_FAILED",
+          message: "OpenClaw gateway restart is unavailable because systemd user services are unavailable in this context",
+          retryable: true,
+          details: {
+            error: describeError(error),
+          },
+        };
+      }
+    }
+
+    await this.openclawGatewayServiceManager.start();
+  }
+
   private async resolveSecretRef(secretRef: string): Promise<string> {
     if (secretRef.startsWith("file:")) {
       const filePath = secretRef.slice("file:".length);
@@ -1847,8 +2127,7 @@ export class RealInstallerService implements InstallerService {
   }): Promise<RuntimeConfig> {
     const imapConfig = await this.resolveImapConfig(input.req.imap);
     const openrouterSecretRef = await this.resolveOpenRouterSecretRef(input.req.openrouter);
-    const openrouterModel =
-      input.req.openrouter.model ?? "openrouter/anthropic/claude-sonnet-4-5";
+    const openrouterModel = input.req.openrouter.model ?? DEFAULT_OPENROUTER_MODEL;
     const operatorTokenSecretRef = await this.writeSecretFile(
       "matrix-operator-access-token",
       input.matrixAccounts.operator.accessToken,
@@ -2234,6 +2513,33 @@ export class RealInstallerService implements InstallerService {
     return `file:${filePath}`;
   }
 
+  private async writeManagedSecretFile(fileName: string, value: string): Promise<string> {
+    try {
+      await mkdir(this.paths.secretsDir, { recursive: true });
+      await chmod(this.paths.secretsDir, 0o700);
+      await this.applyRuntimeOwnership(this.paths.secretsDir);
+      await access(this.paths.secretsDir, fsConstants.W_OK);
+    } catch (error) {
+      throw {
+        code: "SECRET_WRITE_FAILED",
+        message: "Managed secrets directory is not writable; rerun with sufficient privileges",
+        retryable: false,
+        details: {
+          secretsDir: this.paths.secretsDir,
+          error: describeError(error),
+        },
+      };
+    }
+
+    const filePath = join(this.paths.secretsDir, fileName);
+    const tempPath = `${filePath}.${randomUUID()}.tmp`;
+    await writeFile(tempPath, `${value}\n`, "utf8");
+    await chmod(tempPath, 0o600);
+    await rename(tempPath, filePath);
+    await this.applyRuntimeOwnership(filePath);
+    return `file:${filePath}`;
+  }
+
   private async ensureSecretsDir(): Promise<string> {
     if (this.resolvedSecretsDir !== null) {
       return this.resolvedSecretsDir;
@@ -2499,7 +2805,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
       model:
         typeof openrouter.model === "string" && openrouter.model.length > 0
           ? openrouter.model
-          : "openrouter/anthropic/claude-sonnet-4-5",
+          : DEFAULT_OPENROUTER_MODEL,
       apiKeySecretRef:
         typeof openrouter.apiKeySecretRef === "string" && openrouter.apiKeySecretRef.length > 0
           ? openrouter.apiKeySecretRef

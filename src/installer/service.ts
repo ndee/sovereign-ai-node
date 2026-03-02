@@ -14,6 +14,7 @@ import type {
   PreflightRequest,
   ReconfigureImapRequest,
   ReconfigureMatrixRequest,
+  ReconfigureOpenrouterRequest,
   TestAlertRequest,
   TestImapRequest,
   TestMatrixRequest,
@@ -30,4 +31,5 @@ export interface InstallerService {
   getDoctorReport(): Promise<DoctorReport>;
   reconfigureImap(req: ReconfigureImapRequest): Promise<ReconfigureResult>;
   reconfigureMatrix(req: ReconfigureMatrixRequest): Promise<ReconfigureResult>;
+  reconfigureOpenrouter(req: ReconfigureOpenrouterRequest): Promise<ReconfigureResult>;
 }
