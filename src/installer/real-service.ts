@@ -2046,21 +2046,16 @@ export class RealInstallerService implements InstallerService {
     }
 
     const runtimePayload = {
-      generatedAt: now(),
-      source: "sovereign-node",
-      profileRef: openclawPaths.runtimeProfilePath,
+      gateway: {
+        bind: "loopback" as const,
+      },
       plugins: {
         allow: runtimeConfig.openclawProfile.plugins.allow,
         entries: pluginEntries,
       },
       agents: {
         defaults: {
-          model: {
-            primary: runtimeConfig.openrouter.model,
-          },
-          models: {
-            [runtimeConfig.openrouter.model]: {},
-          },
+          model: runtimeConfig.openrouter.model,
         },
         list: [
           {
@@ -2072,17 +2067,7 @@ export class RealInstallerService implements InstallerService {
         ],
       },
       cron: {
-        jobs: [
-          {
-            id: runtimeConfig.openclawProfile.cron.id,
-            every: runtimeConfig.openclawProfile.cron.every,
-            lookbackWindow: runtimeConfig.mailSentinel.lookbackWindow,
-          },
-        ],
-      },
-      matrix: {
-        publicBaseUrl: runtimeConfig.matrix.publicBaseUrl,
-        roomId: runtimeConfig.matrix.alertRoom.roomId,
+        enabled: true,
       },
     };
 

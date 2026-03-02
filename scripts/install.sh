@@ -185,13 +185,22 @@ ensure_service_account() {
   fi
 
   if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
-    useradd \
-      --system \
-      --gid "$SERVICE_GROUP" \
-      --home /var/lib/sovereign-node \
-      --create-home \
-      --shell /usr/sbin/nologin \
-      "$SERVICE_USER"
+    if [[ -d /var/lib/sovereign-node ]]; then
+      useradd \
+        --system \
+        --gid "$SERVICE_GROUP" \
+        --home /var/lib/sovereign-node \
+        --shell /usr/sbin/nologin \
+        "$SERVICE_USER"
+    else
+      useradd \
+        --system \
+        --gid "$SERVICE_GROUP" \
+        --home /var/lib/sovereign-node \
+        --create-home \
+        --shell /usr/sbin/nologin \
+        "$SERVICE_USER"
+    fi
   fi
 
   if getent group docker >/dev/null 2>&1; then

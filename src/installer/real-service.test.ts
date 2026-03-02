@@ -601,6 +601,28 @@ describe("RealInstallerService", () => {
       );
       const registration = JSON.parse(registrationRaw) as { agentId?: string };
       expect(registration.agentId).toBe("mail-sentinel");
+
+      const openclawConfigRaw = await readFile(
+        join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
+        "utf8",
+      );
+      const openclawConfig = JSON.parse(openclawConfigRaw) as {
+        generatedAt?: string;
+        source?: string;
+        profileRef?: string;
+        matrix?: unknown;
+        cron?: { enabled?: boolean; jobs?: unknown };
+        agents?: { defaults?: { model?: string } };
+      };
+      expect(openclawConfig.generatedAt).toBeUndefined();
+      expect(openclawConfig.source).toBeUndefined();
+      expect(openclawConfig.profileRef).toBeUndefined();
+      expect(openclawConfig.matrix).toBeUndefined();
+      expect(openclawConfig.cron?.enabled).toBe(true);
+      expect(openclawConfig.cron?.jobs).toBeUndefined();
+      expect(openclawConfig.agents?.defaults?.model).toBe(
+        "openrouter/anthropic/claude-sonnet-4-5",
+      );
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
