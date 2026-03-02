@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -601,6 +601,9 @@ describe("RealInstallerService", () => {
       );
       const registration = JSON.parse(registrationRaw) as { agentId?: string };
       expect(registration.agentId).toBe("mail-sentinel");
+
+      const runtimeConfigStat = await stat(paths.configPath);
+      expect(runtimeConfigStat.mode & 0o777).toBe(0o644);
 
       const openclawConfigRaw = await readFile(
         join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),

@@ -2005,7 +2005,7 @@ export class RealInstallerService implements InstallerService {
       await mkdir(configDir, { recursive: true });
       const tempPath = `${this.paths.configPath}.${randomUUID()}.tmp`;
       await writeFile(tempPath, `${JSON.stringify(configPayload, null, 2)}\n`, "utf8");
-      await chmod(tempPath, 0o600);
+      await chmod(tempPath, 0o644);
       await rename(tempPath, this.paths.configPath);
       await this.applyRuntimeOwnership(this.paths.configPath);
     } catch (error) {
