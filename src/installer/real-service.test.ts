@@ -957,7 +957,7 @@ describe("RealInstallerService", () => {
             return {
               command: serialized,
               exitCode: 0,
-              stdout: "running",
+              stdout: "Service: systemd (disabled)\nState: failed",
               stderr: "",
             };
           }

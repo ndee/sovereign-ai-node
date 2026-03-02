@@ -655,6 +655,13 @@ export class RealInstallerService implements InstallerService {
     state: GatewayState;
     message?: string;
   }> {
+    const sovereignSystemctl = await this.inspectGatewayViaSystemctl([
+      SOVEREIGN_GATEWAY_SYSTEMD_UNIT,
+    ]);
+    if (sovereignSystemctl !== null) {
+      return sovereignSystemctl;
+    }
+
     const openclawGatewayStatus = await this.safeExec("openclaw", ["gateway", "status"]);
     if (openclawGatewayStatus.ok) {
       const output = `${openclawGatewayStatus.result.stdout}\n${openclawGatewayStatus.result.stderr}`;
@@ -672,7 +679,10 @@ export class RealInstallerService implements InstallerService {
       }
     }
 
-    const systemctl = await this.inspectGatewayViaSystemctl();
+    const systemctl = await this.inspectGatewayViaSystemctl([
+      "openclaw-gateway.service",
+      "openclaw-gateway",
+    ]);
     if (systemctl !== null) {
       return systemctl;
     }
@@ -690,16 +700,11 @@ export class RealInstallerService implements InstallerService {
     };
   }
 
-  private async inspectGatewayViaSystemctl(): Promise<{
+  private async inspectGatewayViaSystemctl(candidates: string[]): Promise<{
     installed: boolean;
     state: GatewayState;
     message?: string;
   } | null> {
-    const candidates = [
-      "openclaw-gateway.service",
-      "openclaw-gateway",
-      SOVEREIGN_GATEWAY_SYSTEMD_UNIT,
-    ];
     for (const unit of candidates) {
       const result = await this.safeExec("systemctl", ["is-active", unit]);
       if (!result.ok) {
