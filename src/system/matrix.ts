@@ -17,8 +17,11 @@ const MATRIX_HTTP_TIMEOUT_MS = 8_000;
 const MATRIX_COMPOSE_COMMAND_TIMEOUT_MS = 180_000;
 const MATRIX_BOOTSTRAP_SECRET_DIR = "bootstrap-secrets";
 const DEFAULT_SYNAPSE_IMAGE = "matrixdotorg/synapse:v1.125.0";
+const DEFAULT_CADDY_IMAGE = "caddy:2.10.2-alpine";
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
+
+type BundledMatrixTlsMode = "auto" | "local-dev";
 
 export type BundledMatrixProvisionResult = {
   projectDir: string;
@@ -27,7 +30,7 @@ export type BundledMatrixProvisionResult = {
   publicBaseUrl: string;
   adminBaseUrl: string;
   federationEnabled: boolean;
-  tlsMode: "local-dev";
+  tlsMode: BundledMatrixTlsMode;
 };
 
 type MatrixBootstrapAccount = {
@@ -73,34 +76,66 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
 
   async provision(req: InstallRequest): Promise<BundledMatrixProvisionResult> {
     const tlsMode = req.matrix.tlsMode ?? "auto";
-    if (tlsMode !== "local-dev") {
+    if (tlsMode === "manual") {
       throw {
         code: "MATRIX_TLS_MODE_UNSUPPORTED",
         message:
-          "Bundled Matrix provisioning is currently implemented only for tlsMode=local-dev",
+          "Bundled Matrix provisioning does not yet support tlsMode=manual",
         retryable: false,
         details: {
           requestedTlsMode: tlsMode,
-          supportedTlsMode: "local-dev",
+          supportedTlsModes: ["auto", "local-dev"],
+        },
+      };
+    }
+    if (tlsMode !== "local-dev" && tlsMode !== "auto") {
+      throw {
+        code: "MATRIX_TLS_MODE_UNSUPPORTED",
+        message: "Bundled Matrix provisioning received an unknown tlsMode",
+        retryable: false,
+        details: {
+          requestedTlsMode: tlsMode,
         },
       };
     }
 
     const homeserverDomain = req.matrix.homeserverDomain;
     const publicBaseUrl = normalizePublicBaseUrl(req.matrix.publicBaseUrl);
+    validateBundledTlsMode({
+      tlsMode,
+      homeserverDomain,
+      publicBaseUrl,
+    });
     const federationEnabled = req.matrix.federationEnabled ?? false;
     const baseDir = await this.ensureBaseDir();
     const projectSlug = slugifyProjectName(homeserverDomain);
     const projectDir = join(baseDir, projectSlug);
     const synapseDir = join(projectDir, "synapse");
     const postgresDir = join(projectDir, "postgres-data");
+    const wellKnownDir = join(projectDir, "well-known");
+    const proxyDir = join(projectDir, "reverse-proxy");
+    const proxyDataDir = join(projectDir, "reverse-proxy-data");
+    const proxyConfigDir = join(projectDir, "reverse-proxy-config");
     const composeFilePath = join(projectDir, "compose.yaml");
     const envFilePath = join(projectDir, ".env");
 
     await mkdir(synapseDir, { recursive: true });
     await mkdir(postgresDir, { recursive: true });
+    if (tlsMode === "auto") {
+      await mkdir(wellKnownDir, { recursive: true });
+      await mkdir(join(wellKnownDir, ".well-known", "matrix"), { recursive: true });
+      await mkdir(proxyDir, { recursive: true });
+      await mkdir(proxyDataDir, { recursive: true });
+      await mkdir(proxyConfigDir, { recursive: true });
+    }
     await ensureDirectoryTreeWritable(synapseDir);
     await ensureDirectoryTreeWritable(postgresDir);
+    if (tlsMode === "auto") {
+      await ensureDirectoryTreeWritable(wellKnownDir);
+      await ensureDirectoryTreeWritable(proxyDir);
+      await ensureDirectoryTreeWritable(proxyDataDir);
+      await ensureDirectoryTreeWritable(proxyConfigDir);
+    }
 
     const existingEnv = await this.readExistingEnv(projectDir);
     const existingPostgresPassword = existingEnv.POSTGRES_PASSWORD?.trim();
@@ -117,7 +152,14 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
 
     const composeYaml = renderComposeYaml({
       synapseImage: resolveSynapseImage(),
-      synapsePortBinding: resolveSynapsePortBinding(publicBaseUrl),
+      caddyImage: DEFAULT_CADDY_IMAGE,
+      tlsMode,
+      localSynapsePortBinding:
+        tlsMode === "auto"
+          ? "127.0.0.1:8008:8008"
+          : resolveLocalDevSynapsePortBinding(publicBaseUrl),
+      httpsProxyPortBinding:
+        tlsMode === "auto" ? resolveAutoHttpsProxyPortBinding(publicBaseUrl) : undefined,
     });
     const envFile = renderEnvFile({
       homeserverDomain,
@@ -130,6 +172,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       homeserverDomain,
       publicBaseUrl,
       federationEnabled,
+      behindReverseProxy: tlsMode === "auto",
       postgresPassword: generated.postgresPassword,
       registrationSharedSecret: generated.registrationSharedSecret,
       macaroonSecret: generated.macaroonSecret,
@@ -139,15 +182,42 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     const signingKey = renderSigningKey();
     const logConfig = renderSynapseLogConfig();
 
-    await Promise.all([
+    const writes = [
       writeFile(composeFilePath, `${composeYaml}\n`, "utf8"),
       writeFile(envFilePath, `${envFile}\n`, "utf8"),
       writeFile(join(synapseDir, "homeserver.yaml"), `${homeserverYaml}\n`, "utf8"),
       writeFile(join(synapseDir, generated.signingKeyFile), `${signingKey}\n`, "utf8"),
       writeFile(join(synapseDir, "log.config"), `${logConfig}\n`, "utf8"),
-    ]);
+    ];
+    if (tlsMode === "auto") {
+      const wellKnown = renderWellKnownFiles({
+        homeserverDomain,
+        publicBaseUrl,
+      });
+      writes.push(
+        writeFile(join(proxyDir, "Caddyfile"), `${renderCaddyfile(homeserverDomain)}\n`, "utf8"),
+        writeFile(
+          join(wellKnownDir, ".well-known", "matrix", "client"),
+          `${wellKnown.client}\n`,
+          "utf8",
+        ),
+        writeFile(
+          join(wellKnownDir, ".well-known", "matrix", "server"),
+          `${wellKnown.server}\n`,
+          "utf8",
+        ),
+      );
+    }
+
+    await Promise.all(writes);
     await ensureDirectoryTreeWritable(synapseDir);
     await ensureDirectoryTreeWritable(postgresDir);
+    if (tlsMode === "auto") {
+      await ensureDirectoryTreeWritable(wellKnownDir);
+      await ensureDirectoryTreeWritable(proxyDir);
+      await ensureDirectoryTreeWritable(proxyDataDir);
+      await ensureDirectoryTreeWritable(proxyConfigDir);
+    }
 
     const composeConfigCheck = await this.runComposeCommand(projectDir, composeFilePath, [
       "config",
@@ -175,7 +245,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         publicBaseUrl,
         tlsMode,
       },
-      "Bundled Matrix local-dev compose bundle generated and validated",
+      "Bundled Matrix compose bundle generated and validated",
     );
 
     return {
@@ -185,7 +255,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       publicBaseUrl,
       adminBaseUrl: MATRIX_INTERNAL_BASE_URL,
       federationEnabled,
-      tlsMode: "local-dev",
+      tlsMode,
     };
   }
 
@@ -467,7 +537,11 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
   }
 
   private async ensureStackRunning(provision: BundledMatrixProvisionResult): Promise<void> {
-    const upArgs = ["up", "-d", "--remove-orphans", "--force-recreate", "postgres", "synapse"];
+    const services = ["postgres", "synapse"];
+    if (provision.tlsMode === "auto") {
+      services.push("reverse-proxy");
+    }
+    const upArgs = ["up", "-d", "--remove-orphans", "--force-recreate", ...services];
     const composeUp = await this.runComposeCommand(
       provision.projectDir,
       provision.composeFilePath,
@@ -980,7 +1054,10 @@ type EnvTemplateInput = {
 
 type ComposeTemplateInput = {
   synapseImage: string;
-  synapsePortBinding: string;
+  caddyImage: string;
+  tlsMode: BundledMatrixTlsMode;
+  localSynapsePortBinding: string;
+  httpsProxyPortBinding?: string;
 };
 
 const renderComposeYaml = (input: ComposeTemplateInput): string => `
@@ -1004,9 +1081,26 @@ services:
     environment:
       SYNAPSE_CONFIG_PATH: \${SYNAPSE_CONFIG_PATH}
     ports:
-      - "${input.synapsePortBinding}"
+      - "${input.localSynapsePortBinding}"
     volumes:
       - ./synapse:/data
+${input.tlsMode === "auto"
+  ? `
+
+  reverse-proxy:
+    image: ${input.caddyImage}
+    restart: unless-stopped
+    depends_on:
+      - synapse
+    ports:
+      - "80:80"
+      - "${input.httpsProxyPortBinding}"
+    volumes:
+      - ./reverse-proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./well-known:/srv:ro
+      - ./reverse-proxy-data:/data
+      - ./reverse-proxy-config:/config`
+  : ""}
 `.trim();
 
 const renderEnvFile = (input: EnvTemplateInput): string =>
@@ -1022,6 +1116,7 @@ type SynapseConfigInput = {
   homeserverDomain: string;
   publicBaseUrl: string;
   federationEnabled: boolean;
+  behindReverseProxy: boolean;
   postgresPassword: string;
   registrationSharedSecret: string;
   macaroonSecret: string;
@@ -1043,7 +1138,7 @@ const renderSynapseConfig = (input: SynapseConfigInput): string => {
     "  - port: 8008",
     "    tls: false",
     "    type: http",
-    "    x_forwarded: false",
+    `    x_forwarded: ${input.behindReverseProxy ? "true" : "false"}`,
     "    bind_addresses: ['0.0.0.0']",
     "    resources:",
     "      - names: [client, federation]",
@@ -1090,7 +1185,7 @@ const resolveSynapseImage = (): string => {
   return DEFAULT_SYNAPSE_IMAGE;
 };
 
-const resolveSynapsePortBinding = (publicBaseUrl: string): string => {
+const resolveLocalDevSynapsePortBinding = (publicBaseUrl: string): string => {
   const parsed = new URL(publicBaseUrl);
   const host = parsed.hostname.trim().toLowerCase();
   const hostBind = isLoopbackHostname(host) ? "127.0.0.1" : "0.0.0.0";
@@ -1099,11 +1194,127 @@ const resolveSynapsePortBinding = (publicBaseUrl: string): string => {
   return `${hostBind}:${publicPort}:8008`;
 };
 
+const resolveAutoHttpsProxyPortBinding = (publicBaseUrl: string): string => {
+  const parsed = new URL(publicBaseUrl);
+  const httpsPort = parsed.port.length > 0 ? parsed.port : "443";
+  return `${httpsPort}:443`;
+};
+
 const isLoopbackHostname = (value: string): boolean =>
   value === "localhost"
   || value === "127.0.0.1"
   || value === "::1"
   || value === "[::1]";
+
+const isIpAddressHostname = (value: string): boolean =>
+  /^[0-9]{1,3}(?:\.[0-9]{1,3}){3}$/.test(value) || value.includes(":");
+
+const validateBundledTlsMode = (input: {
+  tlsMode: BundledMatrixTlsMode;
+  homeserverDomain: string;
+  publicBaseUrl: string;
+}): void => {
+  if (input.tlsMode !== "auto") {
+    return;
+  }
+
+  const parsed = new URL(input.publicBaseUrl);
+  const publicHost = parsed.hostname.trim().toLowerCase();
+  const publicPort = parsed.port.length > 0 ? parsed.port : "443";
+  const homeserverDomain = input.homeserverDomain.trim().toLowerCase();
+
+  if (parsed.protocol !== "https:") {
+    throw {
+      code: "MATRIX_TLS_MODE_INVALID",
+      message: "Bundled Matrix tlsMode=auto requires an https publicBaseUrl",
+      retryable: false,
+      details: {
+        tlsMode: input.tlsMode,
+        publicBaseUrl: input.publicBaseUrl,
+      },
+    };
+  }
+  if (isLoopbackHostname(publicHost) || isIpAddressHostname(publicHost)) {
+    throw {
+      code: "MATRIX_TLS_MODE_INVALID",
+      message: "Bundled Matrix tlsMode=auto requires a public DNS hostname, not a loopback address or IP literal",
+      retryable: false,
+      details: {
+        tlsMode: input.tlsMode,
+        publicBaseUrl: input.publicBaseUrl,
+      },
+    };
+  }
+  if (publicHost !== homeserverDomain) {
+    throw {
+      code: "MATRIX_TLS_MODE_INVALID",
+      message: "Bundled Matrix tlsMode=auto currently requires homeserverDomain to match the publicBaseUrl hostname",
+      retryable: false,
+      details: {
+        homeserverDomain: input.homeserverDomain,
+        publicBaseUrl: input.publicBaseUrl,
+      },
+    };
+  }
+  if (publicPort === "80") {
+    throw {
+      code: "MATRIX_TLS_MODE_INVALID",
+      message: "Bundled Matrix tlsMode=auto cannot use HTTPS on port 80",
+      retryable: false,
+      details: {
+        publicBaseUrl: input.publicBaseUrl,
+      },
+    };
+  }
+};
+
+const renderCaddyfile = (homeserverDomain: string): string =>
+  [
+    "{",
+    "  admin off",
+    "}",
+    "",
+    `${homeserverDomain} {`,
+    "  @wellKnown path /.well-known/matrix/client /.well-known/matrix/server",
+    "  handle @wellKnown {",
+    "    root * /srv",
+    "    header Access-Control-Allow-Origin *",
+    "    header Content-Type application/json",
+    "    header Cache-Control \"public, max-age=300\"",
+    "    file_server",
+    "  }",
+    "",
+    "  handle {",
+    "    reverse_proxy synapse:8008",
+    "  }",
+    "}",
+  ].join("\n");
+
+const renderWellKnownFiles = (input: {
+  homeserverDomain: string;
+  publicBaseUrl: string;
+}): { client: string; server: string } => {
+  const parsed = new URL(input.publicBaseUrl);
+  const httpsPort = parsed.port.length > 0 ? parsed.port : "443";
+  return {
+    client: JSON.stringify(
+      {
+        "m.homeserver": {
+          base_url: input.publicBaseUrl,
+        },
+      },
+      null,
+      2,
+    ),
+    server: JSON.stringify(
+      {
+        "m.server": httpsPort === "443" ? input.homeserverDomain : `${input.homeserverDomain}:${httpsPort}`,
+      },
+      null,
+      2,
+    ),
+  };
+};
 
 const ensureDirectoryTreeWritable = async (root: string): Promise<void> => {
   const queue: string[] = [root];

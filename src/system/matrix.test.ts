@@ -177,6 +177,87 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
     }
   });
 
+  it("writes an auto-TLS reverse-proxy bundle for public installs", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-test-"));
+    const recordedExecCalls: ExecInput[] = [];
+
+    const fakeExecRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        recordedExecCalls.push(input);
+        if (input.command === "docker") {
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: "services:\n  postgres: {}\n  synapse: {}\n  reverse-proxy: {}\n",
+            stderr: "",
+          };
+        }
+        return {
+          command: [input.command, ...(input.args ?? [])].join(" "),
+          exitCode: 127,
+          stdout: "",
+          stderr: "command not found",
+        };
+      },
+    };
+
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "state"),
+      logsDir: join(tempRoot, "logs"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+
+    const provisioner = new DockerComposeBundledMatrixProvisioner(
+      fakeExecRunner,
+      createLogger(),
+      paths,
+    );
+
+    try {
+      const req = buildInstallRequest();
+      req.matrix.homeserverDomain = "matrix.example.org";
+      req.matrix.publicBaseUrl = "https://matrix.example.org";
+      req.matrix.tlsMode = "auto";
+      const result = await provisioner.provision(req);
+
+      expect(result.tlsMode).toBe("auto");
+      expect(result.adminBaseUrl).toBe("http://127.0.0.1:8008");
+
+      const composeText = await readFile(result.composeFilePath, "utf8");
+      expect(composeText).toContain("reverse-proxy:");
+      expect(composeText).toContain("caddy:2.10.2-alpine");
+      expect(composeText).toContain('"127.0.0.1:8008:8008"');
+      expect(composeText).toContain('"80:80"');
+      expect(composeText).toContain('"443:443"');
+
+      const homeserverText = await readFile(join(result.projectDir, "synapse", "homeserver.yaml"), "utf8");
+      expect(homeserverText).toContain('public_baseurl: "https://matrix.example.org/"');
+      expect(homeserverText).toContain("x_forwarded: true");
+
+      const caddyText = await readFile(join(result.projectDir, "reverse-proxy", "Caddyfile"), "utf8");
+      expect(caddyText).toContain("matrix.example.org {");
+      expect(caddyText).toContain("reverse_proxy synapse:8008");
+
+      const wellKnownClient = await readFile(
+        join(result.projectDir, "well-known", ".well-known", "matrix", "client"),
+        "utf8",
+      );
+      expect(wellKnownClient).toContain('"base_url": "https://matrix.example.org"');
+
+      const wellKnownServer = await readFile(
+        join(result.projectDir, "well-known", ".well-known", "matrix", "server"),
+        "utf8",
+      );
+      expect(wellKnownServer).toContain('"m.server": "matrix.example.org"');
+      expect(recordedExecCalls).toHaveLength(1);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("bootstraps operator/bot accounts and creates alert room in local-dev mode", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-test-"));
     const recordedExecCalls: ExecInput[] = [];

@@ -838,6 +838,8 @@ write_secret_file() {
 write_request_file_from_env() {
   node <<'NODE'
 const fs = require("node:fs");
+const matrixPublicBaseUrl = process.env.SN_MATRIX_PUBLIC_BASE_URL || "";
+const matrixTlsMode = /^https:\/\//i.test(matrixPublicBaseUrl) ? "auto" : "local-dev";
 const req = {
   mode: "bundled_matrix",
   openclaw: {
@@ -854,9 +856,9 @@ const req = {
   },
   matrix: {
     homeserverDomain: process.env.SN_MATRIX_DOMAIN,
-    publicBaseUrl: process.env.SN_MATRIX_PUBLIC_BASE_URL,
+    publicBaseUrl: matrixPublicBaseUrl,
     federationEnabled: process.env.SN_MATRIX_FEDERATION_ENABLED === "1",
-    tlsMode: "local-dev",
+    tlsMode: matrixTlsMode,
     alertRoomName: process.env.SN_ALERT_ROOM_NAME,
   },
   operator: {
@@ -898,6 +900,11 @@ review_install_request() {
   ui_info "OpenRouter secret: ${SN_OPENROUTER_SECRET_MODE}"
   ui_info "Matrix homeserver domain: ${SN_MATRIX_DOMAIN}"
   ui_info "Matrix public base URL: ${SN_MATRIX_PUBLIC_BASE_URL}"
+  if [[ "${SN_MATRIX_PUBLIC_BASE_URL}" == https://* ]]; then
+    ui_info "Matrix TLS mode: auto (bundled HTTPS reverse proxy)"
+  else
+    ui_info "Matrix TLS mode: local-dev"
+  fi
   if [[ "${SN_MATRIX_FEDERATION_ENABLED}" == "1" ]]; then
     ui_info "Matrix federation: enabled"
   else
