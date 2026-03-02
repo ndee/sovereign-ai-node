@@ -17,6 +17,27 @@ API_PORT="${SOVEREIGN_NODE_API_PORT:-8787}"
 REQUEST_FILE="${SOVEREIGN_NODE_REQUEST_FILE:-/etc/sovereign-node/install-request.json}"
 RUN_INSTALL="${SOVEREIGN_NODE_RUN_INSTALL:-1}"
 NON_INTERACTIVE="${SOVEREIGN_NODE_NON_INTERACTIVE:-0}"
+ACTION="${SOVEREIGN_NODE_ACTION:-}"
+INSTALLATION_DETECTED="0"
+CONFIGURED_INSTALLATION="0"
+EXISTING_REQUEST_VALID="0"
+LAST_REQUEST_LOAD_ERROR=""
+DEFAULT_OPENROUTER_MODEL="openrouter/anthropic/claude-sonnet-4-5"
+DEFAULT_MATRIX_DOMAIN="matrix.local.test"
+DEFAULT_MATRIX_PUBLIC_BASE_URL="http://127.0.0.1:8008"
+DEFAULT_OPERATOR_USERNAME="operator"
+DEFAULT_ALERT_ROOM_NAME="Sovereign Alerts"
+DEFAULT_POLL_INTERVAL="5m"
+DEFAULT_LOOKBACK_WINDOW="15m"
+DEFAULT_FEDERATION_ENABLED="0"
+DEFAULT_IMAP_CONFIGURED="0"
+DEFAULT_IMAP_HOST="imap.example.org"
+DEFAULT_IMAP_PORT="993"
+DEFAULT_IMAP_TLS="1"
+DEFAULT_IMAP_USERNAME="operator@example.org"
+DEFAULT_IMAP_MAILBOX="INBOX"
+EXISTING_OPENROUTER_SECRET_REF=""
+EXISTING_IMAP_SECRET_REF=""
 
 log() {
   printf '[%s] %s\n' "$SCRIPT_NAME" "$*"
@@ -41,8 +62,10 @@ Options:
   --api-host <host>        API bind host (default: 127.0.0.1)
   --api-port <port>        API bind port (default: 8787)
   --request-file <path>    Install request output path (default: /etc/sovereign-node/install-request.json)
+  --install                Force Install mode (new install / reconfigure)
+  --update                 Force Update mode (reuse existing request/config)
   --skip-install-run       Only bootstrap host; do not run sovereign-node install
-  --non-interactive        Do not prompt; keep/generate request file and exit
+  --non-interactive        Do not prompt; use explicit or inferred action
   -h, --help               Show help
 EOF
 }
@@ -93,6 +116,20 @@ parse_args() {
         REQUEST_FILE="$2"
         shift 2
         ;;
+      --install)
+        if [[ "$ACTION" == "update" ]]; then
+          die "Cannot use --install and --update together"
+        fi
+        ACTION="install"
+        shift
+        ;;
+      --update)
+        if [[ "$ACTION" == "install" ]]; then
+          die "Cannot use --install and --update together"
+        fi
+        ACTION="update"
+        shift
+        ;;
       --skip-install-run)
         RUN_INSTALL="0"
         shift
@@ -110,6 +147,14 @@ parse_args() {
         ;;
     esac
   done
+
+  case "$ACTION" in
+    ""|install|update)
+      ;;
+    *)
+      die "Unsupported action '${ACTION}'. Use install or update."
+      ;;
+  esac
 }
 
 require_root() {
@@ -325,8 +370,145 @@ install_request_template() {
   chmod 0640 "$dst"
 }
 
+detect_installation_state() {
+  INSTALLATION_DETECTED="0"
+  CONFIGURED_INSTALLATION="0"
+
+  if [[ -e "$REQUEST_FILE" || -e /etc/sovereign-node/sovereign-node.json5 || -x /usr/local/bin/sovereign-node ]]; then
+    INSTALLATION_DETECTED="1"
+  fi
+
+  if [[ -r "$REQUEST_FILE" ]]; then
+    CONFIGURED_INSTALLATION="1"
+  fi
+}
+
 has_tty() {
   [[ -e /dev/tty ]]
+}
+
+supports_color() {
+  has_tty && [[ "${TERM:-dumb}" != "dumb" ]]
+}
+
+ui_print() {
+  if has_tty; then
+    printf '%b' "$*" > /dev/tty
+  else
+    printf '%b' "$*"
+  fi
+}
+
+ui_title() {
+  local title subtitle
+  title="$1"
+  subtitle="${2:-}"
+  ui_print "\n"
+  if supports_color; then
+    ui_print "\033[1;36m${title}\033[0m\n"
+  else
+    ui_print "${title}\n"
+  fi
+  if [[ -n "$subtitle" ]]; then
+    ui_print "${subtitle}\n"
+  fi
+}
+
+ui_section() {
+  local label
+  label="$1"
+  ui_print "\n"
+  if supports_color; then
+    ui_print "\033[1m-- ${label} --\033[0m\n"
+  else
+    ui_print "-- ${label} --\n"
+  fi
+}
+
+ui_info() {
+  if supports_color; then
+    ui_print "\033[36m[info]\033[0m $1\n"
+  else
+    ui_print "[info] $1\n"
+  fi
+}
+
+ui_warn() {
+  if supports_color; then
+    ui_print "\033[33m[warn]\033[0m $1\n"
+  else
+    ui_print "[warn] $1\n"
+  fi
+}
+
+ui_error() {
+  if supports_color; then
+    ui_print "\033[31m[error]\033[0m $1\n"
+  else
+    ui_print "[error] $1\n"
+  fi
+}
+
+ui_success() {
+  if supports_color; then
+    ui_print "\033[32m[ok]\033[0m $1\n"
+  else
+    ui_print "[ok] $1\n"
+  fi
+}
+
+ui_choice_menu() {
+  local prompt default_choice answer option_count index option_number
+  prompt="$1"
+  default_choice="$2"
+  shift 2
+  local options=("$@")
+  option_count="${#options[@]}"
+
+  while true; do
+    ui_print "${prompt}\n"
+    for index in "${!options[@]}"; do
+      option_number=$((index + 1))
+      if [[ "$option_number" == "$default_choice" ]]; then
+        ui_print "  ${option_number}) ${options[$index]} [default]\n"
+      else
+        ui_print "  ${option_number}) ${options[$index]}\n"
+      fi
+    done
+    ui_print "Select [${default_choice}]: "
+    IFS= read -r answer < /dev/tty || true
+    if [[ -z "$answer" ]]; then
+      answer="$default_choice"
+    fi
+    if [[ "$answer" =~ ^[0-9]+$ ]] && (( answer >= 1 && answer <= option_count )); then
+      printf '%s' "$answer"
+      return 0
+    fi
+    ui_warn "Please enter a number between 1 and ${option_count}."
+  done
+}
+
+ui_confirm() {
+  local prompt default answer normalized
+  prompt="$1"
+  default="$2"
+  while true; do
+    ui_print "${prompt} [y/n] (default: ${default}): "
+    IFS= read -r answer < /dev/tty || true
+    normalized="$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')"
+    if [[ -z "$normalized" ]]; then
+      normalized="$default"
+    fi
+    case "$normalized" in
+      y|yes)
+        return 0
+        ;;
+      n|no)
+        return 1
+        ;;
+    esac
+    ui_warn "Please answer y or n."
+  done
 }
 
 prompt_value() {
@@ -334,9 +516,9 @@ prompt_value() {
   prompt="$1"
   default="${2:-}"
   if [[ -n "$default" ]]; then
-    printf "%s [%s]: " "$prompt" "$default" > /dev/tty
+    ui_print "${prompt} [${default}]: "
   else
-    printf "%s: " "$prompt" > /dev/tty
+    ui_print "${prompt}: "
   fi
   IFS= read -r value < /dev/tty || true
   if [[ -z "$value" ]]; then
@@ -348,37 +530,236 @@ prompt_value() {
 prompt_secret() {
   local prompt value
   prompt="$1"
-  printf "%s: " "$prompt" > /dev/tty
+  ui_print "${prompt}: "
   stty -echo < /dev/tty
   IFS= read -r value < /dev/tty || true
   stty echo < /dev/tty
-  printf "\n" > /dev/tty
+  ui_print "\n"
   printf '%s' "$value"
 }
 
-prompt_yes_no() {
-  local prompt default answer normalized
+prompt_required_secret() {
+  local prompt empty_message value
   prompt="$1"
-  default="$2"
-  while true; do
-    printf "%s [%s/%s] (default: %s): " \
-      "$prompt" \
-      "y" \
-      "n" \
-      "$default" > /dev/tty
-    IFS= read -r answer < /dev/tty || true
-    normalized="$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]')"
-    if [[ -z "$normalized" ]]; then
-      normalized="$default"
+  empty_message="$2"
+  value="$(prompt_secret "$prompt")"
+  while [[ -z "$value" ]]; do
+    ui_warn "$empty_message"
+    value="$(prompt_secret "$prompt")"
+  done
+  printf '%s' "$value"
+}
+
+reset_request_defaults() {
+  EXISTING_REQUEST_VALID="0"
+  LAST_REQUEST_LOAD_ERROR=""
+  DEFAULT_OPENROUTER_MODEL="openrouter/anthropic/claude-sonnet-4-5"
+  DEFAULT_MATRIX_DOMAIN="matrix.local.test"
+  DEFAULT_MATRIX_PUBLIC_BASE_URL="http://127.0.0.1:8008"
+  DEFAULT_OPERATOR_USERNAME="operator"
+  DEFAULT_ALERT_ROOM_NAME="Sovereign Alerts"
+  DEFAULT_POLL_INTERVAL="5m"
+  DEFAULT_LOOKBACK_WINDOW="15m"
+  DEFAULT_FEDERATION_ENABLED="0"
+  DEFAULT_IMAP_CONFIGURED="0"
+  DEFAULT_IMAP_HOST="imap.example.org"
+  DEFAULT_IMAP_PORT="993"
+  DEFAULT_IMAP_TLS="1"
+  DEFAULT_IMAP_USERNAME="operator@example.org"
+  DEFAULT_IMAP_MAILBOX="INBOX"
+  EXISTING_OPENROUTER_SECRET_REF=""
+  EXISTING_IMAP_SECRET_REF=""
+}
+
+load_existing_defaults() {
+  local output
+  reset_request_defaults
+
+  if [[ ! -r "$REQUEST_FILE" ]]; then
+    return 0
+  fi
+
+  if ! output="$(
+    node - "$REQUEST_FILE" <<'NODE'
+const fs = require("node:fs");
+const path = process.argv[2];
+const raw = fs.readFileSync(path, "utf8");
+const req = JSON.parse(raw);
+const lines = [];
+const clean = (value) => String(value).replace(/\t/g, " ").replace(/\r?\n/g, " ").trim();
+const emit = (key, value) => {
+  if (value === undefined || value === null || value === "") {
+    return;
+  }
+  lines.push(`${key}\t${clean(value)}`);
+};
+
+const openrouter = req.openrouter ?? {};
+const matrix = req.matrix ?? {};
+const operator = req.operator ?? {};
+const mailSentinel = req.mailSentinel ?? {};
+const imap = req.imap ?? {};
+
+emit("DEFAULT_OPENROUTER_MODEL", openrouter.model);
+emit("EXISTING_OPENROUTER_SECRET_REF", openrouter.secretRef ?? openrouter.apiKeySecretRef ?? "");
+emit("DEFAULT_MATRIX_DOMAIN", matrix.homeserverDomain);
+emit("DEFAULT_MATRIX_PUBLIC_BASE_URL", matrix.publicBaseUrl);
+emit("DEFAULT_FEDERATION_ENABLED", matrix.federationEnabled === true ? "1" : "0");
+emit("DEFAULT_ALERT_ROOM_NAME", matrix.alertRoomName);
+emit("DEFAULT_OPERATOR_USERNAME", operator.username);
+emit("DEFAULT_POLL_INTERVAL", mailSentinel.pollInterval);
+emit("DEFAULT_LOOKBACK_WINDOW", mailSentinel.lookbackWindow);
+
+if (imap && typeof imap === "object" && Object.keys(imap).length > 0 && imap.status !== "pending") {
+  emit("DEFAULT_IMAP_CONFIGURED", "1");
+  emit("DEFAULT_IMAP_HOST", imap.host);
+  emit("DEFAULT_IMAP_PORT", imap.port);
+  emit("DEFAULT_IMAP_TLS", imap.tls === false ? "0" : "1");
+  emit("DEFAULT_IMAP_USERNAME", imap.username);
+  emit("DEFAULT_IMAP_MAILBOX", imap.mailbox);
+  emit("EXISTING_IMAP_SECRET_REF", imap.secretRef);
+}
+
+process.stdout.write(lines.join("\n"));
+NODE
+  )"; then
+    LAST_REQUEST_LOAD_ERROR="Failed to parse existing request file: ${REQUEST_FILE}"
+    return 1
+  fi
+
+  while IFS=$'\t' read -r key value; do
+    [[ -n "$key" ]] || continue
+    case "$key" in
+      DEFAULT_OPENROUTER_MODEL)
+        DEFAULT_OPENROUTER_MODEL="$value"
+        ;;
+      EXISTING_OPENROUTER_SECRET_REF)
+        EXISTING_OPENROUTER_SECRET_REF="$value"
+        ;;
+      DEFAULT_MATRIX_DOMAIN)
+        DEFAULT_MATRIX_DOMAIN="$value"
+        ;;
+      DEFAULT_MATRIX_PUBLIC_BASE_URL)
+        DEFAULT_MATRIX_PUBLIC_BASE_URL="$value"
+        ;;
+      DEFAULT_FEDERATION_ENABLED)
+        DEFAULT_FEDERATION_ENABLED="$value"
+        ;;
+      DEFAULT_ALERT_ROOM_NAME)
+        DEFAULT_ALERT_ROOM_NAME="$value"
+        ;;
+      DEFAULT_OPERATOR_USERNAME)
+        DEFAULT_OPERATOR_USERNAME="$value"
+        ;;
+      DEFAULT_POLL_INTERVAL)
+        DEFAULT_POLL_INTERVAL="$value"
+        ;;
+      DEFAULT_LOOKBACK_WINDOW)
+        DEFAULT_LOOKBACK_WINDOW="$value"
+        ;;
+      DEFAULT_IMAP_CONFIGURED)
+        DEFAULT_IMAP_CONFIGURED="$value"
+        ;;
+      DEFAULT_IMAP_HOST)
+        DEFAULT_IMAP_HOST="$value"
+        ;;
+      DEFAULT_IMAP_PORT)
+        DEFAULT_IMAP_PORT="$value"
+        ;;
+      DEFAULT_IMAP_TLS)
+        DEFAULT_IMAP_TLS="$value"
+        ;;
+      DEFAULT_IMAP_USERNAME)
+        DEFAULT_IMAP_USERNAME="$value"
+        ;;
+      DEFAULT_IMAP_MAILBOX)
+        DEFAULT_IMAP_MAILBOX="$value"
+        ;;
+      EXISTING_IMAP_SECRET_REF)
+        EXISTING_IMAP_SECRET_REF="$value"
+        ;;
+    esac
+  done <<< "$output"
+
+  EXISTING_REQUEST_VALID="1"
+  return 0
+}
+
+secret_ref_path_exists() {
+  local secret_ref
+  secret_ref="$1"
+  if [[ -z "$secret_ref" ]]; then
+    return 1
+  fi
+  if [[ "$secret_ref" != file:* ]]; then
+    return 0
+  fi
+  [[ -f "${secret_ref#file:}" ]]
+}
+
+warn_if_missing_secret_ref() {
+  local label secret_ref
+  label="$1"
+  secret_ref="$2"
+  if [[ "$secret_ref" == file:* ]] && [[ ! -f "${secret_ref#file:}" ]]; then
+    ui_warn "${label} secret file is missing: ${secret_ref#file:}"
+    return 1
+  fi
+  return 0
+}
+
+resolve_action() {
+  local default_choice selected_choice subtitle
+
+  if [[ -n "$ACTION" ]]; then
+    if [[ "$ACTION" == "update" && "$CONFIGURED_INSTALLATION" != "1" ]]; then
+      die "Update mode requires an existing readable request file: $REQUEST_FILE"
     fi
-    case "$normalized" in
-      y|yes)
-        printf '1'
+    return
+  fi
+
+  if [[ "$NON_INTERACTIVE" == "1" ]] || ! has_tty; then
+    if [[ "$CONFIGURED_INSTALLATION" == "1" ]]; then
+      ACTION="update"
+    else
+      ACTION="install"
+    fi
+    return
+  fi
+
+  if [[ "$INSTALLATION_DETECTED" == "1" ]]; then
+    default_choice="2"
+    subtitle="Existing installation detected"
+  else
+    default_choice="1"
+    subtitle="No existing installation detected"
+  fi
+
+  while true; do
+    ui_title "Sovereign Node Setup" "$subtitle"
+    selected_choice="$(
+      ui_choice_menu \
+        "Choose an action:" \
+        "$default_choice" \
+        "Install (new / reconfigure)" \
+        "Update (keep current settings)" \
+        "Exit"
+    )"
+    case "$selected_choice" in
+      1)
+        ACTION="install"
         return
         ;;
-      n|no)
-        printf '0'
-        return
+      2)
+        if [[ "$CONFIGURED_INSTALLATION" == "1" ]]; then
+          ACTION="update"
+          return
+        fi
+        ui_warn "Update is not available because no readable existing request file was found."
+        ;;
+      3)
+        ui_info "Installer exited."
+        exit 0
         ;;
     esac
   done
@@ -394,76 +775,7 @@ write_secret_file() {
   chown "${SERVICE_USER}:${SERVICE_GROUP}" "$path" || true
 }
 
-run_install_wizard() {
-  local openrouter_api_key openrouter_model matrix_domain matrix_public_base_url
-  local operator_username alert_room_name poll_interval lookback_window federation_enabled
-  local configure_imap imap_host imap_port imap_tls imap_username imap_password imap_mailbox
-  local openrouter_secret_path imap_secret_path
-
-  log "Starting guided Sovereign Node install wizard"
-
-  openrouter_api_key="$(prompt_secret "OpenRouter API key (sk-or-...)")"
-  while [[ -z "$openrouter_api_key" ]]; do
-    printf "OpenRouter API key is required.\n" > /dev/tty
-    openrouter_api_key="$(prompt_secret "OpenRouter API key (sk-or-...)")"
-  done
-
-  openrouter_model="$(prompt_value "OpenRouter model" "openrouter/anthropic/claude-sonnet-4-5")"
-  matrix_domain="$(prompt_value "Matrix homeserver domain" "matrix.local.test")"
-  matrix_public_base_url="$(prompt_value "Matrix public base URL" "http://127.0.0.1:8008")"
-  operator_username="$(prompt_value "Operator username" "operator")"
-  alert_room_name="$(prompt_value "Alert room name" "Sovereign Alerts")"
-  poll_interval="$(prompt_value "Mail Sentinel poll interval" "5m")"
-  lookback_window="$(prompt_value "Mail Sentinel lookback window" "15m")"
-  federation_enabled="$(prompt_yes_no "Enable Matrix federation?" "n")"
-  configure_imap="$(prompt_yes_no "Configure IMAP now? (choose no to keep IMAP pending)" "n")"
-
-  imap_host=""
-  imap_port="993"
-  imap_tls="1"
-  imap_username=""
-  imap_password=""
-  imap_mailbox="INBOX"
-
-  if [[ "$configure_imap" == "1" ]]; then
-    imap_host="$(prompt_value "IMAP host" "imap.example.org")"
-    imap_port="$(prompt_value "IMAP port" "993")"
-    imap_tls="$(prompt_yes_no "Use TLS for IMAP?" "y")"
-    imap_username="$(prompt_value "IMAP username" "operator@example.org")"
-    imap_password="$(prompt_secret "IMAP password/app password")"
-    while [[ -z "$imap_password" ]]; do
-      printf "IMAP password is required when IMAP is configured.\n" > /dev/tty
-      imap_password="$(prompt_secret "IMAP password/app password")"
-    done
-    imap_mailbox="$(prompt_value "IMAP mailbox" "INBOX")"
-  fi
-
-  openrouter_secret_path="/etc/sovereign-node/secrets/openrouter-api-key"
-  write_secret_file "$openrouter_secret_path" "$openrouter_api_key"
-
-  imap_secret_path="/etc/sovereign-node/secrets/imap-password"
-  if [[ "$configure_imap" == "1" ]]; then
-    write_secret_file "$imap_secret_path" "$imap_password"
-  fi
-
-  export SN_REQUEST_FILE="$REQUEST_FILE"
-  export SN_OPENROUTER_MODEL="$openrouter_model"
-  export SN_OPENROUTER_SECRET_REF="file:${openrouter_secret_path}"
-  export SN_MATRIX_DOMAIN="$matrix_domain"
-  export SN_MATRIX_PUBLIC_BASE_URL="$matrix_public_base_url"
-  export SN_MATRIX_FEDERATION_ENABLED="$federation_enabled"
-  export SN_OPERATOR_USERNAME="$operator_username"
-  export SN_ALERT_ROOM_NAME="$alert_room_name"
-  export SN_POLL_INTERVAL="$poll_interval"
-  export SN_LOOKBACK_WINDOW="$lookback_window"
-  export SN_IMAP_CONFIGURE="$configure_imap"
-  export SN_IMAP_HOST="$imap_host"
-  export SN_IMAP_PORT="$imap_port"
-  export SN_IMAP_TLS="$imap_tls"
-  export SN_IMAP_USERNAME="$imap_username"
-  export SN_IMAP_SECRET_REF="file:${imap_secret_path}"
-  export SN_IMAP_MAILBOX="$imap_mailbox"
-
+write_request_file_from_env() {
   node <<'NODE'
 const fs = require("node:fs");
 const req = {
@@ -520,29 +832,278 @@ NODE
   log "Wrote install request: $REQUEST_FILE"
 }
 
-prepare_request_file() {
+review_install_request() {
+  ui_section "Review"
+  ui_info "OpenRouter model: ${SN_OPENROUTER_MODEL}"
+  ui_info "OpenRouter secret: ${SN_OPENROUTER_SECRET_MODE}"
+  ui_info "Matrix homeserver domain: ${SN_MATRIX_DOMAIN}"
+  ui_info "Matrix public base URL: ${SN_MATRIX_PUBLIC_BASE_URL}"
+  if [[ "${SN_MATRIX_FEDERATION_ENABLED}" == "1" ]]; then
+    ui_info "Matrix federation: enabled"
+  else
+    ui_info "Matrix federation: disabled"
+  fi
+  ui_info "Operator username: ${SN_OPERATOR_USERNAME}"
+  ui_info "Alert room name: ${SN_ALERT_ROOM_NAME}"
+  ui_info "Mail Sentinel poll interval: ${SN_POLL_INTERVAL}"
+  ui_info "Mail Sentinel lookback window: ${SN_LOOKBACK_WINDOW}"
+  if [[ "${SN_IMAP_CONFIGURE}" == "1" ]]; then
+    ui_info "IMAP: configured (${SN_IMAP_SECRET_MODE})"
+    ui_info "IMAP host: ${SN_IMAP_HOST}"
+    ui_info "IMAP username: ${SN_IMAP_USERNAME}"
+    ui_info "IMAP mailbox: ${SN_IMAP_MAILBOX}"
+  else
+    ui_info "IMAP: pending"
+  fi
+}
+
+run_install_wizard() {
+  local defaults_status openrouter_api_key openrouter_model matrix_domain matrix_public_base_url
+  local operator_username alert_room_name poll_interval lookback_window federation_enabled
+  local openrouter_secret_ref openrouter_secret_path openrouter_secret_mode
+  local configure_imap imap_choice imap_host imap_port imap_tls imap_username imap_password
+  local imap_mailbox imap_secret_ref imap_secret_path imap_secret_mode
+
+  defaults_status=0
+  load_existing_defaults || defaults_status=$?
+  if [[ "$defaults_status" -ne 0 ]]; then
+    ui_warn "${LAST_REQUEST_LOAD_ERROR}. Falling back to default values."
+  fi
+
+  ui_title "Sovereign Node Install" \
+    "$( [[ "$INSTALLATION_DETECTED" == "1" ]] && printf 'Reconfigure the existing installation with current values prefilled.' || printf 'New installation with guided setup.' )"
+
+  openrouter_model="$DEFAULT_OPENROUTER_MODEL"
+  matrix_domain="$DEFAULT_MATRIX_DOMAIN"
+  matrix_public_base_url="$DEFAULT_MATRIX_PUBLIC_BASE_URL"
+  operator_username="$DEFAULT_OPERATOR_USERNAME"
+  alert_room_name="$DEFAULT_ALERT_ROOM_NAME"
+  poll_interval="$DEFAULT_POLL_INTERVAL"
+  lookback_window="$DEFAULT_LOOKBACK_WINDOW"
+  federation_enabled="$DEFAULT_FEDERATION_ENABLED"
+  openrouter_secret_ref="$EXISTING_OPENROUTER_SECRET_REF"
+  openrouter_secret_mode="replaced"
+
+  ui_section "OpenRouter"
+  openrouter_model="$(prompt_value "OpenRouter model" "$openrouter_model")"
+  if [[ -n "$openrouter_secret_ref" ]] && [[ "$EXISTING_REQUEST_VALID" == "1" ]]; then
+    if secret_ref_path_exists "$openrouter_secret_ref"; then
+      if ui_confirm "Keep existing OpenRouter API key?" "y"; then
+        openrouter_secret_mode="kept"
+      else
+        openrouter_secret_ref=""
+      fi
+    else
+      ui_warn "Existing OpenRouter secret is missing. Enter a new OpenRouter API key."
+      openrouter_secret_ref=""
+    fi
+  fi
+  if [[ -z "$openrouter_secret_ref" ]]; then
+    openrouter_api_key="$(
+      prompt_required_secret \
+        "OpenRouter API key (sk-or-...)" \
+        "OpenRouter API key is required."
+    )"
+    openrouter_secret_path="/etc/sovereign-node/secrets/openrouter-api-key"
+    write_secret_file "$openrouter_secret_path" "$openrouter_api_key"
+    openrouter_secret_ref="file:${openrouter_secret_path}"
+    openrouter_secret_mode="replaced"
+  fi
+
+  ui_section "Matrix"
+  matrix_domain="$(prompt_value "Matrix homeserver domain" "$matrix_domain")"
+  matrix_public_base_url="$(prompt_value "Matrix public base URL" "$matrix_public_base_url")"
+  operator_username="$(prompt_value "Operator username" "$operator_username")"
+  alert_room_name="$(prompt_value "Alert room name" "$alert_room_name")"
+  if ui_confirm "Enable Matrix federation?" "$( [[ "$federation_enabled" == "1" ]] && printf 'y' || printf 'n' )"; then
+    federation_enabled="1"
+  else
+    federation_enabled="0"
+  fi
+
+  ui_section "Mail Sentinel"
+  poll_interval="$(prompt_value "Mail Sentinel poll interval" "$poll_interval")"
+  lookback_window="$(prompt_value "Mail Sentinel lookback window" "$lookback_window")"
+
+  configure_imap="0"
+  imap_host="$DEFAULT_IMAP_HOST"
+  imap_port="$DEFAULT_IMAP_PORT"
+  imap_tls="$DEFAULT_IMAP_TLS"
+  imap_username="$DEFAULT_IMAP_USERNAME"
+  imap_mailbox="$DEFAULT_IMAP_MAILBOX"
+  imap_secret_ref="$EXISTING_IMAP_SECRET_REF"
+  imap_secret_mode="pending"
+
+  ui_section "IMAP (optional)"
+  if [[ "$DEFAULT_IMAP_CONFIGURED" == "1" ]] && [[ "$EXISTING_REQUEST_VALID" == "1" ]]; then
+    imap_choice="$(
+      ui_choice_menu \
+        "Choose how to handle IMAP:" \
+        "1" \
+        "Keep current IMAP configuration" \
+        "Replace IMAP configuration" \
+        "Leave IMAP pending"
+    )"
+    case "$imap_choice" in
+      1)
+        if secret_ref_path_exists "$imap_secret_ref"; then
+          configure_imap="1"
+          imap_secret_mode="kept"
+        else
+          ui_warn "Existing IMAP secret is missing. Enter replacement IMAP credentials."
+          imap_choice="2"
+        fi
+        ;;
+      3)
+        configure_imap="0"
+        imap_secret_ref=""
+        imap_secret_mode="pending"
+        ;;
+    esac
+    if [[ "$imap_choice" == "2" ]]; then
+      configure_imap="1"
+      imap_host="$(prompt_value "IMAP host" "$imap_host")"
+      imap_port="$(prompt_value "IMAP port" "$imap_port")"
+      if ui_confirm "Use TLS for IMAP?" "$( [[ "$imap_tls" == "1" ]] && printf 'y' || printf 'n' )"; then
+        imap_tls="1"
+      else
+        imap_tls="0"
+      fi
+      imap_username="$(prompt_value "IMAP username" "$imap_username")"
+      imap_password="$(
+        prompt_required_secret \
+          "IMAP password/app password" \
+          "IMAP password is required when IMAP is configured."
+      )"
+      imap_mailbox="$(prompt_value "IMAP mailbox" "$imap_mailbox")"
+      imap_secret_path="/etc/sovereign-node/secrets/imap-password"
+      write_secret_file "$imap_secret_path" "$imap_password"
+      imap_secret_ref="file:${imap_secret_path}"
+      imap_secret_mode="replaced"
+    fi
+  else
+    if ui_confirm "Configure IMAP now? (choose no to keep IMAP pending)" "n"; then
+      configure_imap="1"
+      imap_host="$(prompt_value "IMAP host" "$imap_host")"
+      imap_port="$(prompt_value "IMAP port" "$imap_port")"
+      if ui_confirm "Use TLS for IMAP?" "y"; then
+        imap_tls="1"
+      else
+        imap_tls="0"
+      fi
+      imap_username="$(prompt_value "IMAP username" "$imap_username")"
+      imap_password="$(
+        prompt_required_secret \
+          "IMAP password/app password" \
+          "IMAP password is required when IMAP is configured."
+      )"
+      imap_mailbox="$(prompt_value "IMAP mailbox" "$imap_mailbox")"
+      imap_secret_path="/etc/sovereign-node/secrets/imap-password"
+      write_secret_file "$imap_secret_path" "$imap_password"
+      imap_secret_ref="file:${imap_secret_path}"
+      imap_secret_mode="replaced"
+    fi
+  fi
+
+  export SN_REQUEST_FILE="$REQUEST_FILE"
+  export SN_OPENROUTER_MODEL="$openrouter_model"
+  export SN_OPENROUTER_SECRET_REF="$openrouter_secret_ref"
+  export SN_OPENROUTER_SECRET_MODE="$openrouter_secret_mode"
+  export SN_MATRIX_DOMAIN="$matrix_domain"
+  export SN_MATRIX_PUBLIC_BASE_URL="$matrix_public_base_url"
+  export SN_MATRIX_FEDERATION_ENABLED="$federation_enabled"
+  export SN_OPERATOR_USERNAME="$operator_username"
+  export SN_ALERT_ROOM_NAME="$alert_room_name"
+  export SN_POLL_INTERVAL="$poll_interval"
+  export SN_LOOKBACK_WINDOW="$lookback_window"
+  export SN_IMAP_CONFIGURE="$configure_imap"
+  export SN_IMAP_HOST="$imap_host"
+  export SN_IMAP_PORT="$imap_port"
+  export SN_IMAP_TLS="$imap_tls"
+  export SN_IMAP_USERNAME="$imap_username"
+  export SN_IMAP_SECRET_REF="$imap_secret_ref"
+  export SN_IMAP_SECRET_MODE="$imap_secret_mode"
+  export SN_IMAP_MAILBOX="$imap_mailbox"
+
+  review_install_request
+  if ! ui_confirm "Write the request file and continue?" "y"; then
+    ui_info "Installer exited without changing the request file."
+    exit 0
+  fi
+
+  write_request_file_from_env
+  ui_success "Request file updated."
+}
+
+prepare_install_request_for_install() {
   if [[ "$NON_INTERACTIVE" == "1" ]]; then
     if [[ ! -f "$REQUEST_FILE" ]]; then
-      cp /etc/sovereign-node/install-request.example.json "$REQUEST_FILE"
-      chmod 0640 "$REQUEST_FILE"
-      chown "${SERVICE_USER}:${SERVICE_GROUP}" "$REQUEST_FILE" || true
-      log "Non-interactive mode: wrote template request to $REQUEST_FILE"
+      if [[ -f /etc/sovereign-node/install-request.example.json ]]; then
+        cp /etc/sovereign-node/install-request.example.json "$REQUEST_FILE"
+        chmod 0640 "$REQUEST_FILE"
+        chown "${SERVICE_USER}:${SERVICE_GROUP}" "$REQUEST_FILE" || true
+        log "Non-interactive install: wrote template request to $REQUEST_FILE"
+      else
+        log "Non-interactive install: no request file exists yet; skipping install run"
+      fi
+      RUN_INSTALL="0"
     fi
     return
   fi
 
   if ! has_tty; then
     if [[ ! -f "$REQUEST_FILE" ]]; then
-      cp /etc/sovereign-node/install-request.example.json "$REQUEST_FILE"
-      chmod 0640 "$REQUEST_FILE"
-      chown "${SERVICE_USER}:${SERVICE_GROUP}" "$REQUEST_FILE" || true
+      if [[ -f /etc/sovereign-node/install-request.example.json ]]; then
+        cp /etc/sovereign-node/install-request.example.json "$REQUEST_FILE"
+        chmod 0640 "$REQUEST_FILE"
+        chown "${SERVICE_USER}:${SERVICE_GROUP}" "$REQUEST_FILE" || true
+      fi
+      log "No TTY available; wrote template request file and skipped the install run"
+      RUN_INSTALL="0"
+      return
     fi
-    log "No TTY available; skipping interactive installer wizard"
-    RUN_INSTALL="0"
+    log "No TTY available; reusing existing request file for install mode"
     return
   fi
 
   run_install_wizard
+}
+
+prepare_install_request_for_update() {
+  if [[ "$CONFIGURED_INSTALLATION" != "1" ]]; then
+    die "Update mode requires an existing readable request file: $REQUEST_FILE"
+  fi
+
+  if ! load_existing_defaults; then
+    die "${LAST_REQUEST_LOAD_ERROR}"
+  fi
+
+  if [[ "$NON_INTERACTIVE" == "1" ]] || ! has_tty; then
+    return
+  fi
+
+  ui_title "Sovereign Node Update" "Reuse the current configuration and update in place."
+  ui_section "Update"
+  ui_info "Will update application code."
+  ui_info "Will preserve /etc/sovereign-node, /etc/sovereign-node/secrets, and /var/lib/sovereign-node."
+  ui_info "Will reuse request file: ${REQUEST_FILE}"
+  warn_if_missing_secret_ref "OpenRouter" "$EXISTING_OPENROUTER_SECRET_REF" || true
+  warn_if_missing_secret_ref "IMAP" "$EXISTING_IMAP_SECRET_REF" || true
+  if ! ui_confirm "Continue with update?" "y"; then
+    ui_info "Update cancelled."
+    exit 0
+  fi
+}
+
+prepare_request_file() {
+  case "$ACTION" in
+    update)
+      prepare_install_request_for_update
+      ;;
+    *)
+      prepare_install_request_for_install
+      ;;
+  esac
 }
 
 parse_install_result() {
@@ -722,9 +1283,10 @@ wait_for_runtime_ready() {
 
 run_install_flow() {
   local install_output install_exit_code parsed install_state install_summary status_output doctor_output
+  local action_label
 
   if [[ "$RUN_INSTALL" != "1" ]]; then
-    log "Skipping sovereign-node install run (--skip-install-run)"
+    log "Skipping ${ACTION:-install} run (--skip-install-run)"
     return
   fi
 
@@ -732,7 +1294,12 @@ run_install_flow() {
     die "Install request file not found: $REQUEST_FILE"
   fi
 
-  log "Running sovereign-node install"
+  action_label="${ACTION:-install}"
+  if [[ "$action_label" == "update" ]]; then
+    log "Running Sovereign Node update"
+  else
+    log "Running Sovereign Node install"
+  fi
   set +e
   install_output="$(
     timeout --foreground 30m env \
@@ -755,10 +1322,17 @@ run_install_flow() {
   install_state="${parsed%%$'\t'*}"
   install_summary="${parsed#*$'\t'}"
   if [[ "$install_state" != "succeeded" ]]; then
+    if [[ "$action_label" == "update" ]]; then
+      die "Update did not complete successfully (${install_summary})"
+    fi
     die "Install did not complete successfully (${install_summary})"
   fi
 
-  log "Install job succeeded. Waiting for Matrix and OpenClaw runtime readiness"
+  if [[ "$action_label" == "update" ]]; then
+    log "Update job succeeded. Waiting for Matrix and OpenClaw runtime readiness"
+  else
+    log "Install job succeeded. Waiting for Matrix and OpenClaw runtime readiness"
+  fi
   if ! status_output="$(wait_for_runtime_ready 45 2)"; then
     printf '%s\n' "$status_output"
     die "Runtime did not reach healthy state for Matrix/OpenClaw within timeout"
@@ -771,10 +1345,14 @@ run_install_flow() {
 }
 
 main() {
+  local completion_label
+
   parse_args "$@"
   normalize_service_identity
   require_root
   ensure_supported_os
+  detect_installation_state
+  resolve_action
   resolve_source_mode
   install_base_packages
   install_node22_if_needed
@@ -788,8 +1366,14 @@ main() {
   prepare_request_file
   run_install_flow
 
+  if [[ "${ACTION:-install}" == "update" ]]; then
+    completion_label="Update completed."
+  else
+    completion_label="Install completed."
+  fi
+
   cat <<EOF
-Bootstrap completed.
+${completion_label}
 
 Request file: ${REQUEST_FILE}
 
