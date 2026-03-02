@@ -22,7 +22,9 @@ INSTALLATION_DETECTED="0"
 CONFIGURED_INSTALLATION="0"
 EXISTING_REQUEST_VALID="0"
 LAST_REQUEST_LOAD_ERROR=""
-DEFAULT_OPENROUTER_MODEL="openai/gpt-5-nano"
+RECOMMENDED_OPENROUTER_MODEL="openai/gpt-5-nano"
+LEGACY_OPENROUTER_MODEL="openrouter/anthropic/claude-sonnet-4-5"
+DEFAULT_OPENROUTER_MODEL="$RECOMMENDED_OPENROUTER_MODEL"
 DEFAULT_MATRIX_DOMAIN="matrix.local.test"
 DEFAULT_MATRIX_PUBLIC_BASE_URL="http://127.0.0.1:8008"
 DEFAULT_OPERATOR_USERNAME="operator"
@@ -38,6 +40,7 @@ DEFAULT_IMAP_USERNAME="operator@example.org"
 DEFAULT_IMAP_MAILBOX="INBOX"
 EXISTING_OPENROUTER_SECRET_REF=""
 EXISTING_IMAP_SECRET_REF=""
+LEGACY_OPENROUTER_MODEL_DETECTED="0"
 
 log() {
   printf '[%s] %s\n' "$SCRIPT_NAME" "$*"
@@ -553,7 +556,7 @@ prompt_required_secret() {
 reset_request_defaults() {
   EXISTING_REQUEST_VALID="0"
   LAST_REQUEST_LOAD_ERROR=""
-  DEFAULT_OPENROUTER_MODEL="openai/gpt-5-nano"
+  DEFAULT_OPENROUTER_MODEL="$RECOMMENDED_OPENROUTER_MODEL"
   DEFAULT_MATRIX_DOMAIN="matrix.local.test"
   DEFAULT_MATRIX_PUBLIC_BASE_URL="http://127.0.0.1:8008"
   DEFAULT_OPERATOR_USERNAME="operator"
@@ -569,6 +572,53 @@ reset_request_defaults() {
   DEFAULT_IMAP_MAILBOX="INBOX"
   EXISTING_OPENROUTER_SECRET_REF=""
   EXISTING_IMAP_SECRET_REF=""
+  LEGACY_OPENROUTER_MODEL_DETECTED="0"
+}
+
+migrate_legacy_openrouter_model_request() {
+  local status
+  [[ -r "$REQUEST_FILE" ]] || return 0
+
+  if ! status="$(
+    node - "$REQUEST_FILE" "$LEGACY_OPENROUTER_MODEL" "$RECOMMENDED_OPENROUTER_MODEL" <<'NODE'
+const fs = require("node:fs");
+const requestPath = process.argv[2];
+const legacyModel = process.argv[3];
+const nextModel = process.argv[4];
+
+const raw = fs.readFileSync(requestPath, "utf8");
+const parsed = JSON.parse(raw);
+if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+  process.stdout.write("0");
+  process.exit(0);
+}
+
+const openrouter = parsed.openrouter;
+if (!openrouter || typeof openrouter !== "object" || Array.isArray(openrouter)) {
+  process.stdout.write("0");
+  process.exit(0);
+}
+
+if (openrouter.model !== legacyModel) {
+  process.stdout.write("0");
+  process.exit(0);
+}
+
+openrouter.model = nextModel;
+fs.writeFileSync(requestPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+process.stdout.write("1");
+NODE
+  )"; then
+    return 1
+  fi
+
+  if [[ "$status" == "1" ]]; then
+    chmod 0640 "$REQUEST_FILE" || true
+    chown "${SERVICE_USER}:${SERVICE_GROUP}" "$REQUEST_FILE" || true
+    log "Migrated legacy OpenRouter model in request file to ${RECOMMENDED_OPENROUTER_MODEL}"
+  fi
+
+  return 0
 }
 
 load_existing_defaults() {
@@ -600,7 +650,14 @@ const operator = req.operator ?? {};
 const mailSentinel = req.mailSentinel ?? {};
 const imap = req.imap ?? {};
 
-emit("DEFAULT_OPENROUTER_MODEL", openrouter.model);
+const recommendedOpenrouterModel = "openai/gpt-5-nano";
+const legacyOpenrouterModel = "openrouter/anthropic/claude-sonnet-4-5";
+if (openrouter.model === legacyOpenrouterModel) {
+  emit("DEFAULT_OPENROUTER_MODEL", recommendedOpenrouterModel);
+  emit("LEGACY_OPENROUTER_MODEL_DETECTED", "1");
+} else {
+  emit("DEFAULT_OPENROUTER_MODEL", openrouter.model);
+}
 emit("EXISTING_OPENROUTER_SECRET_REF", openrouter.secretRef ?? openrouter.apiKeySecretRef ?? "");
 emit("DEFAULT_MATRIX_DOMAIN", matrix.homeserverDomain);
 emit("DEFAULT_MATRIX_PUBLIC_BASE_URL", matrix.publicBaseUrl);
@@ -632,6 +689,9 @@ NODE
     case "$key" in
       DEFAULT_OPENROUTER_MODEL)
         DEFAULT_OPENROUTER_MODEL="$value"
+        ;;
+      LEGACY_OPENROUTER_MODEL_DETECTED)
+        LEGACY_OPENROUTER_MODEL_DETECTED="$value"
         ;;
       EXISTING_OPENROUTER_SECRET_REF)
         EXISTING_OPENROUTER_SECRET_REF="$value"
@@ -1076,6 +1136,10 @@ prepare_install_request_for_update() {
 
   if ! load_existing_defaults; then
     die "${LAST_REQUEST_LOAD_ERROR}"
+  fi
+  if [[ "$LEGACY_OPENROUTER_MODEL_DETECTED" == "1" ]]; then
+    migrate_legacy_openrouter_model_request \
+      || die "Failed to migrate the saved request file to ${RECOMMENDED_OPENROUTER_MODEL}"
   fi
 
   if [[ "$NON_INTERACTIVE" == "1" ]] || ! has_tty; then
