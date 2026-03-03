@@ -130,6 +130,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     if (tlsMode !== "local-dev") {
       await mkdir(wellKnownDir, { recursive: true });
       await mkdir(join(wellKnownDir, ".well-known", "matrix"), { recursive: true });
+      await mkdir(join(wellKnownDir, "onboard"), { recursive: true });
       await mkdir(proxyDir, { recursive: true });
       await mkdir(proxyDataDir, { recursive: true });
       await mkdir(proxyConfigDir, { recursive: true });
@@ -204,6 +205,16 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         writeFile(
           join(proxyDir, "Caddyfile"),
           `${renderCaddyfile(new URL(publicBaseUrl).hostname, tlsMode)}\n`,
+          "utf8",
+        ),
+        writeFile(
+          join(wellKnownDir, "onboard", "index.html"),
+          `${renderOnboardingPage({
+            publicBaseUrl,
+            homeserverDomain,
+            operatorLocalpart: sanitizeMatrixLocalpart(req.operator.username, "operator"),
+            tlsMode,
+          })}\n`,
           "utf8",
         ),
         writeFile(
@@ -1404,11 +1415,116 @@ const renderCaddyfile = (
     "    file_server",
     "  }",
     "",
+    "  @onboard path /onboard /onboard/ /onboard/index.html",
+    "  handle @onboard {",
+    "    root * /srv",
+    "    rewrite * /onboard/index.html",
+    "    header Cache-Control \"no-store\"",
+    "    file_server",
+    "  }",
+    "",
+    ...(tlsMode === "internal"
+      ? [
+          "  @ca path /downloads/caddy-root-ca.crt",
+          "  handle @ca {",
+          "    root * /data/caddy/pki/authorities/local",
+          "    rewrite * /root.crt",
+          "    header Content-Type application/x-x509-ca-cert",
+          "    header Content-Disposition \"attachment; filename=sovereign-node-caddy-root-ca.crt\"",
+          "    header Cache-Control \"no-store\"",
+          "    file_server",
+          "  }",
+          "",
+        ]
+      : []),
     "  handle {",
     "    reverse_proxy synapse:8008",
     "  }",
     "}",
   ].join("\n");
+
+const renderOnboardingPage = (input: {
+  publicBaseUrl: string;
+  homeserverDomain: string;
+  operatorLocalpart: string;
+  tlsMode: Exclude<BundledMatrixTlsMode, "local-dev">;
+}): string => {
+  const elementLink = buildElementMobileDeepLink(input.publicBaseUrl);
+  const caSection = input.tlsMode === "internal"
+    ? [
+        "<section class=\"card caution\">",
+        "  <h2>1. Install the Local CA</h2>",
+        "  <p>This LAN-only setup uses Caddy&apos;s internal certificate authority. Install the CA on your phone before opening Element.</p>",
+        "  <a class=\"button button-secondary\" href=\"/downloads/caddy-root-ca.crt\">Download CA Certificate</a>",
+        "  <p class=\"meta\">After download, trust this certificate in your phone&apos;s settings.</p>",
+        "</section>",
+      ].join("\n")
+    : "";
+
+  return [
+    "<!doctype html>",
+    "<html lang=\"en\">",
+    "<head>",
+    "  <meta charset=\"utf-8\">",
+    "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+    "  <title>Sovereign Node Phone Setup</title>",
+    "  <style>",
+    "    :root { color-scheme: light; --bg: #0f172a; --panel: rgba(15, 23, 42, 0.84); --panel-2: rgba(30, 41, 59, 0.78); --text: #e2e8f0; --muted: #bfdbfe; --accent: #22c55e; --accent-2: #38bdf8; --warn: #f59e0b; }",
+    "    * { box-sizing: border-box; }",
+    "    body { margin: 0; min-height: 100vh; font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; background: radial-gradient(circle at top, #1d4ed8 0%, #0f172a 42%, #020617 100%); color: var(--text); }",
+    "    main { width: min(100%, 760px); margin: 0 auto; padding: 24px 16px 40px; }",
+    "    .hero { padding: 24px; border-radius: 24px; background: linear-gradient(135deg, rgba(34, 197, 94, 0.2), rgba(14, 116, 144, 0.15)), var(--panel); box-shadow: 0 24px 80px rgba(2, 6, 23, 0.45); }",
+    "    .eyebrow { margin: 0 0 8px; font-size: 0.85rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }",
+    "    h1 { margin: 0; font-size: clamp(2rem, 6vw, 3.2rem); line-height: 1.05; }",
+    "    p { line-height: 1.55; }",
+    "    .stack { display: grid; gap: 16px; margin-top: 20px; }",
+    "    .card { padding: 20px; border-radius: 20px; background: var(--panel-2); border: 1px solid rgba(148, 163, 184, 0.18); }",
+    "    .caution { border-color: rgba(245, 158, 11, 0.35); background: linear-gradient(135deg, rgba(245, 158, 11, 0.12), rgba(30, 41, 59, 0.85)); }",
+    "    h2 { margin: 0 0 10px; font-size: 1.05rem; }",
+    "    .button { display: inline-flex; align-items: center; justify-content: center; min-height: 52px; width: 100%; padding: 14px 18px; border-radius: 16px; text-decoration: none; font-weight: 700; color: #020617; background: linear-gradient(135deg, var(--accent), #86efac); }",
+    "    .button-secondary { margin-top: 8px; color: var(--text); background: linear-gradient(135deg, rgba(56, 189, 248, 0.22), rgba(59, 130, 246, 0.28)); }",
+    "    code { display: block; margin-top: 10px; padding: 12px 14px; border-radius: 14px; background: rgba(2, 6, 23, 0.55); overflow-wrap: anywhere; color: #dbeafe; }",
+    "    ol { margin: 10px 0 0; padding-left: 20px; }",
+    "    li + li { margin-top: 8px; }",
+    "    .meta { margin: 10px 0 0; font-size: 0.92rem; color: var(--muted); }",
+    "  </style>",
+    "</head>",
+    "<body>",
+    "  <main>",
+    "    <section class=\"hero\">",
+    "      <p class=\"eyebrow\">Sovereign Node</p>",
+    "      <h1>Connect your phone to Matrix</h1>",
+    "      <p>Use this page on your phone to finish Matrix setup with the least manual typing.</p>",
+    "      <code>Homeserver URL: " + escapeHtml(input.publicBaseUrl) + "</code>",
+    "      <code>Sign in as: @" + escapeHtml(input.operatorLocalpart) + ":" + escapeHtml(input.homeserverDomain) + "</code>",
+    "    </section>",
+    "    <div class=\"stack\">",
+    caSection,
+    "      <section class=\"card\">",
+    "        <h2>" + (input.tlsMode === "internal" ? "2" : "1") + ". Open Element</h2>",
+    "        <p>Tap the button below after the certificate step. Element will open with the correct homeserver filled in.</p>",
+    "        <a class=\"button\" href=\"" + escapeHtml(elementLink) + "\">Open in Element</a>",
+    "        <p class=\"meta\">If Element is not installed, install it first and then return to this page.</p>",
+    "      </section>",
+    "      <section class=\"card\">",
+    "        <h2>" + (input.tlsMode === "internal" ? "3" : "2") + ". Sign in</h2>",
+    "        <ol>",
+    "          <li>Approve the homeserver if Element asks for confirmation.</li>",
+    "          <li>Use the username shown above.</li>",
+    "          <li>Use the password created during Sovereign Node installation.</li>",
+    "        </ol>",
+    "      </section>",
+    "    </div>",
+    "  </main>",
+    "</body>",
+    "</html>",
+  ]
+    .filter((line) => line.length > 0)
+    .join("\n");
+};
+
+const buildElementMobileDeepLink = (publicBaseUrl: string): string =>
+  `https://mobile.element.io/?hs_url=${encodeURIComponent(publicBaseUrl)}`;
 
 const renderWellKnownFiles = (input: {
   homeserverDomain: string;
@@ -1573,6 +1689,14 @@ const truncateText = (value: string, maxChars: number): string => {
   }
   return `${value.slice(0, maxChars)}...(truncated)`;
 };
+
+const escapeHtml = (value: string): string =>
+  value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll("\"", "&quot;")
+    .replaceAll("'", "&#39;");
 
 const defaultFetch: FetchLike = (input, init) => globalThis.fetch(input, init);
 

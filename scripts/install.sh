@@ -198,7 +198,8 @@ install_base_packages() {
     curl \
     git \
     build-essential \
-    gnupg
+    gnupg \
+    qrencode
 }
 
 node_major_version() {
@@ -864,6 +865,39 @@ build_internal_matrix_ca_path() {
   printf '/var/lib/sovereign-node/bundled-matrix/%s/reverse-proxy-data/caddy/pki/authorities/local/root.crt' "$slug"
 }
 
+build_matrix_onboarding_url() {
+  local base_url
+  base_url="${1%/}"
+  printf '%s/onboard' "$base_url"
+}
+
+build_matrix_ca_download_url() {
+  local base_url
+  base_url="${1%/}"
+  printf '%s/downloads/caddy-root-ca.crt' "$base_url"
+}
+
+build_element_mobile_link() {
+  node -e 'const base = process.argv[1] || ""; process.stdout.write(`https://mobile.element.io/?hs_url=${encodeURIComponent(base)}`);' "$1"
+}
+
+print_onboarding_qr() {
+  local url
+  url="$1"
+
+  if [[ -z "$url" ]] || [[ "$NON_INTERACTIVE" == "1" ]] || ! has_tty; then
+    return 0
+  fi
+
+  if ! command -v qrencode >/dev/null 2>&1; then
+    return 0
+  fi
+
+  printf '\nScan on your phone:\n'
+  qrencode -t ANSIUTF8 "$url" || true
+  printf '\n'
+}
+
 infer_matrix_tls_mode_from_url() {
   node - "$1" <<'NODE'
 const raw = process.argv[2] || "";
@@ -1058,6 +1092,12 @@ NODE
 }
 
 review_install_request() {
+  local onboarding_url ca_download_url element_mobile_link
+
+  onboarding_url="$(build_matrix_onboarding_url "${SN_MATRIX_PUBLIC_BASE_URL}")"
+  ca_download_url="$(build_matrix_ca_download_url "${SN_MATRIX_PUBLIC_BASE_URL}")"
+  element_mobile_link="$(build_element_mobile_link "${SN_MATRIX_PUBLIC_BASE_URL}")"
+
   ui_section "Review"
   ui_info "OpenRouter model: ${SN_OPENROUTER_MODEL}"
   ui_info "OpenRouter secret: ${SN_OPENROUTER_SECRET_MODE}"
@@ -1068,9 +1108,14 @@ review_install_request() {
   elif [[ "${SN_MATRIX_TLS_MODE}" == "internal" ]]; then
     ui_info "Matrix TLS mode: internal (LAN HTTPS with Caddy local CA)"
     ui_info "Client CA certificate: ${SN_MATRIX_INTERNAL_CA_PATH}"
+    ui_info "Client CA download URL: ${ca_download_url}"
     ui_info "Trust this CA on each client device before using Element Web."
   else
     ui_info "Matrix TLS mode: local-dev"
+  fi
+  if [[ "${SN_MATRIX_TLS_MODE}" != "local-dev" ]]; then
+    ui_info "Phone onboarding URL: ${onboarding_url}"
+    ui_info "Element mobile link: ${element_mobile_link}"
   fi
   if [[ "${SN_MATRIX_FEDERATION_ENABLED}" == "1" ]]; then
     ui_info "Matrix federation: enabled"
@@ -1523,8 +1568,8 @@ wait_for_runtime_ready() {
   done
 }
 
-print_internal_matrix_ca_guidance() {
-  local guidance
+print_matrix_client_onboarding_guidance() {
+  local guidance onboarding_url
   [[ -r "$REQUEST_FILE" ]] || return 0
 
   guidance="$(
@@ -1541,7 +1586,7 @@ const tlsMode =
     : publicBaseUrl.startsWith("https://")
       ? "auto"
       : "local-dev";
-if (tlsMode !== "internal") {
+if (tlsMode === "local-dev" || !publicBaseUrl) {
   process.exit(0);
 }
 const homeserverDomain =
@@ -1554,19 +1599,40 @@ const slug = homeserverDomain
   .replace(/^-+/, "")
   .replace(/-+$/, "");
 const caPath = `/var/lib/sovereign-node/bundled-matrix/${slug}/reverse-proxy-data/caddy/pki/authorities/local/root.crt`;
+const normalizedBaseUrl = publicBaseUrl.replace(/\/+$/, "");
+const onboardingUrl = `${normalizedBaseUrl}/onboard`;
+const caDownloadUrl = `${normalizedBaseUrl}/downloads/caddy-root-ca.crt`;
+const elementLink = `https://mobile.element.io/?hs_url=${encodeURIComponent(publicBaseUrl)}`;
+const lines = [
+  "Phone onboarding:",
+  `- Onboarding page: ${onboardingUrl}`,
+  `- Element mobile link: ${elementLink}`,
+];
+if (tlsMode === "internal") {
+  lines.push(`- CA download URL: ${caDownloadUrl}`);
+  lines.push(`- Client CA certificate: ${caPath}`);
+  lines.push("- Install this CA on every client device before using Element Web.");
+}
 process.stdout.write(
-  [
-    "LAN HTTPS (Caddy Internal CA):",
-    `- Homeserver URL: ${publicBaseUrl}`,
-    `- Client CA certificate: ${caPath}`,
-    "- Install this CA on every client device before using Element Web.",
-  ].join("\n"),
+  lines.join("\n"),
 );
 NODE
   )" || return 0
 
   if [[ -n "$guidance" ]]; then
     printf '\n%s\n' "$guidance"
+    onboarding_url="$(
+      node - "$REQUEST_FILE" <<'NODE'
+const fs = require("node:fs");
+const req = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const publicBaseUrl = typeof req?.matrix?.publicBaseUrl === "string" ? req.matrix.publicBaseUrl : "";
+if (!publicBaseUrl || !publicBaseUrl.startsWith("https://")) {
+  process.exit(0);
+}
+process.stdout.write(`${publicBaseUrl.replace(/\/+$/, "")}/onboard`);
+NODE
+    )" || onboarding_url=""
+    print_onboarding_qr "$onboarding_url"
   fi
 }
 
@@ -1671,7 +1737,7 @@ Useful commands:
 - sovereign-node status --json
 - sovereign-node doctor --json
 EOF
-  print_internal_matrix_ca_guidance
+  print_matrix_client_onboarding_guidance
 }
 
 main "$@"

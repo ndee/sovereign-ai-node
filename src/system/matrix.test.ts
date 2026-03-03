@@ -241,6 +241,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
 
       const caddyText = await readFile(join(result.projectDir, "reverse-proxy", "Caddyfile"), "utf8");
       expect(caddyText).toContain("matrix.example.org {");
+      expect(caddyText).toContain("@onboard path /onboard /onboard/ /onboard/index.html");
       expect(caddyText).toContain("reverse_proxy synapse:8008");
 
       const wellKnownClient = await readFile(
@@ -254,6 +255,12 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
         "utf8",
       );
       expect(wellKnownServer).toContain('"m.server": "matrix.example.org"');
+      const onboardPage = await readFile(
+        join(result.projectDir, "well-known", "onboard", "index.html"),
+        "utf8",
+      );
+      expect(onboardPage).toContain("https://mobile.element.io/?hs_url=https%3A%2F%2Fmatrix.example.org");
+      expect(onboardPage).not.toContain("/downloads/caddy-root-ca.crt");
       expect(recordedExecCalls).toHaveLength(1);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
@@ -309,12 +316,19 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       const caddyText = await readFile(join(result.projectDir, "reverse-proxy", "Caddyfile"), "utf8");
       expect(caddyText).toContain("192.168.0.54 {");
       expect(caddyText).toContain("tls internal");
+      expect(caddyText).toContain("@ca path /downloads/caddy-root-ca.crt");
 
       const wellKnownServer = await readFile(
         join(result.projectDir, "well-known", ".well-known", "matrix", "server"),
         "utf8",
       );
       expect(wellKnownServer).toContain('"m.server": "matrix.local.test:8448"');
+      const onboardPage = await readFile(
+        join(result.projectDir, "well-known", "onboard", "index.html"),
+        "utf8",
+      );
+      expect(onboardPage).toContain("/downloads/caddy-root-ca.crt");
+      expect(onboardPage).toContain("https://mobile.element.io/?hs_url=https%3A%2F%2F192.168.0.54%3A8448");
       expect(recordedExecCalls).toHaveLength(1);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
