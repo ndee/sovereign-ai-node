@@ -198,8 +198,6 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       writeFile(join(synapseDir, "log.config"), `${logConfig}\n`, "utf8"),
     ];
     if (tlsMode !== "local-dev") {
-      const onboardingPageUrl = buildOnboardingPageUrl(publicBaseUrl);
-      const onboardingQrSvg = await this.renderOnboardingQrSvg(onboardingPageUrl);
       const wellKnown = renderWellKnownFiles({
         homeserverDomain,
         publicBaseUrl,
@@ -208,18 +206,6 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         writeFile(
           join(proxyDir, "Caddyfile"),
           `${renderCaddyfile(new URL(publicBaseUrl).hostname, tlsMode)}\n`,
-          "utf8",
-        ),
-        writeFile(
-          join(wellKnownDir, "onboard", "index.html"),
-          `${renderOnboardingPage({
-            publicBaseUrl,
-            homeserverDomain,
-            operatorLocalpart,
-            tlsMode,
-            onboardingPageUrl,
-            onboardingQrSvg,
-          })}\n`,
           "utf8",
         ),
         writeFile(
@@ -236,6 +222,15 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     }
 
     await Promise.all(writes);
+    if (tlsMode !== "local-dev") {
+      await this.writeOnboardingPage({
+        projectDir,
+        publicBaseUrl,
+        homeserverDomain,
+        operatorLocalpart,
+        tlsMode,
+      });
+    }
     await ensureDirectoryTreeWritable(synapseDir);
     await ensureDirectoryTreeWritable(postgresDir);
     if (tlsMode !== "local-dev") {
@@ -485,6 +480,16 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       roomId,
       roomName,
     };
+    if (provision.tlsMode !== "local-dev") {
+      await this.writeOnboardingPage({
+        projectDir: provision.projectDir,
+        publicBaseUrl: provision.publicBaseUrl,
+        homeserverDomain: provision.homeserverDomain,
+        operatorLocalpart: accounts.operator.localpart,
+        tlsMode: provision.tlsMode,
+        alertRoomId: roomId,
+      });
+    }
     this.logger.info(
       {
         projectDir: provision.projectDir,
@@ -1161,6 +1166,31 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     );
     return renderFallbackQrSvg(value);
   }
+
+  private async writeOnboardingPage(input: {
+    projectDir: string;
+    publicBaseUrl: string;
+    homeserverDomain: string;
+    operatorLocalpart: string;
+    tlsMode: Exclude<BundledMatrixTlsMode, "local-dev">;
+    alertRoomId?: string;
+  }): Promise<void> {
+    const onboardingPageUrl = buildOnboardingPageUrl(input.publicBaseUrl);
+    const onboardingQrSvg = await this.renderOnboardingQrSvg(onboardingPageUrl);
+    await writeFile(
+      join(input.projectDir, "well-known", "onboard", "index.html"),
+      `${renderOnboardingPage({
+        publicBaseUrl: input.publicBaseUrl,
+        homeserverDomain: input.homeserverDomain,
+        operatorLocalpart: input.operatorLocalpart,
+        tlsMode: input.tlsMode,
+        onboardingPageUrl,
+        onboardingQrSvg,
+        alertRoomId: input.alertRoomId,
+      })}\n`,
+      "utf8",
+    );
+  }
 }
 
 type EnvTemplateInput = {
@@ -1476,8 +1506,10 @@ const renderOnboardingPage = (input: {
   tlsMode: Exclude<BundledMatrixTlsMode, "local-dev">;
   onboardingPageUrl: string;
   onboardingQrSvg: string;
+  alertRoomId?: string;
 }): string => {
   const elementWebLink = buildElementWebLoginLink();
+  const roomLink = input.alertRoomId ? buildElementWebRoomLink(input.alertRoomId) : "";
   const caSection = input.tlsMode === "internal"
     ? [
         "<section class=\"card caution\">",
@@ -1485,6 +1517,16 @@ const renderOnboardingPage = (input: {
         "  <p>This LAN-only setup uses Caddy&apos;s internal certificate authority. Install the CA on your phone before opening Element.</p>",
         "  <a class=\"button button-secondary\" href=\"/downloads/caddy-root-ca.crt\">Download CA Certificate</a>",
         "  <p class=\"meta\">After download, trust this certificate in your device&apos;s settings. Native Android Matrix apps may still reject local CAs; Element Web in the browser is the reliable path.</p>",
+        "</section>",
+      ].join("\n")
+    : "";
+  const roomSection = input.alertRoomId
+    ? [
+        "<section class=\"card\">",
+        "  <h2>After login: open the alert room</h2>",
+        "  <p>After login, use this button to jump directly into the existing Sovereign Alerts room.</p>",
+        "  <a class=\"button button-secondary\" href=\"" + escapeHtml(roomLink) + "\" target=\"_blank\" rel=\"noreferrer\">Open Alert Room in Element Web</a>",
+        "  <p class=\"meta\">If Element asks again, keep the same homeserver URL and session.</p>",
         "</section>",
       ].join("\n")
     : "";
@@ -1509,7 +1551,7 @@ const renderOnboardingPage = (input: {
     "    .card { padding: 20px; border-radius: 20px; background: var(--panel-2); border: 1px solid rgba(148, 163, 184, 0.18); }",
     "    .caution { border-color: rgba(245, 158, 11, 0.35); background: linear-gradient(135deg, rgba(245, 158, 11, 0.12), rgba(30, 41, 59, 0.85)); }",
     "    h2 { margin: 0 0 10px; font-size: 1.05rem; }",
-    "    .button { display: inline-flex; align-items: center; justify-content: center; min-height: 52px; width: 100%; padding: 14px 18px; border-radius: 16px; text-decoration: none; font-weight: 700; color: #020617; background: linear-gradient(135deg, var(--accent), #86efac); }",
+    "    .button { display: inline-flex; align-items: center; justify-content: center; min-height: 52px; width: 100%; padding: 14px 18px; border: 0; border-radius: 16px; text-decoration: none; font: inherit; font-weight: 700; cursor: pointer; color: #020617; background: linear-gradient(135deg, var(--accent), #86efac); }",
     "    .button-secondary { margin-top: 8px; color: var(--text); background: linear-gradient(135deg, rgba(56, 189, 248, 0.22), rgba(59, 130, 246, 0.28)); }",
     "    .qr-shell { display: grid; place-items: center; margin-top: 14px; padding: 18px; border-radius: 18px; background: rgba(255, 255, 255, 0.92); }",
     "    .qr-shell svg { width: min(100%, 280px); height: auto; }",
@@ -1532,10 +1574,12 @@ const renderOnboardingPage = (input: {
     caSection,
     "      <section class=\"card\">",
     "        <h2>" + (input.tlsMode === "internal" ? "2" : "1") + ". Continue with Element Web</h2>",
-    "        <p>Use Element Web in this browser. It works reliably with the exact homeserver URL below, including the <code>https://</code> prefix.</p>",
+    "        <p>Use Element Web in this browser. The button opens the login page only. A third-party site cannot safely inject your password into app.element.io.</p>",
     "        <a class=\"button\" href=\"" + escapeHtml(elementWebLink) + "\" target=\"_blank\" rel=\"noreferrer\">Connect via Element Web</a>",
     "        <button class=\"button button-secondary\" type=\"button\" onclick=\"copyHomeserverUrl(this)\">Copy Homeserver URL</button>",
+    "        <button class=\"button button-secondary\" type=\"button\" onclick=\"copyUsername(this)\">Copy Username</button>",
     "        <p class=\"meta\">In Element Web: click <strong>Edit</strong> in the homeserver field, then paste the full URL exactly as shown above. Do not type only " + escapeHtml(new URL(input.publicBaseUrl).host) + ".</p>",
+    "        <p class=\"meta\">If Element says the browser is unsupported, use the system browser or a desktop browser. Brave Mobile is not a reliable target for this flow.</p>",
     "      </section>",
     "      <section class=\"card\">",
     "        <h2>" + (input.tlsMode === "internal" ? "3" : "2") + ". Open this setup page on another device</h2>",
@@ -1547,23 +1591,39 @@ const renderOnboardingPage = (input: {
     "      </section>",
     "      <section class=\"card\">",
     "        <h2>" + (input.tlsMode === "internal" ? "4" : "3") + ". Sign in</h2>",
-    "        <ol>",
+        "        <ol>",
     "          <li>Use the username shown above.</li>",
     "          <li>Use the password created during Sovereign Node installation.</li>",
     "          <li>If Element asks for a homeserver again, paste the exact <code>https://</code> URL shown at the top of this page.</li>",
     "        </ol>",
     "      </section>",
+    "      <section class=\"card\">",
+    "        <h2>" + (input.tlsMode === "internal" ? "5" : "4") + ". If Element asks to verify another device</h2>",
+    "        <ol>",
+    "          <li>Tap <strong>Bestätigung nicht möglich?</strong>.</li>",
+    "          <li>Continue without verification or without secure backup.</li>",
+    "          <li>This is acceptable for the default Sovereign Alerts room because it is not configured as an encrypted room.</li>",
+    "        </ol>",
+    "      </section>",
+    roomSection,
     "    </div>",
     "  </main>",
     "  <script>",
     "    const homeserverUrl = " + JSON.stringify(input.publicBaseUrl) + ";",
+    "    const username = " + JSON.stringify(`@${input.operatorLocalpart}:${input.homeserverDomain}`) + ";",
     "    async function copyHomeserverUrl(button) {",
+    "      await copyValue(button, homeserverUrl);",
+    "    }",
+    "    async function copyUsername(button) {",
+    "      await copyValue(button, username);",
+    "    }",
+    "    async function copyValue(button, value) {",
     "      try {",
     "        if (navigator.clipboard && navigator.clipboard.writeText) {",
-    "          await navigator.clipboard.writeText(homeserverUrl);",
+    "          await navigator.clipboard.writeText(value);",
     "        } else {",
     "          const el = document.createElement('textarea');",
-    "          el.value = homeserverUrl;",
+    "          el.value = value;",
     "          document.body.appendChild(el);",
     "          el.select();",
     "          document.execCommand('copy');",
@@ -1590,6 +1650,9 @@ const buildOnboardingPageUrl = (publicBaseUrl: string): string =>
   `${publicBaseUrl.replace(/\/+$/, "")}/onboard`;
 
 const buildElementWebLoginLink = (): string => "https://app.element.io/#/login";
+
+const buildElementWebRoomLink = (roomId: string): string =>
+  `https://app.element.io/#/room/${encodeURIComponent(roomId)}`;
 
 const renderWellKnownFiles = (input: {
   homeserverDomain: string;

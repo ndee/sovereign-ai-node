@@ -262,6 +262,9 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(onboardPage).toContain("Connect via Element Web");
       expect(onboardPage).toContain("https://app.element.io/#/login");
       expect(onboardPage).toContain("Copy Homeserver URL");
+      expect(onboardPage).toContain("Copy Username");
+      expect(onboardPage).toContain("cannot safely inject your password");
+      expect(onboardPage).toContain("Bestätigung nicht möglich?");
       expect(onboardPage).toContain("<svg");
       expect(onboardPage).not.toContain("/downloads/caddy-root-ca.crt");
       expect(recordedExecCalls).toHaveLength(2);
@@ -338,6 +341,8 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(onboardPage).toContain("Connect via Element Web");
       expect(onboardPage).toContain("Native Android Matrix apps may still reject local CAs");
       expect(onboardPage).toContain("Do not type only 192.168.0.54:8448.");
+      expect(onboardPage).toContain("Brave Mobile is not a reliable target");
+      expect(onboardPage).toContain("Bestätigung nicht möglich?");
       expect(onboardPage).toContain("<svg");
       expect(recordedExecCalls).toHaveLength(2);
       expect(recordedExecCalls.some((call) => call.command === "qrencode")).toBe(true);
