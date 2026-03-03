@@ -110,6 +110,8 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(homeserverText).toContain('server_name: "matrix.local.test"');
       expect(homeserverText).toContain('public_baseurl: "http://matrix.local.test:8008/"');
       expect(homeserverText).toContain("allow_unsafe_locale: true");
+      expect(homeserverText).toContain("rc_login:");
+      expect(homeserverText).toContain("per_second: 1000");
       const signingKey = await readFile(
         join(result.projectDir, "synapse", "matrix.local.test.signing.key"),
         "utf8",
@@ -291,7 +293,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
 
     try {
       const req = buildInstallRequest();
-      req.matrix.homeserverDomain = "192.168.0.54";
+      req.matrix.homeserverDomain = "matrix.local.test";
       req.matrix.publicBaseUrl = "https://192.168.0.54:8448";
       req.matrix.tlsMode = "internal";
       const result = await provisioner.provision(req);
@@ -312,7 +314,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
         join(result.projectDir, "well-known", ".well-known", "matrix", "server"),
         "utf8",
       );
-      expect(wellKnownServer).toContain('"m.server": "192.168.0.54:8448"');
+      expect(wellKnownServer).toContain('"m.server": "matrix.local.test:8448"');
       expect(recordedExecCalls).toHaveLength(1);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
@@ -614,6 +616,93 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
         (call) => call.command === "docker" && (call.args ?? []).includes("down"),
       );
       expect(downCalls).toHaveLength(1);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("retries Matrix login when Synapse returns M_LIMIT_EXCEEDED", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-test-"));
+    const recordedExecCalls: ExecInput[] = [];
+    let operatorLoginAttempts = 0;
+
+    const fakeExecRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        recordedExecCalls.push(input);
+        if (input.command === "docker") {
+          const args = input.args ?? [];
+          if (
+            args.includes("config")
+            || args.includes("up")
+            || args.includes("down")
+            || args.includes("register_new_matrix_user")
+          ) {
+            return {
+              command: [input.command, ...args].join(" "),
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+        }
+        return {
+          command: [input.command, ...(input.args ?? [])].join(" "),
+          exitCode: 127,
+          stdout: "",
+          stderr: "command not found",
+        };
+      },
+    };
+
+    const fakeFetch = async (url: string, init?: RequestInit): Promise<Response> => {
+      if (url.endsWith("/_matrix/client/versions")) {
+        return jsonResponse({
+          versions: ["v1.1", "v1.2"],
+        });
+      }
+
+      if (url.endsWith("/_matrix/client/v3/login")) {
+        const payload = parseBody(init?.body);
+        const localpart = readLoginLocalpart(payload) ?? "unknown";
+        if (localpart === "operator" && operatorLoginAttempts === 0) {
+          operatorLoginAttempts += 1;
+          return jsonResponse(
+            {
+              errcode: "M_LIMIT_EXCEEDED",
+              error: "Too Many Requests",
+              retry_after_ms: 1,
+            },
+            429,
+          );
+        }
+        return jsonResponse({
+          access_token: `token-${localpart}`,
+          user_id: `@${localpart}:matrix.local.test`,
+        });
+      }
+
+      return jsonResponse({});
+    };
+
+    const paths = buildPaths(tempRoot);
+    const provisioner = new DockerComposeBundledMatrixProvisioner(
+      fakeExecRunner,
+      createLogger(),
+      paths,
+      fakeFetch,
+    );
+
+    try {
+      const req = buildInstallRequest();
+      const provision = await provisioner.provision(req);
+      const accounts = await provisioner.bootstrapAccounts(req, provision);
+
+      expect(accounts.operator.userId).toBe("@operator:matrix.local.test");
+      expect(accounts.bot.userId).toBe("@mail-sentinel:matrix.local.test");
+      const downCalls = recordedExecCalls.filter(
+        (call) => call.command === "docker" && (call.args ?? []).includes("down"),
+      );
+      expect(downCalls).toHaveLength(0);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }

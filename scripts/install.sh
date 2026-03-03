@@ -15,6 +15,7 @@ ENV_FILE="${SOVEREIGN_NODE_ENV_FILE:-/etc/default/sovereign-node-api}"
 API_HOST="${SOVEREIGN_NODE_API_HOST:-127.0.0.1}"
 API_PORT="${SOVEREIGN_NODE_API_PORT:-8787}"
 REQUEST_FILE="${SOVEREIGN_NODE_REQUEST_FILE:-/etc/sovereign-node/install-request.json}"
+RUNTIME_CONFIG_FILE="${SOVEREIGN_NODE_CONFIG_FILE:-/etc/sovereign-node/sovereign-node.json5}"
 RUN_INSTALL="${SOVEREIGN_NODE_RUN_INSTALL:-1}"
 NON_INTERACTIVE="${SOVEREIGN_NODE_NON_INTERACTIVE:-0}"
 ACTION="${SOVEREIGN_NODE_ACTION:-}"
@@ -638,9 +639,10 @@ load_existing_defaults() {
   if ! output="$(
     SN_RECOMMENDED_MATRIX_DOMAIN="$RECOMMENDED_MATRIX_DOMAIN" \
     SN_RECOMMENDED_MATRIX_PUBLIC_BASE_URL="$RECOMMENDED_MATRIX_PUBLIC_BASE_URL" \
-    node - "$REQUEST_FILE" <<'NODE'
+    node - "$REQUEST_FILE" "$RUNTIME_CONFIG_FILE" <<'NODE'
 const fs = require("node:fs");
 const path = process.argv[2];
+const runtimePath = process.argv[3];
 const raw = fs.readFileSync(path, "utf8");
 const req = JSON.parse(raw);
 const lines = [];
@@ -657,6 +659,16 @@ const matrix = req.matrix ?? {};
 const operator = req.operator ?? {};
 const mailSentinel = req.mailSentinel ?? {};
 const imap = req.imap ?? {};
+let runtime = {};
+try {
+  const runtimeRaw = fs.readFileSync(runtimePath, "utf8");
+  runtime = JSON.parse(runtimeRaw);
+} catch {
+  runtime = {};
+}
+const runtimeMatrix = runtime && typeof runtime === "object" && !Array.isArray(runtime)
+  ? runtime.matrix ?? {}
+  : {};
 
 const recommendedOpenrouterModel = "openai/gpt-5-nano";
 const legacyOpenrouterModel = "openrouter/anthropic/claude-sonnet-4-5";
@@ -667,6 +679,18 @@ const legacyMatrixPublicBaseUrls = new Set([
   "http://127.0.0.1:8008",
   "http://matrix.local.test:8008",
 ]);
+const runtimeMatrixDomain =
+  runtimeMatrix && typeof runtimeMatrix === "object" && !Array.isArray(runtimeMatrix)
+  && typeof runtimeMatrix.homeserverDomain === "string"
+  ? runtimeMatrix.homeserverDomain
+  : "";
+const runtimeMatrixPublicBaseUrl =
+  runtimeMatrix && typeof runtimeMatrix === "object" && !Array.isArray(runtimeMatrix)
+  && typeof runtimeMatrix.publicBaseUrl === "string"
+  ? runtimeMatrix.publicBaseUrl
+  : "";
+const effectiveMatrixDomain = runtimeMatrixDomain || matrix.homeserverDomain || "";
+const effectiveMatrixPublicBaseUrl = runtimeMatrixPublicBaseUrl || matrix.publicBaseUrl || "";
 if (openrouter.model === legacyOpenrouterModel) {
   emit("DEFAULT_OPENROUTER_MODEL", recommendedOpenrouterModel);
   emit("LEGACY_OPENROUTER_MODEL_DETECTED", "1");
@@ -675,16 +699,15 @@ if (openrouter.model === legacyOpenrouterModel) {
 }
 emit("EXISTING_OPENROUTER_SECRET_REF", openrouter.secretRef ?? openrouter.apiKeySecretRef ?? "");
 if (
-  matrix.homeserverDomain === legacyMatrixDomain
-  && legacyMatrixPublicBaseUrls.has(matrix.publicBaseUrl)
-  && recommendedMatrixDomain.length > 0
+  effectiveMatrixDomain === legacyMatrixDomain
+  && effectiveMatrixPublicBaseUrl.startsWith("http://")
   && recommendedMatrixPublicBaseUrl.length > 0
 ) {
-  emit("DEFAULT_MATRIX_DOMAIN", recommendedMatrixDomain);
+  emit("DEFAULT_MATRIX_DOMAIN", legacyMatrixDomain);
   emit("DEFAULT_MATRIX_PUBLIC_BASE_URL", recommendedMatrixPublicBaseUrl);
 } else {
-  emit("DEFAULT_MATRIX_DOMAIN", matrix.homeserverDomain);
-  emit("DEFAULT_MATRIX_PUBLIC_BASE_URL", matrix.publicBaseUrl);
+  emit("DEFAULT_MATRIX_DOMAIN", effectiveMatrixDomain);
+  emit("DEFAULT_MATRIX_PUBLIC_BASE_URL", effectiveMatrixPublicBaseUrl);
 }
 emit("DEFAULT_FEDERATION_ENABLED", matrix.federationEnabled === true ? "1" : "0");
 emit("DEFAULT_ALERT_ROOM_NAME", matrix.alertRoomName);

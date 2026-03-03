@@ -106,14 +106,20 @@ type RuntimeConfig = {
     e2eeAlertRoom: boolean;
   };
   matrix: {
+    homeserverDomain: string;
     federationEnabled: boolean;
     publicBaseUrl: string;
     adminBaseUrl: string;
     operator: {
+      localpart?: string;
       userId: string;
+      passwordSecretRef?: string;
+      accessTokenSecretRef?: string;
     };
     bot: {
+      localpart?: string;
       userId: string;
+      passwordSecretRef?: string;
       accessTokenSecretRef: string;
     };
     alertRoom: {
@@ -698,6 +704,109 @@ export class RealInstallerService implements InstallerService {
     }
   }
 
+  private async tryReuseExistingMatrixAccounts(input: {
+    req: InstallRequest;
+    provision: BundledMatrixProvisionResult;
+    error: unknown;
+  }): Promise<BundledMatrixAccountsResult | null> {
+    if (!isRateLimitedMatrixLoginFailure(input.error)) {
+      return null;
+    }
+
+    const runtimeConfig = await this.tryReadRuntimeConfig();
+    if (runtimeConfig === null) {
+      return null;
+    }
+    if (runtimeConfig.matrix.homeserverDomain !== input.provision.homeserverDomain) {
+      return null;
+    }
+
+    const expectedOperatorLocalpart = sanitizeExpectedMatrixLocalpart(
+      input.req.operator.username,
+      "operator",
+    );
+    const expectedBotLocalpart =
+      expectedOperatorLocalpart === "mail-sentinel" ? "mail-sentinel-bot" : "mail-sentinel";
+    const operator = runtimeConfig.matrix.operator;
+    const bot = runtimeConfig.matrix.bot;
+    if (
+      operator.localpart !== expectedOperatorLocalpart
+      || bot.localpart !== expectedBotLocalpart
+      || operator.passwordSecretRef === undefined
+      || operator.accessTokenSecretRef === undefined
+      || bot.passwordSecretRef === undefined
+    ) {
+      return null;
+    }
+
+    try {
+      const [operatorAccessToken, botAccessToken] = await Promise.all([
+        this.resolveSecretRef(operator.accessTokenSecretRef),
+        this.resolveSecretRef(bot.accessTokenSecretRef),
+      ]);
+      this.logger.warn(
+        {
+          homeserverDomain: input.provision.homeserverDomain,
+          operatorUserId: operator.userId,
+          botUserId: bot.userId,
+        },
+        "Matrix login is rate limited; reusing existing persisted Matrix account tokens",
+      );
+      return {
+        operator: {
+          localpart: operator.localpart,
+          userId: operator.userId,
+          passwordSecretRef: operator.passwordSecretRef,
+          accessToken: operatorAccessToken,
+        },
+        bot: {
+          localpart: bot.localpart,
+          userId: bot.userId,
+          passwordSecretRef: bot.passwordSecretRef,
+          accessToken: botAccessToken,
+        },
+      };
+    } catch (reuseError) {
+      this.logger.warn(
+        {
+          error: reuseError instanceof Error ? reuseError.message : String(reuseError),
+        },
+        "Failed to reuse persisted Matrix account tokens after login rate limiting",
+      );
+      return null;
+    }
+  }
+
+  private async tryRecoverRateLimitedMatrixReconfigure(input: {
+    req: InstallRequest;
+    provision: BundledMatrixProvisionResult;
+    error: unknown;
+  }): Promise<BundledMatrixAccountsResult | null> {
+    if (!isRateLimitedMatrixLoginFailure(input.error) || this.matrixProvisioner.resetState === undefined) {
+      return null;
+    }
+
+    const runtimeConfig = await this.tryReadRuntimeConfig();
+    if (
+      runtimeConfig === null
+      || runtimeConfig.matrix.homeserverDomain === input.provision.homeserverDomain
+    ) {
+      return null;
+    }
+
+    this.logger.warn(
+      {
+        currentHomeserverDomain: runtimeConfig.matrix.homeserverDomain,
+        targetHomeserverDomain: input.provision.homeserverDomain,
+        projectDir: input.provision.projectDir,
+      },
+      "Matrix login is rate limited while switching to a new bundled homeserver; resetting the new Matrix state and retrying",
+    );
+
+    await this.matrixProvisioner.resetState(input.provision);
+    return this.matrixProvisioner.bootstrapAccounts(input.req, input.provision);
+  }
+
   private async tryReadMailSentinelRegistration(): Promise<
     | {
         agentId: string;
@@ -1209,10 +1318,34 @@ export class RealInstallerService implements InstallerService {
               retryable: false,
             };
           }
-          stepState.matrixAccounts = await this.matrixProvisioner.bootstrapAccounts(
-            req,
-            stepState.matrixProvision,
-          );
+          try {
+            stepState.matrixAccounts = await this.matrixProvisioner.bootstrapAccounts(
+              req,
+              stepState.matrixProvision,
+            );
+          } catch (error) {
+            const reusedAccounts = await this.tryReuseExistingMatrixAccounts({
+              req,
+              provision: stepState.matrixProvision,
+              error,
+            });
+            if (reusedAccounts !== null) {
+              stepState.matrixAccounts = reusedAccounts;
+              return;
+            }
+
+            const resetAccounts = await this.tryRecoverRateLimitedMatrixReconfigure({
+              req,
+              provision: stepState.matrixProvision,
+              error,
+            });
+            if (resetAccounts !== null) {
+              stepState.matrixAccounts = resetAccounts;
+              return;
+            }
+
+            throw error;
+          }
         },
       },
       {
@@ -2178,14 +2311,20 @@ export class RealInstallerService implements InstallerService {
         secretRef: imapConfig.secretRef,
       },
       matrix: {
+        homeserverDomain: input.matrixProvision.homeserverDomain,
         federationEnabled: input.matrixProvision.federationEnabled,
         publicBaseUrl: input.matrixProvision.publicBaseUrl,
         adminBaseUrl: input.matrixProvision.adminBaseUrl,
         operator: {
+          localpart: input.matrixAccounts.operator.localpart,
           userId: input.matrixAccounts.operator.userId,
+          passwordSecretRef: input.matrixAccounts.operator.passwordSecretRef,
+          accessTokenSecretRef: operatorTokenSecretRef,
         },
         bot: {
+          localpart: input.matrixAccounts.bot.localpart,
           userId: input.matrixAccounts.bot.userId,
+          passwordSecretRef: input.matrixAccounts.bot.passwordSecretRef,
           accessTokenSecretRef: botTokenSecretRef,
         },
         alertRoom: {
@@ -2788,6 +2927,10 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
   const imap = isRecord(parsed.imap) ? parsed.imap : {};
   const mailSentinel = isRecord(parsed.mailSentinel) ? parsed.mailSentinel : {};
   const operator = isRecord(matrix.operator) ? matrix.operator : {};
+  const homeserverDomain =
+    typeof matrix.homeserverDomain === "string" && matrix.homeserverDomain.length > 0
+      ? matrix.homeserverDomain
+      : inferMatrixHomeserverDomain(matrix.publicBaseUrl);
   const inferredImapConfigured =
     typeof imap.host === "string"
     && imap.host.length > 0
@@ -2858,21 +3001,41 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
           : "env:SOVEREIGN_IMAP_SECRET_UNSET",
     },
     matrix: {
+      homeserverDomain,
       federationEnabled:
         typeof matrix.federationEnabled === "boolean" ? matrix.federationEnabled : false,
       publicBaseUrl: matrix.publicBaseUrl,
       adminBaseUrl,
       operator: {
+        localpart:
+          typeof operator.localpart === "string" && operator.localpart.length > 0
+            ? operator.localpart
+            : undefined,
         userId:
           typeof operator.userId === "string" && operator.userId.length > 0
             ? operator.userId
             : "@operator:local",
+        passwordSecretRef:
+          typeof operator.passwordSecretRef === "string" && operator.passwordSecretRef.length > 0
+            ? operator.passwordSecretRef
+            : undefined,
+        accessTokenSecretRef:
+          typeof operator.accessTokenSecretRef === "string"
+          && operator.accessTokenSecretRef.length > 0
+            ? operator.accessTokenSecretRef
+            : undefined,
       },
       bot: {
+        localpart:
+          typeof bot.localpart === "string" && bot.localpart.length > 0 ? bot.localpart : undefined,
         userId:
           typeof bot.userId === "string" && bot.userId.length > 0
             ? bot.userId
             : "@mail-sentinel:local",
+        passwordSecretRef:
+          typeof bot.passwordSecretRef === "string" && bot.passwordSecretRef.length > 0
+            ? bot.passwordSecretRef
+            : undefined,
         accessTokenSecretRef: bot.accessTokenSecretRef,
       },
       alertRoom: {
@@ -2896,6 +3059,36 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
         typeof mailSentinel.e2eeAlertRoom === "boolean" ? mailSentinel.e2eeAlertRoom : false,
     },
   };
+};
+
+const inferMatrixHomeserverDomain = (publicBaseUrl: string): string => {
+  try {
+    return new URL(publicBaseUrl).hostname;
+  } catch {
+    return "unknown";
+  }
+};
+
+const sanitizeExpectedMatrixLocalpart = (value: string, fallback: string): string => {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._=+\-/]/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return normalized.length > 0 ? normalized : fallback;
+};
+
+const isRateLimitedMatrixLoginFailure = (error: unknown): boolean => {
+  if (!isStructuredError(error) || error.code !== "MATRIX_LOGIN_FAILED" || !isRecord(error.details)) {
+    return false;
+  }
+  if (error.details.status === 429) {
+    return true;
+  }
+  return (
+    typeof error.details.body === "string"
+    && /m_limit_exceeded|too many requests/i.test(error.details.body)
+  );
 };
 
 const check = (

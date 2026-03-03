@@ -16,6 +16,9 @@ const MATRIX_READY_POLL_INTERVAL_MS = 1_500;
 const MATRIX_HTTP_TIMEOUT_MS = 8_000;
 const MATRIX_LOGIN_RETRY_ATTEMPTS = 5;
 const MATRIX_LOGIN_RETRY_DELAY_MS = 500;
+const MATRIX_LOGIN_RATE_LIMIT_FALLBACK_DELAY_MS = 1_000;
+const MATRIX_LOGIN_RATE_LIMIT_MAX_DELAY_MS = MATRIX_READY_TIMEOUT_MS;
+const MATRIX_LOGIN_RATE_LIMIT_FAST_RETRY_THRESHOLD_MS = 10_000;
 const MATRIX_COMPOSE_COMMAND_TIMEOUT_MS = 180_000;
 const MATRIX_BOOTSTRAP_SECRET_DIR = "bootstrap-secrets";
 const DEFAULT_SYNAPSE_IMAGE = "matrixdotorg/synapse:v1.125.0";
@@ -54,6 +57,7 @@ export type BundledMatrixRoomBootstrapResult = {
 
 export interface BundledMatrixProvisioner {
   provision(req: InstallRequest): Promise<BundledMatrixProvisionResult>;
+  resetState?(provision: BundledMatrixProvisionResult): Promise<void>;
   bootstrapAccounts(
     req: InstallRequest,
     provision: BundledMatrixProvisionResult,
@@ -199,7 +203,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       writes.push(
         writeFile(
           join(proxyDir, "Caddyfile"),
-          `${renderCaddyfile(homeserverDomain, tlsMode)}\n`,
+          `${renderCaddyfile(new URL(publicBaseUrl).hostname, tlsMode)}\n`,
           "utf8",
         ),
         writeFile(
@@ -476,6 +480,10 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     return result;
   }
 
+  async resetState(provision: BundledMatrixProvisionResult): Promise<void> {
+    await this.resetBundledPostgresState(provision);
+  }
+
   async test(req: TestMatrixRequest): Promise<TestMatrixResult> {
     const homeserverUrl = normalizePublicBaseUrl(req.publicBaseUrl);
     const checks: CheckResult[] = [];
@@ -682,7 +690,10 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     password: string,
   ): Promise<{ accessToken: string; userId: string }> {
     let lastError: unknown;
-    for (let attempt = 1; attempt <= MATRIX_LOGIN_RETRY_ATTEMPTS; attempt += 1) {
+    let credentialRetryAttempts = 0;
+    const rateLimitDeadline = Date.now() + MATRIX_READY_TIMEOUT_MS;
+    let rateLimitAttempts = 0;
+    while (true) {
       try {
         const payload = await this.matrixJsonRequest<{
           access_token?: unknown;
@@ -720,7 +731,40 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         };
       } catch (error) {
         lastError = error;
-        if (!isRecoverableAccountCredentialFailure(error) || attempt >= MATRIX_LOGIN_RETRY_ATTEMPTS) {
+        if (isRateLimitedMatrixLoginFailure(error)) {
+          const remainingBudgetMs = rateLimitDeadline - Date.now();
+          if (remainingBudgetMs <= 0) {
+            break;
+          }
+          rateLimitAttempts += 1;
+          const retryDelayMs = Math.min(readMatrixLoginRetryDelayMs(error), remainingBudgetMs);
+          if (retryDelayMs > MATRIX_LOGIN_RATE_LIMIT_FAST_RETRY_THRESHOLD_MS) {
+            this.logger.warn(
+              {
+                localpart,
+                rateLimitAttempts,
+                retryDelayMs,
+              },
+              "Matrix login rate limited with a long cooldown; aborting login retries",
+            );
+            break;
+          }
+          this.logger.info(
+            {
+              localpart,
+              rateLimitAttempts,
+              retryDelayMs,
+            },
+            "Matrix login rate limited; waiting before retry",
+          );
+          await delay(retryDelayMs);
+          continue;
+        }
+        credentialRetryAttempts += 1;
+        if (
+          !isRecoverableAccountCredentialFailure(error)
+          || credentialRetryAttempts >= MATRIX_LOGIN_RETRY_ATTEMPTS
+        ) {
           break;
         }
         await delay(MATRIX_LOGIN_RETRY_DELAY_MS);
@@ -920,6 +964,13 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       const rawBody = await response.text();
       const parsedBody = parseJsonSafely(rawBody);
       if (!response.ok) {
+        const retryAfterMs =
+          isRecord(parsedBody)
+          && typeof parsedBody.retry_after_ms === "number"
+          && Number.isFinite(parsedBody.retry_after_ms)
+          && parsedBody.retry_after_ms > 0
+            ? Math.trunc(parsedBody.retry_after_ms)
+            : undefined;
         throw {
           code: input.errorCode,
           message: input.errorMessage,
@@ -928,6 +979,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
             url,
             status: response.status,
             body: summarizeUnknown(parsedBody),
+            ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
           },
         };
       }
@@ -1190,6 +1242,16 @@ const renderSynapseConfig = (input: SynapseConfigInput): string => {
     "enable_registration_without_verification: false",
     "allow_public_rooms_without_auth: false",
     "allow_public_rooms_over_federation: false",
+    "rc_login:",
+    "  address:",
+    "    per_second: 1000",
+    "    burst_count: 1000",
+    "  account:",
+    "    per_second: 1000",
+    "    burst_count: 1000",
+    "  failed_attempts:",
+    "    per_second: 1000",
+    "    burst_count: 1000",
     `registration_shared_secret: "${input.registrationSharedSecret}"`,
     `macaroon_secret_key: "${input.macaroonSecret}"`,
     `form_secret: "${input.formSecret}"`,
@@ -1288,7 +1350,7 @@ const validateBundledTlsMode = (input: {
       },
     };
   }
-  if (publicHost !== homeserverDomain) {
+  if (input.tlsMode !== "internal" && publicHost !== homeserverDomain) {
     throw {
       code: "MATRIX_TLS_MODE_INVALID",
       message: `Bundled Matrix tlsMode=${input.tlsMode} currently requires homeserverDomain to match the publicBaseUrl hostname`,
@@ -1323,7 +1385,7 @@ const validateBundledTlsMode = (input: {
 };
 
 const renderCaddyfile = (
-  homeserverDomain: string,
+  siteHostname: string,
   tlsMode: Exclude<BundledMatrixTlsMode, "local-dev">,
 ): string =>
   [
@@ -1331,7 +1393,7 @@ const renderCaddyfile = (
     "  admin off",
     "}",
     "",
-    `${homeserverDomain} {`,
+    `${siteHostname} {`,
     ...(tlsMode === "internal" ? ["  tls internal"] : []),
     "  @wellKnown path /.well-known/matrix/client /.well-known/matrix/server",
     "  handle @wellKnown {",
@@ -1415,6 +1477,45 @@ const isRecoverableAccountCredentialFailure = (error: unknown): boolean => {
     typeof body === "string"
     && /invalid username or password|m_forbidden/i.test(body)
   );
+};
+
+const isRateLimitedMatrixLoginFailure = (error: unknown): boolean => {
+  if (!isStructuredError(error) || error.code !== "MATRIX_LOGIN_FAILED") {
+    return false;
+  }
+  if (!isRecord(error.details)) {
+    return false;
+  }
+
+  const status = error.details.status;
+  if (status === 429) {
+    return true;
+  }
+
+  const body = error.details.body;
+  return (
+    typeof body === "string"
+    && /m_limit_exceeded|too many requests/i.test(body)
+  );
+};
+
+const readMatrixLoginRetryDelayMs = (error: unknown): number =>
+  clampPositiveDelayMs(
+    isStructuredError(error)
+    && isRecord(error.details)
+    && typeof error.details.retryAfterMs === "number"
+    && Number.isFinite(error.details.retryAfterMs)
+      ? Math.trunc(error.details.retryAfterMs)
+      : MATRIX_LOGIN_RATE_LIMIT_FALLBACK_DELAY_MS,
+    MATRIX_LOGIN_RATE_LIMIT_FALLBACK_DELAY_MS,
+    MATRIX_LOGIN_RATE_LIMIT_MAX_DELAY_MS,
+  );
+
+const clampPositiveDelayMs = (value: number, fallback: number, max: number): number => {
+  if (!Number.isFinite(value) || value <= 0) {
+    return fallback;
+  }
+  return Math.min(Math.trunc(value), max);
 };
 
 const parseSimpleEnv = (raw: string): Record<string, string> => {
