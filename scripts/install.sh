@@ -878,7 +878,19 @@ build_matrix_ca_download_url() {
 }
 
 build_element_web_link() {
-  printf '%s' "https://app.element.io/#/login"
+  local base_url username matrix_domain encoded_base encoded_username
+  base_url="$1"
+  username="$2"
+  matrix_domain="$3"
+
+  encoded_base="$(node -p "encodeURIComponent(process.argv[1])" "$base_url")"
+  if [[ -n "$username" ]] && [[ -n "$matrix_domain" ]]; then
+    encoded_username="$(node -p "encodeURIComponent('@' + process.argv[1] + ':' + process.argv[2])" "$username" "$matrix_domain")"
+    printf 'https://app.element.io/#/login?hs_url=%s&login_hint=%s' "$encoded_base" "$encoded_username"
+    return 0
+  fi
+
+  printf 'https://app.element.io/#/login?hs_url=%s' "$encoded_base"
 }
 
 print_onboarding_qr() {
@@ -1096,7 +1108,7 @@ review_install_request() {
 
   onboarding_url="$(build_matrix_onboarding_url "${SN_MATRIX_PUBLIC_BASE_URL}")"
   ca_download_url="$(build_matrix_ca_download_url "${SN_MATRIX_PUBLIC_BASE_URL}")"
-  element_web_link="$(build_element_web_link)"
+  element_web_link="$(build_element_web_link "${SN_MATRIX_PUBLIC_BASE_URL}" "${SN_OPERATOR_USERNAME}" "${SN_MATRIX_DOMAIN}")"
 
   ui_section "Review"
   ui_info "OpenRouter model: ${SN_OPENROUTER_MODEL}"
@@ -1602,7 +1614,13 @@ const caPath = `/var/lib/sovereign-node/bundled-matrix/${slug}/reverse-proxy-dat
 const normalizedBaseUrl = publicBaseUrl.replace(/\/+$/, "");
 const onboardingUrl = `${normalizedBaseUrl}/onboard`;
 const caDownloadUrl = `${normalizedBaseUrl}/downloads/caddy-root-ca.crt`;
-const elementLink = "https://app.element.io/#/login";
+const operatorUsername =
+  typeof req?.operator?.username === "string" && req.operator.username.length > 0
+    ? req.operator.username
+    : "operator";
+const elementLink =
+  `https://app.element.io/#/login?hs_url=${encodeURIComponent(publicBaseUrl)}`
+  + `&login_hint=${encodeURIComponent(`@${operatorUsername}:${homeserverDomain}`)}`;
 const lines = [
   "Phone onboarding:",
   `- Onboarding page: ${onboardingUrl}`,

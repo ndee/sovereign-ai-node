@@ -260,10 +260,11 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
         "utf8",
       );
       expect(onboardPage).toContain("Connect via Element Web");
-      expect(onboardPage).toContain("https://app.element.io/#/login");
-      expect(onboardPage).toContain("Copy Homeserver URL");
+      expect(onboardPage).toContain("https://app.element.io/#/login?hs_url=");
+      expect(onboardPage).toContain("Copy Server URL");
       expect(onboardPage).toContain("Copy Username");
-      expect(onboardPage).toContain("cannot safely inject your password");
+      expect(onboardPage).toContain("prevent safe password injection");
+      expect(onboardPage).toContain("did not expose the bootstrap password");
       expect(onboardPage).toContain("Bestätigung nicht möglich?");
       expect(onboardPage).toContain("<svg");
       expect(onboardPage).not.toContain("/downloads/caddy-root-ca.crt");
@@ -339,9 +340,10 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       );
       expect(onboardPage).toContain("/downloads/caddy-root-ca.crt");
       expect(onboardPage).toContain("Connect via Element Web");
+      expect(onboardPage).toContain("Copy Server URL");
       expect(onboardPage).toContain("Native Android Matrix apps may still reject local CAs");
       expect(onboardPage).toContain("Do not type only 192.168.0.54:8448.");
-      expect(onboardPage).toContain("Brave Mobile is not a reliable target");
+      expect(onboardPage).toContain("Vanadium and Brave may behave differently");
       expect(onboardPage).toContain("Bestätigung nicht möglich?");
       expect(onboardPage).toContain("<svg");
       expect(recordedExecCalls).toHaveLength(2);
@@ -352,7 +354,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
     }
   });
 
-  it("bootstraps operator/bot accounts and creates alert room in local-dev mode", async () => {
+  it("bootstraps operator/bot accounts, creates the alert room, and rewrites onboarding for HTTPS mode", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-test-"));
     const recordedExecCalls: ExecInput[] = [];
     const recordedFetchUrls: string[] = [];
@@ -428,6 +430,8 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
 
     try {
       const req = buildInstallRequest();
+      req.matrix.publicBaseUrl = "https://192.168.0.54:8448";
+      req.matrix.tlsMode = "internal";
       const provision = await provisioner.provision(req);
       const accounts = await provisioner.bootstrapAccounts(req, provision);
       const room = await provisioner.bootstrapRoom(req, provision, accounts);
@@ -441,8 +445,17 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
 
       const operatorSecretPath = accounts.operator.passwordSecretRef.slice("file:".length);
       const botSecretPath = accounts.bot.passwordSecretRef.slice("file:".length);
-      expect((await readFile(operatorSecretPath, "utf8")).trim().length).toBeGreaterThan(0);
+      const operatorPassword = (await readFile(operatorSecretPath, "utf8")).trim();
+      expect(operatorPassword.length).toBeGreaterThan(0);
       expect((await readFile(botSecretPath, "utf8")).trim().length).toBeGreaterThan(0);
+
+      const onboardPage = await readFile(
+        join(provision.projectDir, "well-known", "onboard", "index.html"),
+        "utf8",
+      );
+      expect(onboardPage).toContain("Copy Password");
+      expect(onboardPage).toContain(operatorPassword);
+      expect(onboardPage).toContain("Open Alert Room in Element Web");
 
       const composeUpCalls = recordedExecCalls.filter(
         (call) => call.command === "docker" && (call.args ?? []).includes("up"),

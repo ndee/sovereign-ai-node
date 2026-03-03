@@ -481,6 +481,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       roomName,
     };
     if (provision.tlsMode !== "local-dev") {
+      const operatorPassword = await this.readPasswordFromSecretRef(accounts.operator.passwordSecretRef);
       await this.writeOnboardingPage({
         projectDir: provision.projectDir,
         publicBaseUrl: provision.publicBaseUrl,
@@ -488,6 +489,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         operatorLocalpart: accounts.operator.localpart,
         tlsMode: provision.tlsMode,
         alertRoomId: roomId,
+        operatorPassword: operatorPassword ?? undefined,
       });
     }
     this.logger.info(
@@ -1174,6 +1176,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     operatorLocalpart: string;
     tlsMode: Exclude<BundledMatrixTlsMode, "local-dev">;
     alertRoomId?: string;
+    operatorPassword?: string;
   }): Promise<void> {
     const onboardingPageUrl = buildOnboardingPageUrl(input.publicBaseUrl);
     const onboardingQrSvg = await this.renderOnboardingQrSvg(onboardingPageUrl);
@@ -1187,9 +1190,29 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         onboardingPageUrl,
         onboardingQrSvg,
         alertRoomId: input.alertRoomId,
+        operatorPassword: input.operatorPassword,
       })}\n`,
       "utf8",
     );
+  }
+
+  private async readPasswordFromSecretRef(secretRef: string): Promise<string | null> {
+    if (!secretRef.startsWith("file:")) {
+      return null;
+    }
+    try {
+      const password = (await readFile(secretRef.slice("file:".length), "utf8")).trim();
+      return password.length > 0 ? password : null;
+    } catch (error) {
+      this.logger.warn(
+        {
+          secretRef,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Could not read Matrix bootstrap password for onboarding page",
+      );
+      return null;
+    }
   }
 }
 
@@ -1507,9 +1530,31 @@ const renderOnboardingPage = (input: {
   onboardingPageUrl: string;
   onboardingQrSvg: string;
   alertRoomId?: string;
+  operatorPassword?: string;
 }): string => {
-  const elementWebLink = buildElementWebLoginLink();
+  const username = `@${input.operatorLocalpart}:${input.homeserverDomain}`;
+  const elementWebLink = buildElementWebLoginLink(input.publicBaseUrl, username);
   const roomLink = input.alertRoomId ? buildElementWebRoomLink(input.alertRoomId) : "";
+  const passwordCard = input.operatorPassword
+    ? [
+        "      <section class=\"card\">",
+        "        <h2>Quick copy: login details</h2>",
+        "        <p>Use these buttons if Element does not prefill everything in this browser.</p>",
+        "        <button class=\"button button-secondary\" type=\"button\" onclick=\"copyHomeserverUrl(this)\">Copy Server URL</button>",
+        "        <button class=\"button button-secondary\" type=\"button\" onclick=\"copyUsername(this)\">Copy Username</button>",
+        "        <button class=\"button button-secondary\" type=\"button\" onclick=\"copyPassword(this)\">Copy Password</button>",
+        "        <p class=\"meta\">The password is embedded in this local onboarding page so you can copy it directly. Anyone who can open this page on your LAN can also read it.</p>",
+        "      </section>",
+      ].join("\n")
+    : [
+        "      <section class=\"card\">",
+        "        <h2>Quick copy: login details</h2>",
+        "        <p>Use these buttons if Element does not prefill everything in this browser.</p>",
+        "        <button class=\"button button-secondary\" type=\"button\" onclick=\"copyHomeserverUrl(this)\">Copy Server URL</button>",
+        "        <button class=\"button button-secondary\" type=\"button\" onclick=\"copyUsername(this)\">Copy Username</button>",
+        "        <p class=\"meta\">The install did not expose the bootstrap password to this page. Use the password shown during install or read the local secret file on the node.</p>",
+        "      </section>",
+      ].join("\n");
   const caSection = input.tlsMode === "internal"
     ? [
         "<section class=\"card caution\">",
@@ -1568,18 +1613,17 @@ const renderOnboardingPage = (input: {
     "      <h1>Connect your phone to Matrix</h1>",
     "      <p>Use this page on your phone to finish Matrix setup with the least manual typing.</p>",
     "      <code>Homeserver URL: " + escapeHtml(input.publicBaseUrl) + "</code>",
-    "      <code>Sign in as: @" + escapeHtml(input.operatorLocalpart) + ":" + escapeHtml(input.homeserverDomain) + "</code>",
+    "      <code>Sign in as: " + escapeHtml(username) + "</code>",
     "    </section>",
     "    <div class=\"stack\">",
     caSection,
+    passwordCard,
     "      <section class=\"card\">",
     "        <h2>" + (input.tlsMode === "internal" ? "2" : "1") + ". Continue with Element Web</h2>",
-    "        <p>Use Element Web in this browser. The button opens the login page only. A third-party site cannot safely inject your password into app.element.io.</p>",
-    "        <a class=\"button\" href=\"" + escapeHtml(elementWebLink) + "\" target=\"_blank\" rel=\"noreferrer\">Connect via Element Web</a>",
-    "        <button class=\"button button-secondary\" type=\"button\" onclick=\"copyHomeserverUrl(this)\">Copy Homeserver URL</button>",
-    "        <button class=\"button button-secondary\" type=\"button\" onclick=\"copyUsername(this)\">Copy Username</button>",
-    "        <p class=\"meta\">In Element Web: click <strong>Edit</strong> in the homeserver field, then paste the full URL exactly as shown above. Do not type only " + escapeHtml(new URL(input.publicBaseUrl).host) + ".</p>",
-    "        <p class=\"meta\">If Element says the browser is unsupported, use the system browser or a desktop browser. Brave Mobile is not a reliable target for this flow.</p>",
+    "        <p>The button opens Element Web with your homeserver prefilled. Browser restrictions still prevent safe password injection into app.element.io, so you may still need to paste the password manually.</p>",
+    "        <a class=\"button\" href=\"" + escapeHtml(elementWebLink) + "\" rel=\"noreferrer\">Connect via Element Web</a>",
+    "        <p class=\"meta\">If Element still shows the generic login screen, tap <strong>Edit</strong> in the homeserver field and paste the full URL exactly as shown above. Do not type only " + escapeHtml(new URL(input.publicBaseUrl).host) + ".</p>",
+    "        <p class=\"meta\">If Element says the browser is unsupported, use the system browser or a desktop browser. Vanadium and Brave may behave differently, so the copy buttons above remain the fallback path.</p>",
     "      </section>",
     "      <section class=\"card\">",
     "        <h2>" + (input.tlsMode === "internal" ? "3" : "2") + ". Open this setup page on another device</h2>",
@@ -1610,12 +1654,22 @@ const renderOnboardingPage = (input: {
     "  </main>",
     "  <script>",
     "    const homeserverUrl = " + JSON.stringify(input.publicBaseUrl) + ";",
-    "    const username = " + JSON.stringify(`@${input.operatorLocalpart}:${input.homeserverDomain}`) + ";",
+    "    const username = " + JSON.stringify(username) + ";",
+    "    const password = " + JSON.stringify(input.operatorPassword ?? "") + ";",
     "    async function copyHomeserverUrl(button) {",
     "      await copyValue(button, homeserverUrl);",
     "    }",
     "    async function copyUsername(button) {",
     "      await copyValue(button, username);",
+    "    }",
+    "    async function copyPassword(button) {",
+    "      if (!password) {",
+    "        const oldText = button.textContent;",
+    "        button.textContent = 'Not available';",
+    "        setTimeout(() => { button.textContent = oldText; }, 1800);",
+    "        return;",
+    "      }",
+    "      await copyValue(button, password);",
     "    }",
     "    async function copyValue(button, value) {",
     "      try {",
@@ -1649,7 +1703,8 @@ const renderOnboardingPage = (input: {
 const buildOnboardingPageUrl = (publicBaseUrl: string): string =>
   `${publicBaseUrl.replace(/\/+$/, "")}/onboard`;
 
-const buildElementWebLoginLink = (): string => "https://app.element.io/#/login";
+const buildElementWebLoginLink = (publicBaseUrl: string, username: string): string =>
+  `https://app.element.io/#/login?hs_url=${encodeURIComponent(publicBaseUrl)}&login_hint=${encodeURIComponent(username)}`;
 
 const buildElementWebRoomLink = (roomId: string): string =>
   `https://app.element.io/#/room/${encodeURIComponent(roomId)}`;
