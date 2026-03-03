@@ -312,9 +312,11 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(composeText).toContain("reverse-proxy:");
       expect(composeText).toContain('"127.0.0.1:8008:8008"');
       expect(composeText).toContain('"8448:443"');
+      expect(composeText).not.toContain('"80:80"');
 
       const caddyText = await readFile(join(result.projectDir, "reverse-proxy", "Caddyfile"), "utf8");
       expect(caddyText).toContain("192.168.0.54 {");
+      expect(caddyText).toContain("default_sni 192.168.0.54");
       expect(caddyText).toContain("tls internal");
       expect(caddyText).toContain("@ca path /downloads/caddy-root-ca.crt");
 

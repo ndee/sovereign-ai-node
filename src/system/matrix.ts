@@ -1188,8 +1188,9 @@ ${input.tlsMode !== "local-dev"
     depends_on:
       - synapse
     ports:
-      - "80:80"
-      - "${input.httpsProxyPortBinding}"
+${input.tlsMode === "auto"
+  ? '      - "80:80"\n'
+  : ""}      - "${input.httpsProxyPortBinding}"
     volumes:
       - ./reverse-proxy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./well-known:/srv:ro
@@ -1402,6 +1403,7 @@ const renderCaddyfile = (
   [
     "{",
     "  admin off",
+    ...(tlsMode === "internal" ? [`  default_sni ${siteHostname}`] : []),
     "}",
     "",
     `${siteHostname} {`,
