@@ -25,8 +25,13 @@ LAST_REQUEST_LOAD_ERROR=""
 RECOMMENDED_OPENROUTER_MODEL="openai/gpt-5-nano"
 LEGACY_OPENROUTER_MODEL="openrouter/anthropic/claude-sonnet-4-5"
 DEFAULT_OPENROUTER_MODEL="$RECOMMENDED_OPENROUTER_MODEL"
+RECOMMENDED_MATRIX_DOMAIN="matrix.local.test"
+RECOMMENDED_MATRIX_PUBLIC_BASE_URL="http://127.0.0.1:8008"
 DEFAULT_MATRIX_DOMAIN="matrix.local.test"
 DEFAULT_MATRIX_PUBLIC_BASE_URL="http://127.0.0.1:8008"
+LEGACY_MATRIX_DOMAIN="matrix.local.test"
+LEGACY_MATRIX_PUBLIC_BASE_URL="http://127.0.0.1:8008"
+LEGACY_MATRIX_ALT_PUBLIC_BASE_URL="http://matrix.local.test:8008"
 DEFAULT_OPERATOR_USERNAME="operator"
 DEFAULT_ALERT_ROOM_NAME="Sovereign Alerts"
 DEFAULT_POLL_INTERVAL="5m"
@@ -556,9 +561,10 @@ prompt_required_secret() {
 reset_request_defaults() {
   EXISTING_REQUEST_VALID="0"
   LAST_REQUEST_LOAD_ERROR=""
+  refresh_recommended_matrix_defaults
   DEFAULT_OPENROUTER_MODEL="$RECOMMENDED_OPENROUTER_MODEL"
-  DEFAULT_MATRIX_DOMAIN="matrix.local.test"
-  DEFAULT_MATRIX_PUBLIC_BASE_URL="http://127.0.0.1:8008"
+  DEFAULT_MATRIX_DOMAIN="$RECOMMENDED_MATRIX_DOMAIN"
+  DEFAULT_MATRIX_PUBLIC_BASE_URL="$RECOMMENDED_MATRIX_PUBLIC_BASE_URL"
   DEFAULT_OPERATOR_USERNAME="operator"
   DEFAULT_ALERT_ROOM_NAME="Sovereign Alerts"
   DEFAULT_POLL_INTERVAL="5m"
@@ -630,6 +636,8 @@ load_existing_defaults() {
   fi
 
   if ! output="$(
+    SN_RECOMMENDED_MATRIX_DOMAIN="$RECOMMENDED_MATRIX_DOMAIN" \
+    SN_RECOMMENDED_MATRIX_PUBLIC_BASE_URL="$RECOMMENDED_MATRIX_PUBLIC_BASE_URL" \
     node - "$REQUEST_FILE" <<'NODE'
 const fs = require("node:fs");
 const path = process.argv[2];
@@ -652,6 +660,13 @@ const imap = req.imap ?? {};
 
 const recommendedOpenrouterModel = "openai/gpt-5-nano";
 const legacyOpenrouterModel = "openrouter/anthropic/claude-sonnet-4-5";
+const recommendedMatrixDomain = process.env.SN_RECOMMENDED_MATRIX_DOMAIN || "";
+const recommendedMatrixPublicBaseUrl = process.env.SN_RECOMMENDED_MATRIX_PUBLIC_BASE_URL || "";
+const legacyMatrixDomain = "matrix.local.test";
+const legacyMatrixPublicBaseUrls = new Set([
+  "http://127.0.0.1:8008",
+  "http://matrix.local.test:8008",
+]);
 if (openrouter.model === legacyOpenrouterModel) {
   emit("DEFAULT_OPENROUTER_MODEL", recommendedOpenrouterModel);
   emit("LEGACY_OPENROUTER_MODEL_DETECTED", "1");
@@ -659,8 +674,18 @@ if (openrouter.model === legacyOpenrouterModel) {
   emit("DEFAULT_OPENROUTER_MODEL", openrouter.model);
 }
 emit("EXISTING_OPENROUTER_SECRET_REF", openrouter.secretRef ?? openrouter.apiKeySecretRef ?? "");
-emit("DEFAULT_MATRIX_DOMAIN", matrix.homeserverDomain);
-emit("DEFAULT_MATRIX_PUBLIC_BASE_URL", matrix.publicBaseUrl);
+if (
+  matrix.homeserverDomain === legacyMatrixDomain
+  && legacyMatrixPublicBaseUrls.has(matrix.publicBaseUrl)
+  && recommendedMatrixDomain.length > 0
+  && recommendedMatrixPublicBaseUrl.length > 0
+) {
+  emit("DEFAULT_MATRIX_DOMAIN", recommendedMatrixDomain);
+  emit("DEFAULT_MATRIX_PUBLIC_BASE_URL", recommendedMatrixPublicBaseUrl);
+} else {
+  emit("DEFAULT_MATRIX_DOMAIN", matrix.homeserverDomain);
+  emit("DEFAULT_MATRIX_PUBLIC_BASE_URL", matrix.publicBaseUrl);
+}
 emit("DEFAULT_FEDERATION_ENABLED", matrix.federationEnabled === true ? "1" : "0");
 emit("DEFAULT_ALERT_ROOM_NAME", matrix.alertRoomName);
 emit("DEFAULT_OPERATOR_USERNAME", operator.username);
@@ -766,6 +791,54 @@ warn_if_missing_secret_ref() {
     return 1
   fi
   return 0
+}
+
+detect_primary_ipv4() {
+  local detected
+
+  detected=""
+  if command -v ip >/dev/null 2>&1; then
+    detected="$(
+      ip -4 route get 1.1.1.1 2>/dev/null \
+        | awk '{for (i = 1; i <= NF; i += 1) if ($i == "src") { print $(i + 1); exit }}'
+    )"
+  fi
+
+  if [[ -z "$detected" ]]; then
+    detected="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  fi
+
+  if [[ -z "$detected" ]] || [[ "$detected" == "127."* ]] || [[ "$detected" == "0.0.0.0" ]]; then
+    return 1
+  fi
+
+  printf '%s' "$detected"
+}
+
+refresh_recommended_matrix_defaults() {
+  local detected_ip
+  detected_ip="$(detect_primary_ipv4 || true)"
+
+  if [[ -n "$detected_ip" ]]; then
+    RECOMMENDED_MATRIX_DOMAIN="$detected_ip"
+    RECOMMENDED_MATRIX_PUBLIC_BASE_URL="https://${detected_ip}:8448"
+  else
+    RECOMMENDED_MATRIX_DOMAIN="$LEGACY_MATRIX_DOMAIN"
+    RECOMMENDED_MATRIX_PUBLIC_BASE_URL="$LEGACY_MATRIX_PUBLIC_BASE_URL"
+  fi
+}
+
+slugify_matrix_project_name() {
+  printf '%s' "$1" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
+}
+
+build_internal_matrix_ca_path() {
+  local homeserver_domain slug
+  homeserver_domain="$1"
+  slug="$(slugify_matrix_project_name "$homeserver_domain")"
+  printf '/var/lib/sovereign-node/bundled-matrix/%s/reverse-proxy-data/caddy/pki/authorities/local/root.crt' "$slug"
 }
 
 infer_matrix_tls_mode_from_url() {
@@ -971,6 +1044,8 @@ review_install_request() {
     ui_info "Matrix TLS mode: auto (bundled HTTPS reverse proxy)"
   elif [[ "${SN_MATRIX_TLS_MODE}" == "internal" ]]; then
     ui_info "Matrix TLS mode: internal (LAN HTTPS with Caddy local CA)"
+    ui_info "Client CA certificate: ${SN_MATRIX_INTERNAL_CA_PATH}"
+    ui_info "Trust this CA on each client device before using Element Web."
   else
     ui_info "Matrix TLS mode: local-dev"
   fi
@@ -1150,6 +1225,7 @@ run_install_wizard() {
   export SN_MATRIX_DOMAIN="$matrix_domain"
   export SN_MATRIX_PUBLIC_BASE_URL="$matrix_public_base_url"
   export SN_MATRIX_TLS_MODE="$matrix_tls_mode"
+  export SN_MATRIX_INTERNAL_CA_PATH="$(build_internal_matrix_ca_path "$matrix_domain")"
   export SN_MATRIX_FEDERATION_ENABLED="$federation_enabled"
   export SN_OPERATOR_USERNAME="$operator_username"
   export SN_ALERT_ROOM_NAME="$alert_room_name"
@@ -1424,6 +1500,53 @@ wait_for_runtime_ready() {
   done
 }
 
+print_internal_matrix_ca_guidance() {
+  local guidance
+  [[ -r "$REQUEST_FILE" ]] || return 0
+
+  guidance="$(
+    node - "$REQUEST_FILE" <<'NODE'
+const fs = require("node:fs");
+const requestPath = process.argv[2];
+const raw = fs.readFileSync(requestPath, "utf8");
+const req = JSON.parse(raw);
+const matrix = req?.matrix ?? {};
+const publicBaseUrl = typeof matrix.publicBaseUrl === "string" ? matrix.publicBaseUrl : "";
+const tlsMode =
+  typeof matrix.tlsMode === "string" && matrix.tlsMode.length > 0
+    ? matrix.tlsMode
+    : publicBaseUrl.startsWith("https://")
+      ? "auto"
+      : "local-dev";
+if (tlsMode !== "internal") {
+  process.exit(0);
+}
+const homeserverDomain =
+  typeof matrix.homeserverDomain === "string" && matrix.homeserverDomain.length > 0
+    ? matrix.homeserverDomain
+    : "matrix.local.test";
+const slug = homeserverDomain
+  .toLowerCase()
+  .replace(/[^a-z0-9]+/g, "-")
+  .replace(/^-+/, "")
+  .replace(/-+$/, "");
+const caPath = `/var/lib/sovereign-node/bundled-matrix/${slug}/reverse-proxy-data/caddy/pki/authorities/local/root.crt`;
+process.stdout.write(
+  [
+    "LAN HTTPS (Caddy Internal CA):",
+    `- Homeserver URL: ${publicBaseUrl}`,
+    `- Client CA certificate: ${caPath}`,
+    "- Install this CA on every client device before using Element Web.",
+  ].join("\n"),
+);
+NODE
+  )" || return 0
+
+  if [[ -n "$guidance" ]]; then
+    printf '\n%s\n' "$guidance"
+  fi
+}
+
 run_install_flow() {
   local install_output install_exit_code parsed install_state install_summary status_output doctor_output
   local action_label
@@ -1525,6 +1648,7 @@ Useful commands:
 - sovereign-node status --json
 - sovereign-node doctor --json
 EOF
+  print_internal_matrix_ca_guidance
 }
 
 main "$@"

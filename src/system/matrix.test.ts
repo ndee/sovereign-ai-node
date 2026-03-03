@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -476,7 +476,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       if (url.endsWith("/_matrix/client/v3/login")) {
         const payload = parseBody(init?.body);
         const localpart = readLoginLocalpart(payload) ?? "unknown";
-        if (localpart === "operator" && operatorLoginAttempts === 0) {
+        if (localpart === "operator" && operatorLoginAttempts < 5) {
           operatorLoginAttempts += 1;
           return jsonResponse(
             {
@@ -519,6 +519,101 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       );
       expect(downCalls).toHaveLength(1);
       expect(upCalls).toHaveLength(2);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("regenerates bootstrap passwords after credential recovery when stored secrets are stale", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-test-"));
+    const recordedExecCalls: ExecInput[] = [];
+
+    const fakeExecRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        recordedExecCalls.push(input);
+        if (input.command === "docker") {
+          const args = input.args ?? [];
+          if (
+            args.includes("config")
+            || args.includes("up")
+            || args.includes("down")
+            || args.includes("register_new_matrix_user")
+          ) {
+            return {
+              command: [input.command, ...args].join(" "),
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+        }
+        return {
+          command: [input.command, ...(input.args ?? [])].join(" "),
+          exitCode: 127,
+          stdout: "",
+          stderr: "command not found",
+        };
+      },
+    };
+
+    const fakeFetch = async (url: string, init?: RequestInit): Promise<Response> => {
+      if (url.endsWith("/_matrix/client/versions")) {
+        return jsonResponse({
+          versions: ["v1.1", "v1.2"],
+        });
+      }
+
+      if (url.endsWith("/_matrix/client/v3/login")) {
+        const payload = parseBody(init?.body);
+        const localpart = readLoginLocalpart(payload) ?? "unknown";
+        const password = readLoginPassword(payload) ?? "";
+        if (localpart === "operator" && password === "stale-operator-password") {
+          return jsonResponse(
+            {
+              errcode: "M_FORBIDDEN",
+              error: "Invalid username or password",
+            },
+            403,
+          );
+        }
+        return jsonResponse({
+          access_token: `token-${localpart}`,
+          user_id: `@${localpart}:matrix.local.test`,
+        });
+      }
+
+      return jsonResponse({});
+    };
+
+    const paths = buildPaths(tempRoot);
+    const provisioner = new DockerComposeBundledMatrixProvisioner(
+      fakeExecRunner,
+      createLogger(),
+      paths,
+      fakeFetch,
+    );
+
+    try {
+      const req = buildInstallRequest();
+      const provision = await provisioner.provision(req);
+      const secretsDir = join(provision.projectDir, "bootstrap-secrets");
+      await mkdir(secretsDir, { recursive: true });
+      await writeFile(join(secretsDir, "operator.password"), "stale-operator-password\n", "utf8");
+      await writeFile(join(secretsDir, "mail-sentinel.password"), "stale-bot-password\n", "utf8");
+
+      const accounts = await provisioner.bootstrapAccounts(req, provision);
+
+      expect(accounts.operator.userId).toBe("@operator:matrix.local.test");
+      expect(accounts.bot.userId).toBe("@mail-sentinel:matrix.local.test");
+      const operatorSecretPath = accounts.operator.passwordSecretRef.slice("file:".length);
+      expect((await readFile(operatorSecretPath, "utf8")).trim()).not.toBe(
+        "stale-operator-password",
+      );
+
+      const downCalls = recordedExecCalls.filter(
+        (call) => call.command === "docker" && (call.args ?? []).includes("down"),
+      );
+      expect(downCalls).toHaveLength(1);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -661,4 +756,9 @@ const readLoginLocalpart = (payload: Record<string, unknown>): string | null => 
   }
   const user = (identifier as { user?: unknown }).user;
   return typeof user === "string" && user.trim().length > 0 ? user : null;
+};
+
+const readLoginPassword = (payload: Record<string, unknown>): string | null => {
+  const password = payload.password;
+  return typeof password === "string" && password.trim().length > 0 ? password : null;
 };

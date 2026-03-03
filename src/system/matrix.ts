@@ -14,6 +14,8 @@ const MATRIX_INTERNAL_BASE_URL = "http://127.0.0.1:8008";
 const MATRIX_READY_TIMEOUT_MS = 180_000;
 const MATRIX_READY_POLL_INTERVAL_MS = 1_500;
 const MATRIX_HTTP_TIMEOUT_MS = 8_000;
+const MATRIX_LOGIN_RETRY_ATTEMPTS = 5;
+const MATRIX_LOGIN_RETRY_DELAY_MS = 500;
 const MATRIX_COMPOSE_COMMAND_TIMEOUT_MS = 180_000;
 const MATRIX_BOOTSTRAP_SECRET_DIR = "bootstrap-secrets";
 const DEFAULT_SYNAPSE_IMAGE = "matrixdotorg/synapse:v1.125.0";
@@ -319,14 +321,27 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       await this.ensureStackRunning(provision);
       await this.waitForSynapseReadyWithRecovery(provision);
 
+      const recoveredOperatorPassword = generatePassword();
+      const recoveredBotPassword = generatePassword();
+      const recoveredOperatorPasswordSecretRef = await this.writeSecretFile(
+        secretsDir,
+        operatorSecretName,
+        recoveredOperatorPassword,
+      );
+      const recoveredBotPasswordSecretRef = await this.writeSecretFile(
+        secretsDir,
+        botSecretName,
+        recoveredBotPassword,
+      );
+
       return this.bootstrapAccountsWithKnownPasswords({
         provision,
         operatorLocalpart,
-        operatorPassword,
-        operatorPasswordSecretRef,
+        operatorPassword: recoveredOperatorPassword,
+        operatorPasswordSecretRef: recoveredOperatorPasswordSecretRef,
         botLocalpart,
-        botPassword,
-        botPasswordSecretRef,
+        botPassword: recoveredBotPassword,
+        botPasswordSecretRef: recoveredBotPasswordSecretRef,
       });
     }
   }
@@ -666,40 +681,53 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     localpart: string,
     password: string,
   ): Promise<{ accessToken: string; userId: string }> {
-    const payload = await this.matrixJsonRequest<{
-      access_token?: unknown;
-      user_id?: unknown;
-    }>({
-      baseUrl,
-      path: "/_matrix/client/v3/login",
-      method: "POST",
-      body: {
-        type: "m.login.password",
-        identifier: {
-          type: "m.id.user",
-          user: localpart,
-        },
-        password,
-      },
-      errorCode: "MATRIX_LOGIN_FAILED",
-      errorMessage: `Matrix login failed for '${localpart}'`,
-      retryable: false,
-    });
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= MATRIX_LOGIN_RETRY_ATTEMPTS; attempt += 1) {
+      try {
+        const payload = await this.matrixJsonRequest<{
+          access_token?: unknown;
+          user_id?: unknown;
+        }>({
+          baseUrl,
+          path: "/_matrix/client/v3/login",
+          method: "POST",
+          body: {
+            type: "m.login.password",
+            identifier: {
+              type: "m.id.user",
+              user: localpart,
+            },
+            password,
+          },
+          errorCode: "MATRIX_LOGIN_FAILED",
+          errorMessage: `Matrix login failed for '${localpart}'`,
+          retryable: false,
+        });
 
-    const accessToken = typeof payload.access_token === "string" ? payload.access_token : "";
-    const userId = typeof payload.user_id === "string" ? payload.user_id : "";
-    if (accessToken.length === 0 || userId.length === 0) {
-      throw {
-        code: "MATRIX_LOGIN_FAILED",
-        message: `Matrix login response for '${localpart}' did not include an access token`,
-        retryable: false,
-      };
+        const accessToken = typeof payload.access_token === "string" ? payload.access_token : "";
+        const userId = typeof payload.user_id === "string" ? payload.user_id : "";
+        if (accessToken.length === 0 || userId.length === 0) {
+          throw {
+            code: "MATRIX_LOGIN_FAILED",
+            message: `Matrix login response for '${localpart}' did not include an access token`,
+            retryable: false,
+          };
+        }
+
+        return {
+          accessToken,
+          userId,
+        };
+      } catch (error) {
+        lastError = error;
+        if (!isRecoverableAccountCredentialFailure(error) || attempt >= MATRIX_LOGIN_RETRY_ATTEMPTS) {
+          break;
+        }
+        await delay(MATRIX_LOGIN_RETRY_DELAY_MS);
+      }
     }
 
-    return {
-      accessToken,
-      userId,
-    };
+    throw lastError;
   }
 
   private async waitForSynapseReady(baseUrl: string): Promise<void> {
