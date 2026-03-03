@@ -259,9 +259,14 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
         join(result.projectDir, "well-known", "onboard", "index.html"),
         "utf8",
       );
-      expect(onboardPage).toContain("https://mobile.element.io/?hs_url=https%3A%2F%2Fmatrix.example.org");
+      expect(onboardPage).toContain("Connect via Element Web");
+      expect(onboardPage).toContain("https://app.element.io/#/login");
+      expect(onboardPage).toContain("Copy Homeserver URL");
+      expect(onboardPage).toContain("<svg");
       expect(onboardPage).not.toContain("/downloads/caddy-root-ca.crt");
-      expect(recordedExecCalls).toHaveLength(1);
+      expect(recordedExecCalls).toHaveLength(2);
+      expect(recordedExecCalls.some((call) => call.command === "qrencode")).toBe(true);
+      expect(recordedExecCalls.some((call) => call.command === "docker")).toBe(true);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -330,8 +335,13 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
         "utf8",
       );
       expect(onboardPage).toContain("/downloads/caddy-root-ca.crt");
-      expect(onboardPage).toContain("https://mobile.element.io/?hs_url=https%3A%2F%2F192.168.0.54%3A8448");
-      expect(recordedExecCalls).toHaveLength(1);
+      expect(onboardPage).toContain("Connect via Element Web");
+      expect(onboardPage).toContain("Native Android Matrix apps may still reject local CAs");
+      expect(onboardPage).toContain("Do not type only 192.168.0.54:8448.");
+      expect(onboardPage).toContain("<svg");
+      expect(recordedExecCalls).toHaveLength(2);
+      expect(recordedExecCalls.some((call) => call.command === "qrencode")).toBe(true);
+      expect(recordedExecCalls.some((call) => call.command === "docker")).toBe(true);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }

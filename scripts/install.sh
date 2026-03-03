@@ -877,8 +877,8 @@ build_matrix_ca_download_url() {
   printf '%s/downloads/caddy-root-ca.crt' "$base_url"
 }
 
-build_element_mobile_link() {
-  node -e 'const base = process.argv[1] || ""; process.stdout.write(`https://mobile.element.io/?hs_url=${encodeURIComponent(base)}`);' "$1"
+build_element_web_link() {
+  printf '%s' "https://app.element.io/#/login"
 }
 
 print_onboarding_qr() {
@@ -1092,11 +1092,11 @@ NODE
 }
 
 review_install_request() {
-  local onboarding_url ca_download_url element_mobile_link
+  local onboarding_url ca_download_url element_web_link
 
   onboarding_url="$(build_matrix_onboarding_url "${SN_MATRIX_PUBLIC_BASE_URL}")"
   ca_download_url="$(build_matrix_ca_download_url "${SN_MATRIX_PUBLIC_BASE_URL}")"
-  element_mobile_link="$(build_element_mobile_link "${SN_MATRIX_PUBLIC_BASE_URL}")"
+  element_web_link="$(build_element_web_link)"
 
   ui_section "Review"
   ui_info "OpenRouter model: ${SN_OPENROUTER_MODEL}"
@@ -1115,7 +1115,7 @@ review_install_request() {
   fi
   if [[ "${SN_MATRIX_TLS_MODE}" != "local-dev" ]]; then
     ui_info "Phone onboarding URL: ${onboarding_url}"
-    ui_info "Element mobile link: ${element_mobile_link}"
+    ui_info "Element Web login: ${element_web_link}"
   fi
   if [[ "${SN_MATRIX_FEDERATION_ENABLED}" == "1" ]]; then
     ui_info "Matrix federation: enabled"
@@ -1602,11 +1602,11 @@ const caPath = `/var/lib/sovereign-node/bundled-matrix/${slug}/reverse-proxy-dat
 const normalizedBaseUrl = publicBaseUrl.replace(/\/+$/, "");
 const onboardingUrl = `${normalizedBaseUrl}/onboard`;
 const caDownloadUrl = `${normalizedBaseUrl}/downloads/caddy-root-ca.crt`;
-const elementLink = `https://mobile.element.io/?hs_url=${encodeURIComponent(publicBaseUrl)}`;
+const elementLink = "https://app.element.io/#/login";
 const lines = [
   "Phone onboarding:",
   `- Onboarding page: ${onboardingUrl}`,
-  `- Element mobile link: ${elementLink}`,
+  `- Element Web login: ${elementLink}`,
 ];
 if (tlsMode === "internal") {
   lines.push(`- CA download URL: ${caDownloadUrl}`);

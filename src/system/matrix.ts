@@ -188,6 +188,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     });
     const signingKey = renderSigningKey();
     const logConfig = renderSynapseLogConfig();
+    const operatorLocalpart = sanitizeMatrixLocalpart(req.operator.username, "operator");
 
     const writes = [
       writeFile(composeFilePath, `${composeYaml}\n`, "utf8"),
@@ -197,6 +198,8 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       writeFile(join(synapseDir, "log.config"), `${logConfig}\n`, "utf8"),
     ];
     if (tlsMode !== "local-dev") {
+      const onboardingPageUrl = buildOnboardingPageUrl(publicBaseUrl);
+      const onboardingQrSvg = await this.renderOnboardingQrSvg(onboardingPageUrl);
       const wellKnown = renderWellKnownFiles({
         homeserverDomain,
         publicBaseUrl,
@@ -212,8 +215,10 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
           `${renderOnboardingPage({
             publicBaseUrl,
             homeserverDomain,
-            operatorLocalpart: sanitizeMatrixLocalpart(req.operator.username, "operator"),
+            operatorLocalpart,
             tlsMode,
+            onboardingPageUrl,
+            onboardingQrSvg,
           })}\n`,
           "utf8",
         ),
@@ -1137,6 +1142,25 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       return {};
     }
   }
+
+  private async renderOnboardingQrSvg(value: string): Promise<string> {
+    const qr = await this.execRunner.run({
+      command: "qrencode",
+      args: ["-t", "SVG", "-o", "-", value],
+    });
+    if (qr.exitCode === 0 && qr.stdout.includes("<svg")) {
+      return normalizeEmbeddedSvg(qr.stdout);
+    }
+
+    this.logger.warn(
+      {
+        command: qr.command,
+        exitCode: qr.exitCode,
+      },
+      "qrencode unavailable; using onboarding QR fallback",
+    );
+    return renderFallbackQrSvg(value);
+  }
 }
 
 type EnvTemplateInput = {
@@ -1450,15 +1474,17 @@ const renderOnboardingPage = (input: {
   homeserverDomain: string;
   operatorLocalpart: string;
   tlsMode: Exclude<BundledMatrixTlsMode, "local-dev">;
+  onboardingPageUrl: string;
+  onboardingQrSvg: string;
 }): string => {
-  const elementLink = buildElementMobileDeepLink(input.publicBaseUrl);
+  const elementWebLink = buildElementWebLoginLink();
   const caSection = input.tlsMode === "internal"
     ? [
         "<section class=\"card caution\">",
         "  <h2>1. Install the Local CA</h2>",
         "  <p>This LAN-only setup uses Caddy&apos;s internal certificate authority. Install the CA on your phone before opening Element.</p>",
         "  <a class=\"button button-secondary\" href=\"/downloads/caddy-root-ca.crt\">Download CA Certificate</a>",
-        "  <p class=\"meta\">After download, trust this certificate in your phone&apos;s settings.</p>",
+        "  <p class=\"meta\">After download, trust this certificate in your device&apos;s settings. Native Android Matrix apps may still reject local CAs; Element Web in the browser is the reliable path.</p>",
         "</section>",
       ].join("\n")
     : "";
@@ -1485,6 +1511,8 @@ const renderOnboardingPage = (input: {
     "    h2 { margin: 0 0 10px; font-size: 1.05rem; }",
     "    .button { display: inline-flex; align-items: center; justify-content: center; min-height: 52px; width: 100%; padding: 14px 18px; border-radius: 16px; text-decoration: none; font-weight: 700; color: #020617; background: linear-gradient(135deg, var(--accent), #86efac); }",
     "    .button-secondary { margin-top: 8px; color: var(--text); background: linear-gradient(135deg, rgba(56, 189, 248, 0.22), rgba(59, 130, 246, 0.28)); }",
+    "    .qr-shell { display: grid; place-items: center; margin-top: 14px; padding: 18px; border-radius: 18px; background: rgba(255, 255, 255, 0.92); }",
+    "    .qr-shell svg { width: min(100%, 280px); height: auto; }",
     "    code { display: block; margin-top: 10px; padding: 12px 14px; border-radius: 14px; background: rgba(2, 6, 23, 0.55); overflow-wrap: anywhere; color: #dbeafe; }",
     "    ol { margin: 10px 0 0; padding-left: 20px; }",
     "    li + li { margin-top: 8px; }",
@@ -1503,21 +1531,54 @@ const renderOnboardingPage = (input: {
     "    <div class=\"stack\">",
     caSection,
     "      <section class=\"card\">",
-    "        <h2>" + (input.tlsMode === "internal" ? "2" : "1") + ". Open Element</h2>",
-    "        <p>Tap the button below after the certificate step. Element will open with the correct homeserver filled in.</p>",
-    "        <a class=\"button\" href=\"" + escapeHtml(elementLink) + "\">Open in Element</a>",
-    "        <p class=\"meta\">If Element is not installed, install it first and then return to this page.</p>",
+    "        <h2>" + (input.tlsMode === "internal" ? "2" : "1") + ". Continue with Element Web</h2>",
+    "        <p>Use Element Web in this browser. It works reliably with the exact homeserver URL below, including the <code>https://</code> prefix.</p>",
+    "        <a class=\"button\" href=\"" + escapeHtml(elementWebLink) + "\" target=\"_blank\" rel=\"noreferrer\">Connect via Element Web</a>",
+    "        <button class=\"button button-secondary\" type=\"button\" onclick=\"copyHomeserverUrl(this)\">Copy Homeserver URL</button>",
+    "        <p class=\"meta\">In Element Web: click <strong>Edit</strong> in the homeserver field, then paste the full URL exactly as shown above. Do not type only " + escapeHtml(new URL(input.publicBaseUrl).host) + ".</p>",
     "      </section>",
     "      <section class=\"card\">",
-    "        <h2>" + (input.tlsMode === "internal" ? "3" : "2") + ". Sign in</h2>",
+    "        <h2>" + (input.tlsMode === "internal" ? "3" : "2") + ". Open this setup page on another device</h2>",
+    "        <p>Open this page on a laptop, then scan the QR code from your phone if you want to hand off setup between devices.</p>",
+    "        <div class=\"qr-shell\">",
+    input.onboardingQrSvg,
+    "        </div>",
+    "        <p class=\"meta\">This QR points to " + escapeHtml(input.onboardingPageUrl) + "</p>",
+    "      </section>",
+    "      <section class=\"card\">",
+    "        <h2>" + (input.tlsMode === "internal" ? "4" : "3") + ". Sign in</h2>",
     "        <ol>",
-    "          <li>Approve the homeserver if Element asks for confirmation.</li>",
     "          <li>Use the username shown above.</li>",
     "          <li>Use the password created during Sovereign Node installation.</li>",
+    "          <li>If Element asks for a homeserver again, paste the exact <code>https://</code> URL shown at the top of this page.</li>",
     "        </ol>",
     "      </section>",
     "    </div>",
     "  </main>",
+    "  <script>",
+    "    const homeserverUrl = " + JSON.stringify(input.publicBaseUrl) + ";",
+    "    async function copyHomeserverUrl(button) {",
+    "      try {",
+    "        if (navigator.clipboard && navigator.clipboard.writeText) {",
+    "          await navigator.clipboard.writeText(homeserverUrl);",
+    "        } else {",
+    "          const el = document.createElement('textarea');",
+    "          el.value = homeserverUrl;",
+    "          document.body.appendChild(el);",
+    "          el.select();",
+    "          document.execCommand('copy');",
+    "          el.remove();",
+    "        }",
+    "        const oldText = button.textContent;",
+    "        button.textContent = 'Copied';",
+    "        setTimeout(() => { button.textContent = oldText; }, 1800);",
+    "      } catch {",
+    "        const oldText = button.textContent;",
+    "        button.textContent = 'Copy failed';",
+    "        setTimeout(() => { button.textContent = oldText; }, 1800);",
+    "      }",
+    "    }",
+    "  </script>",
     "</body>",
     "</html>",
   ]
@@ -1525,8 +1586,10 @@ const renderOnboardingPage = (input: {
     .join("\n");
 };
 
-const buildElementMobileDeepLink = (publicBaseUrl: string): string =>
-  `https://mobile.element.io/?hs_url=${encodeURIComponent(publicBaseUrl)}`;
+const buildOnboardingPageUrl = (publicBaseUrl: string): string =>
+  `${publicBaseUrl.replace(/\/+$/, "")}/onboard`;
+
+const buildElementWebLoginLink = (): string => "https://app.element.io/#/login";
 
 const renderWellKnownFiles = (input: {
   homeserverDomain: string;
@@ -1699,6 +1762,30 @@ const escapeHtml = (value: string): string =>
     .replaceAll(">", "&gt;")
     .replaceAll("\"", "&quot;")
     .replaceAll("'", "&#39;");
+
+const normalizeEmbeddedSvg = (value: string): string =>
+  value
+    .replace(/<\?xml[\s\S]*?\?>\s*/i, "")
+    .replace(/<!DOCTYPE[\s\S]*?>\s*/i, "")
+    .trim();
+
+const renderFallbackQrSvg = (value: string): string => {
+  const safeValue = escapeHtml(value);
+  return [
+    "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 320 320\" role=\"img\" aria-label=\"Open this setup page on another device\">",
+    "  <rect width=\"320\" height=\"320\" rx=\"24\" fill=\"#ffffff\" />",
+    "  <rect x=\"24\" y=\"24\" width=\"272\" height=\"272\" rx=\"16\" fill=\"#0f172a\" opacity=\"0.08\" />",
+    "  <rect x=\"42\" y=\"42\" width=\"72\" height=\"72\" rx=\"10\" fill=\"#0f172a\" />",
+    "  <rect x=\"206\" y=\"42\" width=\"72\" height=\"72\" rx=\"10\" fill=\"#0f172a\" />",
+    "  <rect x=\"42\" y=\"206\" width=\"72\" height=\"72\" rx=\"10\" fill=\"#0f172a\" />",
+    "  <rect x=\"144\" y=\"144\" width=\"32\" height=\"32\" rx=\"6\" fill=\"#0f172a\" />",
+    "  <rect x=\"190\" y=\"144\" width=\"20\" height=\"20\" rx=\"4\" fill=\"#0f172a\" />",
+    "  <rect x=\"220\" y=\"184\" width=\"26\" height=\"26\" rx=\"5\" fill=\"#0f172a\" />",
+    "  <text x=\"160\" y=\"250\" text-anchor=\"middle\" font-family=\"Arial, sans-serif\" font-size=\"15\" fill=\"#0f172a\">Open setup page</text>",
+    `  <text x="160" y="273" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#334155">${safeValue}</text>`,
+    "</svg>",
+  ].join("\n");
+};
 
 const defaultFetch: FetchLike = (input, init) => globalThis.fetch(input, init);
 
