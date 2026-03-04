@@ -411,6 +411,12 @@ export class RealInstallerService implements InstallerService {
       agentPresent: agentProbe.present || registration?.agentId !== undefined,
       cronPresent: cronProbe.present || registration?.cronJobId !== undefined,
     });
+    const relayServiceHealth: ComponentHealth =
+      relay.installed && relay.state === "running"
+        ? "healthy"
+        : relay.installed
+          ? "degraded"
+          : "unhealthy";
     const sovereignHealth: ComponentHealth =
       runtimeConfig === null ? "degraded" : "healthy";
 
@@ -445,12 +451,7 @@ export class RealInstallerService implements InstallerService {
               {
                 name: "matrix-relay-tunnel",
                 kind: "relay-tunnel" as const,
-                health:
-                  relay.installed && relay.state === "running"
-                    ? "healthy"
-                    : relay.installed
-                      ? "degraded"
-                      : "failed",
+                health: relayServiceHealth,
                 state: relay.state,
                 ...(relay.message === undefined ? {} : { message: relay.message }),
               },
@@ -1583,10 +1584,12 @@ export class RealInstallerService implements InstallerService {
 
           const runtimeConfig = await this.writeSovereignConfig({
             req: stepState.effectiveRequest ?? req,
-            relayEnrollment: stepState.relayEnrollment,
             matrixProvision: stepState.matrixProvision,
             matrixAccounts: stepState.matrixAccounts,
             matrixRoom: stepState.matrixRoom,
+            ...(stepState.relayEnrollment === undefined
+              ? {}
+              : { relayEnrollment: stepState.relayEnrollment }),
           });
           await this.writeOpenClawRuntimeArtifacts(runtimeConfig);
           this.setManagedOpenClawEnv(runtimeConfig);
@@ -3543,7 +3546,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
             ...(typeof relayTunnel.subdomain === "string" && relayTunnel.subdomain.length > 0
               ? { subdomain: relayTunnel.subdomain }
               : {}),
-            type: relayTunnel.type === "http" ? "http" : "http",
+            type: "http" as const,
             localIp:
               typeof relayTunnel.localIp === "string" && relayTunnel.localIp.length > 0
                 ? relayTunnel.localIp
@@ -3626,35 +3629,33 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
       publicBaseUrl: matrix.publicBaseUrl,
       adminBaseUrl,
       operator: {
-        localpart:
-          typeof operator.localpart === "string" && operator.localpart.length > 0
-            ? operator.localpart
-            : undefined,
         userId:
           typeof operator.userId === "string" && operator.userId.length > 0
             ? operator.userId
             : "@operator:local",
-        passwordSecretRef:
-          typeof operator.passwordSecretRef === "string" && operator.passwordSecretRef.length > 0
-            ? operator.passwordSecretRef
-            : undefined,
-        accessTokenSecretRef:
-          typeof operator.accessTokenSecretRef === "string"
+        ...(typeof operator.localpart === "string" && operator.localpart.length > 0
+          ? { localpart: operator.localpart }
+          : {}),
+        ...(typeof operator.passwordSecretRef === "string"
+          && operator.passwordSecretRef.length > 0
+          ? { passwordSecretRef: operator.passwordSecretRef }
+          : {}),
+        ...(typeof operator.accessTokenSecretRef === "string"
           && operator.accessTokenSecretRef.length > 0
-            ? operator.accessTokenSecretRef
-            : undefined,
+          ? { accessTokenSecretRef: operator.accessTokenSecretRef }
+          : {}),
       },
       bot: {
-        localpart:
-          typeof bot.localpart === "string" && bot.localpart.length > 0 ? bot.localpart : undefined,
         userId:
           typeof bot.userId === "string" && bot.userId.length > 0
             ? bot.userId
             : "@mail-sentinel:local",
-        passwordSecretRef:
-          typeof bot.passwordSecretRef === "string" && bot.passwordSecretRef.length > 0
-            ? bot.passwordSecretRef
-            : undefined,
+        ...(typeof bot.localpart === "string" && bot.localpart.length > 0
+          ? { localpart: bot.localpart }
+          : {}),
+        ...(typeof bot.passwordSecretRef === "string" && bot.passwordSecretRef.length > 0
+          ? { passwordSecretRef: bot.passwordSecretRef }
+          : {}),
         accessTokenSecretRef: bot.accessTokenSecretRef,
       },
       alertRoom: {

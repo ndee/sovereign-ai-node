@@ -136,9 +136,9 @@ That means:
 - High-risk capabilities (mail, files, secrets, outbound APIs) should be brokered by the kernel, not granted directly to arbitrary plugins
 - OpenClaw can be replaced or supplemented later without redesigning the platform
 
-## Ubuntu VM Install (WIP)
+## Ubuntu VM Install
 
-This repo now includes a guided bootstrap installer for a fresh Ubuntu VM:
+Use the guided installer on a fresh Ubuntu VM:
 
 ```bash
 sudo bash scripts/install.sh --source-dir "$(pwd)"
@@ -150,15 +150,46 @@ For remote bootstrap (`curl | bash`), pass a repo URL:
 curl -fsSL https://raw.githubusercontent.com/ndee/sovereign-ai-node/main/scripts/install.sh | sudo bash
 ```
 
-The guided flow now:
+In interactive mode, the installer starts with an explicit action menu:
 
-1. Prompts for OpenRouter API key + model
-2. Provisions Sovereign Node + OpenClaw + bundled Matrix
-3. Installs/registers Mail Sentinel
-4. Sends a hello alert message to the Matrix room
-5. Lets you keep IMAP pending (configure now or later)
+1. `Install (new / reconfigure)`
+2. `Update (keep current settings)`
+3. `Exit`
+
+Default selection:
+
+- fresh host: `Install`
+- existing host: `Update`
+
+The guided install flow then:
+
+1. collects or reuses OpenRouter settings (default model: `openai/gpt-5-nano`)
+2. provisions Sovereign Node + OpenClaw + bundled Matrix
+3. registers Mail Sentinel (agent + cron)
+4. runs smoke checks and sends a hello alert
+5. keeps IMAP as pending unless you configure it
+
+### Connectivity Modes
+
+Bundled Matrix supports:
+
+- `direct`: public DNS/domain path
+- `direct` + `tlsMode=internal`: LAN-only HTTPS with Caddy local CA
+- `relay`: managed relay path (no user domain and no port forwarding)
+
+Use `sovereign-node status --json` to confirm the active mode and relay state.
+
+### Non-Interactive Action Control
+
+For automation:
+
+- `--install` forces install/reconfigure mode
+- `--update` forces update mode
+- `SOVEREIGN_NODE_ACTION=install|update` env override
+- `--non-interactive` disables prompts
 
 Manual verify:
 
 - `sovereign-node status --json`
 - `sovereign-node doctor --json`
+- `sovereign-node logs --json`

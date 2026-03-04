@@ -7,7 +7,7 @@ Define the bundled Matrix deployment model used by the default `sovereign-ai-nod
 This document explains:
 
 - what the installer must provision for Matrix
-- what the operator must still provide (domain, DNS, etc.)
+- what the operator must still provide in each connectivity mode
 - safe defaults for the bundled profile
 - how Element connects to the provisioned homeserver
 
@@ -24,6 +24,11 @@ The default bundled Matrix profile is:
 - reverse proxy with TLS termination
 - private operator + bot accounts
 - private alert room for bot notifications
+
+Connectivity can run in one of two access modes:
+
+- `direct`: node exposes Matrix endpoint itself (public domain or LAN/internal TLS)
+- `relay`: node keeps Matrix local and publishes a public URL through a managed relay tunnel
 
 Default posture (bundled mode):
 
@@ -79,13 +84,23 @@ Operator-facing implementation note:
 
 ## Operator Inputs Required for Bundled Matrix
 
-The installer cannot infer these values safely and must ask for them (CLI or Wizard):
+The installer cannot infer these values safely and must ask for them (CLI or Wizard).
 
-- Matrix public domain or subdomain (for example `matrix.example.org`)
-- DNS control (or confirmation DNS is already configured)
-- TLS mode (automatic certificate issuance for public installs, local/dev alternative for non-public)
+`direct` mode requires:
+
+- Matrix public domain/subdomain (for example `matrix.example.org`) or LAN host/IP for internal mode
+- DNS control for public automatic TLS (not needed for LAN internal TLS)
+- TLS mode (`auto`, `internal`, or `local-dev`)
 - operator username for Element login
 - whether federation should be enabled
+
+`relay` mode requires:
+
+- relay control URL
+- relay enrollment token
+- optional requested relay slug/hostname prefix
+
+`relay` mode does not require a user-managed domain or inbound port forwarding.
 
 The installer should generate or provision:
 
@@ -111,7 +126,7 @@ The default install flow should provision Matrix in this order:
 
 ## Domain, TLS, and Discovery
 
-### Simplest Path (Recommended Default)
+### Simplest Path (Direct Mode)
 
 Use a dedicated Matrix subdomain as both the homeserver name and public endpoint.
 
@@ -154,6 +169,8 @@ It must:
 - preserve request headers as required by Synapse deployment guidance
 
 Use a reverse proxy configuration aligned with Synapse deployment guidance and test the public Matrix paths before bootstrapping accounts.
+
+In `relay` mode, the node-side reverse proxy runs loopback-only and the public TLS endpoint is terminated on the managed relay.
 
 ## Synapse Configuration Defaults (Bundled Profile)
 
@@ -232,6 +249,10 @@ If federation is enabled:
 - document additional operational responsibilities (abuse handling, upgrades, federation diagnostics)
 
 Failure and rollback behavior for partial bundled Matrix installs is defined in `docs/INSTALLER_CONTRACTS.md` and should be treated as part of the operator contract.
+
+Relay v1 note:
+
+- federation is intentionally disabled in relay mode
 
 ## Operations and Backup Expectations
 

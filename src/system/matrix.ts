@@ -30,6 +30,7 @@ type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 type BundledMatrixTlsMode = "auto" | "internal" | "local-dev";
 type BundledMatrixAccessMode = "direct" | "relay";
 type BundledMatrixOnboardingMode = Exclude<BundledMatrixTlsMode, "local-dev"> | "relay";
+type RequestedBundledMatrixTlsMode = BundledMatrixTlsMode | "manual";
 
 export type BundledMatrixProvisionResult = {
   projectDir: string;
@@ -87,34 +88,9 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
   async provision(req: InstallRequest): Promise<BundledMatrixProvisionResult> {
     const accessMode: BundledMatrixAccessMode =
       req.connectivity?.mode === "relay" || req.relay !== undefined ? "relay" : "direct";
-    const tlsMode = req.matrix.tlsMode ?? "auto";
-    if (accessMode === "direct" && tlsMode === "manual") {
-      throw {
-        code: "MATRIX_TLS_MODE_UNSUPPORTED",
-        message:
-          "Bundled Matrix provisioning does not yet support tlsMode=manual",
-        retryable: false,
-        details: {
-          requestedTlsMode: tlsMode,
-          supportedTlsModes: ["auto", "internal", "local-dev"],
-        },
-      };
-    }
-    if (
-      accessMode === "direct"
-      && tlsMode !== "local-dev"
-      && tlsMode !== "auto"
-      && tlsMode !== "internal"
-    ) {
-      throw {
-        code: "MATRIX_TLS_MODE_UNSUPPORTED",
-        message: "Bundled Matrix provisioning received an unknown tlsMode",
-        retryable: false,
-        details: {
-          requestedTlsMode: tlsMode,
-        },
-      };
-    }
+    const requestedTlsMode: RequestedBundledMatrixTlsMode = req.matrix.tlsMode ?? "auto";
+    const tlsMode = normalizeBundledTlsMode(accessMode, requestedTlsMode);
+    const usesReverseProxy = shouldUseReverseProxy(accessMode, tlsMode);
 
     const homeserverDomain = req.matrix.homeserverDomain;
     const publicBaseUrl = normalizePublicBaseUrl(req.matrix.publicBaseUrl);
@@ -147,7 +123,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
 
     await mkdir(synapseDir, { recursive: true });
     await mkdir(postgresDir, { recursive: true });
-    if (accessMode === "relay" || tlsMode !== "local-dev") {
+    if (usesReverseProxy) {
       await mkdir(wellKnownDir, { recursive: true });
       await mkdir(join(wellKnownDir, ".well-known", "matrix"), { recursive: true });
       await mkdir(join(wellKnownDir, "onboard"), { recursive: true });
@@ -155,13 +131,9 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       await mkdir(proxyDataDir, { recursive: true });
       await mkdir(proxyConfigDir, { recursive: true });
     }
-    await ensureDirectoryTreeWritable(synapseDir);
-    await ensureDirectoryTreeWritable(postgresDir);
-    if (accessMode === "relay" || tlsMode !== "local-dev") {
-      await ensureDirectoryTreeWritable(wellKnownDir);
-      await ensureDirectoryTreeWritable(proxyDir);
-      await ensureDirectoryTreeWritable(proxyDataDir);
-      await ensureDirectoryTreeWritable(proxyConfigDir);
+    await ensureDirectoryTreesWritable([synapseDir, postgresDir]);
+    if (usesReverseProxy) {
+      await ensureDirectoryTreesWritable([wellKnownDir, proxyDir, proxyDataDir, proxyConfigDir]);
     }
 
     const existingEnv = await this.readExistingEnv(projectDir);
@@ -183,15 +155,15 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       accessMode,
       tlsMode,
       localSynapsePortBinding:
-        accessMode === "relay" || tlsMode !== "local-dev"
+        usesReverseProxy
           ? "127.0.0.1:8008:8008"
           : resolveLocalDevSynapsePortBinding(publicBaseUrl),
-      httpsProxyPortBinding:
-        accessMode === "direct" && tlsMode !== "local-dev"
-          ? resolveAutoHttpsProxyPortBinding(publicBaseUrl)
-          : undefined,
-      relayEdgePortBinding:
-        accessMode === "relay" ? `127.0.0.1:${RELAY_LOCAL_EDGE_PORT}:80` : undefined,
+      ...(accessMode === "direct" && tlsMode !== "local-dev"
+        ? { httpsProxyPortBinding: resolveAutoHttpsProxyPortBinding(publicBaseUrl) }
+        : {}),
+      ...(accessMode === "relay"
+        ? { relayEdgePortBinding: `127.0.0.1:${RELAY_LOCAL_EDGE_PORT}:80` }
+        : {}),
     });
     const envFile = renderEnvFile({
       homeserverDomain,
@@ -204,7 +176,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       homeserverDomain,
       publicBaseUrl,
       federationEnabled,
-      behindReverseProxy: accessMode === "relay" || tlsMode !== "local-dev",
+      behindReverseProxy: usesReverseProxy,
       postgresPassword: generated.postgresPassword,
       registrationSharedSecret: generated.registrationSharedSecret,
       macaroonSecret: generated.macaroonSecret,
@@ -222,15 +194,16 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       writeFile(join(synapseDir, generated.signingKeyFile), `${signingKey}\n`, "utf8"),
       writeFile(join(synapseDir, "log.config"), `${logConfig}\n`, "utf8"),
     ];
-    if (accessMode === "relay" || tlsMode !== "local-dev") {
+    if (usesReverseProxy) {
       const wellKnown = renderWellKnownFiles({
         homeserverDomain,
         publicBaseUrl,
       });
+      const onboardingMode = resolveOnboardingMode(accessMode, tlsMode);
       writes.push(
         writeFile(
           join(proxyDir, "Caddyfile"),
-          `${renderCaddyfile(new URL(publicBaseUrl).hostname, accessMode === "relay" ? "relay" : tlsMode)}\n`,
+          `${renderCaddyfile(new URL(publicBaseUrl).hostname, onboardingMode)}\n`,
           "utf8",
         ),
         writeFile(
@@ -247,22 +220,18 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     }
 
     await Promise.all(writes);
-    if (accessMode === "relay" || tlsMode !== "local-dev") {
+    if (usesReverseProxy) {
       await this.writeOnboardingPage({
         projectDir,
         publicBaseUrl,
         homeserverDomain,
         operatorLocalpart,
-        tlsMode: accessMode === "relay" ? "relay" : tlsMode,
+        tlsMode: resolveOnboardingMode(accessMode, tlsMode),
       });
     }
-    await ensureDirectoryTreeWritable(synapseDir);
-    await ensureDirectoryTreeWritable(postgresDir);
-    if (accessMode === "relay" || tlsMode !== "local-dev") {
-      await ensureDirectoryTreeWritable(wellKnownDir);
-      await ensureDirectoryTreeWritable(proxyDir);
-      await ensureDirectoryTreeWritable(proxyDataDir);
-      await ensureDirectoryTreeWritable(proxyConfigDir);
+    await ensureDirectoryTreesWritable([synapseDir, postgresDir]);
+    if (usesReverseProxy) {
+      await ensureDirectoryTreesWritable([wellKnownDir, proxyDir, proxyDataDir, proxyConfigDir]);
     }
 
     const composeConfigCheck = await this.runComposeCommand(projectDir, composeFilePath, [
@@ -506,16 +475,16 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       roomId,
       roomName,
     };
-    if (provision.accessMode === "relay" || provision.tlsMode !== "local-dev") {
+    if (shouldUseReverseProxy(provision.accessMode, provision.tlsMode)) {
       const operatorPassword = await this.readPasswordFromSecretRef(accounts.operator.passwordSecretRef);
       await this.writeOnboardingPage({
         projectDir: provision.projectDir,
         publicBaseUrl: provision.publicBaseUrl,
         homeserverDomain: provision.homeserverDomain,
         operatorLocalpart: accounts.operator.localpart,
-        tlsMode: provision.accessMode === "relay" ? "relay" : provision.tlsMode,
+        tlsMode: resolveOnboardingMode(provision.accessMode, provision.tlsMode),
         alertRoomId: roomId,
-        operatorPassword: operatorPassword ?? undefined,
+        ...(operatorPassword === null ? {} : { operatorPassword }),
       });
     }
     this.logger.info(
@@ -1206,18 +1175,19 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
   }): Promise<void> {
     const onboardingPageUrl = buildOnboardingPageUrl(input.publicBaseUrl);
     const onboardingQrSvg = await this.renderOnboardingQrSvg(onboardingPageUrl);
+    const onboardingPage = renderOnboardingPage({
+      publicBaseUrl: input.publicBaseUrl,
+      homeserverDomain: input.homeserverDomain,
+      operatorLocalpart: input.operatorLocalpart,
+      tlsMode: input.tlsMode,
+      onboardingPageUrl,
+      onboardingQrSvg,
+      ...(input.alertRoomId === undefined ? {} : { alertRoomId: input.alertRoomId }),
+      ...(input.operatorPassword === undefined ? {} : { operatorPassword: input.operatorPassword }),
+    });
     await writeFile(
       join(input.projectDir, "well-known", "onboard", "index.html"),
-      `${renderOnboardingPage({
-        publicBaseUrl: input.publicBaseUrl,
-        homeserverDomain: input.homeserverDomain,
-        operatorLocalpart: input.operatorLocalpart,
-        tlsMode: input.tlsMode,
-        onboardingPageUrl,
-        onboardingQrSvg,
-        alertRoomId: input.alertRoomId,
-        operatorPassword: input.operatorPassword,
-      })}\n`,
+      `${onboardingPage}\n`,
       "utf8",
     );
   }
@@ -1394,6 +1364,58 @@ const resolveSynapseImage = (): string => {
     return configured;
   }
   return DEFAULT_SYNAPSE_IMAGE;
+};
+
+const normalizeBundledTlsMode = (
+  accessMode: BundledMatrixAccessMode,
+  requestedTlsMode: RequestedBundledMatrixTlsMode,
+): BundledMatrixTlsMode => {
+  if (requestedTlsMode === "manual") {
+    throw {
+      code: "MATRIX_TLS_MODE_UNSUPPORTED",
+      message:
+        "Bundled Matrix provisioning does not yet support tlsMode=manual",
+      retryable: false,
+      details: {
+        requestedTlsMode,
+        supportedTlsModes: ["auto", "internal", "local-dev"],
+      },
+    };
+  }
+  if (
+    accessMode === "direct"
+    && requestedTlsMode !== "local-dev"
+    && requestedTlsMode !== "auto"
+    && requestedTlsMode !== "internal"
+  ) {
+    throw {
+      code: "MATRIX_TLS_MODE_UNSUPPORTED",
+      message: "Bundled Matrix provisioning received an unknown tlsMode",
+      retryable: false,
+      details: {
+        requestedTlsMode,
+      },
+    };
+  }
+  return requestedTlsMode;
+};
+
+const shouldUseReverseProxy = (
+  accessMode: BundledMatrixAccessMode,
+  tlsMode: BundledMatrixTlsMode,
+): boolean => accessMode === "relay" || tlsMode !== "local-dev";
+
+const resolveOnboardingMode = (
+  accessMode: BundledMatrixAccessMode,
+  tlsMode: BundledMatrixTlsMode,
+): BundledMatrixOnboardingMode => {
+  if (accessMode === "relay") {
+    return "relay";
+  }
+  if (tlsMode === "local-dev") {
+    throw new Error("Onboarding mode is unavailable when tlsMode=local-dev");
+  }
+  return tlsMode;
 };
 
 const resolveLocalDevSynapsePortBinding = (publicBaseUrl: string): string => {
@@ -1797,6 +1819,12 @@ const ensureDirectoryTreeWritable = async (root: string): Promise<void> => {
       }
       queue.push(join(current, entry.name));
     }
+  }
+};
+
+const ensureDirectoryTreesWritable = async (dirs: string[]): Promise<void> => {
+  for (const dir of dirs) {
+    await ensureDirectoryTreeWritable(dir);
   }
 };
 

@@ -89,9 +89,9 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
     }
 
     const shellScript = buildInstallShellScript({
-      version: installVersion,
       noPrompt: opts.noPrompt ?? true,
       noOnboard: opts.noOnboard ?? true,
+      ...(installVersion === undefined ? {} : { version: installVersion }),
     });
     this.logger.info(
       {

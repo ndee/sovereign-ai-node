@@ -92,12 +92,12 @@ The default bundled install still needs a few real inputs:
 
 - A Linux host you control
 - `sudo`/root access on that host (default system install path)
-- A public domain or subdomain for Matrix (for example `matrix.example.org`)
-- DNS access for that domain
+- Direct mode: a public domain/subdomain for Matrix (for example `matrix.example.org`) plus DNS access
+- Relay mode: relay control URL + enrollment token (no user-managed domain required)
 - IMAP server hostname, port, TLS mode, username, and password or app password
 - Outbound network access to IMAP host, model provider(s), and Matrix endpoints
 
-### Primary Command (Target Contract)
+### Primary Command (Current Contract)
 
 The main operator command should be:
 
@@ -105,17 +105,19 @@ The main operator command should be:
 sovereign-node install
 ```
 
-This command is interactive by default and should complete the full default setup.
+This command can run directly with a prepared request file, but the default operator flow is the guided bootstrap script.
 
-For a fresh machine, the target two-command operator flow is:
+For most operators, use:
 
 ```bash
 curl -fsSL <sovereign-node-installer-url> | sudo bash
-sudo sovereign-node install
 ```
 
 Notes:
 
+- the installer script now starts with an explicit `Install / Update / Exit` action menu in interactive mode
+- `Update` reuses existing settings and request file
+- `Install` on an existing system behaves as reconfigure with prefilled defaults
 - `sovereign-node install` owns OpenClaw installation in the default path.
 - Operators should not run `openclaw onboard` in the default Sovereign flow.
 
