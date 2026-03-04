@@ -260,7 +260,10 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
         "utf8",
       );
       expect(onboardPage).toContain("Connect via Element Web");
+      expect(onboardPage).toContain("Open in Element Android App");
       expect(onboardPage).toContain("https://app.element.io/#/login?hs_url=");
+      expect(onboardPage).toContain("intent://mobile.element.io/");
+      expect(onboardPage).toContain("package=im.vector.app");
       expect(onboardPage).toContain("Copy Server URL");
       expect(onboardPage).toContain("Copy Username");
       expect(onboardPage).toContain("prevent safe password injection");
@@ -340,6 +343,8 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       );
       expect(onboardPage).toContain("/downloads/caddy-root-ca.crt");
       expect(onboardPage).toContain("Connect via Element Web");
+      expect(onboardPage).toContain("Open in Element Android App");
+      expect(onboardPage).toContain("package=im.vector.app");
       expect(onboardPage).toContain("Copy Server URL");
       expect(onboardPage).toContain("Native Android Matrix apps may still reject local CAs");
       expect(onboardPage).toContain("Do not type only 192.168.0.54:8448.");

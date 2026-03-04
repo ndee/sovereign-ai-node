@@ -1534,6 +1534,7 @@ const renderOnboardingPage = (input: {
 }): string => {
   const username = `@${input.operatorLocalpart}:${input.homeserverDomain}`;
   const elementWebLink = buildElementWebLoginLink(input.publicBaseUrl, username);
+  const elementAndroidLink = buildElementAndroidIntentLink(input.publicBaseUrl, username);
   const roomLink = input.alertRoomId ? buildElementWebRoomLink(input.alertRoomId) : "";
   const passwordCard = input.operatorPassword
     ? [
@@ -1622,8 +1623,10 @@ const renderOnboardingPage = (input: {
     "        <h2>" + (input.tlsMode === "internal" ? "2" : "1") + ". Continue with Element Web</h2>",
     "        <p>The button opens Element Web with your homeserver prefilled. Browser restrictions still prevent safe password injection into app.element.io, so you may still need to paste the password manually.</p>",
     "        <a class=\"button\" href=\"" + escapeHtml(elementWebLink) + "\" rel=\"noreferrer\">Connect via Element Web</a>",
+    "        <a class=\"button button-secondary\" href=\"" + escapeHtml(elementAndroidLink) + "\" rel=\"noreferrer\">Open in Element Android App</a>",
     "        <p class=\"meta\">If Element still shows the generic login screen, tap <strong>Edit</strong> in the homeserver field and paste the full URL exactly as shown above. Do not type only " + escapeHtml(new URL(input.publicBaseUrl).host) + ".</p>",
-    "        <p class=\"meta\">If Element says the browser is unsupported, use the system browser or a desktop browser. Vanadium and Brave may behave differently, so the copy buttons above remain the fallback path.</p>",
+    "        <p class=\"meta\">The Android button uses Element Classic&apos;s documented <code>hs_url</code> deep link and explicitly targets the F-Droid package <code>im.vector.app</code>. It can prefill the homeserver, but not securely inject the password.</p>",
+    "        <p class=\"meta\">If the native app still cannot reach the server, it is rejecting the local CA or local-network setup. In that case use the browser path above. Vanadium and Brave may behave differently, so the copy buttons above remain the fallback path.</p>",
     "      </section>",
     "      <section class=\"card\">",
     "        <h2>" + (input.tlsMode === "internal" ? "3" : "2") + ". Open this setup page on another device</h2>",
@@ -1705,6 +1708,19 @@ const buildOnboardingPageUrl = (publicBaseUrl: string): string =>
 
 const buildElementWebLoginLink = (publicBaseUrl: string, username: string): string =>
   `https://app.element.io/#/login?hs_url=${encodeURIComponent(publicBaseUrl)}&login_hint=${encodeURIComponent(username)}`;
+
+const buildElementAndroidDeepLink = (publicBaseUrl: string, username: string): string =>
+  `https://mobile.element.io/?hs_url=${encodeURIComponent(publicBaseUrl)}&login_hint=${encodeURIComponent(username)}`;
+
+const buildElementAndroidIntentLink = (publicBaseUrl: string, username: string): string => {
+  const fallbackUrl = buildElementAndroidDeepLink(publicBaseUrl, username);
+  return "intent://mobile.element.io/"
+    + `?hs_url=${encodeURIComponent(publicBaseUrl)}`
+    + `&login_hint=${encodeURIComponent(username)}`
+    + "#Intent;scheme=https;package=im.vector.app"
+    + `;S.browser_fallback_url=${encodeURIComponent(fallbackUrl)}`
+    + ";end";
+};
 
 const buildElementWebRoomLink = (roomId: string): string =>
   `https://app.element.io/#/room/${encodeURIComponent(roomId)}`;
