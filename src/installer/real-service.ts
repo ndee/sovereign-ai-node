@@ -65,6 +65,44 @@ type PersistedInstallJobRecord = {
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
+type RelayTunnelConfig = {
+  serverAddr: string;
+  serverPort: number;
+  token: string;
+  proxyName: string;
+  subdomain?: string;
+  type: "http";
+  localIp: string;
+  localPort: number;
+};
+
+type RelayRuntimeConfig = {
+  enabled: boolean;
+  controlUrl: string;
+  hostname: string;
+  publicBaseUrl: string;
+  connected: boolean;
+  serviceName: string;
+  configPath: string;
+  tunnel: {
+    serverAddr: string;
+    serverPort: number;
+    tokenSecretRef: string;
+    proxyName: string;
+    subdomain?: string;
+    type: "http";
+    localIp: string;
+    localPort: number;
+  };
+};
+
+type RelayEnrollmentResult = {
+  controlUrl: string;
+  hostname: string;
+  publicBaseUrl: string;
+  tunnel: RelayTunnelConfig;
+};
+
 type RuntimeConfig = {
   openrouter: {
     model: string;
@@ -106,6 +144,7 @@ type RuntimeConfig = {
     e2eeAlertRoom: boolean;
   };
   matrix: {
+    accessMode: "direct" | "relay";
     homeserverDomain: string;
     federationEnabled: boolean;
     publicBaseUrl: string;
@@ -127,6 +166,7 @@ type RuntimeConfig = {
       roomName: string;
     };
   };
+  relay?: RelayRuntimeConfig;
 };
 
 type RealInstallerServiceDeps = {
@@ -151,6 +191,9 @@ const DEFAULT_OPENROUTER_MODEL = "openai/gpt-5-nano";
 const DEFAULT_INSTALL_REQUEST_FILE = "/etc/sovereign-node/install-request.json";
 const DEFAULT_SERVICE_USER = "root";
 const DEFAULT_SERVICE_GROUP = "root";
+const RELAY_TUNNEL_SYSTEMD_UNIT = "sovereign-matrix-relay-tunnel.service";
+const RELAY_TUNNEL_DEFAULT_IMAGE = "ghcr.io/fatedier/frpc:v0.61.1";
+const RELAY_LOCAL_EDGE_PORT = 18080;
 
 export class RealInstallerService implements InstallerService {
   private readonly stubService: StubInstallerService;
@@ -340,6 +383,13 @@ export class RealInstallerService implements InstallerService {
     const expectedFromRegistrationCron = registration?.cronJobId;
 
     const gateway = await this.inspectGatewayService();
+    const relay = runtimeConfig?.relay?.enabled === true
+      ? await this.inspectRelayTunnelService()
+      : {
+          installed: false,
+          state: "unknown" as GatewayState,
+          message: undefined,
+        };
     const healthProbe = await this.probeOpenClawHealth();
     const agentProbe = await this.inspectOpenClawListContains(
       ["agents", "list"],
@@ -390,7 +440,36 @@ export class RealInstallerService implements InstallerService {
           state: mapHealthToServiceState(matrixStatus.health),
           ...(matrixStatus.message === undefined ? {} : { message: matrixStatus.message }),
         },
+        ...(runtimeConfig?.relay?.enabled === true
+          ? [
+              {
+                name: "matrix-relay-tunnel",
+                kind: "relay-tunnel" as const,
+                health:
+                  relay.installed && relay.state === "running"
+                    ? "healthy"
+                    : relay.installed
+                      ? "degraded"
+                      : "failed",
+                state: relay.state,
+                ...(relay.message === undefined ? {} : { message: relay.message }),
+              },
+            ]
+          : []),
       ],
+      ...(runtimeConfig?.relay === undefined
+        ? {}
+        : {
+            relay: {
+              enabled: runtimeConfig.relay.enabled,
+              controlUrl: runtimeConfig.relay.controlUrl,
+              hostname: runtimeConfig.relay.hostname,
+              publicBaseUrl: runtimeConfig.relay.publicBaseUrl,
+              connected: relay.installed && relay.state === "running",
+              serviceInstalled: relay.installed,
+              ...(relay.state === "unknown" ? {} : { serviceState: relay.state }),
+            },
+          }),
       matrix: {
         ...(runtimeConfig?.matrix.publicBaseUrl === undefined
           ? {}
@@ -452,6 +531,9 @@ export class RealInstallerService implements InstallerService {
     const runtimeConfig = await this.tryReadRuntimeConfig();
     const detectedOpenClaw = await this.safeDetectOpenClaw();
     const gateway = await this.inspectGatewayService();
+    const relay = runtimeConfig?.relay?.enabled === true
+      ? await this.inspectRelayTunnelService()
+      : null;
     const healthProbe = await this.probeOpenClawHealth();
     const expectedAgentId =
       runtimeConfig?.openclawProfile.agents[0]?.id ?? MAIL_SENTINEL_AGENT_ID;
@@ -522,6 +604,29 @@ export class RealInstallerService implements InstallerService {
         },
       ),
     );
+
+    if (relay !== null) {
+      checks.push(
+        check(
+          "relay-tunnel-service",
+          "Managed relay tunnel service",
+          relay.installed && relay.state === "running"
+            ? "pass"
+            : relay.installed
+              ? "warn"
+              : "fail",
+          relay.installed && relay.state === "running"
+            ? "Managed relay tunnel service is connected"
+            : "Managed relay tunnel service is not running",
+          relay.message === undefined
+            ? undefined
+            : {
+                state: relay.state,
+                message: relay.message,
+              },
+        ),
+      );
+    }
 
     checks.push(wiringCheck);
 
@@ -917,6 +1022,21 @@ export class RealInstallerService implements InstallerService {
     };
   }
 
+  private async inspectRelayTunnelService(): Promise<{
+    installed: boolean;
+    state: GatewayState;
+    message?: string;
+  }> {
+    const systemctl = await this.inspectGatewayViaSystemctl([RELAY_TUNNEL_SYSTEMD_UNIT]);
+    if (systemctl !== null) {
+      return systemctl;
+    }
+    return {
+      installed: false,
+      state: "unknown",
+    };
+  }
+
   private async inspectGatewayViaSystemctl(candidates: string[]): Promise<{
     installed: boolean;
     state: GatewayState;
@@ -1226,11 +1346,14 @@ export class RealInstallerService implements InstallerService {
 
   private buildInstallSteps(req: InstallRequest): InstallStep[] {
     const stepState: {
+      effectiveRequest?: InstallRequest;
+      relayEnrollment?: RelayEnrollmentResult;
       matrixProvision?: BundledMatrixProvisionResult;
       matrixAccounts?: BundledMatrixAccountsResult;
       matrixRoom?: BundledMatrixRoomBootstrapResult;
       mailSentinelRegistration?: MailSentinelRegistrationResult;
       gatewayServiceSkipped?: boolean;
+      relayTunnelServiceInstalled?: boolean;
     } = {};
 
     return [
@@ -1301,10 +1424,27 @@ export class RealInstallerService implements InstallerService {
         },
       },
       {
+        id: "relay_enroll",
+        label: "Enroll managed relay",
+        run: async () => {
+          if (!this.isRelayModeRequest(req)) {
+            stepState.effectiveRequest = req;
+            return;
+          }
+          stepState.relayEnrollment = await this.resolveRelayEnrollment(req);
+          stepState.effectiveRequest = this.buildRelayProvisionRequest(
+            req,
+            stepState.relayEnrollment,
+          );
+        },
+      },
+      {
         id: "matrix_provision",
         label: "Provision bundled Matrix stack",
         run: async () => {
-          stepState.matrixProvision = await this.matrixProvisioner.provision(req);
+          stepState.matrixProvision = await this.matrixProvisioner.provision(
+            stepState.effectiveRequest ?? req,
+          );
         },
       },
       {
@@ -1320,12 +1460,12 @@ export class RealInstallerService implements InstallerService {
           }
           try {
             stepState.matrixAccounts = await this.matrixProvisioner.bootstrapAccounts(
-              req,
+              stepState.effectiveRequest ?? req,
               stepState.matrixProvision,
             );
           } catch (error) {
             const reusedAccounts = await this.tryReuseExistingMatrixAccounts({
-              req,
+              req: stepState.effectiveRequest ?? req,
               provision: stepState.matrixProvision,
               error,
             });
@@ -1335,7 +1475,7 @@ export class RealInstallerService implements InstallerService {
             }
 
             const resetAccounts = await this.tryRecoverRateLimitedMatrixReconfigure({
-              req,
+              req: stepState.effectiveRequest ?? req,
               provision: stepState.matrixProvision,
               error,
             });
@@ -1367,7 +1507,7 @@ export class RealInstallerService implements InstallerService {
             };
           }
           stepState.matrixRoom = await this.matrixProvisioner.bootstrapRoom(
-            req,
+            stepState.effectiveRequest ?? req,
             stepState.matrixProvision,
             stepState.matrixAccounts,
           );
@@ -1442,13 +1582,19 @@ export class RealInstallerService implements InstallerService {
           }
 
           const runtimeConfig = await this.writeSovereignConfig({
-            req,
+            req: stepState.effectiveRequest ?? req,
+            relayEnrollment: stepState.relayEnrollment,
             matrixProvision: stepState.matrixProvision,
             matrixAccounts: stepState.matrixAccounts,
             matrixRoom: stepState.matrixRoom,
           });
           await this.writeOpenClawRuntimeArtifacts(runtimeConfig);
           this.setManagedOpenClawEnv(runtimeConfig);
+          if (runtimeConfig.relay?.enabled === true) {
+            stepState.relayTunnelServiceInstalled = await this.ensureRelayTunnelService(
+              runtimeConfig,
+            );
+          }
 
           if (stepState.gatewayServiceSkipped === true) {
             const fallbackStarted = await this.ensureSystemGatewayServiceFallback(runtimeConfig);
@@ -1512,7 +1658,7 @@ export class RealInstallerService implements InstallerService {
             };
           }
           stepState.mailSentinelRegistration = await this.registerMailSentinel(
-            req,
+            stepState.effectiveRequest ?? req,
             stepState.matrixRoom,
             {
               allowGatewayUnavailableFallback: stepState.gatewayServiceSkipped === true,
@@ -1536,6 +1682,7 @@ export class RealInstallerService implements InstallerService {
             stepState.mailSentinelRegistration?.agentId ?? MAIL_SENTINEL_AGENT_ID,
             stepState.mailSentinelRegistration?.cronJobId ?? MAIL_SENTINEL_CRON_ID,
             stepState.gatewayServiceSkipped ?? false,
+            stepState.relayEnrollment !== undefined,
           );
         },
       },
@@ -1560,6 +1707,360 @@ export class RealInstallerService implements InstallerService {
         },
       },
     ];
+  }
+
+  private isRelayModeRequest(req: InstallRequest): boolean {
+    if (req.connectivity?.mode === "relay") {
+      return true;
+    }
+    if (req.connectivity?.mode === "direct") {
+      return false;
+    }
+    return req.relay !== undefined;
+  }
+
+  private getRelayRequest(req: InstallRequest): NonNullable<InstallRequest["relay"]> {
+    if (req.relay !== undefined) {
+      return req.relay;
+    }
+    throw {
+      code: "RELAY_CONFIG_MISSING",
+      message: "Relay mode requires relay.controlUrl and relay.enrollmentToken",
+      retryable: false,
+    };
+  }
+
+  private async tryReuseExistingRelayEnrollment(
+    relay: NonNullable<InstallRequest["relay"]>,
+  ): Promise<RelayEnrollmentResult | null> {
+    const runtimeConfig = await this.tryReadRuntimeConfig();
+    if (runtimeConfig?.relay?.enabled !== true) {
+      return null;
+    }
+    if (runtimeConfig.relay.controlUrl !== relay.controlUrl) {
+      return null;
+    }
+
+    try {
+      const token = await this.resolveSecretRef(runtimeConfig.relay.tunnel.tokenSecretRef);
+      return {
+        controlUrl: runtimeConfig.relay.controlUrl,
+        hostname: runtimeConfig.relay.hostname,
+        publicBaseUrl: runtimeConfig.relay.publicBaseUrl,
+        tunnel: {
+          serverAddr: runtimeConfig.relay.tunnel.serverAddr,
+          serverPort: runtimeConfig.relay.tunnel.serverPort,
+          token,
+          proxyName: runtimeConfig.relay.tunnel.proxyName,
+          ...(runtimeConfig.relay.tunnel.subdomain === undefined
+            ? {}
+            : { subdomain: runtimeConfig.relay.tunnel.subdomain }),
+          type: runtimeConfig.relay.tunnel.type,
+          localIp: runtimeConfig.relay.tunnel.localIp,
+          localPort: runtimeConfig.relay.tunnel.localPort,
+        },
+      };
+    } catch (error) {
+      this.logger.warn(
+        {
+          error: describeError(error),
+        },
+        "Existing relay runtime config was found but could not be reused",
+      );
+      return null;
+    }
+  }
+
+  private async resolveRelayEnrollment(req: InstallRequest): Promise<RelayEnrollmentResult> {
+    const relay = this.getRelayRequest(req);
+    const reused = await this.tryReuseExistingRelayEnrollment(relay);
+    if (reused !== null) {
+      this.logger.info(
+        {
+          hostname: reused.hostname,
+          publicBaseUrl: reused.publicBaseUrl,
+        },
+        "Reusing existing managed relay assignment",
+      );
+      return reused;
+    }
+
+    const endpoint = new URL("/api/v1/enroll", ensureTrailingSlash(relay.controlUrl)).toString();
+    let response: Response;
+    try {
+      response = await this.fetchImpl(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          enrollmentToken: relay.enrollmentToken,
+          ...(relay.requestedSlug === undefined ? {} : { requestedSlug: relay.requestedSlug }),
+          version: process.env.npm_package_version ?? "0.1.0",
+        }),
+      });
+    } catch (error) {
+      throw {
+        code: "RELAY_ENROLL_FAILED",
+        message: "Managed relay enrollment request failed",
+        retryable: true,
+        details: {
+          controlUrl: relay.controlUrl,
+          error: describeError(error),
+        },
+      };
+    }
+
+    const responseText = await response.text();
+    if (!response.ok) {
+      throw {
+        code: "RELAY_ENROLL_FAILED",
+        message: "Managed relay enrollment was rejected",
+        retryable: response.status >= 500,
+        details: {
+          controlUrl: relay.controlUrl,
+          status: response.status,
+          body: summarizeText(responseText, 1200),
+        },
+      };
+    }
+
+    const parsed = parseJsonDocument(responseText);
+    const payload =
+      isRecord(parsed)
+      && isRecord(parsed.result)
+        ? parsed.result
+        : isRecord(parsed)
+          ? parsed
+          : null;
+    const tunnel = payload !== null && isRecord(payload.tunnel) ? payload.tunnel : null;
+    const hostname =
+      payload !== null && typeof payload.assignedHostname === "string"
+        ? payload.assignedHostname.trim()
+        : payload !== null && typeof payload.hostname === "string"
+          ? payload.hostname.trim()
+          : "";
+    const publicBaseUrl =
+      payload !== null && typeof payload.publicBaseUrl === "string"
+        ? payload.publicBaseUrl.trim()
+        : "";
+    const serverAddr =
+      tunnel !== null && typeof tunnel.serverAddr === "string"
+        ? tunnel.serverAddr.trim()
+        : tunnel !== null && typeof tunnel.serverHost === "string"
+          ? tunnel.serverHost.trim()
+          : "";
+    const serverPort =
+      tunnel !== null && typeof tunnel.serverPort === "number" && Number.isFinite(tunnel.serverPort)
+        ? Math.trunc(tunnel.serverPort)
+        : 7000;
+    const token =
+      tunnel !== null && typeof tunnel.token === "string"
+        ? tunnel.token.trim()
+        : tunnel !== null && typeof tunnel.authToken === "string"
+          ? tunnel.authToken.trim()
+          : "";
+    const proxyName =
+      tunnel !== null && typeof tunnel.proxyName === "string"
+        ? tunnel.proxyName.trim()
+        : hostname.length > 0
+          ? `relay-${hostname.replace(/[^a-zA-Z0-9-]/g, "-")}`
+          : "";
+    const subdomain =
+      tunnel !== null && typeof tunnel.subdomain === "string" && tunnel.subdomain.trim().length > 0
+        ? tunnel.subdomain.trim()
+        : undefined;
+
+    if (
+      hostname.length === 0
+      || publicBaseUrl.length === 0
+      || serverAddr.length === 0
+      || token.length === 0
+      || proxyName.length === 0
+    ) {
+      throw {
+        code: "RELAY_ENROLL_INVALID",
+        message: "Managed relay enrollment returned an incomplete response",
+        retryable: false,
+        details: {
+          controlUrl: relay.controlUrl,
+          response: summarizeText(responseText, 1200),
+        },
+      };
+    }
+
+    this.logger.info(
+      {
+        hostname,
+        publicBaseUrl,
+        controlUrl: relay.controlUrl,
+      },
+      "Managed relay enrollment succeeded",
+    );
+
+    return {
+      controlUrl: relay.controlUrl,
+      hostname,
+      publicBaseUrl,
+      tunnel: {
+        serverAddr,
+        serverPort,
+        token,
+        proxyName,
+        ...(subdomain === undefined ? {} : { subdomain }),
+        type: "http",
+        localIp: "127.0.0.1",
+        localPort: RELAY_LOCAL_EDGE_PORT,
+      },
+    };
+  }
+
+  private buildRelayProvisionRequest(
+    req: InstallRequest,
+    enrollment: RelayEnrollmentResult,
+  ): InstallRequest {
+    return {
+      ...req,
+      connectivity: {
+        ...(req.connectivity ?? {}),
+        mode: "relay",
+      },
+      matrix: {
+        ...req.matrix,
+        homeserverDomain: enrollment.hostname,
+        publicBaseUrl: enrollment.publicBaseUrl,
+        federationEnabled: false,
+      },
+    };
+  }
+
+  private getRelayTunnelConfigPath(): string {
+    return join(this.paths.stateDir, "relay", "frpc.toml");
+  }
+
+  private async ensureRelayTunnelService(runtimeConfig: RuntimeConfig): Promise<boolean> {
+    if (runtimeConfig.relay?.enabled !== true) {
+      return false;
+    }
+
+    const relay = runtimeConfig.relay;
+    const configPath = relay.configPath;
+    const unitPath = join("/etc/systemd/system", relay.serviceName);
+    const containerName = relay.serviceName.replace(/\.service$/, "");
+    let token: string;
+
+    try {
+      token = await this.resolveSecretRef(relay.tunnel.tokenSecretRef);
+      await mkdir(dirname(configPath), { recursive: true });
+      await this.applyRuntimeOwnership(dirname(configPath));
+      const configText = [
+        `serverAddr = "${relay.tunnel.serverAddr}"`,
+        `serverPort = ${relay.tunnel.serverPort}`,
+        "",
+        "[auth]",
+        'method = "token"',
+        `token = "${token}"`,
+        "",
+        "[[proxies]]",
+        `name = "${relay.tunnel.proxyName}"`,
+        `type = "${relay.tunnel.type}"`,
+        `localIP = "${relay.tunnel.localIp}"`,
+        `localPort = ${relay.tunnel.localPort}`,
+        `customDomains = ["${relay.hostname}"]`,
+        ...(relay.tunnel.subdomain === undefined
+          ? []
+          : [`subdomain = "${relay.tunnel.subdomain}"`]),
+      ].join("\n");
+      await writeFile(configPath, `${configText}\n`, "utf8");
+      await chmod(configPath, 0o600);
+      await this.applyRuntimeOwnership(configPath);
+    } catch (error) {
+      this.logger.warn(
+        {
+          configPath,
+          error: describeError(error),
+        },
+        "Failed to write managed relay tunnel config",
+      );
+      return false;
+    }
+
+    const unitContents = [
+      "[Unit]",
+      "Description=Sovereign Matrix Relay Tunnel",
+      "After=network-online.target docker.service",
+      "Wants=network-online.target",
+      "Requires=docker.service",
+      "",
+      "[Service]",
+      "Type=simple",
+      `ExecStartPre=-/usr/bin/docker rm -f ${containerName}`,
+      `ExecStart=/usr/bin/docker run --rm --name ${containerName} --network host -v ${configPath}:/etc/frp/frpc.toml:ro ${RELAY_TUNNEL_DEFAULT_IMAGE} -c /etc/frp/frpc.toml`,
+      `ExecStop=/usr/bin/docker stop ${containerName}`,
+      "Restart=always",
+      "RestartSec=3",
+      "",
+      "[Install]",
+      "WantedBy=multi-user.target",
+      "",
+    ].join("\n");
+
+    try {
+      await mkdir(dirname(unitPath), { recursive: true });
+      await writeFile(unitPath, unitContents, "utf8");
+    } catch (error) {
+      this.logger.warn(
+        {
+          unitPath,
+          error: describeError(error),
+        },
+        "Failed to write managed relay tunnel systemd unit",
+      );
+      return false;
+    }
+
+    const commands: string[][] = [
+      ["daemon-reload"],
+      ["enable", "--now", relay.serviceName],
+      ["restart", relay.serviceName],
+      ["is-active", relay.serviceName],
+    ];
+    for (const args of commands) {
+      const result = await this.safeExec("systemctl", args);
+      if (!result.ok) {
+        this.logger.warn(
+          {
+            command: ["systemctl", ...args].join(" "),
+            error: result.error,
+          },
+          "Managed relay tunnel systemd command failed",
+        );
+        return false;
+      }
+      if (result.result.exitCode !== 0) {
+        this.logger.warn(
+          {
+            command: result.result.command,
+            exitCode: result.result.exitCode,
+            stderr: truncateText(result.result.stderr, 1200),
+            stdout: truncateText(result.result.stdout, 1200),
+          },
+          "Managed relay tunnel systemd command exited non-zero",
+        );
+        return false;
+      }
+    }
+
+    this.logger.info(
+      {
+        unitName: relay.serviceName,
+        hostname: relay.hostname,
+        publicBaseUrl: relay.publicBaseUrl,
+      },
+      "Managed relay tunnel service started successfully",
+    );
+    return true;
   }
 
   private async persistJobSnapshot(input: {
@@ -1907,6 +2408,7 @@ export class RealInstallerService implements InstallerService {
     expectedAgentId: string,
     expectedCronJobId: string,
     gatewayServiceSkipped: boolean,
+    relayModeEnabled: boolean,
   ): Promise<void> {
     const matrix = await this.testMatrix({
       publicBaseUrl: matrixProvision.adminBaseUrl,
@@ -1942,6 +2444,21 @@ export class RealInstallerService implements InstallerService {
           roomId: runtimeConfig.matrix.alertRoom.roomId,
         },
       };
+    }
+
+    if (relayModeEnabled) {
+      const relay = await this.inspectRelayTunnelService();
+      if (!relay.installed || relay.state !== "running") {
+        throw {
+          code: "SMOKE_CHECKS_FAILED",
+          message: "Managed relay tunnel service is not running during smoke checks",
+          retryable: true,
+          details: {
+            state: relay.state,
+            message: relay.message,
+          },
+        };
+      }
     }
 
     const wiringCheck = await this.inspectOpenClawRuntimeWiring(runtimeConfig);
@@ -2256,6 +2773,7 @@ export class RealInstallerService implements InstallerService {
 
   private async writeSovereignConfig(input: {
     req: InstallRequest;
+    relayEnrollment?: RelayEnrollmentResult;
     matrixProvision: BundledMatrixProvisionResult;
     matrixAccounts: BundledMatrixAccountsResult;
     matrixRoom: BundledMatrixRoomBootstrapResult;
@@ -2271,8 +2789,36 @@ export class RealInstallerService implements InstallerService {
       "matrix-bot-access-token",
       input.matrixAccounts.bot.accessToken,
     );
+    const relayTokenSecretRef =
+      input.relayEnrollment === undefined
+        ? undefined
+        : await this.writeSecretFile("relay-tunnel-token", input.relayEnrollment.tunnel.token);
     const serviceIdentity = this.getConfiguredServiceIdentity();
     const openclawPaths = this.getOpenClawRuntimePaths();
+    const relayRuntimeConfig =
+      input.relayEnrollment === undefined
+        ? undefined
+        : {
+            enabled: true,
+            controlUrl: input.relayEnrollment.controlUrl,
+            hostname: input.relayEnrollment.hostname,
+            publicBaseUrl: input.relayEnrollment.publicBaseUrl,
+            connected: false,
+            serviceName: RELAY_TUNNEL_SYSTEMD_UNIT,
+            configPath: this.getRelayTunnelConfigPath(),
+            tunnel: {
+              serverAddr: input.relayEnrollment.tunnel.serverAddr,
+              serverPort: input.relayEnrollment.tunnel.serverPort,
+              tokenSecretRef: relayTokenSecretRef ?? "env:SOVEREIGN_RELAY_TOKEN_UNSET",
+              proxyName: input.relayEnrollment.tunnel.proxyName,
+              ...(input.relayEnrollment.tunnel.subdomain === undefined
+                ? {}
+                : { subdomain: input.relayEnrollment.tunnel.subdomain }),
+              type: input.relayEnrollment.tunnel.type,
+              localIp: input.relayEnrollment.tunnel.localIp,
+              localPort: input.relayEnrollment.tunnel.localPort,
+            },
+          } satisfies RelayRuntimeConfig;
     const runtimeConfig: RuntimeConfig = {
       openclaw: {
         managedInstallation: input.req.openclaw?.manageInstallation ?? true,
@@ -2311,6 +2857,7 @@ export class RealInstallerService implements InstallerService {
         secretRef: imapConfig.secretRef,
       },
       matrix: {
+        accessMode: input.relayEnrollment === undefined ? "direct" : "relay",
         homeserverDomain: input.matrixProvision.homeserverDomain,
         federationEnabled: input.matrixProvision.federationEnabled,
         publicBaseUrl: input.matrixProvision.publicBaseUrl,
@@ -2332,6 +2879,7 @@ export class RealInstallerService implements InstallerService {
           roomName: input.matrixRoom.roomName,
         },
       },
+      ...(relayRuntimeConfig === undefined ? {} : { relay: relayRuntimeConfig }),
       mailSentinel: {
         pollInterval: input.req.mailSentinel?.pollInterval ?? "5m",
         lookbackWindow: input.req.mailSentinel?.lookbackWindow ?? "15m",
@@ -2343,6 +2891,9 @@ export class RealInstallerService implements InstallerService {
       contractVersion: CONTRACT_VERSION,
       mode: "bundled_matrix" as const,
       generatedAt: now(),
+      connectivity: {
+        mode: runtimeConfig.matrix.accessMode,
+      },
       openclaw: {
         managedInstallation: runtimeConfig.openclaw.managedInstallation,
         installMethod: runtimeConfig.openclaw.installMethod,
@@ -2393,6 +2944,7 @@ export class RealInstallerService implements InstallerService {
               mailbox: runtimeConfig.imap.mailbox,
             },
       matrix: {
+        accessMode: runtimeConfig.matrix.accessMode,
         homeserverDomain: input.matrixProvision.homeserverDomain,
         publicBaseUrl: runtimeConfig.matrix.publicBaseUrl,
         adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
@@ -2415,6 +2967,20 @@ export class RealInstallerService implements InstallerService {
           roomName: runtimeConfig.matrix.alertRoom.roomName,
         },
       },
+      ...(runtimeConfig.relay === undefined
+        ? {}
+        : {
+            relay: {
+              enabled: runtimeConfig.relay.enabled,
+              controlUrl: runtimeConfig.relay.controlUrl,
+              hostname: runtimeConfig.relay.hostname,
+              publicBaseUrl: runtimeConfig.relay.publicBaseUrl,
+              connected: runtimeConfig.relay.connected,
+              serviceName: runtimeConfig.relay.serviceName,
+              configPath: runtimeConfig.relay.configPath,
+              tunnel: runtimeConfig.relay.tunnel,
+            },
+          }),
       mailSentinel: {
         pollInterval: runtimeConfig.mailSentinel.pollInterval,
         lookbackWindow: runtimeConfig.mailSentinel.lookbackWindow,
@@ -2926,6 +3492,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
   const openrouter = isRecord(parsed.openrouter) ? parsed.openrouter : {};
   const imap = isRecord(parsed.imap) ? parsed.imap : {};
   const mailSentinel = isRecord(parsed.mailSentinel) ? parsed.mailSentinel : {};
+  const relay = isRecord(parsed.relay) ? parsed.relay : {};
   const operator = isRecord(matrix.operator) ? matrix.operator : {};
   const homeserverDomain =
     typeof matrix.homeserverDomain === "string" && matrix.homeserverDomain.length > 0
@@ -2937,6 +3504,57 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
     && imap.host !== "pending"
     && typeof imap.secretRef === "string"
     && imap.secretRef.length > 0;
+  const relayTunnel = isRecord(relay.tunnel) ? relay.tunnel : {};
+  const accessMode =
+    matrix.accessMode === "relay" || relay.enabled === true ? "relay" : "direct";
+  const relayConfig =
+    relay.enabled === true
+    && typeof relay.controlUrl === "string"
+    && relay.controlUrl.length > 0
+    && typeof relay.hostname === "string"
+    && relay.hostname.length > 0
+    && typeof relay.publicBaseUrl === "string"
+    && relay.publicBaseUrl.length > 0
+    && typeof relay.serviceName === "string"
+    && relay.serviceName.length > 0
+    && typeof relay.configPath === "string"
+    && relay.configPath.length > 0
+    && typeof relayTunnel.serverAddr === "string"
+    && relayTunnel.serverAddr.length > 0
+    && typeof relayTunnel.serverPort === "number"
+    && Number.isFinite(relayTunnel.serverPort)
+    && typeof relayTunnel.tokenSecretRef === "string"
+    && relayTunnel.tokenSecretRef.length > 0
+    && typeof relayTunnel.proxyName === "string"
+    && relayTunnel.proxyName.length > 0
+      ? {
+          enabled: true,
+          controlUrl: relay.controlUrl,
+          hostname: relay.hostname,
+          publicBaseUrl: relay.publicBaseUrl,
+          connected: typeof relay.connected === "boolean" ? relay.connected : false,
+          serviceName: relay.serviceName,
+          configPath: relay.configPath,
+          tunnel: {
+            serverAddr: relayTunnel.serverAddr,
+            serverPort: Math.trunc(relayTunnel.serverPort),
+            tokenSecretRef: relayTunnel.tokenSecretRef,
+            proxyName: relayTunnel.proxyName,
+            ...(typeof relayTunnel.subdomain === "string" && relayTunnel.subdomain.length > 0
+              ? { subdomain: relayTunnel.subdomain }
+              : {}),
+            type: relayTunnel.type === "http" ? "http" : "http",
+            localIp:
+              typeof relayTunnel.localIp === "string" && relayTunnel.localIp.length > 0
+                ? relayTunnel.localIp
+                : "127.0.0.1",
+            localPort:
+              typeof relayTunnel.localPort === "number" && Number.isFinite(relayTunnel.localPort)
+                ? Math.trunc(relayTunnel.localPort)
+                : RELAY_LOCAL_EDGE_PORT,
+          },
+        }
+      : undefined;
 
   return {
     openclaw: {
@@ -3001,6 +3619,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
           : "env:SOVEREIGN_IMAP_SECRET_UNSET",
     },
     matrix: {
+      accessMode,
       homeserverDomain,
       federationEnabled:
         typeof matrix.federationEnabled === "boolean" ? matrix.federationEnabled : false,
@@ -3046,6 +3665,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
             : "Sovereign Alerts",
       },
     },
+    ...(relayConfig === undefined ? {} : { relay: relayConfig }),
     mailSentinel: {
       pollInterval:
         typeof mailSentinel.pollInterval === "string" && mailSentinel.pollInterval.length > 0

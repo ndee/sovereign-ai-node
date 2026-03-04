@@ -16,43 +16,70 @@ type InstallOptions = {
   openclawVersion?: string;
   skipOpenclawInstall?: boolean;
   forceOpenclawReinstall?: boolean;
+  connectivityMode?: "direct" | "relay";
+  relayControlUrl?: string;
+  relayEnrollmentToken?: string;
+  relayRequestedSlug?: string;
   matrixTlsMode?: "auto" | "internal" | "manual" | "local-dev";
   requestFile?: string;
 };
 
-const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => ({
-  mode: "bundled_matrix",
-  openclaw: {
-    manageInstallation: !opts.skipOpenclawInstall,
-    installMethod: "install_sh",
-    version: opts.openclawVersion ?? "pinned-by-sovereign",
-    skipIfCompatibleInstalled: true,
-    forceReinstall: opts.forceOpenclawReinstall ?? false,
-    runOnboard: false,
-  },
-  openrouter: {
-    model: "openai/gpt-5-nano",
-    secretRef: "env:OPENROUTER_API_KEY",
-  },
-  matrix: {
-    homeserverDomain: "matrix.example.org",
-    publicBaseUrl: "https://matrix.example.org",
-    federationEnabled: false,
-    tlsMode: opts.matrixTlsMode ?? "auto",
-    alertRoomName: "Sovereign Alerts",
-  },
-  operator: {
-    username: "operator",
-  },
-  mailSentinel: {
-    pollInterval: "5m",
-    lookbackWindow: "15m",
-    e2eeAlertRoom: false,
-  },
-  advanced: {
-    nonInteractive: opts.nonInteractive ?? false,
-  },
-});
+const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => {
+  const connectivityMode =
+    opts.connectivityMode
+    ?? (opts.relayControlUrl !== undefined || opts.relayEnrollmentToken !== undefined
+      ? "relay"
+      : "direct");
+  return {
+    mode: "bundled_matrix",
+    connectivity: {
+      mode: connectivityMode,
+    },
+    ...(connectivityMode === "relay"
+      ? {
+          relay: {
+            controlUrl: opts.relayControlUrl ?? "https://relay.example.com",
+            enrollmentToken: opts.relayEnrollmentToken ?? "replace-me",
+            ...(opts.relayRequestedSlug === undefined
+              ? {}
+              : { requestedSlug: opts.relayRequestedSlug }),
+          },
+        }
+      : {}),
+    openclaw: {
+      manageInstallation: !opts.skipOpenclawInstall,
+      installMethod: "install_sh",
+      version: opts.openclawVersion ?? "pinned-by-sovereign",
+      skipIfCompatibleInstalled: true,
+      forceReinstall: opts.forceOpenclawReinstall ?? false,
+      runOnboard: false,
+    },
+    openrouter: {
+      model: "openai/gpt-5-nano",
+      secretRef: "env:OPENROUTER_API_KEY",
+    },
+    matrix: {
+      homeserverDomain:
+        connectivityMode === "relay" ? "relay-pending.invalid" : "matrix.example.org",
+      publicBaseUrl:
+        connectivityMode === "relay" ? "https://relay-pending.invalid" : "https://matrix.example.org",
+      federationEnabled: false,
+      tlsMode: connectivityMode === "relay" ? "auto" : (opts.matrixTlsMode ?? "auto"),
+      alertRoomName: "Sovereign Alerts",
+    },
+    operator: {
+      username: "operator",
+    },
+    mailSentinel: {
+      pollInterval: "5m",
+      lookbackWindow: "15m",
+      e2eeAlertRoom: false,
+    },
+    advanced: {
+      nonInteractive: opts.nonInteractive ?? false,
+    },
+  };
+};
 
 export const registerInstallCommand = (program: Command, app: AppContainer): void => {
   program
@@ -63,6 +90,16 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
     .option("--openclaw-version <ver>", "Override pinned OpenClaw version (advanced)")
     .option("--skip-openclaw-install", "Reuse existing OpenClaw install only (advanced)")
     .option("--force-openclaw-reinstall", "Force OpenClaw reinstall (repair path)")
+    .option(
+      "--connectivity-mode <mode>",
+      "Connection mode (direct|relay) (scaffold/dev)",
+    )
+    .option("--relay-control-url <url>", "Managed relay control plane URL (scaffold/dev)")
+    .option(
+      "--relay-enrollment-token <token>",
+      "Managed relay enrollment token (scaffold/dev)",
+    )
+    .option("--relay-requested-slug <slug>", "Requested managed relay hostname slug (scaffold/dev)")
     .option(
       "--matrix-tls-mode <mode>",
       "Matrix TLS mode (auto|internal|manual|local-dev) (scaffold/dev)",

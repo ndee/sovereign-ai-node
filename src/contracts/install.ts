@@ -29,6 +29,7 @@ export const jobStepIdSchema = z.enum([
   "preflight",
   "openclaw_bootstrap_cli",
   "imap_validate",
+  "relay_enroll",
   "matrix_provision",
   "matrix_bootstrap_accounts",
   "matrix_bootstrap_room",
@@ -89,6 +90,16 @@ export const openrouterInstallInputSchema = z
     path: ["secretRef"],
   });
 
+export const connectivityInstallInputSchema = z.object({
+  mode: z.enum(["direct", "relay"]).optional(),
+});
+
+export const relayInstallInputSchema = z.object({
+  controlUrl: z.string().min(1),
+  enrollmentToken: z.string().min(1),
+  requestedSlug: z.string().min(1).optional(),
+});
+
 export const matrixInstallInputSchema = z.object({
   homeserverDomain: z.string().min(1),
   publicBaseUrl: z.string().min(1),
@@ -118,6 +129,8 @@ export const advancedInstallInputSchema = z.object({
 
 export const installRequestSchema = z.object({
   mode: z.literal("bundled_matrix"),
+  connectivity: connectivityInstallInputSchema.optional(),
+  relay: relayInstallInputSchema.optional(),
   openclaw: openclawInstallRequestSchema.optional(),
   openrouter: openrouterInstallInputSchema,
   imap: imapInstallInputSchema.optional(),
@@ -142,6 +155,7 @@ export const serviceStatusSchema = z.object({
     "synapse",
     "postgres",
     "reverse-proxy",
+    "relay-tunnel",
   ]),
   health: componentHealthSchema,
   state: z.enum(["running", "stopped", "failed", "unknown"]),
@@ -172,6 +186,16 @@ export const installResultSchema = z.object({
     alertRoomName: z.string().min(1),
     e2eeEnabled: z.boolean(),
   }),
+  relay: z
+    .object({
+      enabled: z.boolean(),
+      hostname: z.string().min(1),
+      publicBaseUrl: z.string().min(1),
+      serviceInstalled: z.boolean(),
+      serviceState: z.enum(["running", "stopped", "failed", "unknown"]).optional(),
+      connected: z.boolean(),
+    })
+    .optional(),
   openclaw: z.object({
     installManagedBySovereign: z.boolean(),
     installMethod: z.literal("install_sh"),
@@ -215,6 +239,17 @@ export const sovereignStatusSchema = z.object({
   installationId: idSchema.optional(),
   mode: z.literal("bundled_matrix"),
   services: z.array(serviceStatusSchema),
+  relay: z
+    .object({
+      enabled: z.boolean(),
+      controlUrl: z.string().min(1).optional(),
+      hostname: z.string().min(1).optional(),
+      publicBaseUrl: z.string().min(1).optional(),
+      connected: z.boolean(),
+      serviceInstalled: z.boolean(),
+      serviceState: z.enum(["running", "stopped", "failed", "unknown"]).optional(),
+    })
+    .optional(),
   matrix: z.object({
     homeserverUrl: z.string().min(1).optional(),
     health: componentHealthSchema,

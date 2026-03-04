@@ -359,6 +359,85 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
     }
   });
 
+  it("writes a relay-mode local-edge bundle for managed relay installs", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-test-"));
+    const recordedExecCalls: ExecInput[] = [];
+
+    const fakeExecRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        recordedExecCalls.push(input);
+        if (input.command === "docker") {
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: "services:\n  postgres: {}\n  synapse: {}\n  reverse-proxy: {}\n",
+            stderr: "",
+          };
+        }
+        return {
+          command: [input.command, ...(input.args ?? [])].join(" "),
+          exitCode: 127,
+          stdout: "",
+          stderr: "command not found",
+        };
+      },
+    };
+
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "state"),
+      logsDir: join(tempRoot, "logs"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+
+    const provisioner = new DockerComposeBundledMatrixProvisioner(
+      fakeExecRunner,
+      createLogger(),
+      paths,
+    );
+
+    try {
+      const req = buildInstallRequest();
+      req.connectivity = {
+        mode: "relay",
+      };
+      req.relay = {
+        controlUrl: "https://relay.example.com",
+        enrollmentToken: "relay-token",
+      };
+      req.matrix.homeserverDomain = "node-abc.relay.example.com";
+      req.matrix.publicBaseUrl = "https://node-abc.relay.example.com";
+      req.matrix.federationEnabled = false;
+      req.matrix.tlsMode = "auto";
+
+      const result = await provisioner.provision(req);
+
+      expect(result.accessMode).toBe("relay");
+      const composeText = await readFile(result.composeFilePath, "utf8");
+      expect(composeText).toContain('"127.0.0.1:18080:80"');
+      expect(composeText).not.toContain('"80:80"');
+      expect(composeText).not.toContain(':443"');
+
+      const caddyText = await readFile(join(result.projectDir, "reverse-proxy", "Caddyfile"), "utf8");
+      expect(caddyText).toContain(":80 {");
+      expect(caddyText).not.toContain("tls internal");
+      expect(caddyText).not.toContain("/downloads/caddy-root-ca.crt");
+
+      const onboardPage = await readFile(
+        join(result.projectDir, "well-known", "onboard", "index.html"),
+        "utf8",
+      );
+      expect(onboardPage).toContain("Connect via Element Web");
+      expect(onboardPage).toContain("Open in Element Android App");
+      expect(onboardPage).not.toContain("/downloads/caddy-root-ca.crt");
+      expect(recordedExecCalls).toHaveLength(2);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("bootstraps operator/bot accounts, creates the alert room, and rewrites onboarding for HTTPS mode", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-test-"));
     const recordedExecCalls: ExecInput[] = [];

@@ -38,6 +38,9 @@ DEFAULT_ALERT_ROOM_NAME="Sovereign Alerts"
 DEFAULT_POLL_INTERVAL="5m"
 DEFAULT_LOOKBACK_WINDOW="15m"
 DEFAULT_FEDERATION_ENABLED="0"
+DEFAULT_CONNECTIVITY_MODE="direct"
+DEFAULT_RELAY_CONTROL_URL="${SOVEREIGN_NODE_RELAY_CONTROL_URL:-}"
+DEFAULT_RELAY_REQUESTED_SLUG=""
 DEFAULT_IMAP_CONFIGURED="0"
 DEFAULT_IMAP_HOST="imap.example.org"
 DEFAULT_IMAP_PORT="993"
@@ -45,6 +48,7 @@ DEFAULT_IMAP_TLS="1"
 DEFAULT_IMAP_USERNAME="operator@example.org"
 DEFAULT_IMAP_MAILBOX="INBOX"
 EXISTING_OPENROUTER_SECRET_REF=""
+EXISTING_RELAY_ENROLLMENT_TOKEN=""
 EXISTING_IMAP_SECRET_REF=""
 LEGACY_OPENROUTER_MODEL_DETECTED="0"
 
@@ -656,6 +660,8 @@ const emit = (key, value) => {
 };
 
 const openrouter = req.openrouter ?? {};
+const connectivity = req.connectivity ?? {};
+const relay = req.relay ?? {};
 const matrix = req.matrix ?? {};
 const operator = req.operator ?? {};
 const mailSentinel = req.mailSentinel ?? {};
@@ -669,6 +675,9 @@ try {
 }
 const runtimeMatrix = runtime && typeof runtime === "object" && !Array.isArray(runtime)
   ? runtime.matrix ?? {}
+  : {};
+const runtimeRelay = runtime && typeof runtime === "object" && !Array.isArray(runtime)
+  ? runtime.relay ?? {}
   : {};
 
 const recommendedOpenrouterModel = "openai/gpt-5-nano";
@@ -690,6 +699,21 @@ const runtimeMatrixPublicBaseUrl =
   && typeof runtimeMatrix.publicBaseUrl === "string"
   ? runtimeMatrix.publicBaseUrl
   : "";
+const runtimeRelayEnabled =
+  runtimeRelay && typeof runtimeRelay === "object" && !Array.isArray(runtimeRelay)
+  && runtimeRelay.enabled === true;
+const runtimeRelayControlUrl =
+  runtimeRelayEnabled && typeof runtimeRelay.controlUrl === "string"
+    ? runtimeRelay.controlUrl
+    : "";
+const runtimeRelayHostname =
+  runtimeRelayEnabled && typeof runtimeRelay.hostname === "string"
+    ? runtimeRelay.hostname
+    : "";
+const runtimeRelayPublicBaseUrl =
+  runtimeRelayEnabled && typeof runtimeRelay.publicBaseUrl === "string"
+    ? runtimeRelay.publicBaseUrl
+    : "";
 const effectiveMatrixDomain = runtimeMatrixDomain || matrix.homeserverDomain || "";
 const effectiveMatrixPublicBaseUrl = runtimeMatrixPublicBaseUrl || matrix.publicBaseUrl || "";
 if (openrouter.model === legacyOpenrouterModel) {
@@ -711,6 +735,20 @@ if (
   emit("DEFAULT_MATRIX_PUBLIC_BASE_URL", effectiveMatrixPublicBaseUrl);
 }
 emit("DEFAULT_FEDERATION_ENABLED", matrix.federationEnabled === true ? "1" : "0");
+if (runtimeRelayEnabled || connectivity.mode === "relay" || relay.controlUrl) {
+  emit("DEFAULT_CONNECTIVITY_MODE", "relay");
+} else {
+  emit("DEFAULT_CONNECTIVITY_MODE", "direct");
+}
+emit("DEFAULT_RELAY_CONTROL_URL", runtimeRelayControlUrl || relay.controlUrl || "");
+emit("DEFAULT_RELAY_REQUESTED_SLUG", relay.requestedSlug || "");
+emit("EXISTING_RELAY_ENROLLMENT_TOKEN", relay.enrollmentToken || "");
+if (runtimeRelayHostname) {
+  emit("DEFAULT_MATRIX_DOMAIN", runtimeRelayHostname);
+}
+if (runtimeRelayPublicBaseUrl) {
+  emit("DEFAULT_MATRIX_PUBLIC_BASE_URL", runtimeRelayPublicBaseUrl);
+}
 emit("DEFAULT_ALERT_ROOM_NAME", matrix.alertRoomName);
 emit("DEFAULT_OPERATOR_USERNAME", operator.username);
 emit("DEFAULT_POLL_INTERVAL", mailSentinel.pollInterval);
@@ -753,6 +791,18 @@ NODE
         ;;
       DEFAULT_FEDERATION_ENABLED)
         DEFAULT_FEDERATION_ENABLED="$value"
+        ;;
+      DEFAULT_CONNECTIVITY_MODE)
+        DEFAULT_CONNECTIVITY_MODE="$value"
+        ;;
+      DEFAULT_RELAY_CONTROL_URL)
+        DEFAULT_RELAY_CONTROL_URL="$value"
+        ;;
+      DEFAULT_RELAY_REQUESTED_SLUG)
+        DEFAULT_RELAY_REQUESTED_SLUG="$value"
+        ;;
+      EXISTING_RELAY_ENROLLMENT_TOKEN)
+        EXISTING_RELAY_ENROLLMENT_TOKEN="$value"
         ;;
       DEFAULT_ALERT_ROOM_NAME)
         DEFAULT_ALERT_ROOM_NAME="$value"
@@ -1019,6 +1069,7 @@ write_request_file_from_env() {
   node <<'NODE'
 const fs = require("node:fs");
 const matrixPublicBaseUrl = process.env.SN_MATRIX_PUBLIC_BASE_URL || "";
+const connectivityMode = process.env.SN_CONNECTIVITY_MODE || "direct";
 const inferMatrixTlsMode = (value) => {
   const isLoopback = (host) =>
     host === "localhost"
@@ -1051,6 +1102,9 @@ const inferMatrixTlsMode = (value) => {
 const matrixTlsMode = process.env.SN_MATRIX_TLS_MODE || inferMatrixTlsMode(matrixPublicBaseUrl);
 const req = {
   mode: "bundled_matrix",
+  connectivity: {
+    mode: connectivityMode,
+  },
   openclaw: {
     manageInstallation: true,
     installMethod: "install_sh",
@@ -1083,6 +1137,16 @@ const req = {
   },
 };
 
+if (connectivityMode === "relay") {
+  req.relay = {
+    controlUrl: process.env.SN_RELAY_CONTROL_URL,
+    enrollmentToken: process.env.SN_RELAY_ENROLLMENT_TOKEN,
+  };
+  if ((process.env.SN_RELAY_REQUESTED_SLUG || "").length > 0) {
+    req.relay.requestedSlug = process.env.SN_RELAY_REQUESTED_SLUG;
+  }
+}
+
 if (process.env.SN_IMAP_CONFIGURE === "1") {
   req.imap = {
     host: process.env.SN_IMAP_HOST,
@@ -1113,6 +1177,16 @@ review_install_request() {
   ui_section "Review"
   ui_info "OpenRouter model: ${SN_OPENROUTER_MODEL}"
   ui_info "OpenRouter secret: ${SN_OPENROUTER_SECRET_MODE}"
+  if [[ "${SN_CONNECTIVITY_MODE}" == "relay" ]]; then
+    ui_info "Connection mode: managed relay"
+    ui_info "Relay control URL: ${SN_RELAY_CONTROL_URL}"
+    if [[ -n "${SN_RELAY_REQUESTED_SLUG}" ]]; then
+      ui_info "Requested relay slug: ${SN_RELAY_REQUESTED_SLUG}"
+    fi
+    ui_info "Matrix hostname and public URL will be assigned by the relay during install."
+  else
+    ui_info "Connection mode: direct"
+  fi
   ui_info "Matrix homeserver domain: ${SN_MATRIX_DOMAIN}"
   ui_info "Matrix public base URL: ${SN_MATRIX_PUBLIC_BASE_URL}"
   if [[ "${SN_MATRIX_TLS_MODE}" == "auto" ]]; then
@@ -1151,7 +1225,8 @@ review_install_request() {
 run_install_wizard() {
   local defaults_status openrouter_api_key openrouter_model matrix_domain matrix_public_base_url
   local operator_username alert_room_name poll_interval lookback_window federation_enabled
-  local matrix_tls_mode
+  local matrix_tls_mode connectivity_choice connectivity_mode
+  local relay_control_url relay_enrollment_token relay_requested_slug
   local openrouter_secret_ref openrouter_secret_path openrouter_secret_mode
   local configure_imap imap_choice imap_host imap_port imap_tls imap_username imap_password
   local imap_mailbox imap_secret_ref imap_secret_path imap_secret_mode
@@ -1173,6 +1248,9 @@ run_install_wizard() {
   poll_interval="$DEFAULT_POLL_INTERVAL"
   lookback_window="$DEFAULT_LOOKBACK_WINDOW"
   federation_enabled="$DEFAULT_FEDERATION_ENABLED"
+  connectivity_mode="$DEFAULT_CONNECTIVITY_MODE"
+  relay_control_url="$DEFAULT_RELAY_CONTROL_URL"
+  relay_requested_slug="$DEFAULT_RELAY_REQUESTED_SLUG"
   openrouter_secret_ref="$EXISTING_OPENROUTER_SECRET_REF"
   openrouter_secret_mode="replaced"
 
@@ -1202,16 +1280,71 @@ run_install_wizard() {
     openrouter_secret_mode="replaced"
   fi
 
+  ui_section "Connection"
+  connectivity_choice="$(
+    ui_choice_menu \
+      "Choose how users should connect:" \
+      "$( [[ "$connectivity_mode" == "relay" ]] && printf '1' || printf '3' )" \
+      "Managed Relay (Easiest)" \
+      "Public Domain / Direct HTTPS" \
+      "LAN Only"
+  )"
+  case "$connectivity_choice" in
+    1)
+      connectivity_mode="relay"
+      ;;
+    2|3)
+      connectivity_mode="direct"
+      ;;
+  esac
+  if [[ "$connectivity_choice" == "3" ]]; then
+    if [[ "$matrix_domain" == "$LEGACY_MATRIX_DOMAIN" ]] || [[ -z "$matrix_domain" ]]; then
+      matrix_domain="$RECOMMENDED_MATRIX_DOMAIN"
+    fi
+    if [[ "$matrix_public_base_url" == "$LEGACY_MATRIX_PUBLIC_BASE_URL" ]] \
+      || [[ "$matrix_public_base_url" == "$LEGACY_MATRIX_ALT_PUBLIC_BASE_URL" ]] \
+      || [[ -z "$matrix_public_base_url" ]]; then
+      matrix_public_base_url="$RECOMMENDED_MATRIX_PUBLIC_BASE_URL"
+    fi
+  fi
+
   ui_section "Matrix"
-  matrix_domain="$(prompt_value "Matrix homeserver domain" "$matrix_domain")"
-  matrix_public_base_url="$(prompt_value "Matrix public base URL" "$matrix_public_base_url")"
-  matrix_tls_mode="$(infer_matrix_tls_mode_from_url "$matrix_public_base_url")"
+  if [[ "$connectivity_mode" == "relay" ]]; then
+    relay_control_url="$(prompt_value "Relay server URL" "$relay_control_url")"
+    if [[ -n "$EXISTING_RELAY_ENROLLMENT_TOKEN" ]] && [[ "$EXISTING_REQUEST_VALID" == "1" ]]; then
+      if ui_confirm "Keep existing relay enrollment token?" "y"; then
+        relay_enrollment_token="$EXISTING_RELAY_ENROLLMENT_TOKEN"
+      fi
+    fi
+    if [[ -z "${relay_enrollment_token:-}" ]]; then
+      relay_enrollment_token="$(
+        prompt_required_secret \
+          "Relay enrollment token" \
+          "A relay enrollment token is required for managed relay mode."
+      )"
+    fi
+    relay_requested_slug="$(prompt_value "Requested relay slug (optional)" "$relay_requested_slug")"
+    if [[ -z "$matrix_domain" ]]; then
+      matrix_domain="relay-pending.invalid"
+    fi
+    if [[ -z "$matrix_public_base_url" ]]; then
+      matrix_public_base_url="https://relay-pending.invalid"
+    fi
+    matrix_tls_mode="auto"
+    federation_enabled="0"
+  else
+    matrix_domain="$(prompt_value "Matrix homeserver domain" "$matrix_domain")"
+    matrix_public_base_url="$(prompt_value "Matrix public base URL" "$matrix_public_base_url")"
+    matrix_tls_mode="$(infer_matrix_tls_mode_from_url "$matrix_public_base_url")"
+  fi
   operator_username="$(prompt_value "Operator username" "$operator_username")"
   alert_room_name="$(prompt_value "Alert room name" "$alert_room_name")"
-  if ui_confirm "Enable Matrix federation?" "$( [[ "$federation_enabled" == "1" ]] && printf 'y' || printf 'n' )"; then
-    federation_enabled="1"
-  else
-    federation_enabled="0"
+  if [[ "$connectivity_mode" == "direct" ]]; then
+    if ui_confirm "Enable Matrix federation?" "$( [[ "$federation_enabled" == "1" ]] && printf 'y' || printf 'n' )"; then
+      federation_enabled="1"
+    else
+      federation_enabled="0"
+    fi
   fi
 
   ui_section "Mail Sentinel"
@@ -1299,9 +1432,13 @@ run_install_wizard() {
   fi
 
   export SN_REQUEST_FILE="$REQUEST_FILE"
+  export SN_CONNECTIVITY_MODE="$connectivity_mode"
   export SN_OPENROUTER_MODEL="$openrouter_model"
   export SN_OPENROUTER_SECRET_REF="$openrouter_secret_ref"
   export SN_OPENROUTER_SECRET_MODE="$openrouter_secret_mode"
+  export SN_RELAY_CONTROL_URL="${relay_control_url:-}"
+  export SN_RELAY_ENROLLMENT_TOKEN="${relay_enrollment_token:-}"
+  export SN_RELAY_REQUESTED_SLUG="${relay_requested_slug:-}"
   export SN_MATRIX_DOMAIN="$matrix_domain"
   export SN_MATRIX_PUBLIC_BASE_URL="$matrix_public_base_url"
   export SN_MATRIX_TLS_MODE="$matrix_tls_mode"
@@ -1386,6 +1523,10 @@ prepare_install_request_for_update() {
   ui_info "Will update application code."
   ui_info "Will preserve /etc/sovereign-node, /etc/sovereign-node/secrets, and /var/lib/sovereign-node."
   ui_info "Will reuse request file: ${REQUEST_FILE}"
+  if [[ "$DEFAULT_CONNECTIVITY_MODE" == "relay" ]]; then
+    ui_info "Managed relay mode is enabled."
+    ui_info "Relay control URL: ${DEFAULT_RELAY_CONTROL_URL}"
+  fi
   warn_if_missing_secret_ref "OpenRouter" "$EXISTING_OPENROUTER_SECRET_REF" || true
   warn_if_missing_secret_ref "IMAP" "$EXISTING_IMAP_SECRET_REF" || true
   if ! ui_confirm "Continue with update?" "y"; then

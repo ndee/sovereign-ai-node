@@ -23,14 +23,18 @@ const MATRIX_COMPOSE_COMMAND_TIMEOUT_MS = 180_000;
 const MATRIX_BOOTSTRAP_SECRET_DIR = "bootstrap-secrets";
 const DEFAULT_SYNAPSE_IMAGE = "matrixdotorg/synapse:v1.125.0";
 const DEFAULT_CADDY_IMAGE = "caddy:2.10.2-alpine";
+const RELAY_LOCAL_EDGE_PORT = 18080;
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
 type BundledMatrixTlsMode = "auto" | "internal" | "local-dev";
+type BundledMatrixAccessMode = "direct" | "relay";
+type BundledMatrixOnboardingMode = Exclude<BundledMatrixTlsMode, "local-dev"> | "relay";
 
 export type BundledMatrixProvisionResult = {
   projectDir: string;
   composeFilePath: string;
+  accessMode: BundledMatrixAccessMode;
   homeserverDomain: string;
   publicBaseUrl: string;
   adminBaseUrl: string;
@@ -81,8 +85,10 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
   ) {}
 
   async provision(req: InstallRequest): Promise<BundledMatrixProvisionResult> {
+    const accessMode: BundledMatrixAccessMode =
+      req.connectivity?.mode === "relay" || req.relay !== undefined ? "relay" : "direct";
     const tlsMode = req.matrix.tlsMode ?? "auto";
-    if (tlsMode === "manual") {
+    if (accessMode === "direct" && tlsMode === "manual") {
       throw {
         code: "MATRIX_TLS_MODE_UNSUPPORTED",
         message:
@@ -94,7 +100,12 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         },
       };
     }
-    if (tlsMode !== "local-dev" && tlsMode !== "auto" && tlsMode !== "internal") {
+    if (
+      accessMode === "direct"
+      && tlsMode !== "local-dev"
+      && tlsMode !== "auto"
+      && tlsMode !== "internal"
+    ) {
       throw {
         code: "MATRIX_TLS_MODE_UNSUPPORTED",
         message: "Bundled Matrix provisioning received an unknown tlsMode",
@@ -107,12 +118,21 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
 
     const homeserverDomain = req.matrix.homeserverDomain;
     const publicBaseUrl = normalizePublicBaseUrl(req.matrix.publicBaseUrl);
-    validateBundledTlsMode({
-      tlsMode,
-      homeserverDomain,
-      publicBaseUrl,
-    });
-    const federationEnabled = req.matrix.federationEnabled ?? false;
+    if (accessMode === "direct") {
+      validateBundledTlsMode({
+        tlsMode,
+        homeserverDomain,
+        publicBaseUrl,
+      });
+    }
+    const federationEnabled = accessMode === "relay" ? false : (req.matrix.federationEnabled ?? false);
+    if (accessMode === "relay" && req.matrix.federationEnabled === true) {
+      throw {
+        code: "MATRIX_RELAY_FEDERATION_UNSUPPORTED",
+        message: "Managed relay mode does not support Matrix federation in v1",
+        retryable: false,
+      };
+    }
     const baseDir = await this.ensureBaseDir();
     const projectSlug = slugifyProjectName(homeserverDomain);
     const projectDir = join(baseDir, projectSlug);
@@ -127,7 +147,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
 
     await mkdir(synapseDir, { recursive: true });
     await mkdir(postgresDir, { recursive: true });
-    if (tlsMode !== "local-dev") {
+    if (accessMode === "relay" || tlsMode !== "local-dev") {
       await mkdir(wellKnownDir, { recursive: true });
       await mkdir(join(wellKnownDir, ".well-known", "matrix"), { recursive: true });
       await mkdir(join(wellKnownDir, "onboard"), { recursive: true });
@@ -137,7 +157,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     }
     await ensureDirectoryTreeWritable(synapseDir);
     await ensureDirectoryTreeWritable(postgresDir);
-    if (tlsMode !== "local-dev") {
+    if (accessMode === "relay" || tlsMode !== "local-dev") {
       await ensureDirectoryTreeWritable(wellKnownDir);
       await ensureDirectoryTreeWritable(proxyDir);
       await ensureDirectoryTreeWritable(proxyDataDir);
@@ -160,13 +180,18 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     const composeYaml = renderComposeYaml({
       synapseImage: resolveSynapseImage(),
       caddyImage: DEFAULT_CADDY_IMAGE,
+      accessMode,
       tlsMode,
       localSynapsePortBinding:
-        tlsMode !== "local-dev"
+        accessMode === "relay" || tlsMode !== "local-dev"
           ? "127.0.0.1:8008:8008"
           : resolveLocalDevSynapsePortBinding(publicBaseUrl),
       httpsProxyPortBinding:
-        tlsMode !== "local-dev" ? resolveAutoHttpsProxyPortBinding(publicBaseUrl) : undefined,
+        accessMode === "direct" && tlsMode !== "local-dev"
+          ? resolveAutoHttpsProxyPortBinding(publicBaseUrl)
+          : undefined,
+      relayEdgePortBinding:
+        accessMode === "relay" ? `127.0.0.1:${RELAY_LOCAL_EDGE_PORT}:80` : undefined,
     });
     const envFile = renderEnvFile({
       homeserverDomain,
@@ -179,7 +204,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       homeserverDomain,
       publicBaseUrl,
       federationEnabled,
-      behindReverseProxy: tlsMode !== "local-dev",
+      behindReverseProxy: accessMode === "relay" || tlsMode !== "local-dev",
       postgresPassword: generated.postgresPassword,
       registrationSharedSecret: generated.registrationSharedSecret,
       macaroonSecret: generated.macaroonSecret,
@@ -197,7 +222,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       writeFile(join(synapseDir, generated.signingKeyFile), `${signingKey}\n`, "utf8"),
       writeFile(join(synapseDir, "log.config"), `${logConfig}\n`, "utf8"),
     ];
-    if (tlsMode !== "local-dev") {
+    if (accessMode === "relay" || tlsMode !== "local-dev") {
       const wellKnown = renderWellKnownFiles({
         homeserverDomain,
         publicBaseUrl,
@@ -205,7 +230,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       writes.push(
         writeFile(
           join(proxyDir, "Caddyfile"),
-          `${renderCaddyfile(new URL(publicBaseUrl).hostname, tlsMode)}\n`,
+          `${renderCaddyfile(new URL(publicBaseUrl).hostname, accessMode === "relay" ? "relay" : tlsMode)}\n`,
           "utf8",
         ),
         writeFile(
@@ -222,18 +247,18 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     }
 
     await Promise.all(writes);
-    if (tlsMode !== "local-dev") {
+    if (accessMode === "relay" || tlsMode !== "local-dev") {
       await this.writeOnboardingPage({
         projectDir,
         publicBaseUrl,
         homeserverDomain,
         operatorLocalpart,
-        tlsMode,
+        tlsMode: accessMode === "relay" ? "relay" : tlsMode,
       });
     }
     await ensureDirectoryTreeWritable(synapseDir);
     await ensureDirectoryTreeWritable(postgresDir);
-    if (tlsMode !== "local-dev") {
+    if (accessMode === "relay" || tlsMode !== "local-dev") {
       await ensureDirectoryTreeWritable(wellKnownDir);
       await ensureDirectoryTreeWritable(proxyDir);
       await ensureDirectoryTreeWritable(proxyDataDir);
@@ -272,6 +297,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     return {
       projectDir,
       composeFilePath,
+      accessMode,
       homeserverDomain,
       publicBaseUrl,
       adminBaseUrl: MATRIX_INTERNAL_BASE_URL,
@@ -480,14 +506,14 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       roomId,
       roomName,
     };
-    if (provision.tlsMode !== "local-dev") {
+    if (provision.accessMode === "relay" || provision.tlsMode !== "local-dev") {
       const operatorPassword = await this.readPasswordFromSecretRef(accounts.operator.passwordSecretRef);
       await this.writeOnboardingPage({
         projectDir: provision.projectDir,
         publicBaseUrl: provision.publicBaseUrl,
         homeserverDomain: provision.homeserverDomain,
         operatorLocalpart: accounts.operator.localpart,
-        tlsMode: provision.tlsMode,
+        tlsMode: provision.accessMode === "relay" ? "relay" : provision.tlsMode,
         alertRoomId: roomId,
         operatorPassword: operatorPassword ?? undefined,
       });
@@ -588,7 +614,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
 
   private async ensureStackRunning(provision: BundledMatrixProvisionResult): Promise<void> {
     const services = ["postgres", "synapse"];
-    if (provision.tlsMode !== "local-dev") {
+    if (provision.accessMode === "relay" || provision.tlsMode !== "local-dev") {
       services.push("reverse-proxy");
     }
     const upArgs = ["up", "-d", "--remove-orphans", "--force-recreate", ...services];
@@ -1174,7 +1200,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     publicBaseUrl: string;
     homeserverDomain: string;
     operatorLocalpart: string;
-    tlsMode: Exclude<BundledMatrixTlsMode, "local-dev">;
+    tlsMode: BundledMatrixOnboardingMode;
     alertRoomId?: string;
     operatorPassword?: string;
   }): Promise<void> {
@@ -1227,9 +1253,11 @@ type EnvTemplateInput = {
 type ComposeTemplateInput = {
   synapseImage: string;
   caddyImage: string;
+  accessMode: BundledMatrixAccessMode;
   tlsMode: BundledMatrixTlsMode;
   localSynapsePortBinding: string;
   httpsProxyPortBinding?: string;
+  relayEdgePortBinding?: string;
 };
 
 const renderComposeYaml = (input: ComposeTemplateInput): string => `
@@ -1256,7 +1284,7 @@ services:
       - "${input.localSynapsePortBinding}"
     volumes:
       - ./synapse:/data
-${input.tlsMode !== "local-dev"
+${input.accessMode === "relay" || input.tlsMode !== "local-dev"
   ? `
 
   reverse-proxy:
@@ -1265,9 +1293,9 @@ ${input.tlsMode !== "local-dev"
     depends_on:
       - synapse
     ports:
-${input.tlsMode === "auto"
-  ? '      - "80:80"\n'
-  : ""}      - "${input.httpsProxyPortBinding}"
+${input.accessMode === "relay"
+  ? `      - "${input.relayEdgePortBinding}"`
+  : `${input.tlsMode === "auto" ? '      - "80:80"\n' : ""}      - "${input.httpsProxyPortBinding}"`}
     volumes:
       - ./reverse-proxy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./well-known:/srv:ro
@@ -1475,7 +1503,7 @@ const validateBundledTlsMode = (input: {
 
 const renderCaddyfile = (
   siteHostname: string,
-  tlsMode: Exclude<BundledMatrixTlsMode, "local-dev">,
+  tlsMode: BundledMatrixOnboardingMode,
 ): string =>
   [
     "{",
@@ -1483,7 +1511,7 @@ const renderCaddyfile = (
     ...(tlsMode === "internal" ? [`  default_sni ${siteHostname}`] : []),
     "}",
     "",
-    `${siteHostname} {`,
+    `${tlsMode === "relay" ? ":80" : siteHostname} {`,
     ...(tlsMode === "internal" ? ["  tls internal"] : []),
     "  @wellKnown path /.well-known/matrix/client /.well-known/matrix/server",
     "  handle @wellKnown {",
@@ -1526,7 +1554,7 @@ const renderOnboardingPage = (input: {
   publicBaseUrl: string;
   homeserverDomain: string;
   operatorLocalpart: string;
-  tlsMode: Exclude<BundledMatrixTlsMode, "local-dev">;
+  tlsMode: BundledMatrixOnboardingMode;
   onboardingPageUrl: string;
   onboardingQrSvg: string;
   alertRoomId?: string;
@@ -1566,6 +1594,9 @@ const renderOnboardingPage = (input: {
         "</section>",
       ].join("\n")
     : "";
+  const nativeAppHint = input.tlsMode === "internal"
+    ? "If the native app still cannot reach the server, it is rejecting the local CA or local-network setup. In that case use the browser path above. Vanadium and Brave may behave differently, so the copy buttons above remain the fallback path."
+    : "The Android app button prefills the homeserver using Element Classic&apos;s documented deep link. If the app still drops you into a generic login flow, use the copy buttons above and paste the exact values manually.";
   const roomSection = input.alertRoomId
     ? [
         "<section class=\"card\">",
@@ -1626,7 +1657,7 @@ const renderOnboardingPage = (input: {
     "        <a class=\"button button-secondary\" href=\"" + escapeHtml(elementAndroidLink) + "\" rel=\"noreferrer\">Open in Element Android App</a>",
     "        <p class=\"meta\">If Element still shows the generic login screen, tap <strong>Edit</strong> in the homeserver field and paste the full URL exactly as shown above. Do not type only " + escapeHtml(new URL(input.publicBaseUrl).host) + ".</p>",
     "        <p class=\"meta\">The Android button uses Element Classic&apos;s documented <code>hs_url</code> deep link and explicitly targets the F-Droid package <code>im.vector.app</code>. It can prefill the homeserver, but not securely inject the password.</p>",
-    "        <p class=\"meta\">If the native app still cannot reach the server, it is rejecting the local CA or local-network setup. In that case use the browser path above. Vanadium and Brave may behave differently, so the copy buttons above remain the fallback path.</p>",
+    "        <p class=\"meta\">" + nativeAppHint + "</p>",
     "      </section>",
     "      <section class=\"card\">",
     "        <h2>" + (input.tlsMode === "internal" ? "3" : "2") + ". Open this setup page on another device</h2>",

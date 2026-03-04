@@ -235,6 +235,7 @@ describe("RealInstallerService", () => {
         return {
           projectDir: "/tmp/fake-matrix",
           composeFilePath: "/tmp/fake-matrix/compose.yaml",
+          accessMode: "direct",
           homeserverDomain: "matrix.example.org",
           publicBaseUrl: "https://matrix.example.org",
           adminBaseUrl: "http://127.0.0.1:8008",
@@ -379,6 +380,7 @@ describe("RealInstallerService", () => {
           return {
             projectDir: join(tempRoot, "matrix"),
             composeFilePath: join(tempRoot, "matrix", "compose.yaml"),
+            accessMode: "direct",
             homeserverDomain: req.matrix.homeserverDomain,
             publicBaseUrl: req.matrix.publicBaseUrl,
             adminBaseUrl: "http://127.0.0.1:8008",
@@ -527,6 +529,7 @@ describe("RealInstallerService", () => {
         provision: async (req) => ({
           projectDir: join(tempRoot, "matrix"),
           composeFilePath: join(tempRoot, "matrix", "compose.yaml"),
+          accessMode: "direct",
           homeserverDomain: req.matrix.homeserverDomain,
           publicBaseUrl: "http://matrix.example.org",
           adminBaseUrl: "http://127.0.0.1:8008",
@@ -740,6 +743,7 @@ describe("RealInstallerService", () => {
         provision: async (req) => ({
           projectDir: join(tempRoot, "matrix"),
           composeFilePath: join(tempRoot, "matrix", "compose.yaml"),
+          accessMode: "direct",
           homeserverDomain: req.matrix.homeserverDomain,
           publicBaseUrl: req.matrix.publicBaseUrl,
           adminBaseUrl: "http://127.0.0.1:8008",
@@ -915,6 +919,7 @@ describe("RealInstallerService", () => {
         provision: async (req) => ({
           projectDir: join(tempRoot, "matrix"),
           composeFilePath: join(tempRoot, "matrix", "compose.yaml"),
+          accessMode: "direct",
           homeserverDomain: req.matrix.homeserverDomain,
           publicBaseUrl: req.matrix.publicBaseUrl,
           adminBaseUrl: "http://127.0.0.1:8008",
