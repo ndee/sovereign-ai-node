@@ -1,6 +1,7 @@
 import { Command } from "commander";
 
 import type { AppContainer } from "../app/create-app.js";
+import { registerAgentsCommand } from "./commands/agents.js";
 import { registerDoctorCommand } from "./commands/doctor.js";
 import { registerInstallCommand } from "./commands/install.js";
 import { registerLogsCommand } from "./commands/logs.js";
@@ -20,6 +21,7 @@ export const createCliProgram = (app: AppContainer): Command => {
 
   registerInstallCommand(program, app);
   registerStatusCommand(program, app);
+  registerAgentsCommand(program, app);
   registerDoctorCommand(program, app);
   registerLogsCommand(program);
   registerTestAlertCommand(program, app);
@@ -27,4 +29,3 @@ export const createCliProgram = (app: AppContainer): Command => {
 
   return program;
 };
-

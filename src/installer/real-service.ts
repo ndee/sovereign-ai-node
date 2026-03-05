@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { access, chmod, chown, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -52,7 +52,12 @@ import {
   type InstallStep,
   type JobRunnerSnapshot,
 } from "./job-runner.js";
-import type { InstallerService } from "./service.js";
+import type {
+  InstallerService,
+  ManagedAgentDeleteResult,
+  ManagedAgentListResult,
+  ManagedAgentUpsertResult,
+} from "./service.js";
 import { StubInstallerService } from "./stub-service.js";
 
 type PersistedInstallJobRecord = {
@@ -126,6 +131,12 @@ type RuntimeConfig = {
     agents: Array<{
       id: string;
       workspace: string;
+      matrix?: {
+        localpart: string;
+        userId: string;
+        passwordSecretRef?: string;
+        accessTokenSecretRef?: string;
+      };
     }>;
     cron: {
       id: string;
@@ -169,6 +180,8 @@ type RuntimeConfig = {
   relay?: RelayRuntimeConfig;
 };
 
+type RuntimeAgentEntry = RuntimeConfig["openclawProfile"]["agents"][number];
+
 type RealInstallerServiceDeps = {
   openclawBootstrapper: OpenClawBootstrapper;
   openclawGatewayServiceManager: OpenClawGatewayServiceManager;
@@ -185,6 +198,7 @@ type GatewayState = "running" | "stopped" | "failed" | "unknown";
 const MAIL_SENTINEL_AGENT_ID = "mail-sentinel";
 const MAIL_SENTINEL_CRON_ID = "mail-sentinel-poll";
 const MAIL_SENTINEL_HELLO_MESSAGE = "Hello from Mail Sentinel";
+const NODE_OPERATOR_AGENT_ID = "node-operator";
 const INSTALLER_EXEC_TIMEOUT_MS = 60_000;
 const SOVEREIGN_GATEWAY_SYSTEMD_UNIT = "sovereign-openclaw-gateway.service";
 const DEFAULT_OPENROUTER_MODEL = "openai/gpt-5-nano";
@@ -194,6 +208,7 @@ const DEFAULT_SERVICE_GROUP = "root";
 const RELAY_TUNNEL_SYSTEMD_UNIT = "sovereign-matrix-relay-tunnel.service";
 const RELAY_TUNNEL_DEFAULT_IMAGE = "ghcr.io/fatedier/frpc:v0.61.1";
 const RELAY_LOCAL_EDGE_PORT = 18080;
+const RESERVED_AGENT_IDS = new Set([MAIL_SENTINEL_AGENT_ID, NODE_OPERATOR_AGENT_ID]);
 
 export class RealInstallerService implements InstallerService {
   private readonly stubService: StubInstallerService;
@@ -789,6 +804,609 @@ export class RealInstallerService implements InstallerService {
         ...requestUpdate.validation,
       ],
     };
+  }
+
+  async listManagedAgents(): Promise<ManagedAgentListResult> {
+    const runtimeConfig = await this.readRuntimeConfig();
+    return {
+      agents: runtimeConfig.openclawProfile.agents.map((entry) => ({
+        id: entry.id,
+        workspace: entry.workspace,
+        ...(entry.matrix?.userId === undefined ? {} : { matrixUserId: entry.matrix.userId }),
+      })),
+    };
+  }
+
+  async createManagedAgent(req: {
+    id: string;
+    workspace?: string;
+  }): Promise<ManagedAgentUpsertResult> {
+    return this.upsertManagedAgent(req, "create");
+  }
+
+  async updateManagedAgent(req: {
+    id: string;
+    workspace?: string;
+  }): Promise<ManagedAgentUpsertResult> {
+    return this.upsertManagedAgent(req, "update");
+  }
+
+  async deleteManagedAgent(req: { id: string }): Promise<ManagedAgentDeleteResult> {
+    const runtimeConfig = await this.readRuntimeConfig();
+    const id = sanitizeManagedAgentId(req.id);
+    if (RESERVED_AGENT_IDS.has(id)) {
+      throw {
+        code: "AGENT_DELETE_FORBIDDEN",
+        message: `Managed core agent '${id}' cannot be deleted`,
+        retryable: false,
+      };
+    }
+
+    const existing = runtimeConfig.openclawProfile.agents.find((entry) => entry.id === id);
+    if (existing === undefined) {
+      return {
+        id,
+        deleted: false,
+        restartRequiredServices: [],
+      };
+    }
+
+    runtimeConfig.openclawProfile.agents = runtimeConfig.openclawProfile.agents.filter(
+      (entry) => entry.id !== id,
+    );
+    runtimeConfig.openclawProfile.agents = ensureCoreManagedAgents(
+      runtimeConfig.openclawProfile.agents,
+      this.paths.stateDir,
+    );
+    await this.persistManagedAgentTopology(runtimeConfig);
+    return {
+      id,
+      deleted: true,
+      restartRequiredServices: ["openclaw-gateway"],
+    };
+  }
+
+  private async upsertManagedAgent(
+    req: { id: string; workspace?: string },
+    mode: "create" | "update",
+  ): Promise<ManagedAgentUpsertResult> {
+    const runtimeConfig = await this.readRuntimeConfig();
+    const id = sanitizeManagedAgentId(req.id);
+    const workspace = sanitizeManagedWorkspace(
+      req.workspace,
+      join(this.paths.stateDir, id, "workspace"),
+    );
+    const existing = runtimeConfig.openclawProfile.agents.find((entry) => entry.id === id);
+
+    if (mode === "create" && existing !== undefined) {
+      const changed = existing.workspace !== workspace;
+      if (changed) {
+        existing.workspace = workspace;
+        runtimeConfig.openclawProfile.agents = ensureCoreManagedAgents(
+          runtimeConfig.openclawProfile.agents,
+          this.paths.stateDir,
+        );
+        await this.ensureManagedAgentWorkspace({
+          id,
+          workspace,
+          runtimeConfig,
+        });
+        await this.persistManagedAgentTopology(runtimeConfig);
+      }
+      const ensured = await this.ensureManagedAgentMatrixIdentity(runtimeConfig, id);
+      if (ensured.changed) {
+        await this.persistManagedAgentTopology(ensured.runtimeConfig);
+      }
+      const agent = ensured.runtimeConfig.openclawProfile.agents.find((entry) => entry.id === id);
+      return {
+        agent: {
+          id,
+          workspace,
+          ...(agent?.matrix?.userId === undefined ? {} : { matrixUserId: agent.matrix.userId }),
+        },
+        changed: changed || ensured.changed,
+        restartRequiredServices: changed || ensured.changed ? ["openclaw-gateway"] : [],
+      };
+    }
+
+    if (mode === "update" && existing === undefined) {
+      throw {
+        code: "AGENT_NOT_FOUND",
+        message: `Managed agent '${id}' does not exist`,
+        retryable: false,
+      };
+    }
+
+    if (existing !== undefined) {
+      const changed = existing.workspace !== workspace;
+      if (changed) {
+        existing.workspace = workspace;
+        runtimeConfig.openclawProfile.agents = ensureCoreManagedAgents(
+          runtimeConfig.openclawProfile.agents,
+          this.paths.stateDir,
+        );
+        await this.ensureManagedAgentWorkspace({
+          id,
+          workspace,
+          runtimeConfig,
+        });
+        await this.persistManagedAgentTopology(runtimeConfig);
+      }
+      const ensured = await this.ensureManagedAgentMatrixIdentity(runtimeConfig, id);
+      if (ensured.changed) {
+        await this.persistManagedAgentTopology(ensured.runtimeConfig);
+      }
+      const agent = ensured.runtimeConfig.openclawProfile.agents.find((entry) => entry.id === id);
+      return {
+        agent: {
+          id,
+          workspace,
+          ...(agent?.matrix?.userId === undefined ? {} : { matrixUserId: agent.matrix.userId }),
+        },
+        changed: changed || ensured.changed,
+        restartRequiredServices: changed || ensured.changed ? ["openclaw-gateway"] : [],
+      };
+    }
+
+    runtimeConfig.openclawProfile.agents = ensureCoreManagedAgents(
+      [
+        ...runtimeConfig.openclawProfile.agents,
+        {
+          id,
+          workspace,
+        },
+      ],
+      this.paths.stateDir,
+    );
+    await this.ensureManagedAgentWorkspace({
+      id,
+      workspace,
+      runtimeConfig,
+    });
+    const ensured = await this.ensureManagedAgentMatrixIdentity(runtimeConfig, id);
+    runtimeConfig.openclawProfile.agents = ensured.runtimeConfig.openclawProfile.agents;
+    await this.persistManagedAgentTopology(runtimeConfig);
+    const created = runtimeConfig.openclawProfile.agents.find((entry) => entry.id === id);
+    return {
+      agent: {
+        id,
+        workspace,
+        ...(created?.matrix?.userId === undefined ? {} : { matrixUserId: created.matrix.userId }),
+      },
+      changed: true,
+      restartRequiredServices: ["openclaw-gateway"],
+    };
+  }
+
+  private async persistManagedAgentTopology(runtimeConfig: RuntimeConfig): Promise<void> {
+    runtimeConfig.openclawProfile.agents = ensureCoreManagedAgents(
+      runtimeConfig.openclawProfile.agents,
+      this.paths.stateDir,
+    );
+    for (const agent of runtimeConfig.openclawProfile.agents) {
+      await this.ensureManagedAgentWorkspace({
+        id: agent.id,
+        workspace: agent.workspace,
+        runtimeConfig,
+      });
+    }
+
+    await this.persistManagedAgentTopologyDocument(runtimeConfig);
+    await this.writeOpenClawRuntimeArtifacts(runtimeConfig);
+    this.setManagedOpenClawEnv(runtimeConfig);
+    await this.refreshGatewayAfterRuntimeConfig(runtimeConfig);
+  }
+
+  private async persistManagedAgentTopologyDocument(runtimeConfig: RuntimeConfig): Promise<void> {
+    const raw = await readFile(this.paths.configPath, "utf8");
+    const parsed = parseJsonDocument(raw);
+    if (!isRecord(parsed)) {
+      throw {
+        code: "CONFIG_INVALID",
+        message: "Sovereign runtime config does not match expected shape",
+        retryable: false,
+        details: {
+          configPath: this.paths.configPath,
+        },
+      };
+    }
+
+    parsed["generatedAt"] = now();
+    parsed["openclawProfile"] = {
+      plugins: {
+        allow: runtimeConfig.openclawProfile.plugins.allow,
+      },
+      channels: {
+        matrix: {
+          enabled: true,
+          homeserver: runtimeConfig.matrix.adminBaseUrl,
+          roomId: runtimeConfig.matrix.alertRoom.roomId,
+        },
+      },
+      agents: runtimeConfig.openclawProfile.agents,
+      cron: runtimeConfig.openclawProfile.cron,
+    };
+
+    await this.writeInstallerJsonFile(this.paths.configPath, parsed, 0o644);
+  }
+
+  private async ensureManagedAgentWorkspace(input: {
+    id: string;
+    workspace: string;
+    runtimeConfig: RuntimeConfig;
+  }): Promise<void> {
+    await mkdir(input.workspace, { recursive: true });
+    if (input.id === NODE_OPERATOR_AGENT_ID) {
+      await this.writeNodeOperatorWorkspaceFiles(input.workspace, input.runtimeConfig);
+    } else {
+      const readme = [
+        `# ${input.id} workspace`,
+        "",
+        "Provisioned by sovereign-node managed agent commands.",
+        "Managed by Sovereign Node installer.",
+      ].join("\n");
+      await writeFile(join(input.workspace, "README.md"), `${readme}\n`, "utf8");
+    }
+    await this.applyRuntimeOwnership(input.workspace);
+  }
+
+  private async ensureManagedAgentMatrixIdentity(
+    runtimeConfig: RuntimeConfig,
+    agentId: string,
+  ): Promise<{ runtimeConfig: RuntimeConfig; changed: boolean }> {
+    if (agentId === MAIL_SENTINEL_AGENT_ID) {
+      const entry = runtimeConfig.openclawProfile.agents.find((agent) => agent.id === agentId);
+      if (entry === undefined) {
+        return { runtimeConfig, changed: false };
+      }
+      const mappedIdentity = {
+        localpart: runtimeConfig.matrix.bot.localpart ?? "mail-sentinel",
+        userId: runtimeConfig.matrix.bot.userId,
+        ...(runtimeConfig.matrix.bot.passwordSecretRef === undefined
+          ? {}
+          : { passwordSecretRef: runtimeConfig.matrix.bot.passwordSecretRef }),
+        accessTokenSecretRef: runtimeConfig.matrix.bot.accessTokenSecretRef,
+      };
+      const changed = !areMatrixIdentitiesEqual(entry.matrix, mappedIdentity);
+      if (changed) {
+        entry.matrix = mappedIdentity;
+      }
+      return { runtimeConfig, changed };
+    }
+
+    const entry = runtimeConfig.openclawProfile.agents.find((agent) => agent.id === agentId);
+    if (entry === undefined) {
+      return { runtimeConfig, changed: false };
+    }
+
+    const fallbackLocalpart = sanitizeMatrixLocalpartFromAgentId(agentId);
+    const localpart = sanitizeManagedAgentLocalpart(entry.matrix?.localpart, fallbackLocalpart);
+    const expectedUserId = `@${localpart}:${runtimeConfig.matrix.homeserverDomain}`;
+
+    let passwordSecretRef = entry.matrix?.passwordSecretRef;
+    if (passwordSecretRef === undefined || passwordSecretRef.trim().length === 0) {
+      passwordSecretRef = await this.writeManagedSecretFile(
+        `matrix-agent-${agentId}-password`,
+        generateAgentPassword(),
+      );
+    }
+    const password = await this.resolveSecretRef(passwordSecretRef);
+
+    const operatorTokenSecretRef = runtimeConfig.matrix.operator.accessTokenSecretRef;
+    if (operatorTokenSecretRef === undefined || operatorTokenSecretRef.length === 0) {
+      throw {
+        code: "MATRIX_AGENT_IDENTITY_FAILED",
+        message: "Operator Matrix access token is required to provision agent identities",
+        retryable: false,
+      };
+    }
+    const operatorAccessToken = await this.resolveSecretRef(operatorTokenSecretRef);
+
+    const upsertedUserId = await this.ensureSynapseUserViaAdminApi({
+      adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+      adminAccessToken: operatorAccessToken,
+      expectedUserId,
+      password,
+    });
+    const loginSession = await this.loginMatrixUser({
+      adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+      localpart,
+      password,
+      expectedUserId: upsertedUserId,
+    });
+    const accessTokenSecretRef = await this.writeManagedSecretFile(
+      `matrix-agent-${agentId}-access-token`,
+      loginSession.accessToken,
+    );
+
+    await this.ensureMatrixUserInAlertRoom({
+      adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+      roomId: runtimeConfig.matrix.alertRoom.roomId,
+      inviterAccessToken: operatorAccessToken,
+      inviteeUserId: loginSession.userId,
+      inviteeAccessToken: loginSession.accessToken,
+    });
+
+    const nextIdentity = {
+      localpart,
+      userId: loginSession.userId,
+      passwordSecretRef,
+      accessTokenSecretRef,
+    };
+    const changed = !areMatrixIdentitiesEqual(entry.matrix, nextIdentity);
+    entry.matrix = nextIdentity;
+    return {
+      runtimeConfig,
+      changed,
+    };
+  }
+
+  private async ensureSynapseUserViaAdminApi(input: {
+    adminBaseUrl: string;
+    adminAccessToken: string;
+    expectedUserId: string;
+    password: string;
+  }): Promise<string> {
+    const endpoint = new URL(
+      `/_synapse/admin/v2/users/${encodeURIComponent(input.expectedUserId)}`,
+      ensureTrailingSlash(input.adminBaseUrl),
+    ).toString();
+    const response = await this.fetchImpl(endpoint, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${input.adminAccessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        password: input.password,
+        admin: false,
+        deactivated: false,
+      }),
+    });
+    const bodyText = await response.text();
+    const parsed = parseJsonSafely(bodyText);
+    if (!response.ok) {
+      throw {
+        code: "MATRIX_AGENT_IDENTITY_FAILED",
+        message: `Failed to upsert Matrix account ${input.expectedUserId}`,
+        retryable: true,
+        details: {
+          endpoint,
+          status: response.status,
+          body: summarizeUnknown(parsed),
+        },
+      };
+    }
+    if (isRecord(parsed) && typeof parsed.name === "string" && parsed.name.length > 0) {
+      return parsed.name;
+    }
+    return input.expectedUserId;
+  }
+
+  private async loginMatrixUser(input: {
+    adminBaseUrl: string;
+    localpart: string;
+    password: string;
+    expectedUserId: string;
+  }): Promise<{ userId: string; accessToken: string }> {
+    const endpoint = new URL("/_matrix/client/v3/login", ensureTrailingSlash(input.adminBaseUrl)).toString();
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const response = await this.fetchImpl(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          type: "m.login.password",
+          identifier: {
+            type: "m.id.user",
+            user: input.localpart,
+          },
+          password: input.password,
+        }),
+      });
+      const bodyText = await response.text();
+      const parsed = parseJsonSafely(bodyText);
+      if (response.ok) {
+        const userId = isRecord(parsed) && typeof parsed.user_id === "string"
+          ? parsed.user_id
+          : input.expectedUserId;
+        const accessToken = isRecord(parsed) && typeof parsed.access_token === "string"
+          ? parsed.access_token
+          : "";
+        if (accessToken.length === 0) {
+          throw {
+            code: "MATRIX_AGENT_IDENTITY_FAILED",
+            message: `Matrix login for ${input.expectedUserId} returned no access token`,
+            retryable: true,
+          };
+        }
+        return { userId, accessToken };
+      }
+
+      if (
+        response.status === 429
+        && isRecord(parsed)
+        && typeof parsed.retry_after_ms === "number"
+        && Number.isFinite(parsed.retry_after_ms)
+      ) {
+        await delay(Math.min(Math.max(Math.trunc(parsed.retry_after_ms), 100), 5_000));
+        continue;
+      }
+
+      throw {
+        code: "MATRIX_AGENT_IDENTITY_FAILED",
+        message: `Matrix login failed for ${input.expectedUserId}`,
+        retryable: true,
+        details: {
+          endpoint,
+          status: response.status,
+          body: summarizeUnknown(parsed),
+        },
+      };
+    }
+
+    throw {
+      code: "MATRIX_AGENT_IDENTITY_FAILED",
+      message: `Matrix login was rate-limited for ${input.expectedUserId}`,
+      retryable: true,
+    };
+  }
+
+  private async ensureMatrixUserInAlertRoom(input: {
+    adminBaseUrl: string;
+    roomId: string;
+    inviterAccessToken: string;
+    inviteeUserId: string;
+    inviteeAccessToken: string;
+  }): Promise<void> {
+    const inviteEndpoint = new URL(
+      `/_matrix/client/v3/rooms/${encodeURIComponent(input.roomId)}/invite`,
+      ensureTrailingSlash(input.adminBaseUrl),
+    ).toString();
+    const inviteResponse = await this.fetchImpl(inviteEndpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${input.inviterAccessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({ user_id: input.inviteeUserId }),
+    });
+    const inviteText = await inviteResponse.text();
+    const inviteParsed = parseJsonSafely(inviteText);
+    if (!inviteResponse.ok && !isAlreadyJoinedOrInvitedRoomError(inviteResponse.status, inviteParsed)) {
+      throw {
+        code: "MATRIX_AGENT_IDENTITY_FAILED",
+        message: `Failed to invite ${input.inviteeUserId} to alert room`,
+        retryable: true,
+        details: {
+          endpoint: inviteEndpoint,
+          status: inviteResponse.status,
+          body: summarizeUnknown(inviteParsed),
+        },
+      };
+    }
+
+    const joinEndpoint = new URL(
+      `/_matrix/client/v3/rooms/${encodeURIComponent(input.roomId)}/join`,
+      ensureTrailingSlash(input.adminBaseUrl),
+    ).toString();
+    const joinResponse = await this.fetchImpl(joinEndpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${input.inviteeAccessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+    const joinText = await joinResponse.text();
+    const joinParsed = parseJsonSafely(joinText);
+    if (!joinResponse.ok && !isAlreadyJoinedOrInvitedRoomError(joinResponse.status, joinParsed)) {
+      throw {
+        code: "MATRIX_AGENT_IDENTITY_FAILED",
+        message: `Failed to join ${input.inviteeUserId} into alert room`,
+        retryable: true,
+        details: {
+          endpoint: joinEndpoint,
+          status: joinResponse.status,
+          body: summarizeUnknown(joinParsed),
+        },
+      };
+    }
+  }
+
+  private async writeNodeOperatorWorkspaceFiles(
+    workspaceDir: string,
+    runtimeConfig: RuntimeConfig,
+  ): Promise<void> {
+    const readmePath = join(workspaceDir, "README.md");
+    const agentsPath = join(workspaceDir, "AGENTS.md");
+    const toolsPath = join(workspaceDir, "TOOLS.md");
+    const skillDir = join(workspaceDir, "skills", "node-operator-core");
+    const skillPath = join(skillDir, "SKILL.md");
+
+    const readme = [
+      "# Node Operator workspace",
+      "",
+      "Provisioned by sovereign-node install flow.",
+      "Managed by Sovereign Node installer.",
+      "",
+      "This agent is intended for conversational node operations in Matrix.",
+    ].join("\n");
+
+    const agentsDoc = [
+      "# Node Operator",
+      "",
+      "You are the `node-operator` bot for Sovereign Node.",
+      "",
+      "Primary responsibilities:",
+      "- Keep the node healthy and operational",
+      "- Diagnose runtime problems quickly",
+      "- Create, update, and delete managed agents on operator request",
+      "",
+      "Execution policy:",
+      "- Use `sovereign-node` CLI for all node operations",
+      "- Prefer read-only diagnostics before changing state",
+      "- Ask for explicit confirmation before destructive actions",
+      "- Keep command output summaries short and actionable",
+      "- Never reveal secrets unless explicitly requested by the operator",
+      "",
+      "Preferred command flow:",
+      "1. `sovereign-node status --json`",
+      "2. `sovereign-node doctor --json`",
+      "3. If requested: `sovereign-node agents <subcommand> ... --json`",
+      "",
+      `Context: matrix room ${runtimeConfig.matrix.alertRoom.roomId}`,
+      `Context: homeserver ${runtimeConfig.matrix.publicBaseUrl}`,
+    ].join("\n");
+
+    const toolsDoc = [
+      "# Tooling",
+      "",
+      "Use these commands for node operations:",
+      "- `sovereign-node status --json`",
+      "- `sovereign-node doctor --json`",
+      "- `sovereign-node agents list --json`",
+      "- `sovereign-node agents create <id> --workspace <dir> --json`",
+      "- `sovereign-node agents update <id> --workspace <dir> --json`",
+      "- `sovereign-node agents delete <id> --json`",
+      "- `sovereign-node test-alert --json`",
+      "",
+      "If a command fails, include the exact error and propose the minimal next fix.",
+    ].join("\n");
+
+    const skillDoc = [
+      "# node-operator-core",
+      "",
+      "Use this skill whenever a user asks to operate or repair Sovereign Node.",
+      "",
+      "Checklist:",
+      "1. Inspect health first (`status`, `doctor`)",
+      "2. Confirm intended action",
+      "3. Execute one atomic CLI command",
+      "4. Report result + next step",
+      "",
+      "Agent CRUD mapping:",
+      "- Create: `sovereign-node agents create ...`",
+      "- Read/List: `sovereign-node agents list --json`",
+      "- Update: `sovereign-node agents update ...`",
+      "- Delete: `sovereign-node agents delete ...`",
+    ].join("\n");
+
+    await mkdir(skillDir, { recursive: true });
+    await writeFile(readmePath, `${readme}\n`, "utf8");
+    await writeFile(agentsPath, `${agentsDoc}\n`, "utf8");
+    await writeFile(toolsPath, `${toolsDoc}\n`, "utf8");
+    await writeFile(skillPath, `${skillDoc}\n`, "utf8");
+    await this.applyRuntimeOwnership(skillDir);
+    await this.applyRuntimeOwnership(readmePath);
+    await this.applyRuntimeOwnership(agentsPath);
+    await this.applyRuntimeOwnership(toolsPath);
+    await this.applyRuntimeOwnership(skillPath);
   }
 
   private async tryReadRuntimeConfig(): Promise<RuntimeConfig | null> {
@@ -1582,7 +2200,7 @@ export class RealInstallerService implements InstallerService {
             };
           }
 
-          const runtimeConfig = await this.writeSovereignConfig({
+          let runtimeConfig = await this.writeSovereignConfig({
             req: stepState.effectiveRequest ?? req,
             matrixProvision: stepState.matrixProvision,
             matrixAccounts: stepState.matrixAccounts,
@@ -1591,6 +2209,29 @@ export class RealInstallerService implements InstallerService {
               ? {}
               : { relayEnrollment: stepState.relayEnrollment }),
           });
+          await this.ensureManagedAgentWorkspace({
+            id: NODE_OPERATOR_AGENT_ID,
+            workspace: join(this.paths.stateDir, NODE_OPERATOR_AGENT_ID, "workspace"),
+            runtimeConfig,
+          });
+          try {
+            const ensuredNodeOperator = await this.ensureManagedAgentMatrixIdentity(
+              runtimeConfig,
+              NODE_OPERATOR_AGENT_ID,
+            );
+            runtimeConfig = ensuredNodeOperator.runtimeConfig;
+            if (ensuredNodeOperator.changed) {
+              await this.persistManagedAgentTopologyDocument(runtimeConfig);
+            }
+          } catch (error) {
+            this.logger.warn(
+              {
+                agentId: NODE_OPERATOR_AGENT_ID,
+                error: describeError(error),
+              },
+              "Node Operator Matrix identity provisioning failed during install; continuing with runtime configure",
+            );
+          }
           await this.writeOpenClawRuntimeArtifacts(runtimeConfig);
           this.setManagedOpenClawEnv(runtimeConfig);
           if (runtimeConfig.relay?.enabled === true) {
@@ -2500,14 +3141,30 @@ export class RealInstallerService implements InstallerService {
         };
       }
 
-      const agentProbe = await this.inspectOpenClawListContains(["agents", "list"], expectedAgentId);
-      if (agentProbe.verified && !agentProbe.present) {
+      const requiredAgentIds = Array.from(
+        new Set([
+          expectedAgentId,
+          ...ensureCoreManagedAgents(runtimeConfig.openclawProfile.agents, this.paths.stateDir).map(
+            (entry) => entry.id,
+          ),
+        ]),
+      );
+      const missingAgentIds: string[] = [];
+      let verifiedAgentProbe = false;
+      for (const agentId of requiredAgentIds) {
+        const agentProbe = await this.inspectOpenClawListContains(["agents", "list"], agentId);
+        verifiedAgentProbe = verifiedAgentProbe || agentProbe.verified;
+        if (agentProbe.verified && !agentProbe.present) {
+          missingAgentIds.push(agentId);
+        }
+      }
+      if (verifiedAgentProbe && missingAgentIds.length > 0) {
         throw {
           code: "SMOKE_CHECKS_FAILED",
-          message: "Mail Sentinel agent is missing from OpenClaw runtime",
+          message: "One or more managed agents are missing from OpenClaw runtime",
           retryable: true,
           details: {
-            agentId: expectedAgentId,
+            missingAgentIds,
           },
         };
       }
@@ -2798,6 +3455,33 @@ export class RealInstallerService implements InstallerService {
         : await this.writeSecretFile("relay-tunnel-token", input.relayEnrollment.tunnel.token);
     const serviceIdentity = this.getConfiguredServiceIdentity();
     const openclawPaths = this.getOpenClawRuntimePaths();
+    const previousRuntimeConfig = await this.tryReadRuntimeConfig();
+    const preservedUserAgents =
+      previousRuntimeConfig?.openclawProfile.agents.filter(
+        (entry) => !RESERVED_AGENT_IDS.has(entry.id),
+      ) ?? [];
+    const managedAgents = ensureCoreManagedAgents(
+      [
+        {
+          id: MAIL_SENTINEL_AGENT_ID,
+          workspace: join(this.paths.stateDir, MAIL_SENTINEL_AGENT_ID, "workspace"),
+          matrix: {
+            localpart: input.matrixAccounts.bot.localpart,
+            userId: input.matrixAccounts.bot.userId,
+            ...(input.matrixAccounts.bot.passwordSecretRef === undefined
+              ? {}
+              : { passwordSecretRef: input.matrixAccounts.bot.passwordSecretRef }),
+            accessTokenSecretRef: botTokenSecretRef,
+          },
+        },
+        {
+          id: NODE_OPERATOR_AGENT_ID,
+          workspace: join(this.paths.stateDir, NODE_OPERATOR_AGENT_ID, "workspace"),
+        },
+        ...preservedUserAgents,
+      ],
+      this.paths.stateDir,
+    );
     const relayRuntimeConfig =
       input.relayEnrollment === undefined
         ? undefined
@@ -2842,12 +3526,7 @@ export class RealInstallerService implements InstallerService {
         plugins: {
           allow: imapConfig.status === "configured" ? ["matrix", "imap-readonly"] : ["matrix"],
         },
-        agents: [
-          {
-            id: MAIL_SENTINEL_AGENT_ID,
-            workspace: join(this.paths.stateDir, MAIL_SENTINEL_AGENT_ID, "workspace"),
-          },
-        ],
+        agents: managedAgents,
         cron: {
           id: MAIL_SENTINEL_CRON_ID,
           every: input.req.mailSentinel?.pollInterval ?? "5m",
@@ -3018,6 +3697,10 @@ export class RealInstallerService implements InstallerService {
     const openclawPaths = this.getOpenClawRuntimePaths();
     const openrouterApiKey = await this.resolveSecretRef(runtimeConfig.openrouter.apiKeySecretRef);
     const imapConfigured = runtimeConfig.imap.status === "configured";
+    const managedAgents = ensureCoreManagedAgents(
+      runtimeConfig.openclawProfile.agents,
+      this.paths.stateDir,
+    );
     const pluginEntries: Record<string, unknown> = {
       matrix: {
         enabled: true,
@@ -3065,14 +3748,10 @@ export class RealInstallerService implements InstallerService {
         defaults: {
           model: runtimeConfig.openrouter.model,
         },
-        list: [
-          {
-            id: runtimeConfig.openclawProfile.agents[0]?.id ?? MAIL_SENTINEL_AGENT_ID,
-            workspace:
-              runtimeConfig.openclawProfile.agents[0]?.workspace
-              ?? join(this.paths.stateDir, MAIL_SENTINEL_AGENT_ID, "workspace"),
-          },
-        ],
+        list: managedAgents.map((entry) => ({
+          id: entry.id,
+          workspace: entry.workspace,
+        })),
       },
       cron: {
         enabled: true,
@@ -3477,14 +4156,42 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
   const openclawPlugins = isRecord(openclawProfile.plugins) ? openclawProfile.plugins : {};
   const openclawAgents = Array.isArray(openclawProfile.agents)
     ? openclawProfile.agents
-        .filter(
-          (agent): agent is { id: string; workspace: string } =>
-            isRecord(agent)
-            && typeof agent.id === "string"
-            && agent.id.length > 0
-            && typeof agent.workspace === "string"
-            && agent.workspace.length > 0,
-        )
+        .flatMap((agent): RuntimeAgentEntry[] => {
+          if (
+            !isRecord(agent)
+            || typeof agent.id !== "string"
+            || agent.id.length === 0
+            || typeof agent.workspace !== "string"
+            || agent.workspace.length === 0
+          ) {
+            return [];
+          }
+          const matrixIdentity = isRecord(agent.matrix)
+            && typeof agent.matrix.localpart === "string"
+            && agent.matrix.localpart.length > 0
+            && typeof agent.matrix.userId === "string"
+            && agent.matrix.userId.length > 0
+              ? {
+                  localpart: agent.matrix.localpart,
+                  userId: agent.matrix.userId,
+                  ...(typeof agent.matrix.passwordSecretRef === "string"
+                    && agent.matrix.passwordSecretRef.length > 0
+                    ? { passwordSecretRef: agent.matrix.passwordSecretRef }
+                    : {}),
+                  ...(typeof agent.matrix.accessTokenSecretRef === "string"
+                    && agent.matrix.accessTokenSecretRef.length > 0
+                    ? { accessTokenSecretRef: agent.matrix.accessTokenSecretRef }
+                    : {}),
+                }
+              : undefined;
+          return [
+            {
+              id: agent.id,
+              workspace: agent.workspace,
+              ...(matrixIdentity === undefined ? {} : { matrix: matrixIdentity }),
+            },
+          ];
+        })
     : [
         {
           id: MAIL_SENTINEL_AGENT_ID,
@@ -3697,6 +4404,110 @@ const sanitizeExpectedMatrixLocalpart = (value: string, fallback: string): strin
     .replace(/[^a-z0-9._=+\-/]/g, "_")
     .replace(/^_+|_+$/g, "");
   return normalized.length > 0 ? normalized : fallback;
+};
+
+const sanitizeManagedAgentId = (value: string): string => {
+  const normalized = value.trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9._-]{1,62}$/.test(normalized)) {
+    throw {
+      code: "AGENT_ID_INVALID",
+      message: "Agent id must match ^[a-z0-9][a-z0-9._-]{1,62}$",
+      retryable: false,
+      details: {
+        input: value,
+      },
+    };
+  }
+  return normalized;
+};
+
+const sanitizeManagedWorkspace = (value: string | undefined, fallback: string): string => {
+  const candidate = value?.trim();
+  if (candidate === undefined || candidate.length === 0) {
+    return fallback;
+  }
+  return candidate;
+};
+
+const sanitizeManagedAgentLocalpart = (value: string | undefined, fallback: string): string => {
+  const candidate = value?.trim().toLowerCase() ?? fallback;
+  const normalized = candidate
+    .replace(/[^a-z0-9._=+\-/]/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return normalized.length > 0 ? normalized : fallback;
+};
+
+const sanitizeMatrixLocalpartFromAgentId = (agentId: string): string =>
+  sanitizeManagedAgentLocalpart(agentId, "agent-bot");
+
+const generateAgentPassword = (): string =>
+  randomBytes(24).toString("base64url");
+
+const areMatrixIdentitiesEqual = (
+  left:
+    | {
+      localpart: string;
+      userId: string;
+      passwordSecretRef?: string;
+      accessTokenSecretRef?: string;
+    }
+    | undefined,
+  right:
+    | {
+      localpart: string;
+      userId: string;
+      passwordSecretRef?: string;
+      accessTokenSecretRef?: string;
+    }
+    | undefined,
+): boolean =>
+  left?.localpart === right?.localpart
+  && left?.userId === right?.userId
+  && left?.passwordSecretRef === right?.passwordSecretRef
+  && left?.accessTokenSecretRef === right?.accessTokenSecretRef;
+
+const isAlreadyJoinedOrInvitedRoomError = (status: number, body: unknown): boolean => {
+  if (status !== 400 && status !== 403 && status !== 409) {
+    return false;
+  }
+  const text = summarizeUnknown(body).toLowerCase();
+  return /already in the room|is already in the room|already joined|already invited/.test(text);
+};
+
+const ensureCoreManagedAgents = (
+  agents: RuntimeAgentEntry[],
+  stateDir: string,
+): RuntimeAgentEntry[] => {
+  const ordered: RuntimeAgentEntry[] = [
+    ...agents,
+    {
+      id: MAIL_SENTINEL_AGENT_ID,
+      workspace: join(stateDir, MAIL_SENTINEL_AGENT_ID, "workspace"),
+    },
+    {
+      id: NODE_OPERATOR_AGENT_ID,
+      workspace: join(stateDir, NODE_OPERATOR_AGENT_ID, "workspace"),
+    },
+  ];
+  const byId = new Map<string, RuntimeAgentEntry>();
+  for (const entry of ordered) {
+    if (entry.id.trim().length === 0 || entry.workspace.trim().length === 0) {
+      continue;
+    }
+    byId.set(entry.id, {
+      id: entry.id,
+      workspace: entry.workspace,
+      ...(entry.matrix === undefined ? {} : { matrix: entry.matrix }),
+    });
+  }
+  const coreOrder = [MAIL_SENTINEL_AGENT_ID, NODE_OPERATOR_AGENT_ID];
+  const orderedIds = [
+    ...coreOrder.filter((id) => byId.has(id)),
+    ...Array.from(byId.keys()).filter((id) => !coreOrder.includes(id)),
+  ];
+  return orderedIds
+    .map((id) => byId.get(id))
+    .filter((entry): entry is RuntimeAgentEntry => entry !== undefined);
 };
 
 const isRateLimitedMatrixLoginFailure = (error: unknown): boolean => {

@@ -20,6 +20,28 @@ import type {
   TestMatrixRequest,
 } from "../contracts/api.js";
 
+export type ManagedAgent = {
+  id: string;
+  workspace: string;
+  matrixUserId?: string;
+};
+
+export type ManagedAgentListResult = {
+  agents: ManagedAgent[];
+};
+
+export type ManagedAgentUpsertResult = {
+  agent: ManagedAgent;
+  changed: boolean;
+  restartRequiredServices: string[];
+};
+
+export type ManagedAgentDeleteResult = {
+  id: string;
+  deleted: boolean;
+  restartRequiredServices: string[];
+};
+
 export interface InstallerService {
   preflight(input?: PreflightRequest): Promise<PreflightResult>;
   testImap(req: TestImapRequest): Promise<TestImapResult>;
@@ -32,4 +54,8 @@ export interface InstallerService {
   reconfigureImap(req: ReconfigureImapRequest): Promise<ReconfigureResult>;
   reconfigureMatrix(req: ReconfigureMatrixRequest): Promise<ReconfigureResult>;
   reconfigureOpenrouter(req: ReconfigureOpenrouterRequest): Promise<ReconfigureResult>;
+  listManagedAgents(): Promise<ManagedAgentListResult>;
+  createManagedAgent(req: { id: string; workspace?: string }): Promise<ManagedAgentUpsertResult>;
+  updateManagedAgent(req: { id: string; workspace?: string }): Promise<ManagedAgentUpsertResult>;
+  deleteManagedAgent(req: { id: string }): Promise<ManagedAgentDeleteResult>;
 }

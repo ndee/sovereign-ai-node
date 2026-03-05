@@ -23,7 +23,12 @@ import type {
   TestMatrixRequest,
 } from "../contracts/api.js";
 import type { Logger } from "../logging/logger.js";
-import type { InstallerService } from "./service.js";
+import type {
+  InstallerService,
+  ManagedAgentDeleteResult,
+  ManagedAgentListResult,
+  ManagedAgentUpsertResult,
+} from "./service.js";
 
 const now = () => new Date().toISOString();
 
@@ -248,6 +253,47 @@ export class StubInstallerService implements InstallerService {
       changed: [],
       restartRequiredServices: [],
       validation: [check("openrouter-config", "Reconfigure OpenRouter scaffold only", "warn")],
+    };
+  }
+
+  async listManagedAgents(): Promise<ManagedAgentListResult> {
+    return {
+      agents: [
+        {
+          id: "mail-sentinel",
+          workspace: "/var/lib/sovereign-node/mail-sentinel/workspace",
+        },
+      ],
+    };
+  }
+
+  async createManagedAgent(req: { id: string; workspace?: string }): Promise<ManagedAgentUpsertResult> {
+    return {
+      agent: {
+        id: req.id,
+        workspace: req.workspace ?? `/var/lib/sovereign-node/${req.id}/workspace`,
+      },
+      changed: true,
+      restartRequiredServices: ["openclaw-gateway"],
+    };
+  }
+
+  async updateManagedAgent(req: { id: string; workspace?: string }): Promise<ManagedAgentUpsertResult> {
+    return {
+      agent: {
+        id: req.id,
+        workspace: req.workspace ?? `/var/lib/sovereign-node/${req.id}/workspace`,
+      },
+      changed: true,
+      restartRequiredServices: ["openclaw-gateway"],
+    };
+  }
+
+  async deleteManagedAgent(req: { id: string }): Promise<ManagedAgentDeleteResult> {
+    return {
+      id: req.id,
+      deleted: true,
+      restartRequiredServices: ["openclaw-gateway"],
     };
   }
 }
