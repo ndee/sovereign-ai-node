@@ -8,6 +8,8 @@ const managedAgentSchema = z.object({
   id: z.string().min(1),
   workspace: z.string().min(1),
   matrixUserId: z.string().min(1).optional(),
+  templateRef: z.string().min(1).optional(),
+  toolInstanceIds: z.array(z.string().min(1)).optional(),
 });
 
 const listManagedAgentsResultSchema = z.object({
@@ -28,6 +30,8 @@ const deleteManagedAgentResultSchema = z.object({
 
 type AgentOptions = {
   workspace?: string;
+  template?: string;
+  toolInstance?: string[];
   json?: boolean;
 };
 
@@ -56,6 +60,12 @@ export const registerAgentsCommand = (program: Command, app: AppContainer): void
     .description("Create a managed agent")
     .argument("<id>", "Agent ID")
     .option("--workspace <dir>", "Workspace directory")
+    .option("--template <ref>", "Agent template ref (<id>@<version>)")
+    .option(
+      "--tool-instance <id>",
+      "Bind tool instance id (repeatable)",
+      (value, prev: string[] = []) => [...prev, value],
+    )
     .option("--json", "Emit JSON output")
     .action(async (id: string, opts: AgentOptions) => {
       const command = "agents create";
@@ -63,6 +73,8 @@ export const registerAgentsCommand = (program: Command, app: AppContainer): void
         const result = await app.installerService.createManagedAgent({
           id,
           ...(opts.workspace === undefined ? {} : { workspace: opts.workspace }),
+          ...(opts.template === undefined ? {} : { templateRef: opts.template }),
+          ...(opts.toolInstance === undefined ? {} : { toolInstanceIds: opts.toolInstance }),
         });
         writeCliSuccess(command, result, upsertManagedAgentResultSchema, Boolean(opts.json));
       } catch (error) {
@@ -76,6 +88,12 @@ export const registerAgentsCommand = (program: Command, app: AppContainer): void
     .description("Update a managed agent")
     .argument("<id>", "Agent ID")
     .option("--workspace <dir>", "Workspace directory")
+    .option("--template <ref>", "Agent template ref (<id>@<version>)")
+    .option(
+      "--tool-instance <id>",
+      "Bind tool instance id (repeatable)",
+      (value, prev: string[] = []) => [...prev, value],
+    )
     .option("--json", "Emit JSON output")
     .action(async (id: string, opts: AgentOptions) => {
       const command = "agents update";
@@ -83,6 +101,8 @@ export const registerAgentsCommand = (program: Command, app: AppContainer): void
         const result = await app.installerService.updateManagedAgent({
           id,
           ...(opts.workspace === undefined ? {} : { workspace: opts.workspace }),
+          ...(opts.template === undefined ? {} : { templateRef: opts.template }),
+          ...(opts.toolInstance === undefined ? {} : { toolInstanceIds: opts.toolInstance }),
         });
         writeCliSuccess(command, result, upsertManagedAgentResultSchema, Boolean(opts.json));
       } catch (error) {

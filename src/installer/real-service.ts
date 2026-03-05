@@ -52,11 +52,29 @@ import {
   type InstallStep,
   type JobRunnerSnapshot,
 } from "./job-runner.js";
+import {
+  CORE_TEMPLATE_MANIFESTS,
+  CORE_TRUSTED_TEMPLATE_KEYS,
+  findCoreTemplateManifest,
+  formatTemplateRef,
+  parseTemplateRef,
+  type AgentTemplateManifest,
+  type SovereignTemplateManifest,
+  type ToolTemplateManifest,
+  verifySignedTemplateManifest,
+} from "../templates/catalog.js";
 import type {
   InstallerService,
+  ManagedAgent,
   ManagedAgentDeleteResult,
   ManagedAgentListResult,
   ManagedAgentUpsertResult,
+  SovereignTemplateKind,
+  SovereignTemplateInstallResult,
+  SovereignTemplateListResult,
+  SovereignToolInstanceDeleteResult,
+  SovereignToolInstanceListResult,
+  SovereignToolInstanceUpsertResult,
 } from "./service.js";
 import { StubInstallerService } from "./stub-service.js";
 
@@ -131,6 +149,8 @@ type RuntimeConfig = {
     agents: Array<{
       id: string;
       workspace: string;
+      templateRef?: string;
+      toolInstanceIds?: string[];
       matrix?: {
         localpart: string;
         userId: string;
@@ -176,6 +196,31 @@ type RuntimeConfig = {
       roomId: string;
       roomName: string;
     };
+  };
+  templates: {
+    installed: Array<{
+      kind: SovereignTemplateKind;
+      id: string;
+      version: string;
+      description: string;
+      trusted: boolean;
+      pinned: boolean;
+      keyId: string;
+      manifestSha256: string;
+      installedAt: string;
+      source: "core";
+    }>;
+  };
+  sovereignTools: {
+    instances: Array<{
+      id: string;
+      templateRef: string;
+      capabilities: string[];
+      config: Record<string, string>;
+      secretRefs: Record<string, string>;
+      createdAt: string;
+      updatedAt: string;
+    }>;
   };
   relay?: RelayRuntimeConfig;
 };
@@ -809,17 +854,459 @@ export class RealInstallerService implements InstallerService {
   async listManagedAgents(): Promise<ManagedAgentListResult> {
     const runtimeConfig = await this.readRuntimeConfig();
     return {
-      agents: runtimeConfig.openclawProfile.agents.map((entry) => ({
-        id: entry.id,
-        workspace: entry.workspace,
-        ...(entry.matrix?.userId === undefined ? {} : { matrixUserId: entry.matrix.userId }),
-      })),
+      agents: runtimeConfig.openclawProfile.agents.map((entry) =>
+        this.toManagedAgentOutput(entry)),
     };
+  }
+
+  async listSovereignTemplates(): Promise<SovereignTemplateListResult> {
+    const runtimeConfig = await this.readRuntimeConfig();
+    const installedByRef = new Map(
+      runtimeConfig.templates.installed.map((entry) => [
+        formatTemplateRef(entry.id, entry.version),
+        entry,
+      ]),
+    );
+    const templates = CORE_TEMPLATE_MANIFESTS.map((manifest) => {
+      const verified = verifySignedTemplateManifest(manifest, CORE_TRUSTED_TEMPLATE_KEYS);
+      const ref = formatTemplateRef(manifest.id, manifest.version);
+      const installed = installedByRef.get(ref);
+      const kind: SovereignTemplateKind =
+        manifest.kind === "sovereign-agent-template" ? "agent" : "tool";
+      return {
+        kind,
+        id: manifest.id,
+        version: manifest.version,
+        description: manifest.description,
+        trusted: verified.trusted,
+        installed: installed !== undefined,
+        pinned: installed?.pinned ?? false,
+        keyId: verified.keyId,
+        manifestSha256: verified.manifestSha256,
+      };
+    }).sort((left, right) => `${left.kind}:${left.id}:${left.version}`.localeCompare(
+      `${right.kind}:${right.id}:${right.version}`,
+    ));
+    return { templates };
+  }
+
+  async installSovereignTemplate(req: {
+    ref: string;
+  }): Promise<SovereignTemplateInstallResult> {
+    const manifest = findCoreTemplateManifest(req.ref);
+    if (manifest === undefined) {
+      throw {
+        code: "TEMPLATE_NOT_FOUND",
+        message: `Template '${req.ref}' was not found in the trusted core catalog`,
+        retryable: false,
+      };
+    }
+    const verified = verifySignedTemplateManifest(manifest, CORE_TRUSTED_TEMPLATE_KEYS);
+    const runtimeConfig = await this.readRuntimeConfig();
+    const ref = formatTemplateRef(manifest.id, manifest.version);
+    const existing = runtimeConfig.templates.installed.find(
+      (entry) => formatTemplateRef(entry.id, entry.version) === ref,
+    );
+    if (existing !== undefined) {
+      return {
+        template: {
+          kind: existing.kind,
+          id: existing.id,
+          version: existing.version,
+          description: existing.description,
+          trusted: existing.trusted,
+          installed: true,
+          pinned: existing.pinned,
+          keyId: existing.keyId,
+          manifestSha256: existing.manifestSha256,
+        },
+        changed: false,
+      };
+    }
+
+    runtimeConfig.templates.installed = [
+      ...runtimeConfig.templates.installed,
+      {
+        kind: manifest.kind === "sovereign-agent-template" ? "agent" : "tool",
+        id: manifest.id,
+        version: manifest.version,
+        description: manifest.description,
+        trusted: true,
+        pinned: true,
+        keyId: verified.keyId,
+        manifestSha256: verified.manifestSha256,
+        installedAt: now(),
+        source: "core",
+      },
+    ];
+    await this.persistManagedAgentTopologyDocument(runtimeConfig);
+    return {
+      template: {
+        kind: manifest.kind === "sovereign-agent-template" ? "agent" : "tool",
+        id: manifest.id,
+        version: manifest.version,
+        description: manifest.description,
+        trusted: true,
+        installed: true,
+        pinned: true,
+        keyId: verified.keyId,
+        manifestSha256: verified.manifestSha256,
+      },
+      changed: true,
+    };
+  }
+
+  async listSovereignToolInstances(): Promise<SovereignToolInstanceListResult> {
+    const runtimeConfig = await this.readRuntimeConfig();
+    return {
+      tools: runtimeConfig.sovereignTools.instances
+        .map((entry) => ({
+          id: entry.id,
+          templateRef: entry.templateRef,
+          capabilities: [...entry.capabilities],
+          config: { ...entry.config },
+          secretRefs: { ...entry.secretRefs },
+        }))
+        .sort((left, right) => left.id.localeCompare(right.id)),
+    };
+  }
+
+  async createSovereignToolInstance(req: {
+    id: string;
+    templateRef: string;
+    config?: Record<string, string>;
+    secretRefs?: Record<string, string>;
+  }): Promise<SovereignToolInstanceUpsertResult> {
+    return this.upsertSovereignToolInstance(req, "create");
+  }
+
+  async updateSovereignToolInstance(req: {
+    id: string;
+    templateRef?: string;
+    config?: Record<string, string>;
+    secretRefs?: Record<string, string>;
+  }): Promise<SovereignToolInstanceUpsertResult> {
+    return this.upsertSovereignToolInstance(req, "update");
+  }
+
+  async deleteSovereignToolInstance(req: { id: string }): Promise<SovereignToolInstanceDeleteResult> {
+    const runtimeConfig = await this.readRuntimeConfig();
+    const id = sanitizeToolInstanceId(req.id);
+    const existing = runtimeConfig.sovereignTools.instances.find((entry) => entry.id === id);
+    if (existing === undefined) {
+      return {
+        id,
+        deleted: false,
+      };
+    }
+    const referencedBy = runtimeConfig.openclawProfile.agents
+      .filter((entry) => (entry.toolInstanceIds ?? []).includes(id))
+      .map((entry) => entry.id);
+    if (referencedBy.length > 0) {
+      throw {
+        code: "TOOL_INSTANCE_IN_USE",
+        message: `Tool instance '${id}' is still referenced by one or more agents`,
+        retryable: false,
+        details: {
+          toolInstanceId: id,
+          referencedBy,
+        },
+      };
+    }
+
+    runtimeConfig.sovereignTools.instances = runtimeConfig.sovereignTools.instances.filter(
+      (entry) => entry.id !== id,
+    );
+    await this.persistManagedAgentTopologyDocument(runtimeConfig);
+    return {
+      id,
+      deleted: true,
+    };
+  }
+
+  private async upsertSovereignToolInstance(
+    req: {
+      id: string;
+      templateRef?: string;
+      config?: Record<string, string>;
+      secretRefs?: Record<string, string>;
+    },
+    mode: "create" | "update",
+  ): Promise<SovereignToolInstanceUpsertResult> {
+    const runtimeConfig = await this.readRuntimeConfig();
+    const id = sanitizeToolInstanceId(req.id);
+    const existing = runtimeConfig.sovereignTools.instances.find((entry) => entry.id === id);
+    if (mode === "update" && existing === undefined) {
+      throw {
+        code: "TOOL_INSTANCE_NOT_FOUND",
+        message: `Sovereign tool instance '${id}' does not exist`,
+        retryable: false,
+      };
+    }
+    const nextTemplateRef = sanitizeOptionalTemplateRef(req.templateRef) ?? existing?.templateRef;
+    if (nextTemplateRef === undefined) {
+      throw {
+        code: "TOOL_TEMPLATE_REQUIRED",
+        message: "Tool template ref is required (example: imap-readonly@1.0.0)",
+        retryable: false,
+      };
+    }
+    const toolTemplate = this.resolveInstalledToolTemplate(runtimeConfig, nextTemplateRef);
+    const nextConfig = normalizeStringRecord(req.config ?? existing?.config ?? {});
+    const nextSecretRefs = normalizeStringRecord(req.secretRefs ?? existing?.secretRefs ?? {});
+    this.validateToolInstanceBindings({
+      template: toolTemplate,
+      config: nextConfig,
+      secretRefs: nextSecretRefs,
+    });
+    const nextTool = {
+      id,
+      templateRef: nextTemplateRef,
+      capabilities: [...toolTemplate.capabilities],
+      config: nextConfig,
+      secretRefs: nextSecretRefs,
+      createdAt: existing?.createdAt ?? now(),
+      updatedAt: now(),
+    };
+    const changed = existing === undefined
+      || existing.templateRef !== nextTool.templateRef
+      || !areStringListsEqual(existing.capabilities, nextTool.capabilities)
+      || !areStringRecordsEqual(existing.config, nextTool.config)
+      || !areStringRecordsEqual(existing.secretRefs, nextTool.secretRefs);
+    if (!changed) {
+      return {
+        tool: {
+          id: existing.id,
+          templateRef: existing.templateRef,
+          capabilities: [...existing.capabilities],
+          config: { ...existing.config },
+          secretRefs: { ...existing.secretRefs },
+        },
+        changed: false,
+      };
+    }
+
+    runtimeConfig.sovereignTools.instances = [
+      ...runtimeConfig.sovereignTools.instances.filter((entry) => entry.id !== id),
+      nextTool,
+    ].sort((left, right) => left.id.localeCompare(right.id));
+    await this.persistManagedAgentTopologyDocument(runtimeConfig);
+
+    return {
+      tool: {
+        id: nextTool.id,
+        templateRef: nextTool.templateRef,
+        capabilities: [...nextTool.capabilities],
+        config: { ...nextTool.config },
+        secretRefs: { ...nextTool.secretRefs },
+      },
+      changed: true,
+    };
+  }
+
+  private toManagedAgentOutput(entry: RuntimeAgentEntry): ManagedAgent {
+    return {
+      id: entry.id,
+      workspace: entry.workspace,
+      ...(entry.matrix?.userId === undefined ? {} : { matrixUserId: entry.matrix.userId }),
+      ...(entry.templateRef === undefined ? {} : { templateRef: entry.templateRef }),
+      ...(entry.toolInstanceIds === undefined || entry.toolInstanceIds.length === 0
+        ? {}
+        : { toolInstanceIds: [...entry.toolInstanceIds] }),
+    };
+  }
+
+  private resolveInstalledTemplate(
+    runtimeConfig: RuntimeConfig,
+    ref: string,
+    expectedKind: SovereignTemplateKind,
+  ): SovereignTemplateManifest {
+    const parsed = parseTemplateRef(ref);
+    const installed = runtimeConfig.templates.installed.find(
+      (entry) => entry.id === parsed.id && entry.version === parsed.version,
+    );
+    if (installed === undefined) {
+      throw {
+        code: "TEMPLATE_NOT_INSTALLED",
+        message: `Template '${ref}' is not installed`,
+        retryable: false,
+      };
+    }
+    if (installed.kind !== expectedKind) {
+      throw {
+        code: "TEMPLATE_KIND_MISMATCH",
+        message: `Template '${ref}' is not a ${expectedKind} template`,
+        retryable: false,
+      };
+    }
+    if (!installed.pinned) {
+      throw {
+        code: "TEMPLATE_NOT_PINNED",
+        message: `Template '${ref}' must be pinned before use`,
+        retryable: false,
+      };
+    }
+    const manifest = CORE_TEMPLATE_MANIFESTS.find(
+      (entry) => entry.id === parsed.id && entry.version === parsed.version,
+    );
+    if (manifest === undefined) {
+      throw {
+        code: "TEMPLATE_MANIFEST_UNAVAILABLE",
+        message: `Trusted manifest for '${ref}' is unavailable`,
+        retryable: false,
+      };
+    }
+    const verified = verifySignedTemplateManifest(manifest, CORE_TRUSTED_TEMPLATE_KEYS);
+    if (verified.manifestSha256 !== installed.manifestSha256 || verified.keyId !== installed.keyId) {
+      throw {
+        code: "TEMPLATE_PIN_MISMATCH",
+        message: `Pinned metadata does not match trusted manifest for '${ref}'`,
+        retryable: false,
+      };
+    }
+    return manifest;
+  }
+
+  private resolveInstalledToolTemplate(
+    runtimeConfig: RuntimeConfig,
+    ref: string,
+  ): ToolTemplateManifest {
+    const manifest = this.resolveInstalledTemplate(runtimeConfig, ref, "tool");
+    if (manifest.kind !== "sovereign-tool-template") {
+      throw {
+        code: "TEMPLATE_KIND_MISMATCH",
+        message: `Template '${ref}' is not a tool template`,
+        retryable: false,
+      };
+    }
+    return manifest;
+  }
+
+  private resolveInstalledAgentTemplate(
+    runtimeConfig: RuntimeConfig,
+    ref: string,
+  ): AgentTemplateManifest {
+    const manifest = this.resolveInstalledTemplate(runtimeConfig, ref, "agent");
+    if (manifest.kind !== "sovereign-agent-template") {
+      throw {
+        code: "TEMPLATE_KIND_MISMATCH",
+        message: `Template '${ref}' is not an agent template`,
+        retryable: false,
+      };
+    }
+    return manifest;
+  }
+
+  private validateToolInstanceBindings(input: {
+    template: ToolTemplateManifest;
+    config: Record<string, string>;
+    secretRefs: Record<string, string>;
+  }): void {
+    const missingConfigKeys = input.template.requiredConfigKeys.filter(
+      (key) => input.config[key] === undefined || input.config[key].trim().length === 0,
+    );
+    const missingSecretRefs = input.template.requiredSecretRefs.filter(
+      (key) => input.secretRefs[key] === undefined || input.secretRefs[key].trim().length === 0,
+    );
+    if (missingConfigKeys.length > 0 || missingSecretRefs.length > 0) {
+      throw {
+        code: "TOOL_INSTANCE_BINDINGS_INVALID",
+        message: "Tool instance is missing required config or secret refs",
+        retryable: false,
+        details: {
+          templateRef: formatTemplateRef(input.template.id, input.template.version),
+          missingConfigKeys,
+          missingSecretRefs,
+        },
+      };
+    }
+  }
+
+  private validateAgentTemplateAndTools(input: {
+    runtimeConfig: RuntimeConfig;
+    templateRef?: string;
+    toolInstanceIds: string[];
+  }): { templateRef: string | undefined; toolInstanceIds: string[] } {
+    const toolInstanceIds = input.toolInstanceIds;
+    const unknownToolInstanceIds = toolInstanceIds.filter(
+      (id) => !input.runtimeConfig.sovereignTools.instances.some((entry) => entry.id === id),
+    );
+    if (unknownToolInstanceIds.length > 0) {
+      throw {
+        code: "TOOL_INSTANCE_NOT_FOUND",
+        message: "One or more tool instance ids do not exist",
+        retryable: false,
+        details: {
+          unknownToolInstanceIds,
+        },
+      };
+    }
+
+    if (input.templateRef === undefined) {
+      return {
+        templateRef: undefined,
+        toolInstanceIds,
+      };
+    }
+
+    const template = this.resolveInstalledAgentTemplate(input.runtimeConfig, input.templateRef);
+    const boundRefs = new Set(
+      toolInstanceIds.flatMap((id) => {
+        const tool = input.runtimeConfig.sovereignTools.instances.find((entry) => entry.id === id);
+        return tool === undefined ? [] : [tool.templateRef];
+      }),
+    );
+    const requiredRefs = template.requiredToolTemplates.map((entry) =>
+      formatTemplateRef(entry.id, entry.version));
+    const missingRequiredRefs = requiredRefs.filter((ref) => !boundRefs.has(ref));
+    const allowedRefs = new Set(
+      [
+        ...requiredRefs,
+        ...template.optionalToolTemplates.map((entry) => formatTemplateRef(entry.id, entry.version)),
+      ],
+    );
+    const disallowedBindings = Array.from(boundRefs).filter((ref) => !allowedRefs.has(ref));
+    if (missingRequiredRefs.length > 0 || disallowedBindings.length > 0) {
+      throw {
+        code: "AGENT_TEMPLATE_TOOL_BINDINGS_INVALID",
+        message: "Agent tool bindings do not satisfy template requirements",
+        retryable: false,
+        details: {
+          templateRef: input.templateRef,
+          missingRequiredRefs,
+          disallowedBindings,
+        },
+      };
+    }
+    return {
+      templateRef: input.templateRef,
+      toolInstanceIds,
+    };
+  }
+
+  private resolveManagedAgentMatrixLocalpartFallback(
+    runtimeConfig: RuntimeConfig,
+    entry: RuntimeAgentEntry,
+    agentId: string,
+  ): string {
+    const fallback = sanitizeMatrixLocalpartFromAgentId(agentId);
+    if (entry.templateRef === undefined) {
+      return fallback;
+    }
+    try {
+      const template = this.resolveInstalledAgentTemplate(runtimeConfig, entry.templateRef);
+      const templatePrefix = sanitizeManagedAgentLocalpart(template.matrix.localpartPrefix, fallback);
+      return sanitizeManagedAgentLocalpart(`${templatePrefix}-${agentId}`, fallback);
+    } catch {
+      return fallback;
+    }
   }
 
   async createManagedAgent(req: {
     id: string;
     workspace?: string;
+    templateRef?: string;
+    toolInstanceIds?: string[];
   }): Promise<ManagedAgentUpsertResult> {
     return this.upsertManagedAgent(req, "create");
   }
@@ -827,6 +1314,8 @@ export class RealInstallerService implements InstallerService {
   async updateManagedAgent(req: {
     id: string;
     workspace?: string;
+    templateRef?: string;
+    toolInstanceIds?: string[];
   }): Promise<ManagedAgentUpsertResult> {
     return this.upsertManagedAgent(req, "update");
   }
@@ -867,7 +1356,7 @@ export class RealInstallerService implements InstallerService {
   }
 
   private async upsertManagedAgent(
-    req: { id: string; workspace?: string },
+    req: { id: string; workspace?: string; templateRef?: string; toolInstanceIds?: string[] },
     mode: "create" | "update",
   ): Promise<ManagedAgentUpsertResult> {
     const runtimeConfig = await this.readRuntimeConfig();
@@ -876,12 +1365,36 @@ export class RealInstallerService implements InstallerService {
       req.workspace,
       join(this.paths.stateDir, id, "workspace"),
     );
+    const requestedTemplateRef = sanitizeOptionalTemplateRef(req.templateRef);
+    const requestedToolInstanceIds = sanitizeOptionalToolInstanceIds(req.toolInstanceIds);
     const existing = runtimeConfig.openclawProfile.agents.find((entry) => entry.id === id);
 
     if (mode === "create" && existing !== undefined) {
-      const changed = existing.workspace !== workspace;
+      const nextTemplateRef = requestedTemplateRef ?? existing.templateRef;
+      const nextToolInstanceIds = requestedToolInstanceIds ?? existing.toolInstanceIds ?? [];
+      const validated = this.validateAgentTemplateAndTools(
+        nextTemplateRef === undefined
+          ? {
+              runtimeConfig,
+              toolInstanceIds: nextToolInstanceIds,
+            }
+          : {
+              runtimeConfig,
+              templateRef: nextTemplateRef,
+              toolInstanceIds: nextToolInstanceIds,
+            },
+      );
+      const changed = existing.workspace !== workspace
+        || existing.templateRef !== nextTemplateRef
+        || !areStringListsEqual(existing.toolInstanceIds ?? [], validated.toolInstanceIds);
       if (changed) {
         existing.workspace = workspace;
+        if (nextTemplateRef === undefined) {
+          delete existing.templateRef;
+        } else {
+          existing.templateRef = nextTemplateRef;
+        }
+        existing.toolInstanceIds = validated.toolInstanceIds;
         runtimeConfig.openclawProfile.agents = ensureCoreManagedAgents(
           runtimeConfig.openclawProfile.agents,
           this.paths.stateDir,
@@ -899,11 +1412,7 @@ export class RealInstallerService implements InstallerService {
       }
       const agent = ensured.runtimeConfig.openclawProfile.agents.find((entry) => entry.id === id);
       return {
-        agent: {
-          id,
-          workspace,
-          ...(agent?.matrix?.userId === undefined ? {} : { matrixUserId: agent.matrix.userId }),
-        },
+        agent: this.toManagedAgentOutput(agent ?? existing),
         changed: changed || ensured.changed,
         restartRequiredServices: changed || ensured.changed ? ["openclaw-gateway"] : [],
       };
@@ -918,9 +1427,31 @@ export class RealInstallerService implements InstallerService {
     }
 
     if (existing !== undefined) {
-      const changed = existing.workspace !== workspace;
+      const nextTemplateRef = requestedTemplateRef ?? existing.templateRef;
+      const nextToolInstanceIds = requestedToolInstanceIds ?? existing.toolInstanceIds ?? [];
+      const validated = this.validateAgentTemplateAndTools(
+        nextTemplateRef === undefined
+          ? {
+              runtimeConfig,
+              toolInstanceIds: nextToolInstanceIds,
+            }
+          : {
+              runtimeConfig,
+              templateRef: nextTemplateRef,
+              toolInstanceIds: nextToolInstanceIds,
+            },
+      );
+      const changed = existing.workspace !== workspace
+        || existing.templateRef !== nextTemplateRef
+        || !areStringListsEqual(existing.toolInstanceIds ?? [], validated.toolInstanceIds);
       if (changed) {
         existing.workspace = workspace;
+        if (nextTemplateRef === undefined) {
+          delete existing.templateRef;
+        } else {
+          existing.templateRef = nextTemplateRef;
+        }
+        existing.toolInstanceIds = validated.toolInstanceIds;
         runtimeConfig.openclawProfile.agents = ensureCoreManagedAgents(
           runtimeConfig.openclawProfile.agents,
           this.paths.stateDir,
@@ -938,22 +1469,34 @@ export class RealInstallerService implements InstallerService {
       }
       const agent = ensured.runtimeConfig.openclawProfile.agents.find((entry) => entry.id === id);
       return {
-        agent: {
-          id,
-          workspace,
-          ...(agent?.matrix?.userId === undefined ? {} : { matrixUserId: agent.matrix.userId }),
-        },
+        agent: this.toManagedAgentOutput(agent ?? existing),
         changed: changed || ensured.changed,
         restartRequiredServices: changed || ensured.changed ? ["openclaw-gateway"] : [],
       };
     }
 
+    const validated = this.validateAgentTemplateAndTools(
+      requestedTemplateRef === undefined
+        ? {
+            runtimeConfig,
+            toolInstanceIds: requestedToolInstanceIds ?? [],
+          }
+        : {
+            runtimeConfig,
+            templateRef: requestedTemplateRef,
+            toolInstanceIds: requestedToolInstanceIds ?? [],
+          },
+    );
     runtimeConfig.openclawProfile.agents = ensureCoreManagedAgents(
       [
         ...runtimeConfig.openclawProfile.agents,
         {
           id,
           workspace,
+          ...(validated.templateRef === undefined ? {} : { templateRef: validated.templateRef }),
+          ...(validated.toolInstanceIds.length === 0
+            ? {}
+            : { toolInstanceIds: validated.toolInstanceIds }),
         },
       ],
       this.paths.stateDir,
@@ -968,11 +1511,16 @@ export class RealInstallerService implements InstallerService {
     await this.persistManagedAgentTopology(runtimeConfig);
     const created = runtimeConfig.openclawProfile.agents.find((entry) => entry.id === id);
     return {
-      agent: {
-        id,
-        workspace,
-        ...(created?.matrix?.userId === undefined ? {} : { matrixUserId: created.matrix.userId }),
-      },
+      agent: this.toManagedAgentOutput(
+        created ?? {
+          id,
+          workspace,
+          ...(validated.templateRef === undefined ? {} : { templateRef: validated.templateRef }),
+          ...(validated.toolInstanceIds.length === 0
+            ? {}
+            : { toolInstanceIds: validated.toolInstanceIds }),
+        },
+      ),
       changed: true,
       restartRequiredServices: ["openclaw-gateway"],
     };
@@ -1026,6 +1574,8 @@ export class RealInstallerService implements InstallerService {
       agents: runtimeConfig.openclawProfile.agents,
       cron: runtimeConfig.openclawProfile.cron,
     };
+    parsed["templates"] = runtimeConfig.templates;
+    parsed["sovereignTools"] = runtimeConfig.sovereignTools;
 
     await this.writeInstallerJsonFile(this.paths.configPath, parsed, 0o644);
   }
@@ -1036,7 +1586,17 @@ export class RealInstallerService implements InstallerService {
     runtimeConfig: RuntimeConfig;
   }): Promise<void> {
     await mkdir(input.workspace, { recursive: true });
-    if (input.id === NODE_OPERATOR_AGENT_ID) {
+    const agent = input.runtimeConfig.openclawProfile.agents.find((entry) => entry.id === input.id);
+    if (agent?.templateRef !== undefined) {
+      const template = this.resolveInstalledAgentTemplate(input.runtimeConfig, agent.templateRef);
+      await this.writeTemplateWorkspaceFiles({
+        workspaceDir: input.workspace,
+        runtimeConfig: input.runtimeConfig,
+        agentId: input.id,
+        template,
+        toolInstanceIds: agent.toolInstanceIds ?? [],
+      });
+    } else if (input.id === NODE_OPERATOR_AGENT_ID) {
       await this.writeNodeOperatorWorkspaceFiles(input.workspace, input.runtimeConfig);
     } else {
       const readme = [
@@ -1079,7 +1639,11 @@ export class RealInstallerService implements InstallerService {
       return { runtimeConfig, changed: false };
     }
 
-    const fallbackLocalpart = sanitizeMatrixLocalpartFromAgentId(agentId);
+    const fallbackLocalpart = this.resolveManagedAgentMatrixLocalpartFallback(
+      runtimeConfig,
+      entry,
+      agentId,
+    );
     const localpart = sanitizeManagedAgentLocalpart(entry.matrix?.localpart, fallbackLocalpart);
     const expectedUserId = `@${localpart}:${runtimeConfig.matrix.homeserverDomain}`;
 
@@ -1407,6 +1971,40 @@ export class RealInstallerService implements InstallerService {
     await this.applyRuntimeOwnership(agentsPath);
     await this.applyRuntimeOwnership(toolsPath);
     await this.applyRuntimeOwnership(skillPath);
+  }
+
+  private async writeTemplateWorkspaceFiles(input: {
+    workspaceDir: string;
+    runtimeConfig: RuntimeConfig;
+    agentId: string;
+    template: AgentTemplateManifest;
+    toolInstanceIds: string[];
+  }): Promise<void> {
+    const boundTools = input.toolInstanceIds
+      .map((id) => input.runtimeConfig.sovereignTools.instances.find((entry) => entry.id === id))
+      .filter((entry): entry is RuntimeConfig["sovereignTools"]["instances"][number] => entry !== undefined);
+    const toolLines = boundTools.length === 0
+      ? ["No bound tool instances."]
+      : boundTools.flatMap((tool) => {
+          const manifest = this.resolveInstalledToolTemplate(input.runtimeConfig, tool.templateRef);
+          return [
+            `- \`${tool.id}\``,
+            `  template: \`${tool.templateRef}\``,
+            `  capabilities: ${manifest.capabilities.join(", ")}`,
+            ...manifest.allowedCommands.map((command) => `  command: \`${command}\``),
+          ];
+        });
+    for (const file of input.template.workspaceFiles) {
+      const targetPath = join(input.workspaceDir, file.path);
+      await mkdir(dirname(targetPath), { recursive: true });
+      const rendered = file.content
+        .replaceAll("{{AGENT_ID}}", input.agentId)
+        .replaceAll("{{MATRIX_HOMESERVER}}", input.runtimeConfig.matrix.publicBaseUrl)
+        .replaceAll("{{MATRIX_ALERT_ROOM_ID}}", input.runtimeConfig.matrix.alertRoom.roomId)
+        .replaceAll("{{TOOL_SECTION}}", toolLines.join("\n"));
+      await writeFile(targetPath, `${rendered}\n`, "utf8");
+      await this.applyRuntimeOwnership(targetPath);
+    }
   }
 
   private async tryReadRuntimeConfig(): Promise<RuntimeConfig | null> {
@@ -3460,6 +4058,8 @@ export class RealInstallerService implements InstallerService {
       previousRuntimeConfig?.openclawProfile.agents.filter(
         (entry) => !RESERVED_AGENT_IDS.has(entry.id),
       ) ?? [];
+    const preservedInstalledTemplates = previousRuntimeConfig?.templates.installed ?? [];
+    const preservedToolInstances = previousRuntimeConfig?.sovereignTools.instances ?? [];
     const managedAgents = ensureCoreManagedAgents(
       [
         {
@@ -3567,6 +4167,12 @@ export class RealInstallerService implements InstallerService {
         lookbackWindow: input.req.mailSentinel?.lookbackWindow ?? "15m",
         e2eeAlertRoom: input.req.mailSentinel?.e2eeAlertRoom ?? false,
       },
+      templates: {
+        installed: preservedInstalledTemplates,
+      },
+      sovereignTools: {
+        instances: preservedToolInstances,
+      },
     };
 
     const configPayload = {
@@ -3668,6 +4274,8 @@ export class RealInstallerService implements InstallerService {
         lookbackWindow: runtimeConfig.mailSentinel.lookbackWindow,
         e2eeAlertRoom: runtimeConfig.mailSentinel.e2eeAlertRoom,
       },
+      templates: runtimeConfig.templates,
+      sovereignTools: runtimeConfig.sovereignTools,
     };
 
     try {
@@ -4184,10 +4792,23 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
                     : {}),
                 }
               : undefined;
+          const templateRef =
+            typeof agent.templateRef === "string" && agent.templateRef.length > 0
+              ? agent.templateRef
+              : undefined;
+          const toolInstanceIds = Array.isArray(agent.toolInstanceIds)
+            ? agent.toolInstanceIds.filter(
+                (entry): entry is string => typeof entry === "string" && entry.length > 0,
+              )
+            : undefined;
           return [
             {
               id: agent.id,
               workspace: agent.workspace,
+              ...(templateRef === undefined ? {} : { templateRef }),
+              ...(toolInstanceIds === undefined || toolInstanceIds.length === 0
+                ? {}
+                : { toolInstanceIds }),
               ...(matrixIdentity === undefined ? {} : { matrix: matrixIdentity }),
             },
           ];
@@ -4202,6 +4823,102 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
   const openrouter = isRecord(parsed.openrouter) ? parsed.openrouter : {};
   const imap = isRecord(parsed.imap) ? parsed.imap : {};
   const mailSentinel = isRecord(parsed.mailSentinel) ? parsed.mailSentinel : {};
+  const templates = isRecord(parsed.templates) ? parsed.templates : {};
+  const templateInstalledEntries = Array.isArray(templates.installed)
+    ? templates.installed.flatMap((entry) => {
+        if (
+          !isRecord(entry)
+          || (entry.kind !== "agent" && entry.kind !== "tool")
+          || typeof entry.id !== "string"
+          || entry.id.length === 0
+          || typeof entry.version !== "string"
+          || entry.version.length === 0
+          || typeof entry.description !== "string"
+          || typeof entry.keyId !== "string"
+          || entry.keyId.length === 0
+          || typeof entry.manifestSha256 !== "string"
+          || entry.manifestSha256.length === 0
+        ) {
+          return [];
+        }
+        const kind: SovereignTemplateKind = entry.kind === "agent" ? "agent" : "tool";
+        return [
+          {
+            kind,
+            id: entry.id,
+            version: entry.version,
+            description: entry.description,
+            trusted: typeof entry.trusted === "boolean" ? entry.trusted : true,
+            pinned: typeof entry.pinned === "boolean" ? entry.pinned : true,
+            keyId: entry.keyId,
+            manifestSha256: entry.manifestSha256,
+            installedAt:
+              typeof entry.installedAt === "string" && entry.installedAt.length > 0
+                ? entry.installedAt
+                : now(),
+            source: "core" as const,
+          },
+        ];
+      })
+    : [];
+  const sovereignTools = isRecord(parsed.sovereignTools) ? parsed.sovereignTools : {};
+  const sovereignToolInstances = Array.isArray(sovereignTools.instances)
+    ? sovereignTools.instances.flatMap((entry) => {
+        if (
+          !isRecord(entry)
+          || typeof entry.id !== "string"
+          || entry.id.length === 0
+          || typeof entry.templateRef !== "string"
+          || entry.templateRef.length === 0
+        ) {
+          return [];
+        }
+        const capabilities = Array.isArray(entry.capabilities)
+          ? entry.capabilities.filter(
+              (item): item is string => typeof item === "string" && item.length > 0,
+            )
+          : [];
+        const config = isRecord(entry.config)
+          ? Object.fromEntries(
+              Object.entries(entry.config).filter(
+                (pair): pair is [string, string] =>
+                  typeof pair[0] === "string"
+                  && pair[0].length > 0
+                  && typeof pair[1] === "string"
+                  && pair[1].length > 0,
+              ),
+            )
+          : {};
+        const secretRefs = isRecord(entry.secretRefs)
+          ? Object.fromEntries(
+              Object.entries(entry.secretRefs).filter(
+                (pair): pair is [string, string] =>
+                  typeof pair[0] === "string"
+                  && pair[0].length > 0
+                  && typeof pair[1] === "string"
+                  && pair[1].length > 0,
+              ),
+            )
+          : {};
+        return [
+          {
+            id: entry.id,
+            templateRef: entry.templateRef,
+            capabilities,
+            config,
+            secretRefs,
+            createdAt:
+              typeof entry.createdAt === "string" && entry.createdAt.length > 0
+                ? entry.createdAt
+                : now(),
+            updatedAt:
+              typeof entry.updatedAt === "string" && entry.updatedAt.length > 0
+                ? entry.updatedAt
+                : now(),
+          },
+        ];
+      })
+    : [];
   const relay = isRecord(parsed.relay) ? parsed.relay : {};
   const operator = isRecord(matrix.operator) ? matrix.operator : {};
   const homeserverDomain =
@@ -4386,6 +5103,12 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
       e2eeAlertRoom:
         typeof mailSentinel.e2eeAlertRoom === "boolean" ? mailSentinel.e2eeAlertRoom : false,
     },
+    templates: {
+      installed: templateInstalledEntries,
+    },
+    sovereignTools: {
+      instances: sovereignToolInstances,
+    },
   };
 };
 
@@ -4419,6 +5142,75 @@ const sanitizeManagedAgentId = (value: string): string => {
     };
   }
   return normalized;
+};
+
+const sanitizeToolInstanceId = (value: string): string => {
+  const normalized = value.trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9._-]{1,62}$/.test(normalized)) {
+    throw {
+      code: "TOOL_INSTANCE_ID_INVALID",
+      message: "Tool instance id must match ^[a-z0-9][a-z0-9._-]{1,62}$",
+      retryable: false,
+      details: {
+        input: value,
+      },
+    };
+  }
+  return normalized;
+};
+
+const sanitizeOptionalTemplateRef = (value: string | undefined): string | undefined => {
+  const candidate = value?.trim();
+  if (candidate === undefined || candidate.length === 0) {
+    return undefined;
+  }
+  const parsed = parseTemplateRef(candidate);
+  return formatTemplateRef(parsed.id, parsed.version);
+};
+
+const sanitizeOptionalToolInstanceIds = (value: string[] | undefined): string[] | undefined => {
+  if (value === undefined) {
+    return undefined;
+  }
+  const deduped = Array.from(new Set(value.map((entry) => sanitizeToolInstanceId(entry))));
+  return deduped;
+};
+
+const normalizeStringRecord = (value: Record<string, string>): Record<string, string> =>
+  Object.fromEntries(
+    Object.entries(value)
+      .map(([key, entry]) => [key.trim(), entry.trim()] as const)
+      .filter(([key, entry]) => key.length > 0 && entry.length > 0)
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+
+const areStringRecordsEqual = (
+  left: Record<string, string>,
+  right: Record<string, string>,
+): boolean => {
+  const leftEntries = Object.entries(left).sort(([a], [b]) => a.localeCompare(b));
+  const rightEntries = Object.entries(right).sort(([a], [b]) => a.localeCompare(b));
+  if (leftEntries.length !== rightEntries.length) {
+    return false;
+  }
+  for (let index = 0; index < leftEntries.length; index += 1) {
+    const leftEntry = leftEntries[index];
+    const rightEntry = rightEntries[index];
+    if (leftEntry === undefined || rightEntry === undefined) {
+      return false;
+    }
+    if (leftEntry[0] !== rightEntry[0] || leftEntry[1] !== rightEntry[1]) {
+      return false;
+    }
+  }
+  return true;
+};
+
+const areStringListsEqual = (left: string[], right: string[]): boolean => {
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((entry, index) => entry === right[index]);
 };
 
 const sanitizeManagedWorkspace = (value: string | undefined, fallback: string): string => {
@@ -4497,6 +5289,10 @@ const ensureCoreManagedAgents = (
     byId.set(entry.id, {
       id: entry.id,
       workspace: entry.workspace,
+      ...(entry.templateRef === undefined ? {} : { templateRef: entry.templateRef }),
+      ...(entry.toolInstanceIds === undefined || entry.toolInstanceIds.length === 0
+        ? {}
+        : { toolInstanceIds: entry.toolInstanceIds }),
       ...(entry.matrix === undefined ? {} : { matrix: entry.matrix }),
     });
   }

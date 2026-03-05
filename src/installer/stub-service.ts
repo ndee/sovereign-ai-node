@@ -28,6 +28,11 @@ import type {
   ManagedAgentDeleteResult,
   ManagedAgentListResult,
   ManagedAgentUpsertResult,
+  SovereignTemplateInstallResult,
+  SovereignTemplateListResult,
+  SovereignToolInstanceDeleteResult,
+  SovereignToolInstanceListResult,
+  SovereignToolInstanceUpsertResult,
 } from "./service.js";
 
 const now = () => new Date().toISOString();
@@ -267,22 +272,36 @@ export class StubInstallerService implements InstallerService {
     };
   }
 
-  async createManagedAgent(req: { id: string; workspace?: string }): Promise<ManagedAgentUpsertResult> {
+  async createManagedAgent(req: {
+    id: string;
+    workspace?: string;
+    templateRef?: string;
+    toolInstanceIds?: string[];
+  }): Promise<ManagedAgentUpsertResult> {
     return {
       agent: {
         id: req.id,
         workspace: req.workspace ?? `/var/lib/sovereign-node/${req.id}/workspace`,
+        ...(req.templateRef === undefined ? {} : { templateRef: req.templateRef }),
+        ...(req.toolInstanceIds === undefined ? {} : { toolInstanceIds: req.toolInstanceIds }),
       },
       changed: true,
       restartRequiredServices: ["openclaw-gateway"],
     };
   }
 
-  async updateManagedAgent(req: { id: string; workspace?: string }): Promise<ManagedAgentUpsertResult> {
+  async updateManagedAgent(req: {
+    id: string;
+    workspace?: string;
+    templateRef?: string;
+    toolInstanceIds?: string[];
+  }): Promise<ManagedAgentUpsertResult> {
     return {
       agent: {
         id: req.id,
         workspace: req.workspace ?? `/var/lib/sovereign-node/${req.id}/workspace`,
+        ...(req.templateRef === undefined ? {} : { templateRef: req.templateRef }),
+        ...(req.toolInstanceIds === undefined ? {} : { toolInstanceIds: req.toolInstanceIds }),
       },
       changed: true,
       restartRequiredServices: ["openclaw-gateway"],
@@ -294,6 +313,84 @@ export class StubInstallerService implements InstallerService {
       id: req.id,
       deleted: true,
       restartRequiredServices: ["openclaw-gateway"],
+    };
+  }
+
+  async listSovereignTemplates(): Promise<SovereignTemplateListResult> {
+    return {
+      templates: [],
+    };
+  }
+
+  async installSovereignTemplate(_req: { ref: string }): Promise<SovereignTemplateInstallResult> {
+    return {
+      template: {
+        kind: "agent",
+        id: "scaffold",
+        version: "0.0.0",
+        description: "Scaffold template",
+        trusted: false,
+        installed: false,
+        pinned: false,
+        keyId: "scaffold",
+        manifestSha256: "scaffold",
+      },
+      changed: false,
+    };
+  }
+
+  async listSovereignToolInstances(): Promise<SovereignToolInstanceListResult> {
+    return {
+      tools: [],
+    };
+  }
+
+  async createSovereignToolInstance(
+    req: {
+      id: string;
+      templateRef: string;
+      config?: Record<string, string>;
+      secretRefs?: Record<string, string>;
+    },
+  ): Promise<SovereignToolInstanceUpsertResult> {
+    return {
+      tool: {
+        id: req.id,
+        templateRef: req.templateRef,
+        capabilities: [],
+        config: req.config ?? {},
+        secretRefs: req.secretRefs ?? {},
+      },
+      changed: true,
+    };
+  }
+
+  async updateSovereignToolInstance(
+    req: {
+      id: string;
+      templateRef?: string;
+      config?: Record<string, string>;
+      secretRefs?: Record<string, string>;
+    },
+  ): Promise<SovereignToolInstanceUpsertResult> {
+    return {
+      tool: {
+        id: req.id,
+        templateRef: req.templateRef ?? "scaffold@0.0.0",
+        capabilities: [],
+        config: req.config ?? {},
+        secretRefs: req.secretRefs ?? {},
+      },
+      changed: true,
+    };
+  }
+
+  async deleteSovereignToolInstance(req: {
+    id: string;
+  }): Promise<SovereignToolInstanceDeleteResult> {
+    return {
+      id: req.id,
+      deleted: true,
     };
   }
 }

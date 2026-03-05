@@ -7,7 +7,9 @@ import { registerInstallCommand } from "./commands/install.js";
 import { registerLogsCommand } from "./commands/logs.js";
 import { registerReconfigureCommand } from "./commands/reconfigure.js";
 import { registerStatusCommand } from "./commands/status.js";
+import { registerTemplatesCommand } from "./commands/templates.js";
 import { registerTestAlertCommand } from "./commands/test-alert.js";
+import { registerToolsCommand } from "./commands/tools.js";
 
 export const createCliProgram = (app: AppContainer): Command => {
   const program = new Command();
@@ -22,6 +24,8 @@ export const createCliProgram = (app: AppContainer): Command => {
   registerInstallCommand(program, app);
   registerStatusCommand(program, app);
   registerAgentsCommand(program, app);
+  registerTemplatesCommand(program, app);
+  registerToolsCommand(program, app);
   registerDoctorCommand(program, app);
   registerLogsCommand(program);
   registerTestAlertCommand(program, app);
