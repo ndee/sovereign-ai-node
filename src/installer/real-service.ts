@@ -1351,14 +1351,25 @@ export class RealInstallerService implements InstallerService {
   private buildOpenClawAgentToolPolicy(
     runtimeConfig: RuntimeConfig,
     toolInstanceIds: string[],
-  ): { profile: "minimal"; allow: string[] } | null {
+  ): {
+    allow: string[];
+    exec: {
+      host: "gateway";
+      security: "allowlist";
+      ask: "off";
+    };
+  } | null {
     const execPatterns = this.listAgentExecAllowlistPatterns(runtimeConfig, toolInstanceIds);
     if (execPatterns.length === 0) {
       return null;
     }
     return {
-      profile: "minimal",
       allow: [OPENCLAW_EXEC_TOOL_ID],
+      exec: {
+        host: "gateway",
+        security: "allowlist",
+        ask: "off",
+      },
     };
   }
 

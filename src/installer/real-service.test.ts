@@ -947,8 +947,12 @@ describe("RealInstallerService", () => {
             id?: string;
             workspace?: string;
             tools?: {
-              profile?: string;
               allow?: string[];
+              exec?: {
+                host?: string;
+                security?: string;
+                ask?: string;
+              };
             };
           }>;
           defaults?: { model?: string };
@@ -988,15 +992,23 @@ describe("RealInstallerService", () => {
           expect.objectContaining({
             id: "mail-sentinel",
             tools: {
-              profile: "minimal",
               allow: ["exec"],
+              exec: {
+                host: "gateway",
+                security: "allowlist",
+                ask: "off",
+              },
             },
           }),
           expect.objectContaining({
             id: "node-operator",
             tools: {
-              profile: "minimal",
               allow: ["exec"],
+              exec: {
+                host: "gateway",
+                security: "allowlist",
+                ask: "off",
+              },
             },
           }),
         ]),
