@@ -74,6 +74,12 @@ const CORE_PUBLIC_KEY_PEM_2026_03 = [
   "MCowBQYDK2VwAyEA1NjeN4Uzn3Eh1cuWIZv4zxfO+WQU2HyRMasiwO4/DGE=",
   "-----END PUBLIC KEY-----",
 ].join("\n");
+const CORE_KEY_ID_2026_03_07 = "sovereign-core-ed25519-2026-03-07";
+const CORE_PUBLIC_KEY_PEM_2026_03_07 = [
+  "-----BEGIN PUBLIC KEY-----",
+  "MCowBQYDK2VwAyEAXjJxn/mN5HIo4wRLQOpZRD6IRohKnWVzAp8C1PGGfJI=",
+  "-----END PUBLIC KEY-----",
+].join("\n");
 
 export const CORE_TRUSTED_TEMPLATE_KEYS: TrustedTemplateKey[] = [
   {
@@ -83,6 +89,10 @@ export const CORE_TRUSTED_TEMPLATE_KEYS: TrustedTemplateKey[] = [
   {
     keyId: CORE_KEY_ID_2026_03,
     publicKeyPem: CORE_PUBLIC_KEY_PEM_2026_03,
+  },
+  {
+    keyId: CORE_KEY_ID_2026_03_07,
+    publicKeyPem: CORE_PUBLIC_KEY_PEM_2026_03_07,
   },
 ];
 
@@ -164,8 +174,8 @@ export const CORE_TEMPLATE_MANIFESTS: SovereignTemplateManifest[] = [
     ],
     signature: {
       algorithm: "ed25519",
-      keyId: CORE_KEY_ID_2026_03,
-      value: "gufLUtCoao/CpMTjLpJdmppY3BwoPGccxMv+vAhx69VU2MUmpN4ZKC8RPi0RU2tM9y/zuiAoijVVBjw33MaKCQ==",
+      keyId: CORE_KEY_ID_2026_03_07,
+      value: "Bw0N0McoAU/JX3PCd0OVsJn4WM5fog1lej8ZgK1MNtLOpqIQL9phvf2gvPdYzqLfCQFTYX40+seehSgNTTjcAQ==",
     },
   },
   {

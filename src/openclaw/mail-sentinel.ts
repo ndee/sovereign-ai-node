@@ -20,6 +20,12 @@ export type MailSentinelRegistrationResult = {
   cronCommand: string;
 };
 
+type CronListJob = {
+  id: string;
+  name?: string;
+  agentId?: string;
+};
+
 export interface OpenClawMailSentinelRegistrar {
   register(input: MailSentinelRegistrationInput): Promise<MailSentinelRegistrationResult>;
 }
@@ -87,8 +93,11 @@ export class ShellOpenClawMailSentinelRegistrar
       allowAlreadyExists: true,
     });
 
+    await this.removeExistingCronJobs(input);
+
     const cronMessage = [
       "Summarize the latest 3 emails in INBOX using read-only IMAP tools.",
+      "The tool instance is already scoped to the configured mailbox, so use --query ALL for the whole mailbox and do not include INBOX in the query string.",
       "Highlight urgent or security-relevant items.",
       "If IMAP is not configured, report the missing setup clearly.",
     ].join(" ");
@@ -185,6 +194,42 @@ export class ShellOpenClawMailSentinelRegistrar
     };
   }
 
+  private async removeExistingCronJobs(
+    input: MailSentinelRegistrationInput,
+  ): Promise<void> {
+    const jobs = await this.listCronJobs();
+    const staleJobs = jobs.filter((job) =>
+      job.name === input.cronJobName
+      && (job.agentId === undefined || job.agentId === input.agentId)
+    );
+
+    for (const job of staleJobs) {
+      const result = await this.execRunner.run({
+        command: "openclaw",
+        args: ["cron", "rm", job.id],
+        options: {
+          timeout: OPENCLAW_MAIL_SENTINEL_COMMAND_TIMEOUT_MS,
+          env: {
+            CI: "1",
+          },
+        },
+      });
+      if (result.exitCode !== 0 && !isNotFoundResult(result)) {
+        throw {
+          code: "MAIL_SENTINEL_REGISTER_FAILED",
+          message: `Failed to remove existing OpenClaw cron job ${job.id}`,
+          retryable: true,
+          details: {
+            command: result.command,
+            exitCode: result.exitCode,
+            stderr: truncateText(result.stderr, 1200),
+            stdout: truncateText(result.stdout, 1200),
+          },
+        };
+      }
+    }
+  }
+
   private async runCommandAlternatives(input: {
     label: string;
     commands: string[][];
@@ -231,10 +276,111 @@ export class ShellOpenClawMailSentinelRegistrar
       },
     };
   }
+
+  private async listCronJobs(): Promise<CronListJob[]> {
+    const jsonResult = await this.execRunner.run({
+      command: "openclaw",
+      args: ["cron", "list", "--json"],
+      options: {
+        timeout: OPENCLAW_MAIL_SENTINEL_COMMAND_TIMEOUT_MS,
+        env: {
+          CI: "1",
+        },
+      },
+    });
+    if (jsonResult.exitCode === 0) {
+      const parsed = parseCronListJson(jsonResult.stdout);
+      if (parsed !== null) {
+        return parsed;
+      }
+    }
+
+    const textResult = await this.execRunner.run({
+      command: "openclaw",
+      args: ["cron", "list"],
+      options: {
+        timeout: OPENCLAW_MAIL_SENTINEL_COMMAND_TIMEOUT_MS,
+        env: {
+          CI: "1",
+        },
+      },
+    });
+    if (textResult.exitCode !== 0) {
+      throw {
+        code: "MAIL_SENTINEL_REGISTER_FAILED",
+        message: "Failed to list existing OpenClaw cron jobs",
+        retryable: true,
+        details: {
+          jsonCommand: jsonResult.command,
+          jsonExitCode: jsonResult.exitCode,
+          jsonStdout: truncateText(jsonResult.stdout, 1200),
+          jsonStderr: truncateText(jsonResult.stderr, 1200),
+          textCommand: textResult.command,
+          textExitCode: textResult.exitCode,
+          textStdout: truncateText(textResult.stdout, 1200),
+          textStderr: truncateText(textResult.stderr, 1200),
+        },
+      };
+    }
+    return parseCronListTable(textResult.stdout);
+  }
 }
 
 const isAlreadyExistsResult = (result: ExecResult): boolean =>
   /already\s+exists|exists/i.test(`${result.stderr}\n${result.stdout}`);
+
+const isNotFoundResult = (result: ExecResult): boolean =>
+  /not\s+found|unknown\s+job|no\s+such/i.test(`${result.stderr}\n${result.stdout}`);
+
+const parseCronListJson = (value: string): CronListJob[] | null => {
+  try {
+    const parsed = JSON.parse(value) as {
+      jobs?: Array<{
+        id?: unknown;
+        name?: unknown;
+        agentId?: unknown;
+      }>;
+    };
+    if (!Array.isArray(parsed.jobs)) {
+      return null;
+    }
+    return parsed.jobs.flatMap((job) => {
+      if (typeof job.id !== "string" || job.id.length === 0) {
+        return [];
+      }
+      return [{
+        id: job.id,
+        ...(typeof job.name === "string" ? { name: job.name } : {}),
+        ...(typeof job.agentId === "string" ? { agentId: job.agentId } : {}),
+      }];
+    });
+  } catch {
+    return null;
+  }
+};
+
+const parseCronListTable = (value: string): CronListJob[] =>
+  value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^[0-9a-f]{8}-[0-9a-f-]{27}\s+/i.test(line))
+    .map((line) => {
+      const match = line.match(
+        /^([0-9a-f-]{36})\s+(\S+)(?:\s+.+?\s+(?:isolated|main)\s+(\S+))?$/i,
+      );
+      if (match === null) {
+        return {
+          id: line.split(/\s+/, 1)[0] ?? "",
+        };
+      }
+      const [, id, name, agentId] = match;
+      return {
+        id,
+        ...(name === undefined ? {} : { name }),
+        ...(agentId === undefined ? {} : { agentId }),
+      };
+    })
+    .filter((job) => job.id.length > 0);
 
 const truncateText = (value: string, maxChars: number): string => {
   if (value.length <= maxChars) {

@@ -10,10 +10,11 @@ describe("ShellOpenClawMailSentinelRegistrar", () => {
     const execRunner: ExecRunner = {
       run: async (input): Promise<ExecResult> => {
         calls.push(input);
+        const serialized = [input.command, ...(input.args ?? [])].join(" ");
         return {
-          command: [input.command, ...(input.args ?? [])].join(" "),
+          command: serialized,
           exitCode: 0,
-          stdout: "",
+          stdout: serialized === "openclaw cron list --json" ? "{\"jobs\":[]}" : "",
           stderr: "",
         };
       },
@@ -47,8 +48,12 @@ describe("ShellOpenClawMailSentinelRegistrar", () => {
         },
       },
     });
-    expect(calls[1]?.command).toBe("openclaw");
-    expect(calls[1]?.args?.slice(0, 5)).toEqual([
+    expect(calls[1]).toMatchObject({
+      command: "openclaw",
+      args: ["cron", "list", "--json"],
+    });
+    expect(calls[2]?.command).toBe("openclaw");
+    expect(calls[2]?.args?.slice(0, 5)).toEqual([
       "cron",
       "add",
       "--name",
@@ -63,6 +68,14 @@ describe("ShellOpenClawMailSentinelRegistrar", () => {
       run: async (input): Promise<ExecResult> => {
         const serialized = [input.command, ...(input.args ?? [])].join(" ");
         calls.push(serialized);
+        if (serialized === "openclaw cron list --json") {
+          return {
+            command: serialized,
+            exitCode: 0,
+            stdout: "{\"jobs\":[]}",
+            stderr: "",
+          };
+        }
         if (serialized.includes("cron add") && serialized.includes("--replace")) {
           return {
             command: serialized,
@@ -100,6 +113,14 @@ describe("ShellOpenClawMailSentinelRegistrar", () => {
       run: async (input): Promise<ExecResult> => {
         const serialized = [input.command, ...(input.args ?? [])].join(" ");
         calls.push(serialized);
+        if (serialized === "openclaw cron list --json") {
+          return {
+            command: serialized,
+            exitCode: 0,
+            stdout: "{\"jobs\":[]}",
+            stderr: "",
+          };
+        }
         if (serialized === "openclaw agents add mail-sentinel --workspace /tmp/ws") {
           return {
             command: serialized,
@@ -149,5 +170,56 @@ describe("ShellOpenClawMailSentinelRegistrar", () => {
     expect(calls).toContain(
       "openclaw agents upsert --id mail-sentinel --workspace /tmp/ws",
     );
+  });
+
+  it("removes existing cron jobs with the same name before re-registering", async () => {
+    const calls: string[] = [];
+    const execRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        const serialized = [input.command, ...(input.args ?? [])].join(" ");
+        calls.push(serialized);
+        if (serialized === "openclaw cron list --json") {
+          return {
+            command: serialized,
+            exitCode: 0,
+            stdout: JSON.stringify({
+              jobs: [
+                {
+                  id: "11111111-1111-1111-1111-111111111111",
+                  name: "mail-sentinel-poll",
+                  agentId: "mail-sentinel",
+                },
+                {
+                  id: "22222222-2222-2222-2222-222222222222",
+                  name: "mail-sentinel-poll",
+                  agentId: "mail-sentinel",
+                },
+              ],
+            }),
+            stderr: "",
+          };
+        }
+        return {
+          command: serialized,
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        };
+      },
+    };
+
+    const registrar = new ShellOpenClawMailSentinelRegistrar(execRunner, createLogger());
+    await registrar.register({
+      agentId: "mail-sentinel",
+      workspaceDir: "/tmp/ws",
+      cronJobName: "mail-sentinel-poll",
+      pollInterval: "5m",
+      lookbackWindow: "15m",
+      roomId: "!alerts:matrix.example.org",
+    });
+
+    expect(calls).toContain("openclaw cron rm 11111111-1111-1111-1111-111111111111");
+    expect(calls).toContain("openclaw cron rm 22222222-2222-2222-2222-222222222222");
+    expect(calls.at(-1)).toContain("openclaw cron add --name mail-sentinel-poll");
   });
 });

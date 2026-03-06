@@ -2102,6 +2102,12 @@ export class RealInstallerService implements InstallerService {
               `  capabilities: ${manifest.capabilities.join(", ")}`,
               ...manifest.allowedCommands.map((command) =>
                 `  command: \`${this.renderSovereignToolCommand(tool.id, command)}\``),
+              ...(manifest.id === "imap-readonly"
+                ? [
+                    "  note: searches already run inside the configured mailbox",
+                    "  note: use `--query ALL` for the whole mailbox and do not prefix the query with `INBOX`",
+                  ]
+                : []),
             ];
           }),
         ];

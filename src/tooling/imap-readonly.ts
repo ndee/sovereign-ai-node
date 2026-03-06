@@ -388,6 +388,25 @@ export const buildImapSearchQuery = (query: string): SearchObject => {
   return state.query;
 };
 
+export const normalizeImapSearchQuery = (query: string, mailbox: string): string => {
+  const trimmed = query.trim();
+  const normalizedMailbox = mailbox.trim();
+  if (trimmed.length === 0 || normalizedMailbox.length === 0) {
+    return trimmed;
+  }
+
+  const lowerQuery = trimmed.toLowerCase();
+  const lowerMailbox = normalizedMailbox.toLowerCase();
+  if (lowerQuery === lowerMailbox) {
+    return "ALL";
+  }
+  if (lowerQuery.startsWith(`${lowerMailbox} `)) {
+    const stripped = trimmed.slice(normalizedMailbox.length).trim();
+    return stripped.length === 0 ? "ALL" : stripped;
+  }
+  return trimmed;
+};
+
 const clampSearchLimit = (value: number | undefined): number => {
   if (value === undefined || !Number.isFinite(value)) {
     return DEFAULT_MAX_SEARCH_RESULTS;
@@ -494,7 +513,8 @@ export class ImapReadonlyToolService {
     configPath?: string;
   }): Promise<ImapSearchMailResult> {
     const instance = await this.resolveToolInstance(input.instanceId, input.configPath);
-    const searchQuery = buildImapSearchQuery(input.query);
+    const normalizedQuery = normalizeImapSearchQuery(input.query, instance.account.mailbox);
+    const searchQuery = buildImapSearchQuery(normalizedQuery);
     const limit = clampSearchLimit(input.limit);
 
     return await this.runner(instance.account, async (client) =>

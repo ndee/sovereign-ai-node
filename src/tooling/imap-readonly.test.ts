@@ -6,6 +6,7 @@ import type { ImapClientLike } from "../system/imap-client.js";
 import {
   ImapReadonlyToolService,
   buildImapSearchQuery,
+  normalizeImapSearchQuery,
 } from "./imap-readonly.js";
 
 const TEST_SECRET_ENV = "SOVEREIGN_TEST_IMAP_PASSWORD";
@@ -129,6 +130,11 @@ describe("imap-readonly tool service", () => {
       });
   });
 
+  it("normalizes a redundant mailbox prefix in IMAP search queries", () => {
+    expect(normalizeImapSearchQuery("INBOX ALL", "INBOX")).toBe("ALL");
+    expect(normalizeImapSearchQuery("INBOX is:unseen", "INBOX")).toBe("is:unseen");
+  });
+
   it("searches mail through a bound read-only instance", async () => {
     process.env[TEST_SECRET_ENV] = "bridge-pass";
 
@@ -226,6 +232,38 @@ describe("imap-readonly tool service", () => {
     expect(result.totalMatches).toBe(2);
     expect(result.messages.map((message) => message.uid)).toEqual([27, 12]);
     expect(result.messages[0]?.subject).toBe("Quarterly Report");
+  });
+
+  it("treats a leading configured mailbox token as redundant during search", async () => {
+    process.env[TEST_SECRET_ENV] = "bridge-pass";
+
+    const searchQueries: unknown[] = [];
+    const runtimeConfig = buildRuntimeConfig(`env:${TEST_SECRET_ENV}`);
+    const service = new ImapReadonlyToolService({
+      configLoader: async () => runtimeConfig,
+      runner: async (_account, handler) => {
+        const client: ImapClientLike = {
+          ...createNoopClient(),
+          search: async (query) => {
+            searchQueries.push(query);
+            return [];
+          },
+        };
+        return await handler(client);
+      },
+    });
+
+    await service.searchMail({
+      instanceId: "mail-sentinel-imap",
+      query: "INBOX ALL",
+      limit: 3,
+    });
+
+    expect(searchQueries).toEqual([
+      {
+        all: true,
+      },
+    ]);
   });
 
   it("reads a message by RFC 5322 Message-ID without write access", async () => {
