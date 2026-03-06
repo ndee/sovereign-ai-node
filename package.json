@@ -14,7 +14,7 @@
   "scripts": {
     "dev:cli": "tsx src/bin/sovereign-node.ts",
     "dev:api": "tsx src/bin/sovereign-node-api.ts",
-    "build": "tsup src/bin/sovereign-node.ts src/bin/sovereign-node-api.ts --format esm --dts --out-dir dist",
+    "build": "tsup src/bin/sovereign-node.ts src/bin/sovereign-node-api.ts src/bin/sovereign-node-onboarding-api.ts --format esm --dts --out-dir dist",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"

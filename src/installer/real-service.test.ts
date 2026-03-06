@@ -73,13 +73,18 @@ const writeRuntimeArtifacts = async (paths: SovereignPaths): Promise<void> => {
   const gatewayEnvPath = join(paths.openclawServiceHome, "gateway.env");
   const matrixOperatorTokenPath = join(paths.secretsDir, "matrix-operator-access-token");
   const matrixBotTokenPath = join(paths.secretsDir, "matrix-bot-access-token");
+  const matrixOperatorPasswordPath = join(paths.secretsDir, "matrix-operator.password");
+  const projectDir = join(paths.stateDir, "bundled-matrix", "matrix-example-org");
+  const onboardingStatePath = join(projectDir, "onboarding", "state.json");
 
   await mkdir(dirname(paths.configPath), { recursive: true });
   await mkdir(paths.secretsDir, { recursive: true });
   await mkdir(dirname(runtimeConfigPath), { recursive: true });
   await mkdir(dirname(runtimeProfilePath), { recursive: true });
   await mkdir(join(paths.stateDir, "mail-sentinel"), { recursive: true });
+  await mkdir(dirname(onboardingStatePath), { recursive: true });
 
+  await writeFile(matrixOperatorPasswordPath, "operator-password\n", "utf8");
   await writeFile(matrixOperatorTokenPath, "operator-token\n", "utf8");
   await writeFile(matrixBotTokenPath, "bot-token\n", "utf8");
   await writeFile(
@@ -123,14 +128,21 @@ const writeRuntimeArtifacts = async (paths: SovereignPaths): Promise<void> => {
           secretRef: "file:/tmp/imap-secret",
         },
         matrix: {
+          accessMode: "direct",
+          homeserverDomain: "matrix.example.org",
           publicBaseUrl: "https://matrix.example.org",
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: false,
+          projectDir,
+          onboardingStatePath,
           operator: {
+            localpart: "operator",
             userId: "@operator:matrix.example.org",
+            passwordSecretRef: `file:${matrixOperatorPasswordPath}`,
             accessTokenSecretRef: `file:${matrixOperatorTokenPath}`,
           },
           bot: {
+            localpart: "mail-sentinel",
             userId: "@mail-sentinel:matrix.example.org",
             accessTokenSecretRef: `file:${matrixBotTokenPath}`,
           },
@@ -1379,6 +1391,197 @@ describe("RealInstallerService", () => {
       expect(status.openclaw.cronPresent).toBe(true);
       expect(status.matrix.roomReachable).toBe(true);
       expect(status.services.some((entry) => entry.kind === "openclaw")).toBe(true);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("issues a one-time Matrix onboarding code and writes hashed onboarding state", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+    await writeRuntimeArtifacts(paths);
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      mailSentinelRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert",
+          cronCommand: "openclaw cron add",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+    });
+
+    try {
+      const issued = await service.issueMatrixOnboardingCode();
+      expect(issued.code).toMatch(/^[A-Z2-9]{4}(?:-[A-Z2-9]{4}){2}$/);
+      expect(issued.username).toBe("@operator:matrix.example.org");
+      expect(issued.onboardingUrl).toBe("https://matrix.example.org/onboard");
+
+      const onboardingStateRaw = await readFile(
+        join(paths.stateDir, "bundled-matrix", "matrix-example-org", "onboarding", "state.json"),
+        "utf8",
+      );
+      const onboardingState = JSON.parse(onboardingStateRaw) as {
+        codeHash?: string;
+        codeSalt?: string;
+        username?: string;
+        homeserverUrl?: string;
+        operatorPasswordSecretRef?: string;
+      };
+      expect(onboardingState.codeHash).toBeTruthy();
+      expect(onboardingState.codeSalt).toBeTruthy();
+      expect(onboardingStateRaw).not.toContain(issued.code);
+      expect(onboardingState.username).toBe("@operator:matrix.example.org");
+      expect(onboardingState.homeserverUrl).toBe("https://matrix.example.org");
+      expect(onboardingState.operatorPasswordSecretRef).toBe(
+        `file:${join(paths.secretsDir, "matrix-operator.password")}`,
+      );
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects Matrix onboarding code issuance for local-dev installs without HTTPS onboarding", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+    await writeRuntimeArtifacts(paths);
+    const rawConfig = await readFile(paths.configPath, "utf8");
+    const parsedConfig = JSON.parse(rawConfig) as {
+      matrix?: {
+        publicBaseUrl?: string;
+      };
+    };
+    if (parsedConfig.matrix) {
+      parsedConfig.matrix.publicBaseUrl = "http://127.0.0.1:8008";
+    }
+    await writeFile(paths.configPath, `${JSON.stringify(parsedConfig, null, 2)}\n`, "utf8");
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      mailSentinelRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert",
+          cronCommand: "openclaw cron add",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "http://127.0.0.1:8008",
+          checks: [],
+        }),
+      },
+    });
+
+    try {
+      await expect(service.issueMatrixOnboardingCode()).rejects.toMatchObject({
+        code: "MATRIX_ONBOARDING_UNAVAILABLE",
+      });
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }

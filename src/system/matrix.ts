@@ -8,6 +8,7 @@ import type { CheckResult } from "../contracts/common.js";
 import type { InstallRequest, TestMatrixResult } from "../contracts/index.js";
 import type { SovereignPaths } from "../config/paths.js";
 import type { Logger } from "../logging/logger.js";
+import { buildMatrixOnboardingUrl } from "../onboarding/bootstrap-code.js";
 import type { ExecRunner, ExecResult } from "./exec.js";
 
 const MATRIX_INTERNAL_BASE_URL = "http://127.0.0.1:8008";
@@ -20,10 +21,13 @@ const MATRIX_LOGIN_RATE_LIMIT_FALLBACK_DELAY_MS = 1_000;
 const MATRIX_LOGIN_RATE_LIMIT_MAX_DELAY_MS = MATRIX_READY_TIMEOUT_MS;
 const MATRIX_LOGIN_RATE_LIMIT_FAST_RETRY_THRESHOLD_MS = 10_000;
 const MATRIX_COMPOSE_COMMAND_TIMEOUT_MS = 180_000;
-const MATRIX_BOOTSTRAP_SECRET_DIR = "bootstrap-secrets";
 const DEFAULT_SYNAPSE_IMAGE = "matrixdotorg/synapse:v1.125.0";
 const DEFAULT_CADDY_IMAGE = "caddy:2.10.2-alpine";
+const DEFAULT_ONBOARDING_API_IMAGE = "node:22-alpine";
 const RELAY_LOCAL_EDGE_PORT = 18080;
+const MATRIX_ONBOARDING_DIR = "onboarding";
+const MATRIX_ONBOARDING_STATE_FILE = "state.json";
+const MATRIX_ONBOARDING_API_PORT = 8090;
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -118,6 +122,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     const proxyDir = join(projectDir, "reverse-proxy");
     const proxyDataDir = join(projectDir, "reverse-proxy-data");
     const proxyConfigDir = join(projectDir, "reverse-proxy-config");
+    const onboardingDir = join(projectDir, MATRIX_ONBOARDING_DIR);
     const composeFilePath = join(projectDir, "compose.yaml");
     const envFilePath = join(projectDir, ".env");
 
@@ -130,10 +135,17 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       await mkdir(proxyDir, { recursive: true });
       await mkdir(proxyDataDir, { recursive: true });
       await mkdir(proxyConfigDir, { recursive: true });
+      await mkdir(onboardingDir, { recursive: true });
     }
     await ensureDirectoryTreesWritable([synapseDir, postgresDir]);
     if (usesReverseProxy) {
-      await ensureDirectoryTreesWritable([wellKnownDir, proxyDir, proxyDataDir, proxyConfigDir]);
+      await ensureDirectoryTreesWritable([
+        wellKnownDir,
+        proxyDir,
+        proxyDataDir,
+        proxyConfigDir,
+        onboardingDir,
+      ]);
     }
 
     const existingEnv = await this.readExistingEnv(projectDir);
@@ -152,6 +164,9 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     const composeYaml = renderComposeYaml({
       synapseImage: resolveSynapseImage(),
       caddyImage: DEFAULT_CADDY_IMAGE,
+      onboardingApiImage: DEFAULT_ONBOARDING_API_IMAGE,
+      appDistDir: resolveOnboardingApiDistDir(),
+      secretsDir: this.paths.secretsDir,
       accessMode,
       tlsMode,
       localSynapsePortBinding:
@@ -231,7 +246,13 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     }
     await ensureDirectoryTreesWritable([synapseDir, postgresDir]);
     if (usesReverseProxy) {
-      await ensureDirectoryTreesWritable([wellKnownDir, proxyDir, proxyDataDir, proxyConfigDir]);
+      await ensureDirectoryTreesWritable([
+        wellKnownDir,
+        proxyDir,
+        proxyDataDir,
+        proxyConfigDir,
+        onboardingDir,
+      ]);
     }
 
     const composeConfigCheck = await this.runComposeCommand(projectDir, composeFilePath, [
@@ -284,9 +305,9 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
 
     const operatorLocalpart = sanitizeMatrixLocalpart(req.operator.username, "operator");
     const botLocalpart = chooseBotLocalpart(operatorLocalpart);
-    const secretsDir = await this.ensureBootstrapSecretsDir(provision.projectDir);
-    const operatorSecretName = `${operatorLocalpart}.password`;
-    const botSecretName = `${botLocalpart}.password`;
+    const secretsDir = await this.ensureManagedSecretsDir();
+    const operatorSecretName = `matrix-${operatorLocalpart}.password`;
+    const botSecretName = `matrix-${botLocalpart}.password`;
     const operatorPassword =
       (await this.readSecretFile(secretsDir, operatorSecretName)) ?? generatePassword();
     const botPassword = (await this.readSecretFile(secretsDir, botSecretName)) ?? generatePassword();
@@ -476,7 +497,6 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       roomName,
     };
     if (shouldUseReverseProxy(provision.accessMode, provision.tlsMode)) {
-      const operatorPassword = await this.readPasswordFromSecretRef(accounts.operator.passwordSecretRef);
       await this.writeOnboardingPage({
         projectDir: provision.projectDir,
         publicBaseUrl: provision.publicBaseUrl,
@@ -484,7 +504,6 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         operatorLocalpart: accounts.operator.localpart,
         tlsMode: resolveOnboardingMode(provision.accessMode, provision.tlsMode),
         alertRoomId: roomId,
-        ...(operatorPassword === null ? {} : { operatorPassword }),
       });
     }
     this.logger.info(
@@ -1021,8 +1040,8 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     }
   }
 
-  private async ensureBootstrapSecretsDir(projectDir: string): Promise<string> {
-    const dir = join(projectDir, MATRIX_BOOTSTRAP_SECRET_DIR);
+  private async ensureManagedSecretsDir(): Promise<string> {
+    const dir = this.paths.secretsDir;
     await mkdir(dir, { recursive: true });
     await chmod(dir, 0o700);
     return dir;
@@ -1171,7 +1190,6 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     operatorLocalpart: string;
     tlsMode: BundledMatrixOnboardingMode;
     alertRoomId?: string;
-    operatorPassword?: string;
   }): Promise<void> {
     const onboardingPageUrl = buildOnboardingPageUrl(input.publicBaseUrl);
     const onboardingQrSvg = await this.renderOnboardingQrSvg(onboardingPageUrl);
@@ -1183,7 +1201,6 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       onboardingPageUrl,
       onboardingQrSvg,
       ...(input.alertRoomId === undefined ? {} : { alertRoomId: input.alertRoomId }),
-      ...(input.operatorPassword === undefined ? {} : { operatorPassword: input.operatorPassword }),
     });
     await writeFile(
       join(input.projectDir, "well-known", "onboard", "index.html"),
@@ -1192,24 +1209,6 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     );
   }
 
-  private async readPasswordFromSecretRef(secretRef: string): Promise<string | null> {
-    if (!secretRef.startsWith("file:")) {
-      return null;
-    }
-    try {
-      const password = (await readFile(secretRef.slice("file:".length), "utf8")).trim();
-      return password.length > 0 ? password : null;
-    } catch (error) {
-      this.logger.warn(
-        {
-          secretRef,
-          error: error instanceof Error ? error.message : String(error),
-        },
-        "Could not read Matrix bootstrap password for onboarding page",
-      );
-      return null;
-    }
-  }
 }
 
 type EnvTemplateInput = {
@@ -1223,6 +1222,9 @@ type EnvTemplateInput = {
 type ComposeTemplateInput = {
   synapseImage: string;
   caddyImage: string;
+  onboardingApiImage: string;
+  appDistDir: string;
+  secretsDir: string;
   accessMode: BundledMatrixAccessMode;
   tlsMode: BundledMatrixTlsMode;
   localSynapsePortBinding: string;
@@ -1257,11 +1259,30 @@ services:
 ${input.accessMode === "relay" || input.tlsMode !== "local-dev"
   ? `
 
+  onboarding-api:
+    image: ${input.onboardingApiImage}
+    restart: unless-stopped
+    depends_on:
+      - synapse
+    environment:
+      SOVEREIGN_ONBOARDING_BIND_HOST: 0.0.0.0
+      SOVEREIGN_ONBOARDING_BIND_PORT: "${MATRIX_ONBOARDING_API_PORT}"
+      SOVEREIGN_ONBOARDING_STATE_PATH: "/onboarding/${MATRIX_ONBOARDING_STATE_FILE}"
+      SOVEREIGN_ONBOARDING_ALLOWED_SECRETS_DIR: "${input.secretsDir}"
+    command:
+      - node
+      - /srv/sovereign-node-onboarding-api.js
+    volumes:
+      - "${input.appDistDir}:/srv:ro"
+      - ./${MATRIX_ONBOARDING_DIR}:/onboarding
+      - "${input.secretsDir}:${input.secretsDir}:ro"
+
   reverse-proxy:
     image: ${input.caddyImage}
     restart: unless-stopped
     depends_on:
       - synapse
+      - onboarding-api
     ports:
 ${input.accessMode === "relay"
   ? `      - "${input.relayEdgePortBinding}"`
@@ -1364,6 +1385,14 @@ const resolveSynapseImage = (): string => {
     return configured;
   }
   return DEFAULT_SYNAPSE_IMAGE;
+};
+
+const resolveOnboardingApiDistDir = (): string => {
+  const configured = process.env.SOVEREIGN_NODE_APP_DIR?.trim();
+  if (configured !== undefined && configured.length > 0) {
+    return join(configured, "dist");
+  }
+  return "/opt/sovereign-ai-node/app/dist";
 };
 
 const normalizeBundledTlsMode = (
@@ -1552,6 +1581,13 @@ const renderCaddyfile = (
     "    file_server",
     "  }",
     "",
+    "  @onboardApi path /onboard/api /onboard/api/*",
+    "  handle @onboardApi {",
+    "    header Cache-Control \"no-store\"",
+    "    uri strip_prefix /onboard/api",
+    `    reverse_proxy onboarding-api:${MATRIX_ONBOARDING_API_PORT}`,
+    "  }",
+    "",
     ...(tlsMode === "internal"
       ? [
           "  @ca path /downloads/caddy-root-ca.crt",
@@ -1580,32 +1616,11 @@ const renderOnboardingPage = (input: {
   onboardingPageUrl: string;
   onboardingQrSvg: string;
   alertRoomId?: string;
-  operatorPassword?: string;
 }): string => {
   const username = `@${input.operatorLocalpart}:${input.homeserverDomain}`;
   const elementWebLink = buildElementWebLoginLink(input.publicBaseUrl, username);
   const elementAndroidLink = buildElementAndroidIntentLink(input.publicBaseUrl, username);
   const roomLink = input.alertRoomId ? buildElementWebRoomLink(input.alertRoomId) : "";
-  const passwordCard = input.operatorPassword
-    ? [
-        "      <section class=\"card\">",
-        "        <h2>Quick copy: login details</h2>",
-        "        <p>Use these buttons if Element does not prefill everything in this browser.</p>",
-        "        <button class=\"button button-secondary\" type=\"button\" onclick=\"copyHomeserverUrl(this)\">Copy Server URL</button>",
-        "        <button class=\"button button-secondary\" type=\"button\" onclick=\"copyUsername(this)\">Copy Username</button>",
-        "        <button class=\"button button-secondary\" type=\"button\" onclick=\"copyPassword(this)\">Copy Password</button>",
-        "        <p class=\"meta\">The password is embedded in this local onboarding page so you can copy it directly. Anyone who can open this page on your LAN can also read it.</p>",
-        "      </section>",
-      ].join("\n")
-    : [
-        "      <section class=\"card\">",
-        "        <h2>Quick copy: login details</h2>",
-        "        <p>Use these buttons if Element does not prefill everything in this browser.</p>",
-        "        <button class=\"button button-secondary\" type=\"button\" onclick=\"copyHomeserverUrl(this)\">Copy Server URL</button>",
-        "        <button class=\"button button-secondary\" type=\"button\" onclick=\"copyUsername(this)\">Copy Username</button>",
-        "        <p class=\"meta\">The install did not expose the bootstrap password to this page. Use the password shown during install or read the local secret file on the node.</p>",
-        "      </section>",
-      ].join("\n");
   const caSection = input.tlsMode === "internal"
     ? [
         "<section class=\"card caution\">",
@@ -1617,8 +1632,8 @@ const renderOnboardingPage = (input: {
       ].join("\n")
     : "";
   const nativeAppHint = input.tlsMode === "internal"
-    ? "If the native app still cannot reach the server, it is rejecting the local CA or local-network setup. In that case use the browser path above. Vanadium and Brave may behave differently, so the copy buttons above remain the fallback path."
-    : "The Android app button prefills the homeserver using Element Classic&apos;s documented deep link. If the app still drops you into a generic login flow, use the copy buttons above and paste the exact values manually.";
+    ? "If the native app still cannot reach the server, it is rejecting the local CA or local-network setup. In that case use the browser path above. Vanadium and Brave may behave differently, so the copy buttons below remain the fallback path."
+    : "The Android app button prefills the homeserver using Element Classic&apos;s documented deep link. If the app still drops you into a generic login flow, use the copy buttons below and paste the exact values manually.";
   const roomSection = input.alertRoomId
     ? [
         "<section class=\"card\">",
@@ -1629,6 +1644,11 @@ const renderOnboardingPage = (input: {
         "</section>",
       ].join("\n")
     : "";
+  const copyStep = input.tlsMode === "internal" ? 2 : 1;
+  const webStep = input.tlsMode === "internal" ? 3 : 2;
+  const qrStep = input.tlsMode === "internal" ? 4 : 3;
+  const signInStep = input.tlsMode === "internal" ? 5 : 4;
+  const verifyStep = input.tlsMode === "internal" ? 6 : 5;
 
   return [
     "<!doctype html>",
@@ -1658,6 +1678,11 @@ const renderOnboardingPage = (input: {
     "    ol { margin: 10px 0 0; padding-left: 20px; }",
     "    li + li { margin-top: 8px; }",
     "    .meta { margin: 10px 0 0; font-size: 0.92rem; color: var(--muted); }",
+    "    .field { display: grid; gap: 8px; margin-top: 12px; }",
+    "    .field span { font-size: 0.92rem; color: var(--muted); }",
+    "    .field input { width: 100%; min-height: 52px; border-radius: 14px; border: 1px solid rgba(148, 163, 184, 0.28); background: rgba(2, 6, 23, 0.55); color: var(--text); padding: 0 16px; font: inherit; letter-spacing: 0.12em; text-transform: uppercase; }",
+    "    .button-row { display: grid; gap: 8px; margin-top: 12px; }",
+    "    .hidden { display: none !important; }",
     "  </style>",
     "</head>",
     "<body>",
@@ -1671,9 +1696,25 @@ const renderOnboardingPage = (input: {
     "    </section>",
     "    <div class=\"stack\">",
     caSection,
-    passwordCard,
     "      <section class=\"card\">",
-    "        <h2>" + (input.tlsMode === "internal" ? "2" : "1") + ". Continue with Element Web</h2>",
+    "        <h2>" + String(copyStep) + ". Quick copy and unlock</h2>",
+    "        <p>Copy the homeserver and username here. Unlock the password with a one-time code printed by the installer or generated later with <code>sudo sovereign-node onboarding issue</code>.</p>",
+    "        <div class=\"button-row\">",
+    "          <button class=\"button button-secondary\" type=\"button\" onclick=\"copyHomeserverUrl(this)\">Copy Server URL</button>",
+    "          <button class=\"button button-secondary\" type=\"button\" onclick=\"copyUsername(this)\">Copy Username</button>",
+    "        </div>",
+    "        <label class=\"field\" for=\"bootstrapCode\">",
+    "          <span>One-time onboarding code</span>",
+    "          <input id=\"bootstrapCode\" name=\"bootstrapCode\" autocomplete=\"one-time-code\" autocapitalize=\"characters\" spellcheck=\"false\" placeholder=\"ABCD-EFGH-IJKL\">",
+    "        </label>",
+    "        <div class=\"button-row\">",
+    "          <button class=\"button\" id=\"redeemButton\" type=\"button\" onclick=\"redeemCode(this)\">Unlock Password</button>",
+    "          <button class=\"button button-secondary hidden\" id=\"copyPasswordButton\" type=\"button\" onclick=\"copyPassword(this)\">Copy Password</button>",
+    "        </div>",
+    "        <p class=\"meta\" id=\"passwordStatus\">The password is not embedded in this page. The code works once, expires after 10 minutes, and must be reissued for later device onboarding.</p>",
+    "      </section>",
+    "      <section class=\"card\">",
+    "        <h2>" + String(webStep) + ". Continue with Element Web</h2>",
     "        <p>The button opens Element Web with your homeserver prefilled. Browser restrictions still prevent safe password injection into app.element.io, so you may still need to paste the password manually.</p>",
     "        <a class=\"button\" href=\"" + escapeHtml(elementWebLink) + "\" rel=\"noreferrer\">Connect via Element Web</a>",
     "        <a class=\"button button-secondary\" href=\"" + escapeHtml(elementAndroidLink) + "\" rel=\"noreferrer\">Open in Element Android App</a>",
@@ -1682,7 +1723,7 @@ const renderOnboardingPage = (input: {
     "        <p class=\"meta\">" + nativeAppHint + "</p>",
     "      </section>",
     "      <section class=\"card\">",
-    "        <h2>" + (input.tlsMode === "internal" ? "3" : "2") + ". Open this setup page on another device</h2>",
+    "        <h2>" + String(qrStep) + ". Open this setup page on another device</h2>",
     "        <p>Open this page on a laptop, then scan the QR code from your phone if you want to hand off setup between devices.</p>",
     "        <div class=\"qr-shell\">",
     input.onboardingQrSvg,
@@ -1690,15 +1731,15 @@ const renderOnboardingPage = (input: {
     "        <p class=\"meta\">This QR points to " + escapeHtml(input.onboardingPageUrl) + "</p>",
     "      </section>",
     "      <section class=\"card\">",
-    "        <h2>" + (input.tlsMode === "internal" ? "4" : "3") + ". Sign in</h2>",
-        "        <ol>",
+    "        <h2>" + String(signInStep) + ". Sign in</h2>",
+    "        <ol>",
     "          <li>Use the username shown above.</li>",
-    "          <li>Use the password created during Sovereign Node installation.</li>",
+    "          <li>Unlock the password from this page with your one-time code, then copy it into Element.</li>",
     "          <li>If Element asks for a homeserver again, paste the exact <code>https://</code> URL shown at the top of this page.</li>",
     "        </ol>",
     "      </section>",
     "      <section class=\"card\">",
-    "        <h2>" + (input.tlsMode === "internal" ? "5" : "4") + ". If Element asks to verify another device</h2>",
+    "        <h2>" + String(verifyStep) + ". If Element asks to verify another device</h2>",
     "        <ol>",
     "          <li>Tap <strong>Bestätigung nicht möglich?</strong>.</li>",
     "          <li>Continue without verification or without secure backup.</li>",
@@ -1711,21 +1752,69 @@ const renderOnboardingPage = (input: {
     "  <script>",
     "    const homeserverUrl = " + JSON.stringify(input.publicBaseUrl) + ";",
     "    const username = " + JSON.stringify(username) + ";",
-    "    const password = " + JSON.stringify(input.operatorPassword ?? "") + ";",
+    "    let revealedPassword = '';",
     "    async function copyHomeserverUrl(button) {",
     "      await copyValue(button, homeserverUrl);",
     "    }",
     "    async function copyUsername(button) {",
     "      await copyValue(button, username);",
     "    }",
+    "    async function redeemCode(button) {",
+    "      const codeInput = document.getElementById('bootstrapCode');",
+    "      const status = document.getElementById('passwordStatus');",
+    "      const copyButton = document.getElementById('copyPasswordButton');",
+    "      const code = typeof codeInput?.value === 'string' ? codeInput.value.trim() : '';",
+    "      if (!code) {",
+    "        status.textContent = 'Enter the one-time onboarding code from the installer output.';",
+    "        return;",
+    "      }",
+    "      const previousText = button.textContent;",
+    "      button.textContent = 'Unlocking...';",
+    "      button.disabled = true;",
+    "      try {",
+    "        const response = await fetch('/onboard/api/redeem', {",
+    "          method: 'POST',",
+    "          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },",
+    "          cache: 'no-store',",
+    "          body: JSON.stringify({ code }),",
+    "        });",
+    "        const payload = await response.json().catch(() => ({}));",
+    "        if (!response.ok) {",
+    "          revealedPassword = '';",
+    "          copyButton.classList.add('hidden');",
+    "          status.textContent = typeof payload.message === 'string' && payload.message.length > 0",
+    "            ? payload.message + ' Run sudo sovereign-node onboarding issue to get a fresh code.'",
+    "            : 'The one-time code could not be redeemed. Run sudo sovereign-node onboarding issue to get a fresh code.';",
+    "          return;",
+    "        }",
+    "        revealedPassword = typeof payload.password === 'string' ? payload.password : '';",
+    "        if (!revealedPassword) {",
+    "          throw new Error('Password was missing from the onboarding response');",
+    "        }",
+    "        copyButton.classList.remove('hidden');",
+    "        status.textContent = 'Password unlocked for this page session. Copy it now. After one successful copy it is cleared from this page.';",
+    "      } catch (error) {",
+    "        revealedPassword = '';",
+    "        copyButton.classList.add('hidden');",
+    "        status.textContent = error instanceof Error ? error.message : 'Unlock failed';",
+    "      } finally {",
+    "        button.disabled = false;",
+    "        button.textContent = previousText;",
+    "      }",
+    "    }",
     "    async function copyPassword(button) {",
-    "      if (!password) {",
+    "      const status = document.getElementById('passwordStatus');",
+    "      const copyButton = document.getElementById('copyPasswordButton');",
+    "      if (!revealedPassword) {",
     "        const oldText = button.textContent;",
     "        button.textContent = 'Not available';",
     "        setTimeout(() => { button.textContent = oldText; }, 1800);",
     "        return;",
     "      }",
-    "      await copyValue(button, password);",
+    "      await copyValue(button, revealedPassword);",
+    "      revealedPassword = '';",
+    "      copyButton.classList.add('hidden');",
+    "      status.textContent = 'Password copied. It has been cleared from this page. Run sudo sovereign-node onboarding issue if you need a fresh one-time code.';",
     "    }",
     "    async function copyValue(button, value) {",
     "      try {",
@@ -1748,6 +1837,9 @@ const renderOnboardingPage = (input: {
     "        setTimeout(() => { button.textContent = oldText; }, 1800);",
     "      }",
     "    }",
+    "    window.addEventListener('pagehide', () => {",
+    "      revealedPassword = '';",
+    "    });",
     "  </script>",
     "</body>",
     "</html>",
@@ -1757,7 +1849,7 @@ const renderOnboardingPage = (input: {
 };
 
 const buildOnboardingPageUrl = (publicBaseUrl: string): string =>
-  `${publicBaseUrl.replace(/\/+$/, "")}/onboard`;
+  buildMatrixOnboardingUrl(publicBaseUrl);
 
 const buildElementWebLoginLink = (publicBaseUrl: string, username: string): string =>
   `https://app.element.io/#/login?hs_url=${encodeURIComponent(publicBaseUrl)}&login_hint=${encodeURIComponent(username)}`;

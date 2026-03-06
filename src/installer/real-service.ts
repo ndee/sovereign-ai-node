@@ -10,6 +10,7 @@ import {
   type DoctorReport,
   type InstallJobStatusResponse,
   type InstallRequest,
+  type MatrixOnboardingIssueResult,
   type PreflightResult,
   type ReconfigureResult,
   type SovereignStatus,
@@ -29,6 +30,10 @@ import type {
 } from "../contracts/api.js";
 import type { Logger } from "../logging/logger.js";
 import type { SovereignPaths } from "../config/paths.js";
+import {
+  buildMatrixOnboardingUrl,
+  issueMatrixOnboardingState,
+} from "../onboarding/bootstrap-code.js";
 import type { OpenClawBootstrapper } from "../openclaw/bootstrap.js";
 import type { OpenClawGatewayServiceManager } from "../openclaw/gateway-service.js";
 import type {
@@ -815,6 +820,50 @@ export class RealInstallerService implements InstallerService {
           : []),
         ...requestUpdate.validation,
       ],
+    };
+  }
+
+  async issueMatrixOnboardingCode(req?: {
+    ttlMinutes?: number;
+  }): Promise<MatrixOnboardingIssueResult> {
+    const runtimeConfig = await this.readRuntimeConfig();
+    if (
+      runtimeConfig.matrix.accessMode !== "relay"
+      && !runtimeConfig.matrix.publicBaseUrl.startsWith("https://")
+    ) {
+      throw {
+        code: "MATRIX_ONBOARDING_UNAVAILABLE",
+        message:
+          "Matrix onboarding is unavailable because this installation does not expose the HTTPS onboarding page",
+        retryable: false,
+        details: {
+          publicBaseUrl: runtimeConfig.matrix.publicBaseUrl,
+          accessMode: runtimeConfig.matrix.accessMode,
+        },
+      };
+    }
+    const statePath = this.getMatrixOnboardingStatePath(runtimeConfig);
+    const operatorPasswordSecretRef = runtimeConfig.matrix.operator.passwordSecretRef;
+    if (operatorPasswordSecretRef === undefined || operatorPasswordSecretRef.length === 0) {
+      throw {
+        code: "MATRIX_ONBOARDING_UNAVAILABLE",
+        message: "Matrix onboarding is unavailable because the operator password secret is missing",
+        retryable: false,
+      };
+    }
+
+    const issued = issueMatrixOnboardingState({
+      operatorPasswordSecretRef,
+      username: runtimeConfig.matrix.operator.userId,
+      homeserverUrl: runtimeConfig.matrix.publicBaseUrl,
+      ttlMinutes: req?.ttlMinutes,
+    });
+    await this.writeInstallerJsonFile(statePath, issued.state, 0o600);
+    return {
+      code: issued.code,
+      expiresAt: issued.state.expiresAt,
+      onboardingUrl: buildMatrixOnboardingUrl(runtimeConfig.matrix.publicBaseUrl),
+      username: runtimeConfig.matrix.operator.userId,
     };
   }
 
@@ -4113,6 +4162,25 @@ export class RealInstallerService implements InstallerService {
     return parsed;
   }
 
+  private getMatrixOnboardingStatePath(runtimeConfig: RuntimeConfig): string {
+    const configured = runtimeConfig.matrix.onboardingStatePath?.trim();
+    if (configured !== undefined && configured.length > 0) {
+      return configured;
+    }
+    const projectDir = runtimeConfig.matrix.projectDir?.trim();
+    if (projectDir !== undefined && projectDir.length > 0) {
+      return join(projectDir, "onboarding", "state.json");
+    }
+    throw {
+      code: "MATRIX_ONBOARDING_UNAVAILABLE",
+      message: "Matrix onboarding is unavailable for this installation",
+      retryable: false,
+      details: {
+        reason: "missing_project_dir",
+      },
+    };
+  }
+
   private getInstallRequestPath(): string {
     const configured = process.env.SOVEREIGN_NODE_REQUEST_FILE?.trim();
     if (configured !== undefined && configured.length > 0) {
@@ -4480,6 +4548,8 @@ export class RealInstallerService implements InstallerService {
         federationEnabled: input.matrixProvision.federationEnabled,
         publicBaseUrl: input.matrixProvision.publicBaseUrl,
         adminBaseUrl: input.matrixProvision.adminBaseUrl,
+        projectDir: input.matrixProvision.projectDir,
+        onboardingStatePath: join(input.matrixProvision.projectDir, "onboarding", "state.json"),
         operator: {
           localpart: input.matrixAccounts.operator.localpart,
           userId: input.matrixAccounts.operator.userId,
@@ -4579,6 +4649,8 @@ export class RealInstallerService implements InstallerService {
         adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
         federationEnabled: runtimeConfig.matrix.federationEnabled,
         tlsMode: input.matrixProvision.tlsMode,
+        projectDir: runtimeConfig.matrix.projectDir,
+        onboardingStatePath: runtimeConfig.matrix.onboardingStatePath,
         operator: {
           localpart: input.matrixAccounts.operator.localpart,
           userId: runtimeConfig.matrix.operator.userId,

@@ -98,6 +98,8 @@ export type RuntimeConfig = {
     federationEnabled: boolean;
     publicBaseUrl: string;
     adminBaseUrl: string;
+    projectDir?: string;
+    onboardingStatePath?: string;
     operator: {
       localpart?: string;
       userId: string;
@@ -427,6 +429,14 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
     typeof matrix.homeserverDomain === "string" && matrix.homeserverDomain.length > 0
       ? matrix.homeserverDomain
       : inferMatrixHomeserverDomain(matrix.publicBaseUrl);
+  const projectDir =
+    typeof matrix.projectDir === "string" && matrix.projectDir.length > 0
+      ? matrix.projectDir
+      : undefined;
+  const onboardingStatePath =
+    typeof matrix.onboardingStatePath === "string" && matrix.onboardingStatePath.length > 0
+      ? matrix.onboardingStatePath
+      : undefined;
   const inferredImapConfigured =
     typeof imap.host === "string"
     && imap.host.length > 0
@@ -563,6 +573,8 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
         typeof matrix.federationEnabled === "boolean" ? matrix.federationEnabled : false,
       publicBaseUrl: matrix.publicBaseUrl,
       adminBaseUrl,
+      ...(projectDir === undefined ? {} : { projectDir }),
+      ...(onboardingStatePath === undefined ? {} : { onboardingStatePath }),
       operator: {
         userId:
           typeof operator.userId === "string" && operator.userId.length > 0

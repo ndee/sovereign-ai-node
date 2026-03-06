@@ -5,6 +5,7 @@ import type {
   DoctorReport,
   InstallJobStatusResponse,
   InstallRequest,
+  MatrixOnboardingIssueResult,
   PreflightResult,
   ReconfigureResult,
   SovereignStatus,
@@ -258,6 +259,15 @@ export class StubInstallerService implements InstallerService {
       changed: [],
       restartRequiredServices: [],
       validation: [check("openrouter-config", "Reconfigure OpenRouter scaffold only", "warn")],
+    };
+  }
+
+  async issueMatrixOnboardingCode(): Promise<MatrixOnboardingIssueResult> {
+    return {
+      code: "SCFD-0000-0000",
+      expiresAt: now(),
+      onboardingUrl: "https://matrix.example.org/onboard",
+      username: "@operator:matrix.example.org",
     };
   }
 

@@ -259,6 +259,43 @@ Purpose:
 
 - `result` MUST be a `SovereignStatus`
 
+## `sovereign-node onboarding issue`
+
+Purpose:
+
+- issue a new one-time Matrix onboarding code for the HTTPS onboarding page
+
+Behavior:
+
+- writes a fresh single-use onboarding state file
+- invalidates any previously issued unused code
+- returns the onboarding code, expiry, onboarding URL, and username
+- MUST fail clearly when the current installation does not expose HTTPS onboarding (for example `local-dev`)
+
+Flags:
+
+- `--ttl-minutes <minutes>` default `10`
+- `--json`
+
+`--json` result shape:
+
+```json
+{
+  "code": "ABCD-EFGH-IJKL",
+  "expiresAt": "2026-03-06T12:34:56.000Z",
+  "onboardingUrl": "https://node-name.sovereign-ai-node.com/onboard",
+  "username": "@operator:node-name.sovereign-ai-node.com"
+}
+```
+
+Normative onboarding rules:
+
+- `/onboard` MUST NOT embed the operator password in static HTML or JS
+- onboarding codes MUST be stored server-side as salted hashes
+- onboarding codes MUST be single-use
+- default TTL MUST be 10 minutes
+- onboarding API responses revealing the password MUST be sent with `Cache-Control: no-store`
+
 ## `sovereign-node doctor`
 
 Purpose:

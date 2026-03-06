@@ -335,12 +335,14 @@ install_wrappers() {
   cat > /usr/local/bin/sovereign-node <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
+export SOVEREIGN_NODE_APP_DIR="$APP_DIR"
 exec node "$APP_DIR/dist/sovereign-node.js" "\$@"
 EOF
 
   cat > /usr/local/bin/sovereign-node-api <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
+export SOVEREIGN_NODE_APP_DIR="$APP_DIR"
 exec node "$APP_DIR/dist/sovereign-node-api.js" "\$@"
 EOF
 
@@ -1709,7 +1711,7 @@ wait_for_runtime_ready() {
 }
 
 print_matrix_client_onboarding_guidance() {
-  local guidance onboarding_url
+  local guidance onboarding_url onboarding_json onboarding_parse
   [[ -r "$REQUEST_FILE" ]] || return 0
 
   guidance="$(
@@ -1753,6 +1755,7 @@ const lines = [
   "Phone onboarding:",
   `- Onboarding page: ${onboardingUrl}`,
   `- Element Web login: ${elementLink}`,
+  "- Use a one-time onboarding code to unlock the password on the onboarding page.",
 ];
 if (tlsMode === "internal") {
   lines.push(`- CA download URL: ${caDownloadUrl}`);
@@ -1767,6 +1770,50 @@ NODE
 
   if [[ -n "$guidance" ]]; then
     printf '\n%s\n' "$guidance"
+    onboarding_json="$(sovereign-node onboarding issue --json 2>/dev/null || true)"
+    onboarding_parse="$(
+      node - "$onboarding_json" <<'NODE'
+const raw = process.argv[2] ?? "";
+if (!raw) {
+  process.exit(0);
+}
+let parsed;
+try {
+  parsed = JSON.parse(raw);
+} catch {
+  process.exit(0);
+}
+const result = parsed?.result;
+if (!result || typeof result !== "object") {
+  process.exit(0);
+}
+const fields = [
+  typeof result.code === "string" ? result.code : "",
+  typeof result.expiresAt === "string" ? result.expiresAt : "",
+  typeof result.onboardingUrl === "string" ? result.onboardingUrl : "",
+  typeof result.username === "string" ? result.username : "",
+];
+if (fields.some((value) => value.length === 0)) {
+  process.exit(0);
+}
+process.stdout.write(fields.join("\t"));
+NODE
+    )" || onboarding_parse=""
+    if [[ -n "$onboarding_parse" ]]; then
+      local onboarding_code onboarding_expires onboarding_url_from_issue onboarding_username
+      onboarding_code="${onboarding_parse%%$'\t'*}"
+      onboarding_parse="${onboarding_parse#*$'\t'}"
+      onboarding_expires="${onboarding_parse%%$'\t'*}"
+      onboarding_parse="${onboarding_parse#*$'\t'}"
+      onboarding_url_from_issue="${onboarding_parse%%$'\t'*}"
+      onboarding_username="${onboarding_parse#*$'\t'}"
+      printf '%s\n' \
+        "- One-time onboarding code: ${onboarding_code}" \
+        "- Code expires at: ${onboarding_expires}" \
+        "- Username: ${onboarding_username}" \
+        "- Regenerate later: sudo sovereign-node onboarding issue"
+      onboarding_url="$onboarding_url_from_issue"
+    fi
     onboarding_url="$(
       node - "$REQUEST_FILE" <<'NODE'
 const fs = require("node:fs");
@@ -1778,6 +1825,9 @@ if (!publicBaseUrl || !publicBaseUrl.startsWith("https://")) {
 process.stdout.write(`${publicBaseUrl.replace(/\/+$/, "")}/onboard`);
 NODE
     )" || onboarding_url=""
+    if [[ -z "$onboarding_url" && -n "${onboarding_url_from_issue:-}" ]]; then
+      onboarding_url="$onboarding_url_from_issue"
+    fi
     print_onboarding_qr "$onboarding_url"
   fi
 }
@@ -1882,6 +1932,7 @@ Useful commands:
 - sovereign-node install --request-file ${REQUEST_FILE} --json
 - sovereign-node status --json
 - sovereign-node doctor --json
+- sovereign-node onboarding issue --json
 EOF
   print_matrix_client_onboarding_guidance
 }

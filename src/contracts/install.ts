@@ -303,6 +303,13 @@ export const reconfigureResultSchema = z.object({
   validation: z.array(checkResultSchema),
 });
 
+export const matrixOnboardingIssueResultSchema = z.object({
+  code: z.string().min(1),
+  expiresAt: isoTimestampSchema,
+  onboardingUrl: z.string().min(1),
+  username: z.string().min(1),
+});
+
 export const testImapResultSchema = z.object({
   ok: z.boolean(),
   host: z.string().min(1),
@@ -350,3 +357,4 @@ export type ReconfigureResult = z.infer<typeof reconfigureResultSchema>;
 export type TestImapResult = z.infer<typeof testImapResultSchema>;
 export type TestMatrixResult = z.infer<typeof testMatrixResultSchema>;
 export type StartInstallResult = z.infer<typeof startInstallResultSchema>;
+export type MatrixOnboardingIssueResult = z.infer<typeof matrixOnboardingIssueResultSchema>;

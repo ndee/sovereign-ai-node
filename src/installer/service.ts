@@ -2,6 +2,7 @@ import type {
   DoctorReport,
   InstallJobStatusResponse,
   InstallRequest,
+  MatrixOnboardingIssueResult,
   PreflightResult,
   ReconfigureResult,
   SovereignStatus,
@@ -101,6 +102,7 @@ export interface InstallerService {
   reconfigureImap(req: ReconfigureImapRequest): Promise<ReconfigureResult>;
   reconfigureMatrix(req: ReconfigureMatrixRequest): Promise<ReconfigureResult>;
   reconfigureOpenrouter(req: ReconfigureOpenrouterRequest): Promise<ReconfigureResult>;
+  issueMatrixOnboardingCode(req?: { ttlMinutes?: number }): Promise<MatrixOnboardingIssueResult>;
   listManagedAgents(): Promise<ManagedAgentListResult>;
   createManagedAgent(req: {
     id: string;

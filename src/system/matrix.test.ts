@@ -231,6 +231,9 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       const composeText = await readFile(result.composeFilePath, "utf8");
       expect(composeText).toContain("reverse-proxy:");
       expect(composeText).toContain("caddy:2.10.2-alpine");
+      expect(composeText).toContain("onboarding-api:");
+      expect(composeText).toContain("node:22-alpine");
+      expect(composeText).toContain("/srv/sovereign-node-onboarding-api.js");
       expect(composeText).toContain('"127.0.0.1:8008:8008"');
       expect(composeText).toContain('"80:80"');
       expect(composeText).toContain('"443:443"');
@@ -242,6 +245,8 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       const caddyText = await readFile(join(result.projectDir, "reverse-proxy", "Caddyfile"), "utf8");
       expect(caddyText).toContain("matrix.example.org {");
       expect(caddyText).toContain("@onboard path /onboard /onboard/ /onboard/index.html");
+      expect(caddyText).toContain("@onboardApi path /onboard/api /onboard/api/*");
+      expect(caddyText).toContain("reverse_proxy onboarding-api:8090");
       expect(caddyText).toContain("reverse_proxy synapse:8008");
 
       const wellKnownClient = await readFile(
@@ -266,8 +271,10 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(onboardPage).toContain("package=im.vector.app");
       expect(onboardPage).toContain("Copy Server URL");
       expect(onboardPage).toContain("Copy Username");
-      expect(onboardPage).toContain("prevent safe password injection");
-      expect(onboardPage).toContain("did not expose the bootstrap password");
+      expect(onboardPage).toContain("Unlock Password");
+      expect(onboardPage).toContain("/onboard/api/redeem");
+      expect(onboardPage).toContain("The password is not embedded in this page.");
+      expect(onboardPage).toContain("sudo sovereign-node onboarding issue");
       expect(onboardPage).toContain("Bestätigung nicht möglich?");
       expect(onboardPage).toContain("<svg");
       expect(onboardPage).not.toContain("/downloads/caddy-root-ca.crt");
@@ -322,6 +329,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
 
       const composeText = await readFile(result.composeFilePath, "utf8");
       expect(composeText).toContain("reverse-proxy:");
+      expect(composeText).toContain("onboarding-api:");
       expect(composeText).toContain('"127.0.0.1:8008:8008"');
       expect(composeText).toContain('"8448:443"');
       expect(composeText).not.toContain('"80:80"');
@@ -331,6 +339,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(caddyText).toContain("default_sni 192.168.0.54");
       expect(caddyText).toContain("tls internal");
       expect(caddyText).toContain("@ca path /downloads/caddy-root-ca.crt");
+      expect(caddyText).toContain("@onboardApi path /onboard/api /onboard/api/*");
 
       const wellKnownServer = await readFile(
         join(result.projectDir, "well-known", ".well-known", "matrix", "server"),
@@ -346,6 +355,8 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(onboardPage).toContain("Open in Element Android App");
       expect(onboardPage).toContain("package=im.vector.app");
       expect(onboardPage).toContain("Copy Server URL");
+      expect(onboardPage).toContain("Unlock Password");
+      expect(onboardPage).toContain("The password is not embedded in this page.");
       expect(onboardPage).toContain("Native Android Matrix apps may still reject local CAs");
       expect(onboardPage).toContain("Do not type only 192.168.0.54:8448.");
       expect(onboardPage).toContain("Vanadium and Brave may behave differently");
@@ -416,6 +427,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
 
       expect(result.accessMode).toBe("relay");
       const composeText = await readFile(result.composeFilePath, "utf8");
+      expect(composeText).toContain("onboarding-api:");
       expect(composeText).toContain('"127.0.0.1:18080:80"');
       expect(composeText).not.toContain('"80:80"');
       expect(composeText).not.toContain(':443"');
@@ -424,6 +436,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(caddyText).toContain(":80 {");
       expect(caddyText).not.toContain("tls internal");
       expect(caddyText).not.toContain("/downloads/caddy-root-ca.crt");
+      expect(caddyText).toContain("@onboardApi path /onboard/api /onboard/api/*");
 
       const onboardPage = await readFile(
         join(result.projectDir, "well-known", "onboard", "index.html"),
@@ -431,6 +444,8 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       );
       expect(onboardPage).toContain("Connect via Element Web");
       expect(onboardPage).toContain("Open in Element Android App");
+      expect(onboardPage).toContain("Unlock Password");
+      expect(onboardPage).toContain("The password is not embedded in this page.");
       expect(onboardPage).not.toContain("/downloads/caddy-root-ca.crt");
       expect(recordedExecCalls).toHaveLength(2);
     } finally {
@@ -538,7 +553,9 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
         "utf8",
       );
       expect(onboardPage).toContain("Copy Password");
-      expect(onboardPage).toContain(operatorPassword);
+      expect(onboardPage).toContain("Unlock Password");
+      expect(onboardPage).toContain("The password is not embedded in this page.");
+      expect(onboardPage).not.toContain(operatorPassword);
       expect(onboardPage).toContain("Open Alert Room in Element Web");
 
       const composeUpCalls = recordedExecCalls.filter(
@@ -726,10 +743,17 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
     try {
       const req = buildInstallRequest();
       const provision = await provisioner.provision(req);
-      const secretsDir = join(provision.projectDir, "bootstrap-secrets");
-      await mkdir(secretsDir, { recursive: true });
-      await writeFile(join(secretsDir, "operator.password"), "stale-operator-password\n", "utf8");
-      await writeFile(join(secretsDir, "mail-sentinel.password"), "stale-bot-password\n", "utf8");
+      await mkdir(paths.secretsDir, { recursive: true });
+      await writeFile(
+        join(paths.secretsDir, "matrix-operator.password"),
+        "stale-operator-password\n",
+        "utf8",
+      );
+      await writeFile(
+        join(paths.secretsDir, "matrix-mail-sentinel.password"),
+        "stale-bot-password\n",
+        "utf8",
+      );
 
       const accounts = await provisioner.bootstrapAccounts(req, provision);
 

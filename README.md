@@ -196,7 +196,16 @@ The guided install flow then:
 3. installs and instantiates core templates/agents/tools
 4. registers Mail Sentinel cron workflow
 5. runs smoke checks and sends hello alerts from both core agents
-6. keeps IMAP as pending unless you configure it
+6. prints a one-time Matrix onboarding code for the HTTPS onboarding page
+7. keeps IMAP as pending unless you configure it
+
+For HTTPS-backed Matrix installs (`direct` with `tlsMode=auto|internal` or `relay`):
+
+- the onboarding page is `https://.../onboard`
+- the operator password is not embedded in that page
+- the installer prints a single-use bootstrap code valid for 10 minutes
+- the user enters that code on `/onboard` to reveal the password once
+- re-onboarding later requires `sudo sovereign-node onboarding issue`
 
 After install, manage this model directly via CLI:
 
@@ -231,3 +240,4 @@ Manual verify:
 - `sovereign-node status --json`
 - `sovereign-node doctor --json`
 - `sovereign-node logs --json`
+- `sovereign-node onboarding issue --json`

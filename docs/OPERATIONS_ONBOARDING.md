@@ -247,9 +247,25 @@ The installer output should provide:
 
 - Matrix homeserver URL
 - operator username (Matrix user ID or localpart)
-- password or password-reset instructions
+- one-time onboarding code instructions for `/onboard`
 - expected alert room name and room ID
 - a quick check command (`sovereign-node test-alert`)
+
+For HTTPS-backed installs, the onboarding flow is:
+
+1. open the printed `/onboard` URL
+2. enter the one-time bootstrap code printed by the installer
+3. copy the password once into Element
+4. if the code is expired or already used, run:
+
+```bash
+sudo sovereign-node onboarding issue
+```
+
+Security note:
+
+- the operator password is no longer embedded in `/onboard`
+- bootstrap codes are single-use and expire after 10 minutes by default
 
 ## Wait for Mail Alerts (Operator Step 4)
 
