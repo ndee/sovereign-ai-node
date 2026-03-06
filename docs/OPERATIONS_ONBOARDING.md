@@ -43,9 +43,9 @@ The operator should not need to manually do these steps in the default path, but
 - Install OpenClaw itself (pinned version) using the official OpenClaw installer and skip OpenClaw onboarding
 - Install/repair the OpenClaw gateway service after Sovereign writes the runtime config
 - Configure OpenClaw with pinned plugins and agent config
-- Register the `mail-sentinel` agent and cron polling job
+- Register core Sovereign agents and cron polling jobs
 - Provision the bundled Matrix stack (Synapse, Postgres, reverse proxy, TLS)
-- Create Matrix operator and bot accounts
+- Create Matrix operator and required core-agent accounts
 - Create a private alert room and store the room target
 - Run health checks and send a test alert
 
@@ -58,7 +58,7 @@ Phase-A documentation assumes the default path is:
 - single Linux host
 - bundled Matrix stack (Synapse + Postgres + reverse proxy)
 - Docker Compose deployment for the bundled services
-- `Mail Sentinel` as a standard OpenClaw agent
+- core Sovereign templates instantiated as managed OpenClaw agents
 - external Element client (Element Desktop, mobile, or `app.element.io`)
 
 Default operational posture for the bundled profile:
@@ -79,6 +79,31 @@ Default operational posture for the bundled profile:
 Core rule:
 
 - The CLI and Wizard UI must call the same installer/provisioning backend logic.
+
+## Sovereign Runtime Concepts (Operator View)
+
+Operator-facing runtime objects:
+
+- `Sovereign agent templates`
+  - Signed/pinned manifests for agent behavior and workspace materialization.
+- `Sovereign tool templates`
+  - Signed/pinned manifests for least-privilege capability contracts.
+- `Sovereign tool instances`
+  - Concrete bindings of a tool template to real config/secrets.
+- `Sovereign agents`
+  - Managed agent instances with their own Matrix identities, workspace, and bound tool instances.
+
+Relevant operator commands:
+
+- `sovereign-node templates list --json`
+- `sovereign-node templates install <id>@<version> --json`
+- `sovereign-node tools list --json`
+- `sovereign-node tools create ... --json`
+- `sovereign-node tools update ... --json`
+- `sovereign-node agents list --json`
+- `sovereign-node agents create ... --json`
+- `sovereign-node agents update ... --json`
+- `sovereign-node agents delete <id> --json`
 
 Contract note:
 
@@ -131,14 +156,24 @@ In the default bundled mode, the installer should perform these steps in order:
 4. Collect and test IMAP credentials.
 5. Collect Matrix domain settings and apply safe defaults.
 6. Provision the bundled Matrix stack.
-7. Create Matrix operator account and bot account.
-8. Create a private alert room and invite both accounts.
+7. Create Matrix operator account and required core-agent accounts.
+8. Create a private alert room and invite operator + core agents.
 9. Write Sovereign-managed OpenClaw config/profile and secrets references.
 10. Install/repair the OpenClaw gateway service and start it.
 11. Install/configure required OpenClaw plugins.
-12. Register `mail-sentinel` agent config, skills, and cron polling job.
-13. Run health checks and a synthetic test alert.
-14. Print Element connection details and next steps.
+12. Install/pin core templates and instantiate core agent/tool runtime entries.
+13. Register `mail-sentinel` cron polling job.
+14. Run health checks and synthetic hello alerts from core agents.
+15. Print Element connection details and next steps.
+
+Current default core instantiation:
+
+- Agents:
+  - `mail-sentinel`
+  - `node-operator`
+- Tool instances:
+  - `node-operator-cli` (always)
+  - `mail-sentinel-imap` (only when IMAP is configured)
 
 ### OpenClaw Bootstrap in the Default Sovereign Flow
 
@@ -176,6 +211,7 @@ Recommended operator command set:
 - `sovereign-node test-alert`
 - `sovereign-node reconfigure imap`
 - `sovereign-node reconfigure matrix`
+- `sovereign-node reconfigure openrouter`
 
 `openclaw` remains fully supported for runtime-native operations:
 

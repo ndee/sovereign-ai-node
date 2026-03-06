@@ -65,6 +65,34 @@ These defaults are binding for the phase-B bundled install profile unless explic
   - Element Mobile
   - `app.element.io` with custom homeserver
 - self-hosted Element Web: optional, not required for phase 1
+- template lifecycle: installer manages signed/pinned core templates
+- core runtime bootstrap: installer instantiates core Sovereign agents and tool instances
+
+## Sovereign Runtime Objects (Normative Vocabulary)
+
+Installer- and operator-facing contracts in this document use the following model:
+
+- `Sovereign Agent Template`
+  - Signed, pinned manifest for agent behavior.
+  - Defines workspace materialization and tool-template requirements.
+- `Sovereign Tool Template`
+  - Signed, pinned manifest for a least-privilege capability contract.
+  - Defines required config keys, secret refs, and allowed command/tool surface.
+- `Sovereign Tool Instance`
+  - Installation-local binding of a tool template to concrete config and secret refs.
+  - Multiple instances per template are allowed (for example multiple IMAP identities).
+- `Sovereign Agent`
+  - Managed runtime agent with its own workspace and Matrix identity.
+  - References `templateRef` and bound `toolInstanceIds`.
+
+Current core templates in the bundled profile:
+
+- Agent templates:
+  - `mail-sentinel@1.0.0`
+  - `node-operator@1.0.0`
+- Tool templates:
+  - `imap-readonly@1.0.0`
+  - `node-cli-ops@1.0.0`
 
 ## OpenClaw Bootstrap Policy (Default Sovereign Path)
 
@@ -302,6 +330,16 @@ Purpose:
 
 - `result` MUST be a `ReconfigureResult` with `target = "matrix"`
 
+## `sovereign-node reconfigure openrouter`
+
+Purpose:
+
+- update OpenRouter model and/or secret reference for the bundled deployment profile
+
+`--json` result schema:
+
+- `result` MUST be a `ReconfigureResult` with `target = "openrouter"`
+
 ## Shared Installer Backend API Contract
 
 The CLI and Sovereign Wizard UI must use the same backend installer/provisioning implementation.
@@ -319,6 +357,7 @@ This section defines the required HTTP-style API contract (or an equivalent loca
 - `GET /api/status`
 - `POST /api/reconfigure/imap`
 - `POST /api/reconfigure/matrix`
+- `POST /api/reconfigure/openrouter`
 
 ## API Response Envelope
 
@@ -387,6 +426,7 @@ type JobStep = {
     | "preflight"
     | "openclaw_bootstrap_cli"
     | "imap_validate"
+    | "relay_enroll"
     | "matrix_provision"
     | "matrix_bootstrap_accounts"
     | "matrix_bootstrap_room"
@@ -409,6 +449,14 @@ type JobStep = {
 ```ts
 type InstallRequest = {
   mode: "bundled_matrix";
+  connectivity?: {
+    mode?: "direct" | "relay";
+  };
+  relay?: {
+    controlUrl: string;
+    enrollmentToken: string;
+    requestedSlug?: string;
+  };
   openclaw?: {
     manageInstallation?: boolean; // default true
     installMethod?: "install_sh"; // phase-B default and only supported value
@@ -417,7 +465,13 @@ type InstallRequest = {
     forceReinstall?: boolean; // default false
     runOnboard?: false; // default false; Sovereign flow skips onboarding
   };
-  imap: {
+  openrouter: {
+    model?: string;
+    // Exactly one of the following should be provided:
+    apiKey?: string; // transient only
+    secretRef?: string; // file:... or env:...
+  };
+  imap?: {
     host: string;
     port: number;
     tls: boolean;
@@ -431,7 +485,7 @@ type InstallRequest = {
     homeserverDomain: string; // e.g. matrix.example.org
     publicBaseUrl: string; // e.g. https://matrix.example.org
     federationEnabled?: boolean; // default false
-    tlsMode?: "auto" | "manual" | "local-dev"; // default auto for public installs
+    tlsMode?: "auto" | "internal" | "manual" | "local-dev"; // default auto for public installs
     alertRoomName?: string; // default "Sovereign Alerts"
   };
   operator: {
@@ -457,7 +511,11 @@ Constraints:
 - `openclaw.manageInstallation` defaults to `true`
 - `openclaw.installMethod` defaults to `"install_sh"`
 - `openclaw.runOnboard` defaults to `false` and should remain `false` in the default Sovereign flow
+- `openrouter` is required
+- `openrouter.apiKey` or `openrouter.secretRef` is required
 - `imap.password` MUST NOT be persisted if provided
+- `imap` may be omitted (pending IMAP mode)
+- `connectivity.mode = "relay"` requires a valid `relay` object
 - `matrix.federationEnabled` defaults to `false`
 - `mailSentinel.e2eeAlertRoom` defaults to `false`
 
@@ -497,10 +555,18 @@ type InstallResult = {
     homeserverUrl: string;
     federationEnabled: boolean;
     operatorUserId: string;
-    botUserId: string;
+    botUserId: string; // primary alert bot user id (mail-sentinel)
     alertRoomId: string;
     alertRoomName: string;
     e2eeEnabled: boolean;
+  };
+  relay?: {
+    enabled: boolean;
+    hostname: string;
+    publicBaseUrl: string;
+    serviceInstalled: boolean;
+    serviceState?: "running" | "stopped" | "failed" | "unknown";
+    connected: boolean;
   };
   openclaw: {
     installManagedBySovereign: boolean;
@@ -511,8 +577,8 @@ type InstallResult = {
     openclawHome: string;
     gatewayServiceInstalled: boolean;
     gatewayServiceName?: string;
-    agentId: "mail-sentinel";
-    cronJobId: string;
+    agentId: "mail-sentinel"; // compatibility field for primary polling agent
+    cronJobId: string; // compatibility field for primary polling cron
     pluginIds: string[]; // e.g. ["matrix", "imap-readonly"]
   };
   paths: {
@@ -555,7 +621,7 @@ type ComponentHealth = "healthy" | "degraded" | "unhealthy" | "unknown";
 
 type ServiceStatus = {
   name: string;
-  kind: "sovereign-node" | "openclaw" | "synapse" | "postgres" | "reverse-proxy";
+  kind: "sovereign-node" | "openclaw" | "synapse" | "postgres" | "reverse-proxy" | "relay-tunnel";
   health: ComponentHealth;
   state: "running" | "stopped" | "failed" | "unknown";
   message?: string;
@@ -565,6 +631,15 @@ type SovereignStatus = {
   installationId?: ID;
   mode: "bundled_matrix";
   services: ServiceStatus[];
+  relay?: {
+    enabled: boolean;
+    controlUrl?: string;
+    hostname?: string;
+    publicBaseUrl?: string;
+    connected: boolean;
+    serviceInstalled: boolean;
+    serviceState?: "running" | "stopped" | "failed" | "unknown";
+  };
   matrix: {
     homeserverUrl?: string;
     health: ComponentHealth;
@@ -581,8 +656,8 @@ type SovereignStatus = {
     serviceInstalled: boolean;
     serviceState?: "running" | "stopped" | "failed" | "unknown";
     configPath?: string;
-    agentPresent: boolean;
-    cronPresent: boolean;
+    agentPresent: boolean; // primary runtime/cron agents present
+    cronPresent: boolean; // primary runtime cron present
     pluginIds?: string[];
   };
   mailSentinel: {
@@ -636,7 +711,7 @@ type TestAlertResult = {
 
 ```ts
 type ReconfigureResult = {
-  target: "imap" | "matrix";
+  target: "imap" | "matrix" | "openrouter";
   changed: string[]; // field paths
   restartRequiredServices: string[];
   validation: CheckResult[];
@@ -669,7 +744,7 @@ Request body:
 
 ```ts
 type TestImapRequest = {
-  imap: InstallRequest["imap"];
+  imap: NonNullable<InstallRequest["imap"]>;
 };
 ```
 
@@ -797,7 +872,7 @@ Request body:
 
 ```ts
 type ReconfigureImapRequest = {
-  imap: InstallRequest["imap"];
+  imap: NonNullable<InstallRequest["imap"]>;
 };
 ```
 
@@ -825,6 +900,33 @@ Response:
 
 - `result` MUST be `ReconfigureResult` with `target = "matrix"`
 
+## `POST /api/reconfigure/openrouter`
+
+Purpose:
+
+- update OpenRouter model and/or secret reference for the active installation
+
+Request body:
+
+```ts
+type ReconfigureOpenrouterRequest = {
+  openrouter: {
+    model?: string;
+    apiKey?: string; // transient only
+    secretRef?: string;
+  };
+};
+```
+
+Constraints:
+
+- at least one of `model`, `apiKey`, or `secretRef` is required
+- `apiKey` and `secretRef` must not both be set in the same request
+
+Response:
+
+- `result` MUST be `ReconfigureResult` with `target = "openrouter"`
+
 ## Failure Semantics and Rollback (Normative)
 
 ## Install Phases and Commit Boundaries
@@ -837,12 +939,13 @@ Commit boundaries:
 
 1. host preflight checks
 2. OpenClaw CLI bootstrap/install
-3. IMAP validation (no persistent state change yet unless secrets persisted)
-4. bundled Matrix provisioning
-5. Matrix account and room bootstrap
-6. OpenClaw configuration + gateway service install
-7. bot registration (agent + cron)
-8. smoke checks and test alert
+3. IMAP validation (when configured; no persistent state change yet unless secrets persisted)
+4. relay enrollment (relay mode only)
+5. bundled Matrix provisioning
+6. Matrix account and room bootstrap
+7. OpenClaw configuration + gateway service install
+8. core agent registration (managed agents + cron)
+9. smoke checks and test alert
 
 ## Default Rollback Policy
 
@@ -916,7 +1019,7 @@ If any step fails:
 - If the gateway service entry is stale or broken, retries should repair it using `openclaw gateway install --force`.
 - Mark install as partially provisioned and repairable.
 
-### Failure after bot registration
+### Failure after core agent registration
 
 - Keep OpenClaw config/state and Matrix state.
 - Disable the newly created cron job if smoke checks fail after registration, when supported by the installed OpenClaw release.
@@ -938,7 +1041,7 @@ Required behavior:
 - detect existing OpenClaw CLI installation and reuse it when compatible with the Sovereign pin
 - repair/upgrade OpenClaw when an incompatible version is installed (unless an explicit advanced override disables this)
 - detect existing OpenClaw gateway service and reconcile/repair instead of duplicating it
-- detect existing Matrix operator/bot accounts and room when they match configured identifiers
+- detect existing Matrix operator/core-agent accounts and room when they match configured identifiers
 - detect existing OpenClaw agent/cron registration and update in place when possible
 - produce stable resource identifiers in `InstallResult` after successful reconciliation
 

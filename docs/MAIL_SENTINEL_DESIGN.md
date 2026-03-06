@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Define the design of a reliable mail triage bot built as a standard OpenClaw agent.
+Define the design of a reliable mail triage bot packaged as a Sovereign agent template and instantiated as a managed OpenClaw agent.
 
 This document covers:
 
@@ -14,7 +14,7 @@ This document covers:
 
 ## Summary
 
-`Mail Sentinel` is an OpenClaw agent that:
+`Mail Sentinel` is a Sovereign agent template (`mail-sentinel@1.0.0`) instantiated as a managed OpenClaw agent that:
 
 - polls mail on a schedule
 - reads mail via a strictly read-only IMAP tool surface
@@ -22,11 +22,18 @@ This document covers:
 - posts alerts/summaries
 - learns from user feedback over time without requiring mailbox write access
 
-The bot is designed to be:
+The resulting Sovereign agent is designed to be:
 
 - reliable in unattended operation
 - minimally privileged
 - configurable with standard OpenClaw primitives (agent workspace, skills, plugins, cron, tool policy)
+
+Template/runtime binding in this model:
+
+- agent template: `mail-sentinel@1.0.0`
+- tool template: `imap-readonly@1.0.0`
+- default tool instance id (when IMAP is configured): `mail-sentinel-imap`
+- default runtime agent id: `mail-sentinel`
 
 ## Product and Packaging Decisions
 
@@ -36,7 +43,7 @@ The bot is designed to be:
 
 Chosen boundary:
 
-- `Mail Sentinel` bot behavior = agent workspace + skills + tool policy + cron
+- `Mail Sentinel` behavior contract = Sovereign agent template workspace files + skills + tool policy + cron defaults
 - read-only IMAP access = OpenClaw plugin tool surface (`imap-readonly`)
 
 Why:
@@ -100,7 +107,7 @@ This is the correct product-level UX target, but several setup steps must be aut
 - IMAP validation, secret storage, and read-only plugin configuration
 - OpenClaw install/profile application, plugin enablement, and agent/cron registration
 - bundled Matrix provisioning (Synapse, database, reverse proxy/TLS)
-- Matrix account bootstrap (operator + bot), private room creation, and room targeting
+- Matrix account bootstrap (operator + managed agent identities), private room creation, and room targeting
 - post-install health checks and a test alert
 
 This design assumes those steps are implemented by the operator surfaces described in the runbooks, while the bot itself remains a standard OpenClaw agent.

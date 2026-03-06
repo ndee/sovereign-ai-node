@@ -35,17 +35,45 @@ Sovereign AI Node puts that layer back under local control.
 
 This repo is designed so the Pro edition can extend it without forking the core architecture.
 
-## V1 Entry Module: Mail Sentinel
+## Core Concepts
 
-Version 1 starts with a single bot, `Mail Sentinel`, to prove the platform:
+Sovereign Node separates templates from runtime instances:
 
-- `Decision Required`
-- `Financial Relevance`
-- `Risk / Escalation`
-- Proactive alerts
-- Local feedback-based improvement
+- `Sovereign Agent Template`
+  - Signed, pinned manifest.
+  - Defines OpenClaw workspace files (`AGENTS.md`, `TOOLS.md`, skills), Matrix localpart strategy, required/optional tool templates.
+- `Sovereign Tool Template`
+  - Signed, pinned manifest.
+  - Defines capability contract, required config keys, required secret refs, and allowed command surface.
+- `Sovereign Tool Instance`
+  - Concrete, installation-local binding of a tool template.
+  - Holds concrete `config` and `secretRefs` values.
+  - Can be instantiated multiple times with different credentials.
+- `Sovereign Agent`
+  - Managed runtime agent with its own workspace and Matrix bot identity.
+  - References an agent template (`templateRef`) and bound tool instances (`toolInstanceIds`).
 
-Mail is the entry point, not the end state.
+## Core Templates (Current)
+
+Signed core templates currently include:
+
+- Agent templates:
+  - `mail-sentinel@1.0.0`
+  - `node-operator@1.0.0`
+- Tool templates:
+  - `imap-readonly@1.0.0`
+  - `node-cli-ops@1.0.0`
+
+Default install behavior:
+
+- Installs/pins core templates.
+- Instantiates core agents:
+  - `mail-sentinel`
+  - `node-operator`
+- Instantiates core tool instances:
+  - `node-operator-cli` (always)
+  - `mail-sentinel-imap` (only when IMAP is configured)
+- Sends hello messages from both core agents to the alert room.
 
 ## Architecture Overview
 
@@ -165,9 +193,19 @@ The guided install flow then:
 
 1. collects or reuses OpenRouter settings (default model: `openai/gpt-5-nano`)
 2. provisions Sovereign Node + OpenClaw + bundled Matrix
-3. registers Mail Sentinel (agent + cron)
-4. runs smoke checks and sends a hello alert
-5. keeps IMAP as pending unless you configure it
+3. installs and instantiates core templates/agents/tools
+4. registers Mail Sentinel cron workflow
+5. runs smoke checks and sends hello alerts from both core agents
+6. keeps IMAP as pending unless you configure it
+
+After install, manage this model directly via CLI:
+
+- `sovereign-node templates list --json`
+- `sovereign-node templates install <id>@<version> --json`
+- `sovereign-node tools list --json`
+- `sovereign-node tools create <id> --template <id>@<version> --config k=v --secret-ref k=ref --json`
+- `sovereign-node agents list --json`
+- `sovereign-node agents create <id> --template <id>@<version> --tool-instance <id> --json`
 
 ### Connectivity Modes
 

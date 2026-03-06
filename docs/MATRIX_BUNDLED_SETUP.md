@@ -22,8 +22,8 @@ The default bundled Matrix profile is:
 - Synapse homeserver
 - Postgres database
 - reverse proxy with TLS termination
-- private operator + bot accounts
-- private alert room for bot notifications
+- private operator + managed-agent accounts
+- private alert room for managed-agent notifications
 
 Connectivity can run in one of two access modes:
 
@@ -59,9 +59,9 @@ Recommended ordering in the default path:
 2. OpenClaw CLI bootstrap/install (official OpenClaw `install.sh`, pinned version, `--no-onboard`)
 3. IMAP validation
 4. Bundled Matrix provisioning and bootstrap (the sequence defined below)
-5. Write Sovereign-managed OpenClaw config using the Matrix outputs (homeserver URL, bot credentials/token, alert room ID)
+5. Write Sovereign-managed OpenClaw config using the Matrix outputs (homeserver URL, mapped Matrix identities/tokens, alert room ID)
 6. Install/repair OpenClaw gateway service (`openclaw gateway install`)
-7. Register bot/cron and run smoke checks
+7. Register core agents/cron and run smoke checks
 
 Why this order:
 
@@ -104,7 +104,7 @@ The installer cannot infer these values safely and must ask for them (CLI or Wiz
 
 The installer should generate or provision:
 
-- bot account
+- required core agent accounts
 - initial passwords or a password reset/bootstrap flow
 - private alert room
 
@@ -119,10 +119,10 @@ The default install flow should provision Matrix in this order:
 3. Start/configure Synapse with the selected `server_name` and public URL.
 4. Start/configure reverse proxy with TLS and Matrix endpoint routing.
 5. Verify Synapse health through the public endpoint.
-6. Create operator account and bot account.
-7. Create private alert room and invite both accounts.
-8. Persist homeserver URL, bot credentials/token, and alert room ID into Sovereign/OpenClaw config.
-9. Run a Matrix send test before enabling the bot cron path.
+6. Create operator account and required core agent accounts.
+7. Create private alert room and invite operator + required core agents.
+8. Persist homeserver URL, mapped Matrix identities/tokens, and alert room ID into Sovereign/OpenClaw config.
+9. Run a Matrix send test before enabling core agent cron/background flows.
 
 ## Domain, TLS, and Discovery
 
@@ -191,16 +191,16 @@ The bundled install must create a working operator channel, not just a homeserve
 Required bootstrap actions:
 
 - create operator account (for Element login)
-- create bot account (for OpenClaw Matrix plugin)
+- create required core-agent accounts (for OpenClaw Matrix channel accounts)
 - create private alert room
-- invite operator and bot to the room
-- persist room ID in config for alert delivery
+- invite operator and required core agents to the room
+- persist room ID and mapped agent identities in config for alert delivery
 
 Recommended access defaults:
 
 - room is private/non-public
 - operator account has admin/power required to manage the room
-- bot account has only the permissions needed to post alerts
+- each agent account has only the permissions needed for its role
 
 ## Element Connection Expectations
 

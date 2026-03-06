@@ -50,9 +50,40 @@ Core capabilities reused directly from OpenClaw:
 
 `sovereign-ai-node` does not replace these capabilities. It standardizes and constrains how they are configured and used.
 
+### Sovereign Template and Instance Model
+
+Sovereign Node introduces a signed, pinned catalog on top of OpenClaw runtime primitives.
+
+Core entities:
+
+- `Sovereign Agent Template` (`kind: sovereign-agent-template`)
+  - Signed manifest.
+  - Defines agent workspace files, Matrix localpart prefix policy, and tool-template requirements.
+- `Sovereign Tool Template` (`kind: sovereign-tool-template`)
+  - Signed manifest.
+  - Defines capability contract, required config keys, required secret refs, and allowed command surface.
+- `Sovereign Tool Instance`
+  - Installation-local instance of a tool template with concrete config and secret references.
+  - Supports multiple instances per template for multi-account/service scenarios.
+- `Sovereign Agent` (managed runtime agent)
+  - OpenClaw agent entry with:
+    - `templateRef`
+    - `toolInstanceIds`
+    - dedicated workspace
+    - dedicated Matrix bot identity
+
+Default core templates currently shipped by this repo:
+
+- Agent templates:
+  - `mail-sentinel@1.0.0`
+  - `node-operator@1.0.0`
+- Tool templates:
+  - `imap-readonly@1.0.0`
+  - `node-cli-ops@1.0.0`
+
 ### Agents and Workspaces
 
-Agents are standard OpenClaw agents.
+Agents are standard OpenClaw agents instantiated from Sovereign agent templates.
 
 Each agent uses a dedicated OpenClaw workspace and prompt files (for example `AGENTS.md`, `SOUL.md`, `TOOLS.md`) plus curated skills.
 
@@ -61,7 +92,7 @@ Core rules:
 - One workspace per agent role
 - Per-agent tool policy is explicit
 - Per-agent skill allowlist is explicit
-- Agent behavior lives in versioned workspace templates and skill packs
+- Agent behavior lives in signed, versioned template workspace files and skill packs
 
 Packaging rule:
 
@@ -100,6 +131,12 @@ A profile defines:
 - Sandbox settings (`agents.defaults.sandbox`, `agents.list[].sandbox`)
 - Cron enablement and scheduling defaults
 - Diagnostics/logging settings
+
+Additionally, Sovereign runtime config persists:
+
+- installed/pinned template inventory (`templates.installed`)
+- managed tool instances (`sovereignTools.instances`)
+- managed agent topology with template/tool bindings (`openclawProfile.agents[]`)
 
 ### Skills Configuration and Source Control
 
@@ -184,7 +221,9 @@ Typical lifecycle:
 - Default operator path: `sovereign-node install` bootstraps OpenClaw (official `install.sh`, pinned version, `--no-onboard`)
 - Install/repair the OpenClaw gateway service (`openclaw gateway install`) after Sovereign writes the runtime config
 - Install and enable required plugins
-- Create/configure agents (`openclaw agents ...`)
+- Install/pin templates (`sovereign-node templates ...`)
+- Create/configure tool instances (`sovereign-node tools ...`)
+- Create/configure agents (`sovereign-node agents ...`)
 - Apply runtime profile config
 - Configure channels (for example Matrix plugin + channel config)
 - Configure cron jobs
