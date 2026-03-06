@@ -4552,7 +4552,7 @@ export class RealInstallerService implements InstallerService {
       },
       openclawProfile: {
         plugins: {
-          allow: imapConfig.status === "configured" ? ["matrix", "imap-readonly"] : ["matrix"],
+          allow: ["matrix"],
         },
         agents: managedAgents,
         cron: {
@@ -4754,22 +4754,6 @@ export class RealInstallerService implements InstallerService {
         enabled: true,
       },
     };
-    if (imapConfigured) {
-      pluginEntries["imap-readonly"] = {
-        enabled: true,
-        config: {
-          account: {
-            host: runtimeConfig.imap.host,
-            port: runtimeConfig.imap.port,
-            tls: runtimeConfig.imap.tls,
-            secure: runtimeConfig.imap.tls,
-            username: runtimeConfig.imap.username,
-            mailbox: runtimeConfig.imap.mailbox,
-            secretRef: runtimeConfig.imap.secretRef,
-          },
-        },
-      };
-    }
     const matrixAccounts: Record<
       string,
       {

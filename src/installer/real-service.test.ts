@@ -109,7 +109,7 @@ const writeRuntimeArtifacts = async (paths: SovereignPaths): Promise<void> => {
         },
         openclawProfile: {
           plugins: {
-            allow: ["matrix", "imap-readonly"],
+            allow: ["matrix"],
           },
           agents: [
             {
