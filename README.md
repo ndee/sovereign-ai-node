@@ -223,6 +223,9 @@ Bundled Matrix supports:
 - `direct`: public DNS/domain path
 - `direct` + `tlsMode=internal`: LAN-only HTTPS with Caddy local CA
 - `relay`: managed relay path (no user domain and no port forwarding)
+  - default managed relay: `https://relay.sovereign-ai-node.com`
+  - no enrollment token prompt on the default managed path
+  - custom relays still require an enrollment token
 
 Use `sovereign-node status --json` to confirm the active mode and relay state.
 

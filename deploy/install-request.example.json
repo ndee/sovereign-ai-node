@@ -4,8 +4,7 @@
     "mode": "relay"
   },
   "relay": {
-    "controlUrl": "https://relay.sovereign-ai-node.com",
-    "enrollmentToken": "replace-me"
+    "controlUrl": "https://relay.sovereign-ai-node.com"
   },
   "openclaw": {
     "manageInstallation": true,

@@ -23,12 +23,10 @@ type InstallOptions = {
   requestFile?: string;
 };
 
+const DEFAULT_MANAGED_RELAY_CONTROL_URL = "https://relay.sovereign-ai-node.com";
+
 const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => {
-  const connectivityMode =
-    opts.connectivityMode
-    ?? (opts.relayControlUrl !== undefined || opts.relayEnrollmentToken !== undefined
-      ? "relay"
-      : "relay");
+  const connectivityMode = opts.connectivityMode ?? "relay";
   return {
     mode: "bundled_matrix",
     connectivity: {
@@ -37,8 +35,10 @@ const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => {
     ...(connectivityMode === "relay"
       ? {
           relay: {
-            controlUrl: opts.relayControlUrl ?? "https://relay.sovereign-ai-node.com",
-            enrollmentToken: opts.relayEnrollmentToken ?? "replace-me",
+            controlUrl: opts.relayControlUrl ?? DEFAULT_MANAGED_RELAY_CONTROL_URL,
+            ...(opts.relayEnrollmentToken === undefined
+              ? {}
+              : { enrollmentToken: opts.relayEnrollmentToken }),
           },
         }
       : {}),
@@ -90,10 +90,13 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
       "--connectivity-mode <mode>",
       "Connection mode (direct|relay) (scaffold/dev)",
     )
-    .option("--relay-control-url <url>", "Managed relay control plane URL (scaffold/dev)")
+    .option(
+      "--relay-control-url <url>",
+      "Relay control plane URL (default: https://relay.sovereign-ai-node.com)",
+    )
     .option(
       "--relay-enrollment-token <token>",
-      "Managed relay enrollment token (scaffold/dev)",
+      "Custom relay enrollment token (required for non-Sovereign relays)",
     )
     .option(
       "--matrix-tls-mode <mode>",

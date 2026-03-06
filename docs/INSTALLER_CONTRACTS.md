@@ -491,7 +491,7 @@ type InstallRequest = {
   };
   relay?: {
     controlUrl: string;
-    enrollmentToken: string;
+    enrollmentToken?: string;
   };
   openclaw?: {
     manageInstallation?: boolean; // default true
@@ -552,6 +552,8 @@ Constraints:
 - `imap.password` MUST NOT be persisted if provided
 - `imap` may be omitted (pending IMAP mode)
 - `connectivity.mode = "relay"` requires a valid `relay` object
+- `relay.enrollmentToken` is optional only for the default Sovereign managed relay (`https://relay.sovereign-ai-node.com`)
+- custom relays must provide `relay.enrollmentToken`
 - relay hostname selection is installer-managed; user-provided relay slugs are not part of the public contract
 - `matrix.federationEnabled` defaults to `false`
 - `mailSentinel.e2eeAlertRoom` defaults to `false`

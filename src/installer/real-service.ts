@@ -180,6 +180,8 @@ type RelayEnrollmentResult = {
   tunnel: RelayTunnelConfig;
 };
 
+const DEFAULT_MANAGED_RELAY_CONTROL_URL = "https://relay.sovereign-ai-node.com";
+
 const RELAY_NAME_THEMES = [
   "satoshi",
   "freedom",
@@ -2714,12 +2716,12 @@ export class RealInstallerService implements InstallerService {
       {
         id: "relay_enroll",
         label: "Enroll managed relay",
-        run: async () => {
+        run: async (ctx) => {
           if (!this.isRelayModeRequest(req)) {
             stepState.effectiveRequest = req;
             return;
           }
-          stepState.relayEnrollment = await this.resolveRelayEnrollment(req);
+          stepState.relayEnrollment = await this.resolveRelayEnrollment(req, ctx.installationId);
           stepState.effectiveRequest = this.buildRelayProvisionRequest(
             req,
             stepState.relayEnrollment,
@@ -3037,9 +3039,13 @@ export class RealInstallerService implements InstallerService {
     }
     throw {
       code: "RELAY_CONFIG_MISSING",
-      message: "Relay mode requires relay.controlUrl and relay.enrollmentToken",
+      message: "Relay mode requires relay.controlUrl",
       retryable: false,
     };
+  }
+
+  private isDefaultManagedRelayControlUrl(controlUrl: string): boolean {
+    return controlUrl.trim().replace(/\/+$/, "") === DEFAULT_MANAGED_RELAY_CONTROL_URL;
   }
 
   private async tryReuseExistingRelayEnrollment(
@@ -3083,7 +3089,10 @@ export class RealInstallerService implements InstallerService {
     }
   }
 
-  private async resolveRelayEnrollment(req: InstallRequest): Promise<RelayEnrollmentResult> {
+  private async resolveRelayEnrollment(
+    req: InstallRequest,
+    installationId: string,
+  ): Promise<RelayEnrollmentResult> {
     const relay = this.getRelayRequest(req);
     const reused = await this.tryReuseExistingRelayEnrollment(relay);
     if (reused !== null) {
@@ -3097,7 +3106,25 @@ export class RealInstallerService implements InstallerService {
       return reused;
     }
 
-    const endpoint = new URL("/api/v1/enroll", ensureTrailingSlash(relay.controlUrl)).toString();
+    const enrollmentToken = relay.enrollmentToken?.trim();
+    const usesManagedPublicEnroll =
+      this.isDefaultManagedRelayControlUrl(relay.controlUrl)
+      && (enrollmentToken === undefined || enrollmentToken.length === 0);
+    if (!usesManagedPublicEnroll && (enrollmentToken === undefined || enrollmentToken.length === 0)) {
+      throw {
+        code: "RELAY_CONFIG_MISSING",
+        message: "Custom relay mode requires relay.enrollmentToken",
+        retryable: false,
+        details: {
+          controlUrl: relay.controlUrl,
+        },
+      };
+    }
+
+    const endpoint = new URL(
+      usesManagedPublicEnroll ? "/api/v1/enroll-public" : "/api/v1/enroll",
+      ensureTrailingSlash(relay.controlUrl),
+    ).toString();
     let lastFailure: { status?: number; responseText?: string; error?: unknown } | null = null;
     for (let attempt = 1; attempt <= 6; attempt += 1) {
       const requestedSlug = this.generateManagedRelayRequestedSlug();
@@ -3110,7 +3137,7 @@ export class RealInstallerService implements InstallerService {
             Accept: "application/json",
           },
           body: JSON.stringify({
-            enrollmentToken: relay.enrollmentToken,
+            ...(usesManagedPublicEnroll ? { installationId } : { enrollmentToken }),
             requestedSlug,
             version: process.env.npm_package_version ?? "0.1.0",
           }),
