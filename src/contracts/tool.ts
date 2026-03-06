@@ -1,0 +1,46 @@
+import { z } from "zod";
+
+export const imapMessageSummarySchema = z.object({
+  uid: z.number().int().positive(),
+  messageId: z.string().min(1).optional(),
+  subject: z.string().min(1).optional(),
+  from: z.array(z.string().min(1)),
+  to: z.array(z.string().min(1)),
+  cc: z.array(z.string().min(1)),
+  date: z.string().min(1).optional(),
+  flags: z.array(z.string().min(1)),
+  size: z.number().int().nonnegative().optional(),
+});
+
+export const imapAttachmentSummarySchema = z.object({
+  filename: z.string().min(1).nullable(),
+  mimeType: z.string().min(1),
+  disposition: z.enum(["attachment", "inline"]).nullable(),
+  related: z.boolean(),
+  sizeBytes: z.number().int().nonnegative(),
+});
+
+export const imapSearchMailResultSchema = z.object({
+  instanceId: z.string().min(1),
+  mailbox: z.string().min(1),
+  query: z.string().min(1),
+  totalMatches: z.number().int().nonnegative(),
+  messages: z.array(imapMessageSummarySchema),
+});
+
+export const imapReadMailResultSchema = z.object({
+  instanceId: z.string().min(1),
+  mailbox: z.string().min(1),
+  selectedBy: z.enum(["uid", "message-id"]),
+  message: imapMessageSummarySchema.extend({
+    text: z.string(),
+    textTruncated: z.boolean(),
+    htmlAvailable: z.boolean(),
+    attachments: z.array(imapAttachmentSummarySchema),
+    bodyParseWarning: z.string().min(1).optional(),
+  }),
+});
+
+export type ImapSearchMailResult = z.infer<typeof imapSearchMailResultSchema>;
+export type ImapReadMailResult = z.infer<typeof imapReadMailResultSchema>;
+

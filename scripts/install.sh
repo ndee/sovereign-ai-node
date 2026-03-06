@@ -347,7 +347,14 @@ export SOVEREIGN_NODE_APP_DIR="$APP_DIR"
 exec node "$APP_DIR/dist/sovereign-node-api.js" "\$@"
 EOF
 
-  chmod 0755 /usr/local/bin/sovereign-node /usr/local/bin/sovereign-node-api
+  cat > /usr/local/bin/sovereign-tool <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+export SOVEREIGN_NODE_APP_DIR="$APP_DIR"
+exec node "$APP_DIR/dist/sovereign-tool.js" "\$@"
+EOF
+
+  chmod 0755 /usr/local/bin/sovereign-node /usr/local/bin/sovereign-node-api /usr/local/bin/sovereign-tool
 }
 
 install_systemd_unit() {

@@ -858,7 +858,7 @@ export class RealInstallerService implements InstallerService {
       operatorPasswordSecretRef,
       username: runtimeConfig.matrix.operator.userId,
       homeserverUrl: runtimeConfig.matrix.publicBaseUrl,
-      ttlMinutes: req?.ttlMinutes,
+      ...(req?.ttlMinutes === undefined ? {} : { ttlMinutes: req.ttlMinutes }),
     });
     await this.writeInstallerJsonFile(statePath, issued.state, 0o600);
     return {
@@ -4760,6 +4760,10 @@ export class RealInstallerService implements InstallerService {
         config: {
           account: {
             host: runtimeConfig.imap.host,
+            port: runtimeConfig.imap.port,
+            tls: runtimeConfig.imap.tls,
+            secure: runtimeConfig.imap.tls,
+            username: runtimeConfig.imap.username,
             mailbox: runtimeConfig.imap.mailbox,
             secretRef: runtimeConfig.imap.secretRef,
           },

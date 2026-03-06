@@ -50,7 +50,11 @@ export const generateMatrixOnboardingCode = (): string => {
   const bytes = randomBytes(12);
   let raw = "";
   for (let index = 0; index < 12; index += 1) {
-    raw += MATRIX_ONBOARDING_CODE_ALPHABET[bytes[index] % MATRIX_ONBOARDING_CODE_ALPHABET.length];
+    const next = bytes[index];
+    if (next === undefined) {
+      throw new Error("Failed to generate onboarding code");
+    }
+    raw += MATRIX_ONBOARDING_CODE_ALPHABET[next % MATRIX_ONBOARDING_CODE_ALPHABET.length];
   }
   return `${raw.slice(0, 4)}-${raw.slice(4, 8)}-${raw.slice(8, 12)}`;
 };
