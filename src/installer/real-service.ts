@@ -180,6 +180,14 @@ type RelayEnrollmentResult = {
   tunnel: RelayTunnelConfig;
 };
 
+const OPENCLAW_EXEC_TOOL_ID = "exec";
+const SOVEREIGN_EXECUTABLE_PATHS: Record<string, string> = {
+  "sovereign-node": "/usr/local/bin/sovereign-node",
+  "sovereign-node-api": "/usr/local/bin/sovereign-node-api",
+  "sovereign-node-onboarding-api": "/usr/local/bin/sovereign-node-onboarding-api",
+  "sovereign-tool": "/usr/local/bin/sovereign-tool",
+};
+
 const DEFAULT_MANAGED_RELAY_CONTROL_URL = "https://relay.sovereign-ai-node.com";
 
 const RELAY_NAME_THEMES = [
@@ -1305,6 +1313,55 @@ export class RealInstallerService implements InstallerService {
     return manifest;
   }
 
+  private resolveBoundToolInstances(
+    runtimeConfig: RuntimeConfig,
+    toolInstanceIds: string[],
+  ): RuntimeConfig["sovereignTools"]["instances"] {
+    return toolInstanceIds
+      .map((id) => runtimeConfig.sovereignTools.instances.find((entry) => entry.id === id))
+      .filter((entry): entry is RuntimeConfig["sovereignTools"]["instances"][number] => entry !== undefined);
+  }
+
+  private renderSovereignToolCommand(toolInstanceId: string, command: string): string {
+    const rendered = command.replaceAll("<tool-instance-id>", toolInstanceId);
+    const [executable, ...rest] = rendered.split(" ");
+    const resolvedExecutable =
+      executable === undefined ? "" : (SOVEREIGN_EXECUTABLE_PATHS[executable] ?? executable);
+    return [resolvedExecutable, ...rest].filter((part) => part.length > 0).join(" ");
+  }
+
+  private listAgentExecAllowlistPatterns(
+    runtimeConfig: RuntimeConfig,
+    toolInstanceIds: string[],
+  ): string[] {
+    const patterns = new Set<string>();
+    for (const tool of this.resolveBoundToolInstances(runtimeConfig, toolInstanceIds)) {
+      const manifest = this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef);
+      for (const command of manifest.allowedCommands) {
+        const rendered = this.renderSovereignToolCommand(tool.id, command);
+        const [executable] = rendered.split(" ");
+        if (executable !== undefined && executable.startsWith("/")) {
+          patterns.add(executable);
+        }
+      }
+    }
+    return Array.from(patterns);
+  }
+
+  private buildOpenClawAgentToolPolicy(
+    runtimeConfig: RuntimeConfig,
+    toolInstanceIds: string[],
+  ): { profile: "minimal"; allow: string[] } | null {
+    const execPatterns = this.listAgentExecAllowlistPatterns(runtimeConfig, toolInstanceIds);
+    if (execPatterns.length === 0) {
+      return null;
+    }
+    return {
+      profile: "minimal",
+      allow: [OPENCLAW_EXEC_TOOL_ID],
+    };
+  }
+
   private validateToolInstanceBindings(input: {
     template: ToolTemplateManifest;
     config: Record<string, string>;
@@ -2020,20 +2077,23 @@ export class RealInstallerService implements InstallerService {
     template: AgentTemplateManifest;
     toolInstanceIds: string[];
   }): Promise<void> {
-    const boundTools = input.toolInstanceIds
-      .map((id) => input.runtimeConfig.sovereignTools.instances.find((entry) => entry.id === id))
-      .filter((entry): entry is RuntimeConfig["sovereignTools"]["instances"][number] => entry !== undefined);
+    const boundTools = this.resolveBoundToolInstances(input.runtimeConfig, input.toolInstanceIds);
     const toolLines = boundTools.length === 0
       ? ["No bound tool instances."]
-      : boundTools.flatMap((tool) => {
-          const manifest = this.resolveInstalledToolTemplate(input.runtimeConfig, tool.templateRef);
-          return [
-            `- \`${tool.id}\``,
-            `  template: \`${tool.templateRef}\``,
-            `  capabilities: ${manifest.capabilities.join(", ")}`,
-            ...manifest.allowedCommands.map((command) => `  command: \`${command}\``),
-          ];
-        });
+      : [
+          "Run the listed commands with the OpenClaw `exec` tool.",
+          "",
+          ...boundTools.flatMap((tool) => {
+            const manifest = this.resolveInstalledToolTemplate(input.runtimeConfig, tool.templateRef);
+            return [
+              `- \`${tool.id}\``,
+              `  template: \`${tool.templateRef}\``,
+              `  capabilities: ${manifest.capabilities.join(", ")}`,
+              ...manifest.allowedCommands.map((command) =>
+                `  command: \`${this.renderSovereignToolCommand(tool.id, command)}\``),
+            ];
+          }),
+        ];
     for (const file of input.template.workspaceFiles) {
       const targetPath = join(input.workspaceDir, file.path);
       await mkdir(dirname(targetPath), { recursive: true });
@@ -3784,6 +3844,16 @@ export class RealInstallerService implements InstallerService {
         ],
         allowAlreadyExists: true,
       });
+      for (const pattern of this.listAgentExecAllowlistPatterns(
+        runtimeConfig,
+        agent.toolInstanceIds ?? [],
+      )) {
+        await this.runOpenClawCommandAlternatives({
+          label: `${agentId}-exec-allowlist`,
+          commands: [["approvals", "allowlist", "add", "--agent", agentId, pattern]],
+          allowAlreadyExists: true,
+        });
+      }
     }
   }
 
@@ -4815,10 +4885,17 @@ export class RealInstallerService implements InstallerService {
         defaults: {
           model: normalizeOpenClawAgentModel(runtimeConfig.openrouter.model),
         },
-        list: managedAgents.map((entry) => ({
-          id: entry.id,
-          workspace: entry.workspace,
-        })),
+        list: managedAgents.map((entry) => {
+          const tools = this.buildOpenClawAgentToolPolicy(
+            runtimeConfig,
+            entry.toolInstanceIds ?? [],
+          );
+          return {
+            id: entry.id,
+            workspace: entry.workspace,
+            ...(tools === null ? {} : { tools }),
+          };
+        }),
       },
       cron: {
         enabled: true,

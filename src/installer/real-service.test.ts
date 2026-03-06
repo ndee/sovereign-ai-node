@@ -942,7 +942,17 @@ describe("RealInstallerService", () => {
         profileRef?: string;
         matrix?: unknown;
         cron?: { enabled?: boolean; jobs?: unknown };
-        agents?: { list?: Array<Record<string, unknown>>; defaults?: { model?: string } };
+        agents?: {
+          list?: Array<{
+            id?: string;
+            workspace?: string;
+            tools?: {
+              profile?: string;
+              allow?: string[];
+            };
+          }>;
+          defaults?: { model?: string };
+        };
         plugins?: { entries?: { matrix?: { enabled?: boolean; config?: unknown } } };
         channels?: {
           matrix?: {
@@ -973,8 +983,38 @@ describe("RealInstallerService", () => {
       expect(
         openclawConfig.agents?.list?.every((entry) => Object.hasOwn(entry, "matrix") === false),
       ).toBe(true);
+      expect(openclawConfig.agents?.list).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: "mail-sentinel",
+            tools: {
+              profile: "minimal",
+              allow: ["exec"],
+            },
+          }),
+          expect.objectContaining({
+            id: "node-operator",
+            tools: {
+              profile: "minimal",
+              allow: ["exec"],
+            },
+          }),
+        ]),
+      );
       expect(openclawConfig.agents?.defaults?.model).toBe(
         "openrouter/openai/gpt-5-nano",
+      );
+
+      const mailSentinelToolsRaw = await readFile(
+        join(paths.stateDir, "mail-sentinel", "workspace", "TOOLS.md"),
+        "utf8",
+      );
+      expect(mailSentinelToolsRaw).toContain("Run the listed commands with the OpenClaw `exec` tool.");
+      expect(mailSentinelToolsRaw).toContain(
+        "/usr/local/bin/sovereign-tool imap-search-mail --instance mail-sentinel-imap --query <query>",
+      );
+      expect(mailSentinelToolsRaw).toContain(
+        "/usr/local/bin/sovereign-tool imap-read-mail --instance mail-sentinel-imap --message-id <id>",
       );
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
@@ -1325,6 +1365,30 @@ describe("RealInstallerService", () => {
               stderr: "",
             };
           }
+          if (serialized === "openclaw plugins enable matrix") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "enabled",
+              stderr: "",
+            };
+          }
+          if (serialized.startsWith("openclaw agents ")) {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+          if (serialized.startsWith("openclaw approvals allowlist add --agent ")) {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
           return {
             command: serialized,
             exitCode: 1,
@@ -1362,6 +1426,11 @@ describe("RealInstallerService", () => {
       expect(commandCalls.some((command) => command === "systemctl daemon-reload")).toBe(true);
       expect(commandCalls.some((command) => command.includes("enable --now"))).toBe(true);
       expect(commandCalls.some((command) => command.includes("is-active"))).toBe(true);
+      expect(
+        commandCalls.includes(
+          "openclaw approvals allowlist add --agent mail-sentinel /usr/local/bin/sovereign-tool",
+        ),
+      ).toBe(true);
 
       const stepStates = Object.fromEntries(
         started.job.steps.map((step) => [step.id, step.state]),
