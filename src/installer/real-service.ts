@@ -166,6 +166,9 @@ type RuntimeConfig = {
   imap: {
     status: "configured" | "pending";
     host: string;
+    port: number;
+    tls: boolean;
+    username: string;
     mailbox: string;
     secretRef: string;
   };
@@ -242,8 +245,15 @@ type GatewayState = "running" | "stopped" | "failed" | "unknown";
 
 const MAIL_SENTINEL_AGENT_ID = "mail-sentinel";
 const MAIL_SENTINEL_CRON_ID = "mail-sentinel-poll";
-const MAIL_SENTINEL_HELLO_MESSAGE = "Hello from Mail Sentinel";
 const NODE_OPERATOR_AGENT_ID = "node-operator";
+const MAIL_SENTINEL_HELLO_MESSAGE = "Hello from Mail Sentinel. I can summarize your latest 3 inbox mails.";
+const NODE_OPERATOR_HELLO_MESSAGE = "Hello from Node Operator. Ask me for Sovereign Node and system status.";
+const NODE_CLI_OPS_TEMPLATE_REF = "node-cli-ops@1.0.0";
+const IMAP_READONLY_TEMPLATE_REF = "imap-readonly@1.0.0";
+const MAIL_SENTINEL_TEMPLATE_REF = "mail-sentinel@1.0.0";
+const NODE_OPERATOR_TEMPLATE_REF = "node-operator@1.0.0";
+const NODE_OPERATOR_TOOL_INSTANCE_ID = "node-operator-cli";
+const MAIL_SENTINEL_TOOL_INSTANCE_ID = "mail-sentinel-imap";
 const INSTALLER_EXEC_TIMEOUT_MS = 60_000;
 const SOVEREIGN_GATEWAY_SYSTEMD_UNIT = "sovereign-openclaw-gateway.service";
 const DEFAULT_OPENROUTER_MODEL = "openai/gpt-5-nano";
@@ -954,6 +964,96 @@ export class RealInstallerService implements InstallerService {
       },
       changed: true,
     };
+  }
+
+  private withRequiredCoreTemplates(
+    existing: RuntimeConfig["templates"]["installed"],
+    refs: string[],
+  ): RuntimeConfig["templates"]["installed"] {
+    const byRef = new Map(
+      existing.map((entry) => [formatTemplateRef(entry.id, entry.version), entry] as const),
+    );
+    for (const ref of refs) {
+      const manifest = findCoreTemplateManifest(ref);
+      if (manifest === undefined) {
+        throw {
+          code: "TEMPLATE_NOT_FOUND",
+          message: `Template '${ref}' was not found in the trusted core catalog`,
+          retryable: false,
+        };
+      }
+      if (byRef.has(ref)) {
+        continue;
+      }
+      const verified = verifySignedTemplateManifest(manifest, CORE_TRUSTED_TEMPLATE_KEYS);
+      byRef.set(ref, {
+        kind: manifest.kind === "sovereign-agent-template" ? "agent" : "tool",
+        id: manifest.id,
+        version: manifest.version,
+        description: manifest.description,
+        trusted: true,
+        pinned: true,
+        keyId: verified.keyId,
+        manifestSha256: verified.manifestSha256,
+        installedAt: now(),
+        source: "core",
+      });
+    }
+    return Array.from(byRef.values()).sort((left, right) =>
+      `${left.kind}:${left.id}:${left.version}`.localeCompare(
+        `${right.kind}:${right.id}:${right.version}`,
+      ));
+  }
+
+  private buildNodeOperatorToolInstance(
+    existing: RuntimeConfig["sovereignTools"]["instances"][number] | undefined,
+  ): RuntimeConfig["sovereignTools"]["instances"][number] {
+    const template = this.resolveToolTemplateManifest(NODE_CLI_OPS_TEMPLATE_REF);
+    return {
+      id: NODE_OPERATOR_TOOL_INSTANCE_ID,
+      templateRef: NODE_CLI_OPS_TEMPLATE_REF,
+      capabilities: [...template.capabilities],
+      config: {},
+      secretRefs: {},
+      createdAt: existing?.createdAt ?? now(),
+      updatedAt: now(),
+    };
+  }
+
+  private buildMailSentinelImapToolInstance(
+    imap: RuntimeConfig["imap"],
+    existing: RuntimeConfig["sovereignTools"]["instances"][number] | undefined,
+  ): RuntimeConfig["sovereignTools"]["instances"][number] {
+    const template = this.resolveToolTemplateManifest(IMAP_READONLY_TEMPLATE_REF);
+    return {
+      id: MAIL_SENTINEL_TOOL_INSTANCE_ID,
+      templateRef: IMAP_READONLY_TEMPLATE_REF,
+      capabilities: [...template.capabilities],
+      config: {
+        host: imap.host,
+        port: String(imap.port),
+        tls: imap.tls ? "true" : "false",
+        username: imap.username,
+        mailbox: imap.mailbox,
+      },
+      secretRefs: {
+        password: imap.secretRef,
+      },
+      createdAt: existing?.createdAt ?? now(),
+      updatedAt: now(),
+    };
+  }
+
+  private resolveToolTemplateManifest(ref: string): ToolTemplateManifest {
+    const manifest = findCoreTemplateManifest(ref);
+    if (manifest === undefined || manifest.kind !== "sovereign-tool-template") {
+      throw {
+        code: "TEMPLATE_NOT_FOUND",
+        message: `Tool template '${ref}' was not found in the trusted core catalog`,
+        retryable: false,
+      };
+    }
+    return manifest;
   }
 
   async listSovereignToolInstances(): Promise<SovereignToolInstanceListResult> {
@@ -2475,11 +2575,30 @@ export class RealInstallerService implements InstallerService {
 
     const openclawEnv =
       command === "openclaw" ? await this.resolveManagedOpenClawEnv() : null;
+    const openclawServiceUser =
+      command === "openclaw" ? await this.resolveManagedOpenClawServiceUser() : null;
+    const shouldRunOpenClawAsServiceUser =
+      command === "openclaw"
+      && typeof process.getuid === "function"
+      && process.getuid() === 0
+      && openclawServiceUser !== null
+      && openclawServiceUser !== "root";
+    const effectiveCommand = shouldRunOpenClawAsServiceUser ? "sudo" : command;
+    const effectiveArgs = shouldRunOpenClawAsServiceUser
+      ? [
+          "-u",
+          openclawServiceUser,
+          "--preserve-env=OPENCLAW_HOME,OPENCLAW_CONFIG,OPENCLAW_CONFIG_PATH,SOVEREIGN_NODE_CONFIG,CI",
+          "--",
+          command,
+          ...args,
+        ]
+      : args;
 
     try {
       const result = await this.execRunner.run({
-        command,
-        args,
+        command: effectiveCommand,
+        args: effectiveArgs,
         options: {
           timeout: INSTALLER_EXEC_TIMEOUT_MS,
           ...(command === "openclaw"
@@ -2559,6 +2678,18 @@ export class RealInstallerService implements InstallerService {
     const env = this.buildManagedOpenClawEnv(runtimeConfig);
     this.managedOpenClawEnv = env;
     return env;
+  }
+
+  private async resolveManagedOpenClawServiceUser(): Promise<string | null> {
+    const runtimeConfig = await this.tryReadRuntimeConfig();
+    if (runtimeConfig === null) {
+      return null;
+    }
+    const configuredUser = runtimeConfig.openclaw.serviceUser?.trim();
+    if (configuredUser === undefined || configuredUser.length === 0) {
+      return null;
+    }
+    return configuredUser;
   }
 
   private buildInstallSteps(req: InstallRequest): InstallStep[] {
@@ -2808,27 +2939,39 @@ export class RealInstallerService implements InstallerService {
               : { relayEnrollment: stepState.relayEnrollment }),
           });
           await this.ensureManagedAgentWorkspace({
+            id: MAIL_SENTINEL_AGENT_ID,
+            workspace: join(this.paths.stateDir, MAIL_SENTINEL_AGENT_ID, "workspace"),
+            runtimeConfig,
+          });
+          await this.ensureManagedAgentWorkspace({
             id: NODE_OPERATOR_AGENT_ID,
             workspace: join(this.paths.stateDir, NODE_OPERATOR_AGENT_ID, "workspace"),
             runtimeConfig,
           });
+          const ensuredMailSentinel = await this.ensureManagedAgentMatrixIdentity(
+            runtimeConfig,
+            MAIL_SENTINEL_AGENT_ID,
+          );
+          runtimeConfig = ensuredMailSentinel.runtimeConfig;
+          let ensuredNodeOperatorChanged = false;
           try {
             const ensuredNodeOperator = await this.ensureManagedAgentMatrixIdentity(
               runtimeConfig,
               NODE_OPERATOR_AGENT_ID,
             );
             runtimeConfig = ensuredNodeOperator.runtimeConfig;
-            if (ensuredNodeOperator.changed) {
-              await this.persistManagedAgentTopologyDocument(runtimeConfig);
-            }
+            ensuredNodeOperatorChanged = ensuredNodeOperator.changed;
           } catch (error) {
             this.logger.warn(
               {
                 agentId: NODE_OPERATOR_AGENT_ID,
                 error: describeError(error),
               },
-              "Node Operator Matrix identity provisioning failed during install; continuing with runtime configure",
+              "Node Operator Matrix identity provisioning failed during install; continuing with degraded operator bot setup",
             );
+          }
+          if (ensuredMailSentinel.changed || ensuredNodeOperatorChanged) {
+            await this.persistManagedAgentTopologyDocument(runtimeConfig);
           }
           await this.writeOpenClawRuntimeArtifacts(runtimeConfig);
           this.setManagedOpenClawEnv(runtimeConfig);
@@ -2932,20 +3075,7 @@ export class RealInstallerService implements InstallerService {
         id: "test_alert",
         label: "Send hello alert",
         run: async () => {
-          const testAlert = await this.testAlert({
-            channel: "matrix",
-            text: MAIL_SENTINEL_HELLO_MESSAGE,
-          });
-          if (!testAlert.delivered) {
-            throw {
-              code: testAlert.error?.code ?? "TEST_ALERT_FAILED",
-              message: testAlert.error?.message ?? "Test alert delivery failed",
-              retryable: testAlert.error?.retryable ?? true,
-              ...(testAlert.error?.details === undefined
-                ? {}
-                : { details: testAlert.error.details }),
-            };
-          }
+          await this.sendCoreAgentHelloMessages();
         },
       },
     ];
@@ -3479,6 +3609,23 @@ export class RealInstallerService implements InstallerService {
       };
     }
 
+    if (deferredReason === undefined) {
+      const runtimeConfig = await this.readRuntimeConfig();
+      try {
+        await this.ensureCoreAgentOpenClawBindings(runtimeConfig);
+      } catch (error) {
+        if (!isCoreAgentBindingBestEffortSkippable(error)) {
+          throw error;
+        }
+        this.logger.warn(
+          {
+            error: describeError(error),
+          },
+          "Core agent Matrix binding commands are unavailable in this OpenClaw runtime; continuing without explicit per-agent bindings",
+        );
+      }
+    }
+
     await this.persistMailSentinelRegistrationRecord({
       registrationFile,
       registration,
@@ -3531,6 +3678,213 @@ export class RealInstallerService implements InstallerService {
         details: {
           registrationFile: input.registrationFile,
           error: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+  }
+
+  private async ensureCoreAgentOpenClawBindings(runtimeConfig: RuntimeConfig): Promise<void> {
+    if (this.execRunner === null) {
+      this.logger.warn(
+        "Exec runner unavailable; skipping explicit OpenClaw per-agent matrix account/binding setup",
+      );
+      return;
+    }
+    const matrixPluginEnable = await this.safeExec("openclaw", ["plugins", "enable", "matrix"]);
+    if (!matrixPluginEnable.ok) {
+      throw {
+        code: "MAIL_SENTINEL_REGISTER_FAILED",
+        message: "OpenClaw matrix plugin could not be enabled",
+        retryable: true,
+        details: {
+          error: matrixPluginEnable.error,
+        },
+      };
+    }
+    if (matrixPluginEnable.result.exitCode !== 0) {
+      throw {
+        code: "MAIL_SENTINEL_REGISTER_FAILED",
+        message: "OpenClaw matrix plugin enable command exited with non-zero status",
+        retryable: true,
+        details: {
+          command: matrixPluginEnable.result.command,
+          exitCode: matrixPluginEnable.result.exitCode,
+          stderr: truncateText(matrixPluginEnable.result.stderr, 1200),
+          stdout: truncateText(matrixPluginEnable.result.stdout, 1200),
+        },
+      };
+    }
+
+    const coreAgents = [MAIL_SENTINEL_AGENT_ID, NODE_OPERATOR_AGENT_ID];
+    for (const agentId of coreAgents) {
+      const agent = runtimeConfig.openclawProfile.agents.find((entry) => entry.id === agentId);
+      if (agent?.matrix === undefined || agent.matrix.accessTokenSecretRef === undefined) {
+        this.logger.warn(
+          {
+            agentId,
+          },
+          "Managed core agent has no Matrix identity yet; skipping OpenClaw matrix account binding",
+        );
+        continue;
+      }
+      await this.runOpenClawCommandAlternatives({
+        label: `${agentId}-agent`,
+        commands: [
+          ["agents", "add", agentId, "--workspace", agent.workspace],
+          ["agents", "create", agentId, "--workspace", agent.workspace],
+          ["agents", "upsert", agentId, "--workspace", agent.workspace],
+          ["agents", "upsert", "--id", agentId, "--workspace", agent.workspace],
+          ["agents", "add", "--id", agentId, "--workspace", agent.workspace],
+          ["agents", "create", "--id", agentId, "--workspace", agent.workspace],
+        ],
+        allowAlreadyExists: true,
+      });
+      await this.runOpenClawCommandAlternatives({
+        label: `${agentId}-matrix-bind`,
+        commands: [
+          [
+            "agents",
+            "bind",
+            "--agent",
+            agentId,
+            "--bind",
+            `matrix:${agentId}`,
+          ],
+          [
+            "agents",
+            "bind",
+            "--agent",
+            agentId,
+            "--bind",
+            "matrix",
+          ],
+        ],
+        allowAlreadyExists: true,
+      });
+    }
+  }
+
+  private async runOpenClawCommandAlternatives(input: {
+    label: string;
+    commands: string[][];
+    allowAlreadyExists?: boolean;
+  }): Promise<void> {
+    const failures: {
+      command: string;
+      exitCode: number;
+      stderr: string;
+      stdout: string;
+    }[] = [];
+    for (const args of input.commands) {
+      const result = await this.safeExec("openclaw", args);
+      if (!result.ok) {
+        failures.push({
+          command: `openclaw ${args.join(" ")}`,
+          exitCode: -1,
+          stderr: truncateText(result.error, 1200),
+          stdout: "",
+        });
+        continue;
+      }
+      if (result.result.exitCode === 0) {
+        return;
+      }
+      const output = `${result.result.stderr}\n${result.result.stdout}`;
+      if (input.allowAlreadyExists === true && isAlreadyExistsOutput(output)) {
+        return;
+      }
+      failures.push({
+        command: result.result.command,
+        exitCode: result.result.exitCode,
+        stderr: truncateText(result.result.stderr, 1200),
+        stdout: truncateText(result.result.stdout, 1200),
+      });
+    }
+    throw {
+      code: "MAIL_SENTINEL_REGISTER_FAILED",
+      message: `OpenClaw ${input.label} registration commands failed`,
+      retryable: true,
+      details: {
+        failures,
+      },
+    };
+  }
+
+  private async sendCoreAgentHelloMessages(): Promise<void> {
+    const runtimeConfig = await this.readRuntimeConfig();
+    const messages: Array<{ agentId: string; text: string }> = [
+      {
+        agentId: NODE_OPERATOR_AGENT_ID,
+        text: NODE_OPERATOR_HELLO_MESSAGE,
+      },
+      {
+        agentId: MAIL_SENTINEL_AGENT_ID,
+        text: MAIL_SENTINEL_HELLO_MESSAGE,
+      },
+    ];
+    let deliveredCount = 0;
+    for (const item of messages) {
+      const agent = runtimeConfig.openclawProfile.agents.find((entry) => entry.id === item.agentId);
+      if (agent?.matrix?.accessTokenSecretRef === undefined) {
+        this.logger.warn(
+          {
+            agentId: item.agentId,
+          },
+          "Managed core agent has no Matrix access token; skipping hello message",
+        );
+        continue;
+      }
+      const accessToken = await this.resolveSecretRef(agent.matrix.accessTokenSecretRef);
+      await this.sendMatrixRoomMessage({
+        adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+        roomId: runtimeConfig.matrix.alertRoom.roomId,
+        accessToken,
+        text: item.text,
+      });
+      deliveredCount += 1;
+    }
+    if (deliveredCount === 0) {
+      throw {
+        code: "TEST_ALERT_FAILED",
+        message: "No core agent hello messages could be delivered",
+        retryable: true,
+      };
+    }
+  }
+
+  private async sendMatrixRoomMessage(input: {
+    adminBaseUrl: string;
+    roomId: string;
+    accessToken: string;
+    text: string;
+  }): Promise<void> {
+    const txnId = randomUUID();
+    const endpoint = new URL(
+      `/_matrix/client/v3/rooms/${encodeURIComponent(input.roomId)}/send/m.room.message/${encodeURIComponent(txnId)}`,
+      ensureTrailingSlash(input.adminBaseUrl),
+    ).toString();
+    const response = await this.fetchImpl(endpoint, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${input.accessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        msgtype: "m.text",
+        body: input.text,
+      }),
+    });
+    const bodyText = await response.text();
+    if (!response.ok) {
+      throw {
+        code: "TEST_ALERT_FAILED",
+        message: "Matrix hello message delivery failed",
+        retryable: true,
+        details: {
+          endpoint,
+          status: response.status,
+          body: summarizeText(bodyText, 1200),
         },
       };
     }
@@ -4060,11 +4414,41 @@ export class RealInstallerService implements InstallerService {
       ) ?? [];
     const preservedInstalledTemplates = previousRuntimeConfig?.templates.installed ?? [];
     const preservedToolInstances = previousRuntimeConfig?.sovereignTools.instances ?? [];
+    const coreTemplateRefs = [
+      NODE_CLI_OPS_TEMPLATE_REF,
+      IMAP_READONLY_TEMPLATE_REF,
+      MAIL_SENTINEL_TEMPLATE_REF,
+      NODE_OPERATOR_TEMPLATE_REF,
+    ];
+    const installedTemplates = this.withRequiredCoreTemplates(
+      preservedInstalledTemplates,
+      coreTemplateRefs,
+    );
+    const operatorToolInstance = this.buildNodeOperatorToolInstance(
+      preservedToolInstances.find((entry) => entry.id === NODE_OPERATOR_TOOL_INSTANCE_ID),
+    );
+    const mailSentinelToolInstance =
+      imapConfig.status === "configured"
+        ? this.buildMailSentinelImapToolInstance(
+            imapConfig,
+            preservedToolInstances.find((entry) => entry.id === MAIL_SENTINEL_TOOL_INSTANCE_ID),
+          )
+        : null;
+    const nonCoreToolInstances = preservedToolInstances.filter(
+      (entry) => entry.id !== NODE_OPERATOR_TOOL_INSTANCE_ID && entry.id !== MAIL_SENTINEL_TOOL_INSTANCE_ID,
+    );
+    const mergedToolInstances = [
+      ...nonCoreToolInstances,
+      operatorToolInstance,
+      ...(mailSentinelToolInstance === null ? [] : [mailSentinelToolInstance]),
+    ].sort((left, right) => left.id.localeCompare(right.id));
     const managedAgents = ensureCoreManagedAgents(
       [
         {
           id: MAIL_SENTINEL_AGENT_ID,
           workspace: join(this.paths.stateDir, MAIL_SENTINEL_AGENT_ID, "workspace"),
+          templateRef: MAIL_SENTINEL_TEMPLATE_REF,
+          toolInstanceIds: mailSentinelToolInstance === null ? [] : [MAIL_SENTINEL_TOOL_INSTANCE_ID],
           matrix: {
             localpart: input.matrixAccounts.bot.localpart,
             userId: input.matrixAccounts.bot.userId,
@@ -4077,6 +4461,8 @@ export class RealInstallerService implements InstallerService {
         {
           id: NODE_OPERATOR_AGENT_ID,
           workspace: join(this.paths.stateDir, NODE_OPERATOR_AGENT_ID, "workspace"),
+          templateRef: NODE_OPERATOR_TEMPLATE_REF,
+          toolInstanceIds: [NODE_OPERATOR_TOOL_INSTANCE_ID],
         },
         ...preservedUserAgents,
       ],
@@ -4135,6 +4521,9 @@ export class RealInstallerService implements InstallerService {
       imap: {
         status: imapConfig.status,
         host: imapConfig.host,
+        port: imapConfig.port,
+        tls: imapConfig.tls,
+        username: imapConfig.username,
         mailbox: imapConfig.mailbox,
         secretRef: imapConfig.secretRef,
       },
@@ -4168,10 +4557,10 @@ export class RealInstallerService implements InstallerService {
         e2eeAlertRoom: input.req.mailSentinel?.e2eeAlertRoom ?? false,
       },
       templates: {
-        installed: preservedInstalledTemplates,
+        installed: installedTemplates,
       },
       sovereignTools: {
-        instances: preservedToolInstances,
+        instances: mergedToolInstances,
       },
     };
 
@@ -4221,14 +4610,19 @@ export class RealInstallerService implements InstallerService {
           ? {
               status: "configured",
               host: runtimeConfig.imap.host,
-              port: input.req.imap.port,
-              tls: input.req.imap.tls,
-              username: input.req.imap.username,
+              port: runtimeConfig.imap.port,
+              tls: runtimeConfig.imap.tls,
+              username: runtimeConfig.imap.username,
               secretRef: runtimeConfig.imap.secretRef,
               mailbox: runtimeConfig.imap.mailbox,
             }
           : {
               status: "pending",
+              host: runtimeConfig.imap.host,
+              port: runtimeConfig.imap.port,
+              tls: runtimeConfig.imap.tls,
+              username: runtimeConfig.imap.username,
+              secretRef: runtimeConfig.imap.secretRef,
               mailbox: runtimeConfig.imap.mailbox,
             },
       matrix: {
@@ -4326,6 +4720,30 @@ export class RealInstallerService implements InstallerService {
         },
       };
     }
+    const matrixAccounts: Record<
+      string,
+      {
+        homeserver: string;
+        userId: string;
+        accessToken: string;
+      }
+    > = {};
+    for (const agentId of [MAIL_SENTINEL_AGENT_ID, NODE_OPERATOR_AGENT_ID]) {
+      const agent = managedAgents.find((entry) => entry.id === agentId);
+      if (agent?.matrix === undefined || agent.matrix.accessTokenSecretRef === undefined) {
+        continue;
+      }
+      matrixAccounts[agentId] = {
+        homeserver: runtimeConfig.matrix.adminBaseUrl,
+        userId: agent.matrix.userId,
+        accessToken: await this.resolveSecretRef(agent.matrix.accessTokenSecretRef),
+      };
+    }
+    if (matrixAccounts[MAIL_SENTINEL_AGENT_ID] !== undefined) {
+      matrixAccounts["default"] = {
+        ...matrixAccounts[MAIL_SENTINEL_AGENT_ID],
+      };
+    }
 
     const runtimePayload = {
       gateway: {
@@ -4340,21 +4758,28 @@ export class RealInstallerService implements InstallerService {
           enabled: true,
           homeserver: runtimeConfig.matrix.adminBaseUrl,
           userId: runtimeConfig.matrix.bot.userId,
+          ...(Object.keys(matrixAccounts).length === 0
+            ? {}
+            : {
+                accounts: matrixAccounts,
+              }),
           dm: {
-            policy: "disabled" as const,
+            policy: "allowlist" as const,
+            allowFrom: [runtimeConfig.matrix.operator.userId],
           },
           groupPolicy: "allowlist" as const,
           groups: {
             [runtimeConfig.matrix.alertRoom.roomId]: {
               enabled: true,
-              autoReply: false,
+              autoReply: true,
+              users: [runtimeConfig.matrix.operator.userId],
             },
           },
         },
       },
       agents: {
         defaults: {
-          model: runtimeConfig.openrouter.model,
+          model: normalizeOpenClawAgentModel(runtimeConfig.openrouter.model),
         },
         list: managedAgents.map((entry) => ({
           id: entry.id,
@@ -4449,6 +4874,9 @@ export class RealInstallerService implements InstallerService {
       return {
         status: "pending",
         host: "pending",
+        port: 993,
+        tls: true,
+        username: "pending",
         mailbox: "INBOX",
         secretRef: "env:SOVEREIGN_IMAP_SECRET_UNSET",
       };
@@ -4458,6 +4886,9 @@ export class RealInstallerService implements InstallerService {
       return {
         status: "configured",
         host: imap.host,
+        port: imap.port,
+        tls: imap.tls,
+        username: imap.username,
         mailbox: imap.mailbox ?? "INBOX",
         secretRef: imap.secretRef,
       };
@@ -4467,6 +4898,9 @@ export class RealInstallerService implements InstallerService {
       return {
         status: "configured",
         host: imap.host,
+        port: imap.port,
+        tls: imap.tls,
+        username: imap.username,
         mailbox: imap.mailbox ?? "INBOX",
         secretRef: await this.writeSecretFile("imap-password", imap.password),
       };
@@ -4475,6 +4909,9 @@ export class RealInstallerService implements InstallerService {
     return {
       status: "pending",
       host: imap.host,
+      port: imap.port,
+      tls: imap.tls,
+      username: imap.username,
       mailbox: imap.mailbox ?? "INBOX",
       secretRef: "env:SOVEREIGN_IMAP_SECRET_UNSET",
     };
@@ -5038,6 +5475,15 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
             ? "configured"
             : "pending",
       host: typeof imap.host === "string" && imap.host.length > 0 ? imap.host : "unknown",
+      port:
+        typeof imap.port === "number" && Number.isFinite(imap.port)
+          ? Math.trunc(imap.port)
+          : 993,
+      tls: typeof imap.tls === "boolean" ? imap.tls : true,
+      username:
+        typeof imap.username === "string" && imap.username.length > 0
+          ? imap.username
+          : "pending",
       mailbox:
         typeof imap.mailbox === "string" && imap.mailbox.length > 0 ? imap.mailbox : "INBOX",
       secretRef:
@@ -5271,7 +5717,6 @@ const ensureCoreManagedAgents = (
   stateDir: string,
 ): RuntimeAgentEntry[] => {
   const ordered: RuntimeAgentEntry[] = [
-    ...agents,
     {
       id: MAIL_SENTINEL_AGENT_ID,
       workspace: join(stateDir, MAIL_SENTINEL_AGENT_ID, "workspace"),
@@ -5280,6 +5725,7 @@ const ensureCoreManagedAgents = (
       id: NODE_OPERATOR_AGENT_ID,
       workspace: join(stateDir, NODE_OPERATOR_AGENT_ID, "workspace"),
     },
+    ...agents,
   ];
   const byId = new Map<string, RuntimeAgentEntry>();
   for (const entry of ordered) {
@@ -5499,6 +5945,56 @@ const isMailSentinelGatewayUnavailableError = (error: unknown): boolean => {
   return /gateway closed|failed to connect|connection refused|econnrefused|no medium found/i.test(
     combined,
   );
+};
+
+const isAlreadyExistsOutput = (value: string): boolean =>
+  /already\s+exists|already\s+bound|already\s+configured|already\s+registered/i.test(value);
+
+const isCoreAgentBindingBestEffortSkippable = (error: unknown): boolean => {
+  if (!isRecord(error) || error.code !== "MAIL_SENTINEL_REGISTER_FAILED") {
+    return false;
+  }
+  const messages: string[] = [];
+  if (typeof error.message === "string") {
+    messages.push(error.message);
+  }
+  if (isRecord(error.details) && Array.isArray(error.details.failures)) {
+    for (const failure of error.details.failures) {
+      if (!isRecord(failure)) {
+        continue;
+      }
+      if (typeof failure.stderr === "string") {
+        messages.push(failure.stderr);
+      }
+      if (typeof failure.stdout === "string") {
+        messages.push(failure.stdout);
+      }
+    }
+  }
+  if (isRecord(error.details)) {
+    if (typeof error.details.stderr === "string") {
+      messages.push(error.details.stderr);
+    }
+    if (typeof error.details.stdout === "string") {
+      messages.push(error.details.stdout);
+    }
+  }
+  const combined = messages.join("\n").toLowerCase();
+  return /unknown command|unknown option|unexpected command|not implemented|plugins enable/.test(combined);
+};
+
+const normalizeOpenClawAgentModel = (value: string): string => {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return DEFAULT_OPENROUTER_MODEL;
+  }
+  if (/^openrouter\//i.test(trimmed)) {
+    return trimmed;
+  }
+  if (trimmed.split("/").length === 2) {
+    return `openrouter/${trimmed}`;
+  }
+  return trimmed;
 };
 
 const resolveVersionPinStatus = (

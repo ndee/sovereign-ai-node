@@ -633,7 +633,14 @@ describe("RealInstallerService", () => {
         cron?: { enabled?: boolean; jobs?: unknown };
         agents?: { list?: Array<Record<string, unknown>>; defaults?: { model?: string } };
         plugins?: { entries?: { matrix?: { enabled?: boolean; config?: unknown } } };
-        channels?: { matrix?: { enabled?: boolean; homeserver?: string; userId?: string } };
+        channels?: {
+          matrix?: {
+            enabled?: boolean;
+            homeserver?: string;
+            userId?: string;
+            accounts?: Record<string, { userId?: string; homeserver?: string; accessToken?: string }>;
+          };
+        };
       };
       expect(openclawConfig.generatedAt).toBeUndefined();
       expect(openclawConfig.source).toBeUndefined();
@@ -646,11 +653,17 @@ describe("RealInstallerService", () => {
       expect(openclawConfig.channels?.matrix?.enabled).toBe(true);
       expect(openclawConfig.channels?.matrix?.homeserver).toBe("http://127.0.0.1:8008");
       expect(openclawConfig.channels?.matrix?.userId).toBe("@mail-sentinel:matrix.example.org");
+      expect(openclawConfig.channels?.matrix?.accounts?.["mail-sentinel"]?.userId).toBe(
+        "@mail-sentinel:matrix.example.org",
+      );
+      expect(openclawConfig.channels?.matrix?.accounts?.default?.userId).toBe(
+        "@mail-sentinel:matrix.example.org",
+      );
       expect(
         openclawConfig.agents?.list?.every((entry) => Object.hasOwn(entry, "matrix") === false),
       ).toBe(true);
       expect(openclawConfig.agents?.defaults?.model).toBe(
-        "openai/gpt-5-nano",
+        "openrouter/openai/gpt-5-nano",
       );
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
@@ -1343,7 +1356,7 @@ describe("RealInstallerService", () => {
       const openclawConfig = JSON.parse(openclawConfigRaw) as {
         agents?: { defaults?: { model?: string } };
       };
-      expect(openclawConfig.agents?.defaults?.model).toBe("openai/gpt-5");
+      expect(openclawConfig.agents?.defaults?.model).toBe("openrouter/openai/gpt-5");
 
       const gatewayEnvRaw = await readFile(
         join(paths.openclawServiceHome, "gateway.env"),

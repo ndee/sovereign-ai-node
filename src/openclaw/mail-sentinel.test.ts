@@ -53,7 +53,7 @@ describe("ShellOpenClawMailSentinelRegistrar", () => {
       "add",
       "--name",
       "mail-sentinel-poll",
-      "--every",
+      "--agent",
     ]);
   });
 

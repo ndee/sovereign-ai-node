@@ -61,11 +61,21 @@ const CORE_PUBLIC_KEY_PEM = [
   "MCowBQYDK2VwAyEAm97Y7Eyidm9mmk+vre8+PTJWtUSfJI6n3DlWJ3x4bek=",
   "-----END PUBLIC KEY-----",
 ].join("\n");
+const CORE_KEY_ID_2026_03 = "sovereign-core-ed25519-2026-03";
+const CORE_PUBLIC_KEY_PEM_2026_03 = [
+  "-----BEGIN PUBLIC KEY-----",
+  "MCowBQYDK2VwAyEA1NjeN4Uzn3Eh1cuWIZv4zxfO+WQU2HyRMasiwO4/DGE=",
+  "-----END PUBLIC KEY-----",
+].join("\n");
 
 export const CORE_TRUSTED_TEMPLATE_KEYS: TrustedTemplateKey[] = [
   {
     keyId: CORE_KEY_ID,
     publicKeyPem: CORE_PUBLIC_KEY_PEM,
+  },
+  {
+    keyId: CORE_KEY_ID_2026_03,
+    publicKeyPem: CORE_PUBLIC_KEY_PEM_2026_03,
   },
 ];
 
@@ -114,6 +124,79 @@ export const CORE_TEMPLATE_MANIFESTS: SovereignTemplateManifest[] = [
       algorithm: "ed25519",
       keyId: CORE_KEY_ID,
       value: "iC9gCncfVhI6ZCknRjuGy93IWVIntGuLktSNdpGaNfO+flWST34eosIQT4F/fYWtnJEI7KHSzAXOJzJHj1S+DA==",
+    },
+  },
+  {
+    kind: "sovereign-agent-template",
+    id: "mail-sentinel",
+    version: "1.0.0",
+    description: "Conversational inbox sentinel for read-only IMAP triage and Matrix summaries.",
+    matrix: {
+      localpartPrefix: "mail-sentinel",
+    },
+    requiredToolTemplates: [],
+    optionalToolTemplates: [
+      {
+        id: "imap-readonly",
+        version: "1.0.0",
+      },
+    ],
+    workspaceFiles: [
+      {
+        path: "AGENTS.md",
+        content: [
+          "# Mail Sentinel",
+          "",
+          "You are the `{{AGENT_ID}}` bot for Sovereign Node.",
+          "",
+          "Primary responsibilities:",
+          "- Monitor inboxes with read-only IMAP tools",
+          "- Summarize the newest 3 inbox emails on demand",
+          "- Post concise alerts and summaries to Matrix",
+          "",
+          "Execution policy:",
+          "- Use only the listed Sovereign tools in TOOLS.md",
+          "- Never modify mail state and never send mail",
+          "- If IMAP tools are not bound, reply with a clear setup instruction",
+          "- Keep responses short, factual, and operator-friendly",
+          "",
+          "When asked for mailbox summary:",
+          "1. Query newest messages from INBOX",
+          "2. Summarize the latest 3 emails",
+          "3. Highlight urgent or security-relevant items",
+          "",
+          "Context:",
+          "- Homeserver: {{MATRIX_HOMESERVER}}",
+          "- Alert room: {{MATRIX_ALERT_ROOM_ID}}",
+        ].join("\n"),
+      },
+      {
+        path: "TOOLS.md",
+        content: [
+          "# Allowed Sovereign Tools",
+          "",
+          "{{TOOL_SECTION}}",
+          "",
+          "Never use tools not explicitly listed above.",
+        ].join("\n"),
+      },
+      {
+        path: "skills/mail-sentinel-core/SKILL.md",
+        content: [
+          "# mail-sentinel-core",
+          "",
+          "Checklist:",
+          "1. Confirm IMAP tool instance is available",
+          "2. Read newest inbox messages with read-only commands",
+          "3. Produce a 3-mail summary",
+          "4. Flag urgent messages and suggest next action",
+        ].join("\n"),
+      },
+    ],
+    signature: {
+      algorithm: "ed25519",
+      keyId: CORE_KEY_ID_2026_03,
+      value: "gufLUtCoao/CpMTjLpJdmppY3BwoPGccxMv+vAhx69VU2MUmpN4ZKC8RPi0RU2tM9y/zuiAoijVVBjw33MaKCQ==",
     },
   },
   {
