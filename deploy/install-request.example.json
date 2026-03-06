@@ -1,5 +1,12 @@
 {
   "mode": "bundled_matrix",
+  "connectivity": {
+    "mode": "relay"
+  },
+  "relay": {
+    "controlUrl": "https://relay.sovereign-ai-node.com",
+    "enrollmentToken": "replace-me"
+  },
   "openclaw": {
     "manageInstallation": true,
     "installMethod": "install_sh",
@@ -9,14 +16,14 @@
     "runOnboard": false
   },
   "openrouter": {
-    "model": "openrouter/anthropic/claude-sonnet-4-5",
+    "model": "openai/gpt-5-nano",
     "secretRef": "file:/etc/sovereign-node/secrets/openrouter-api-key"
   },
   "matrix": {
-    "homeserverDomain": "matrix.example.org",
-    "publicBaseUrl": "https://matrix.example.org",
+    "homeserverDomain": "relay-pending.invalid",
+    "publicBaseUrl": "https://relay-pending.invalid",
     "federationEnabled": false,
-    "tlsMode": "local-dev",
+    "tlsMode": "auto",
     "alertRoomName": "Sovereign Alerts"
   },
   "operator": {

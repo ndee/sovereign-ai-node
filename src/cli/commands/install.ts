@@ -28,7 +28,7 @@ const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => {
     opts.connectivityMode
     ?? (opts.relayControlUrl !== undefined || opts.relayEnrollmentToken !== undefined
       ? "relay"
-      : "direct");
+      : "relay");
   return {
     mode: "bundled_matrix",
     connectivity: {
@@ -37,7 +37,7 @@ const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => {
     ...(connectivityMode === "relay"
       ? {
           relay: {
-            controlUrl: opts.relayControlUrl ?? "https://relay.example.com",
+            controlUrl: opts.relayControlUrl ?? "https://relay.sovereign-ai-node.com",
             enrollmentToken: opts.relayEnrollmentToken ?? "replace-me",
           },
         }
