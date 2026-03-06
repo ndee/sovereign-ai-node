@@ -97,7 +97,6 @@ export const connectivityInstallInputSchema = z.object({
 export const relayInstallInputSchema = z.object({
   controlUrl: z.string().min(1),
   enrollmentToken: z.string().min(1),
-  requestedSlug: z.string().min(1).optional(),
 });
 
 export const matrixInstallInputSchema = z.object({

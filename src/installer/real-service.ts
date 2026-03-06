@@ -175,6 +175,42 @@ type RelayEnrollmentResult = {
   tunnel: RelayTunnelConfig;
 };
 
+const RELAY_NAME_THEMES = [
+  "satoshi",
+  "freedom",
+  "privacy",
+  "liberty",
+  "cipher",
+  "anon",
+  "hodl",
+  "sovereign",
+  "bitcoin",
+];
+
+const RELAY_NAME_MOODS = [
+  "stealthy",
+  "mighty",
+  "brave",
+  "silent",
+  "wild",
+  "sunny",
+  "cosmic",
+  "fuzzy",
+  "nimble",
+];
+
+const RELAY_NAME_MASCOTS = [
+  "badger",
+  "fox",
+  "otter",
+  "owl",
+  "falcon",
+  "lynx",
+  "yak",
+  "raven",
+  "wolf",
+];
+
 type RealInstallerServiceDeps = {
   openclawBootstrapper: OpenClawBootstrapper;
   openclawGatewayServiceManager: OpenClawGatewayServiceManager;
@@ -3013,134 +3049,195 @@ export class RealInstallerService implements InstallerService {
     }
 
     const endpoint = new URL("/api/v1/enroll", ensureTrailingSlash(relay.controlUrl)).toString();
-    let response: Response;
-    try {
-      response = await this.fetchImpl(endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify({
-          enrollmentToken: relay.enrollmentToken,
-          ...(relay.requestedSlug === undefined ? {} : { requestedSlug: relay.requestedSlug }),
-          version: process.env.npm_package_version ?? "0.1.0",
-        }),
-      });
-    } catch (error) {
-      throw {
-        code: "RELAY_ENROLL_FAILED",
-        message: "Managed relay enrollment request failed",
-        retryable: true,
-        details: {
-          controlUrl: relay.controlUrl,
-          error: describeError(error),
-        },
-      };
-    }
+    let lastFailure: { status?: number; responseText?: string; error?: unknown } | null = null;
+    for (let attempt = 1; attempt <= 6; attempt += 1) {
+      const requestedSlug = this.generateManagedRelayRequestedSlug();
+      let response: Response;
+      try {
+        response = await this.fetchImpl(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({
+            enrollmentToken: relay.enrollmentToken,
+            requestedSlug,
+            version: process.env.npm_package_version ?? "0.1.0",
+          }),
+        });
+      } catch (error) {
+        lastFailure = {
+          error,
+        };
+        continue;
+      }
 
-    const responseText = await response.text();
-    if (!response.ok) {
-      throw {
-        code: "RELAY_ENROLL_FAILED",
-        message: "Managed relay enrollment was rejected",
-        retryable: response.status >= 500,
-        details: {
-          controlUrl: relay.controlUrl,
+      const responseText = await response.text();
+      if (!response.ok) {
+        lastFailure = {
           status: response.status,
-          body: summarizeText(responseText, 1200),
-        },
-      };
-    }
+          responseText,
+        };
+        const responseTextLower = responseText.toLowerCase();
+        const slugConflict =
+          response.status === 409
+          || (
+            (response.status === 400 || response.status === 422)
+            && responseTextLower.includes("slug")
+            && (
+              responseTextLower.includes("taken")
+              || responseTextLower.includes("already")
+              || responseTextLower.includes("exists")
+            )
+          );
+        if (slugConflict && attempt < 6) {
+          this.logger.warn(
+            {
+              requestedSlug,
+              controlUrl: relay.controlUrl,
+              status: response.status,
+            },
+            "Managed relay slug collision detected; retrying with a new generated node name",
+          );
+          continue;
+        }
+        throw {
+          code: "RELAY_ENROLL_FAILED",
+          message: "Managed relay enrollment was rejected",
+          retryable: response.status >= 500,
+          details: {
+            controlUrl: relay.controlUrl,
+            status: response.status,
+            requestedSlug,
+            body: summarizeText(responseText, 1200),
+          },
+        };
+      }
 
-    const parsed = parseJsonDocument(responseText);
-    const payload =
-      isRecord(parsed)
-      && isRecord(parsed.result)
-        ? parsed.result
-        : isRecord(parsed)
-          ? parsed
-          : null;
-    const tunnel = payload !== null && isRecord(payload.tunnel) ? payload.tunnel : null;
-    const hostname =
-      payload !== null && typeof payload.assignedHostname === "string"
-        ? payload.assignedHostname.trim()
-        : payload !== null && typeof payload.hostname === "string"
-          ? payload.hostname.trim()
+      const parsed = parseJsonDocument(responseText);
+      const payload =
+        isRecord(parsed)
+        && isRecord(parsed.result)
+          ? parsed.result
+          : isRecord(parsed)
+            ? parsed
+            : null;
+      const tunnel = payload !== null && isRecord(payload.tunnel) ? payload.tunnel : null;
+      const hostname =
+        payload !== null && typeof payload.assignedHostname === "string"
+          ? payload.assignedHostname.trim()
+          : payload !== null && typeof payload.hostname === "string"
+            ? payload.hostname.trim()
+            : "";
+      const publicBaseUrl =
+        payload !== null && typeof payload.publicBaseUrl === "string"
+          ? payload.publicBaseUrl.trim()
           : "";
-    const publicBaseUrl =
-      payload !== null && typeof payload.publicBaseUrl === "string"
-        ? payload.publicBaseUrl.trim()
-        : "";
-    const serverAddr =
-      tunnel !== null && typeof tunnel.serverAddr === "string"
-        ? tunnel.serverAddr.trim()
-        : tunnel !== null && typeof tunnel.serverHost === "string"
-          ? tunnel.serverHost.trim()
-          : "";
-    const serverPort =
-      tunnel !== null && typeof tunnel.serverPort === "number" && Number.isFinite(tunnel.serverPort)
-        ? Math.trunc(tunnel.serverPort)
-        : 7000;
-    const token =
-      tunnel !== null && typeof tunnel.token === "string"
-        ? tunnel.token.trim()
-        : tunnel !== null && typeof tunnel.authToken === "string"
-          ? tunnel.authToken.trim()
-          : "";
-    const proxyName =
-      tunnel !== null && typeof tunnel.proxyName === "string"
-        ? tunnel.proxyName.trim()
-        : hostname.length > 0
-          ? `relay-${hostname.replace(/[^a-zA-Z0-9-]/g, "-")}`
-          : "";
-    const subdomain =
-      tunnel !== null && typeof tunnel.subdomain === "string" && tunnel.subdomain.trim().length > 0
-        ? tunnel.subdomain.trim()
-        : undefined;
+      const serverAddr =
+        tunnel !== null && typeof tunnel.serverAddr === "string"
+          ? tunnel.serverAddr.trim()
+          : tunnel !== null && typeof tunnel.serverHost === "string"
+            ? tunnel.serverHost.trim()
+            : "";
+      const serverPort =
+        tunnel !== null && typeof tunnel.serverPort === "number" && Number.isFinite(tunnel.serverPort)
+          ? Math.trunc(tunnel.serverPort)
+          : 7000;
+      const token =
+        tunnel !== null && typeof tunnel.token === "string"
+          ? tunnel.token.trim()
+          : tunnel !== null && typeof tunnel.authToken === "string"
+            ? tunnel.authToken.trim()
+            : "";
+      const proxyName =
+        tunnel !== null && typeof tunnel.proxyName === "string"
+          ? tunnel.proxyName.trim()
+          : hostname.length > 0
+            ? `relay-${hostname.replace(/[^a-zA-Z0-9-]/g, "-")}`
+            : "";
+      const subdomain =
+        tunnel !== null && typeof tunnel.subdomain === "string" && tunnel.subdomain.trim().length > 0
+          ? tunnel.subdomain.trim()
+          : undefined;
 
-    if (
-      hostname.length === 0
-      || publicBaseUrl.length === 0
-      || serverAddr.length === 0
-      || token.length === 0
-      || proxyName.length === 0
-    ) {
-      throw {
-        code: "RELAY_ENROLL_INVALID",
-        message: "Managed relay enrollment returned an incomplete response",
-        retryable: false,
-        details: {
+      if (
+        hostname.length === 0
+        || publicBaseUrl.length === 0
+        || serverAddr.length === 0
+        || token.length === 0
+        || proxyName.length === 0
+      ) {
+        throw {
+          code: "RELAY_ENROLL_INVALID",
+          message: "Managed relay enrollment returned an incomplete response",
+          retryable: false,
+          details: {
+            controlUrl: relay.controlUrl,
+            requestedSlug,
+            response: summarizeText(responseText, 1200),
+          },
+        };
+      }
+
+      this.logger.info(
+        {
+          hostname,
+          publicBaseUrl,
           controlUrl: relay.controlUrl,
-          response: summarizeText(responseText, 1200),
+          requestedSlug,
         },
-      };
-    }
+        "Managed relay enrollment succeeded",
+      );
 
-    this.logger.info(
-      {
+      return {
+        controlUrl: relay.controlUrl,
         hostname,
         publicBaseUrl,
-        controlUrl: relay.controlUrl,
-      },
-      "Managed relay enrollment succeeded",
-    );
+        tunnel: {
+          serverAddr,
+          serverPort,
+          token,
+          proxyName,
+          ...(subdomain === undefined ? {} : { subdomain }),
+          type: "http",
+          localIp: "127.0.0.1",
+          localPort: RELAY_LOCAL_EDGE_PORT,
+        },
+      };
+    }
 
-    return {
-      controlUrl: relay.controlUrl,
-      hostname,
-      publicBaseUrl,
-      tunnel: {
-        serverAddr,
-        serverPort,
-        token,
-        proxyName,
-        ...(subdomain === undefined ? {} : { subdomain }),
-        type: "http",
-        localIp: "127.0.0.1",
-        localPort: RELAY_LOCAL_EDGE_PORT,
+    throw {
+      code: "RELAY_ENROLL_FAILED",
+      message: "Managed relay enrollment request failed",
+      retryable: true,
+      details: {
+        controlUrl: relay.controlUrl,
+        ...(lastFailure?.status === undefined ? {} : { status: lastFailure.status }),
+        ...(lastFailure?.responseText === undefined
+          ? {}
+          : { body: summarizeText(lastFailure.responseText, 1200) }),
+        ...(lastFailure?.error === undefined ? {} : { error: describeError(lastFailure.error) }),
       },
     };
+  }
+
+  private generateManagedRelayRequestedSlug(): string {
+    const entropy = randomUUID().replace(/-/g, "");
+    const pick = (values: readonly string[], offset: number): string => {
+      const nibble = entropy.slice(offset, offset + 2);
+      const value = Number.parseInt(nibble, 16);
+      const index = Number.isFinite(value) ? value % values.length : 0;
+      return values[index] ?? values[0] ?? "node";
+    };
+    const suffix = entropy.slice(0, 4);
+    const raw = `${pick(RELAY_NAME_MOODS, 0)}-${pick(RELAY_NAME_THEMES, 2)}-${pick(RELAY_NAME_MASCOTS, 4)}-${suffix}`.toLowerCase();
+    const normalized = raw
+      .replace(/[^a-z0-9-]/g, "-")
+      .replace(/-{2,}/g, "-")
+      .replace(/^-+/, "")
+      .replace(/-+$/, "");
+    return normalized.length === 0 ? `sovereign-node-${suffix}` : normalized.slice(0, 63).replace(/-+$/, "");
   }
 
   private buildRelayProvisionRequest(

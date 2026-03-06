@@ -19,7 +19,6 @@ type InstallOptions = {
   connectivityMode?: "direct" | "relay";
   relayControlUrl?: string;
   relayEnrollmentToken?: string;
-  relayRequestedSlug?: string;
   matrixTlsMode?: "auto" | "internal" | "manual" | "local-dev";
   requestFile?: string;
 };
@@ -40,9 +39,6 @@ const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => {
           relay: {
             controlUrl: opts.relayControlUrl ?? "https://relay.example.com",
             enrollmentToken: opts.relayEnrollmentToken ?? "replace-me",
-            ...(opts.relayRequestedSlug === undefined
-              ? {}
-              : { requestedSlug: opts.relayRequestedSlug }),
           },
         }
       : {}),
@@ -99,7 +95,6 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
       "--relay-enrollment-token <token>",
       "Managed relay enrollment token (scaffold/dev)",
     )
-    .option("--relay-requested-slug <slug>", "Requested managed relay hostname slug (scaffold/dev)")
     .option(
       "--matrix-tls-mode <mode>",
       "Matrix TLS mode (auto|internal|manual|local-dev) (scaffold/dev)",
