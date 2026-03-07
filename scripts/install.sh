@@ -227,6 +227,72 @@ install_base_packages() {
     qrencode
 }
 
+docker_cli_available() {
+  command -v docker >/dev/null 2>&1
+}
+
+docker_compose_available() {
+  if ! docker_cli_available; then
+    return 1
+  fi
+  docker compose version >/dev/null 2>&1
+}
+
+configure_docker_apt_repo() {
+  local arch codename repo_url keyring_path list_path
+  arch="$(dpkg --print-architecture)"
+  codename="${VERSION_CODENAME:-}"
+  if [[ -z "$codename" ]]; then
+    die "Cannot detect distro codename (VERSION_CODENAME missing in /etc/os-release)"
+  fi
+
+  repo_url="https://download.docker.com/linux/${ID}"
+  keyring_path="/etc/apt/keyrings/docker.gpg"
+  list_path="/etc/apt/sources.list.d/docker.list"
+
+  install -d -m 0755 /etc/apt/keyrings
+  curl -fsSL "${repo_url}/gpg" | gpg --dearmor --yes -o "$keyring_path"
+  chmod a+r "$keyring_path"
+
+  cat > "$list_path" <<EOF
+deb [arch=${arch} signed-by=${keyring_path}] ${repo_url} ${codename} stable
+EOF
+}
+
+install_docker_if_needed() {
+  if docker_cli_available && docker_compose_available; then
+    log "Docker + Compose detected, skipping Docker install"
+    return
+  fi
+
+  log "Installing Docker Engine and Docker Compose"
+  configure_docker_apt_repo
+
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y
+
+  if ! apt-get install -y \
+    docker-ce \
+    docker-ce-cli \
+    containerd.io \
+    docker-buildx-plugin \
+    docker-compose-plugin; then
+    log "Docker CE package install failed, falling back to distro docker packages"
+    apt-get install -y docker.io docker-compose-v2 \
+      || apt-get install -y docker.io docker-compose-plugin \
+      || apt-get install -y docker.io docker-compose
+  fi
+
+  systemctl enable --now docker || true
+
+  if ! docker_cli_available; then
+    die "Docker installation finished but docker CLI is unavailable"
+  fi
+  if ! docker_compose_available; then
+    die "Docker installation finished but docker compose is unavailable"
+  fi
+}
+
 node_major_version() {
   if ! command -v node >/dev/null 2>&1; then
     echo "0"
@@ -2111,6 +2177,7 @@ main() {
   resolve_action
   resolve_source_mode
   install_base_packages
+  install_docker_if_needed
   install_node22_if_needed
   ensure_service_account
   ensure_runtime_directories
