@@ -3,7 +3,11 @@ import { randomUUID } from "node:crypto";
 import type { FastifyReply } from "fastify";
 import type { ZodType } from "zod";
 
-import { CONTRACT_VERSION, type ErrorDetail } from "../contracts/common.js";
+import {
+  CONTRACT_VERSION,
+  normalizeErrorDetail,
+  type ErrorDetail,
+} from "../contracts/common.js";
 import { baseSuccessEnvelopeSchema } from "../contracts/common.js";
 
 const now = () => new Date().toISOString();
@@ -28,11 +32,7 @@ export const sendApiError = (
   statusCode: number,
   error: unknown,
 ): FastifyReply => {
-  const normalized: ErrorDetail = {
-    code: "API_ERROR",
-    message: error instanceof Error ? error.message : String(error),
-    retryable: false,
-  };
+  const normalized: ErrorDetail = normalizeErrorDetail(error, "API_ERROR");
 
   return reply.code(statusCode).send({
     contractVersion: CONTRACT_VERSION,
@@ -42,4 +42,3 @@ export const sendApiError = (
     error: normalized,
   });
 };
-

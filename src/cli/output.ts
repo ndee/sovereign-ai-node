@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 
 import type { ZodType } from "zod";
 
-import { CONTRACT_VERSION, type ErrorDetail } from "../contracts/common.js";
+import {
+  CONTRACT_VERSION,
+  normalizeErrorDetail,
+  type ErrorDetail,
+} from "../contracts/common.js";
 import {
   cliAnySuccessEnvelopeSchema,
   cliErrorEnvelopeSchema,
@@ -35,11 +39,7 @@ export const writeCliSuccess = <T>(
 };
 
 export const writeCliError = (command: string, error: unknown, json: boolean): void => {
-  const normalized: ErrorDetail = {
-    code: "CLI_ERROR",
-    message: error instanceof Error ? error.message : String(error),
-    retryable: false,
-  };
+  const normalized: ErrorDetail = normalizeErrorDetail(error, "CLI_ERROR");
 
   if (!json) {
     process.stderr.write(`${command} failed: ${normalized.message}\n`);
@@ -61,4 +61,3 @@ export const writeCliLogEvent = (event: unknown): void => {
   const parsed = cliLogEventSchema.parse(event);
   process.stdout.write(`${JSON.stringify(parsed)}\n`);
 };
-

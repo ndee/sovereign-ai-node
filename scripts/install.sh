@@ -6,8 +6,12 @@ SCRIPT_NAME="$(basename "$0")"
 REPO_URL="${SOVEREIGN_NODE_REPO_URL:-https://github.com/ndee/sovereign-ai-node}"
 SOURCE_DIR="${SOVEREIGN_NODE_SOURCE_DIR:-}"
 REF="${SOVEREIGN_NODE_REF:-main}"
+BOTS_REPO_URL="${SOVEREIGN_BOTS_REPO_URL:-https://github.com/ndee/sovereign-ai-bots}"
+BOTS_SOURCE_DIR="${SOVEREIGN_BOTS_SOURCE_DIR:-}"
+BOTS_REF="${SOVEREIGN_BOTS_REF:-main}"
 INSTALL_ROOT="${SOVEREIGN_NODE_INSTALL_ROOT:-/opt/sovereign-ai-node}"
 APP_DIR="${INSTALL_ROOT}/app"
+BOTS_DIR="${INSTALL_ROOT}/sovereign-ai-bots"
 SERVICE_NAME="${SOVEREIGN_NODE_SERVICE_NAME:-sovereign-node-api}"
 SERVICE_USER="${SOVEREIGN_NODE_SERVICE_USER:-sovereign-node}"
 SERVICE_GROUP="${SOVEREIGN_NODE_SERVICE_GROUP:-}"
@@ -70,6 +74,9 @@ Options:
   --repo-url <url>         Git URL for sovereign-ai-node (default: https://github.com/ndee/sovereign-ai-node)
   --source-dir <path>      Local source directory (alternative to --repo-url)
   --ref <ref>              Git ref (default: main)
+  --bots-repo-url <url>    Git URL for sovereign-ai-bots (default: https://github.com/ndee/sovereign-ai-bots)
+  --bots-source-dir <path> Local bot repo source directory (alternative to --bots-repo-url)
+  --bots-ref <ref>         Bot repo Git ref (default: main)
   --install-root <path>    Install root (default: /opt/sovereign-ai-node)
   --service-user <user>    systemd service user (default: sovereign-node)
   --service-group <group>  systemd service group (default: same as service user)
@@ -105,9 +112,22 @@ parse_args() {
         REF="$2"
         shift 2
         ;;
+      --bots-repo-url)
+        BOTS_REPO_URL="$2"
+        shift 2
+        ;;
+      --bots-source-dir)
+        BOTS_SOURCE_DIR="$2"
+        shift 2
+        ;;
+      --bots-ref)
+        BOTS_REF="$2"
+        shift 2
+        ;;
       --install-root)
         INSTALL_ROOT="$2"
         APP_DIR="${INSTALL_ROOT}/app"
+        BOTS_DIR="${INSTALL_ROOT}/sovereign-ai-bots"
         shift 2
         ;;
       --service-user)
@@ -286,22 +306,60 @@ ensure_runtime_directories() {
 }
 
 resolve_source_mode() {
+  local detected_bots_source
+
   if [[ -n "$SOURCE_DIR" ]]; then
     [[ -d "$SOURCE_DIR" ]] || die "Source directory does not exist: $SOURCE_DIR"
-    return
-  fi
-
-  if [[ -n "$REPO_URL" ]]; then
-    return
-  fi
-
-  if [[ -f "./package.json" ]] && grep -q '"name": "sovereign-ai-node"' "./package.json"; then
+  elif [[ -n "$REPO_URL" ]]; then
+    :
+  elif [[ -f "./package.json" ]] && grep -q '"name": "sovereign-ai-node"' "./package.json"; then
     SOURCE_DIR="$(pwd)"
     log "Using local source directory: $SOURCE_DIR"
+  else
+    die "Missing source. Provide --source-dir <path> or --repo-url <url>."
+  fi
+
+  if [[ -n "$BOTS_SOURCE_DIR" ]]; then
+    [[ -d "$BOTS_SOURCE_DIR" ]] || die "Bot source directory does not exist: $BOTS_SOURCE_DIR"
     return
   fi
 
-  die "Missing source. Provide --source-dir <path> or --repo-url <url>."
+  detected_bots_source="$(find_local_bots_source_dir)"
+  if [[ -n "$detected_bots_source" ]]; then
+    BOTS_SOURCE_DIR="$detected_bots_source"
+    log "Using local bots source directory: $BOTS_SOURCE_DIR"
+    return
+  fi
+
+  if [[ -n "$BOTS_REPO_URL" ]]; then
+    return
+  fi
+
+  die "Missing bot source. Provide --bots-source-dir <path> or --bots-repo-url <url>."
+}
+
+find_local_bots_source_dir() {
+  local sibling_root candidate
+
+  if [[ -z "$SOURCE_DIR" ]]; then
+    return 0
+  fi
+
+  sibling_root="$(dirname "$SOURCE_DIR")"
+  candidate="${sibling_root}/sovereign-ai-bots"
+  if [[ -d "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  for candidate in "${sibling_root}"/sovereign-ai-bots-*; do
+    if [[ -d "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 0
 }
 
 sync_app_source() {
@@ -322,6 +380,24 @@ sync_app_source() {
   }
 }
 
+sync_bots_source() {
+  log "Syncing bot packages into $BOTS_DIR"
+  rm -rf "$BOTS_DIR"
+  install -d -m 0755 "$BOTS_DIR"
+
+  if [[ -n "$BOTS_SOURCE_DIR" ]]; then
+    cp -a "${BOTS_SOURCE_DIR}/." "$BOTS_DIR/"
+    rm -rf "$BOTS_DIR/node_modules" "$BOTS_DIR/dist" "$BOTS_DIR/.git"
+    return
+  fi
+
+  git clone --depth 1 --branch "$BOTS_REF" "$BOTS_REPO_URL" "$BOTS_DIR" || {
+    rm -rf "$BOTS_DIR"
+    git clone "$BOTS_REPO_URL" "$BOTS_DIR"
+    git -C "$BOTS_DIR" checkout "$BOTS_REF"
+  }
+}
+
 build_app() {
   log "Installing dependencies and building app"
   (
@@ -334,10 +410,11 @@ build_app() {
 install_wrappers() {
   log "Installing CLI wrappers into /usr/local/bin"
 
-  cat > /usr/local/bin/sovereign-node <<EOF
+cat > /usr/local/bin/sovereign-node <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 export SOVEREIGN_NODE_APP_DIR="$APP_DIR"
+export SOVEREIGN_BOTS_REPO_DIR="$BOTS_DIR"
 exec node "$APP_DIR/dist/sovereign-node.js" "\$@"
 EOF
 
@@ -345,6 +422,7 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 export SOVEREIGN_NODE_APP_DIR="$APP_DIR"
+export SOVEREIGN_BOTS_REPO_DIR="$BOTS_DIR"
 exec node "$APP_DIR/dist/sovereign-node-api.js" "\$@"
 EOF
 
@@ -352,6 +430,7 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 export SOVEREIGN_NODE_APP_DIR="$APP_DIR"
+export SOVEREIGN_BOTS_REPO_DIR="$BOTS_DIR"
 exec node "$APP_DIR/dist/sovereign-tool.js" "\$@"
 EOF
 
@@ -1863,17 +1942,35 @@ wait_for_runtime_ready() {
 }
 
 print_matrix_client_onboarding_guidance() {
-  local guidance onboarding_url onboarding_json onboarding_parse
+  local guidance guidance_payload onboarding_json onboarding_url
   [[ -r "$REQUEST_FILE" ]] || return 0
 
-  guidance="$(
-    node - "$REQUEST_FILE" <<'NODE'
+  onboarding_json="$(sovereign-node onboarding issue --json 2>/dev/null || true)"
+  guidance_payload="$(
+    node - "$REQUEST_FILE" "$onboarding_json" <<'NODE'
 const fs = require("node:fs");
 const requestPath = process.argv[2];
-const raw = fs.readFileSync(requestPath, "utf8");
-const req = JSON.parse(raw);
+const onboardingRaw = process.argv[3] ?? "";
+let req = {};
+try {
+  req = JSON.parse(fs.readFileSync(requestPath, "utf8"));
+} catch {
+  req = {};
+}
+let onboarding = {};
+try {
+  const parsed = JSON.parse(onboardingRaw);
+  onboarding = parsed?.result ?? {};
+} catch {
+  onboarding = {};
+}
 const matrix = req?.matrix ?? {};
-const publicBaseUrl = typeof matrix.publicBaseUrl === "string" ? matrix.publicBaseUrl : "";
+const issuedOnboardingUrl =
+  typeof onboarding.onboardingUrl === "string" ? onboarding.onboardingUrl.replace(/\/+$/, "") : "";
+const issuedUsername = typeof onboarding.username === "string" ? onboarding.username : "";
+const publicBaseUrl = issuedOnboardingUrl
+  ? issuedOnboardingUrl.replace(/\/onboard$/, "")
+  : (typeof matrix.publicBaseUrl === "string" ? matrix.publicBaseUrl : "");
 const tlsMode =
   typeof matrix.tlsMode === "string" && matrix.tlsMode.length > 0
     ? matrix.tlsMode
@@ -1884,9 +1981,11 @@ if (tlsMode === "local-dev" || !publicBaseUrl) {
   process.exit(0);
 }
 const homeserverDomain =
-  typeof matrix.homeserverDomain === "string" && matrix.homeserverDomain.length > 0
-    ? matrix.homeserverDomain
-    : "matrix.local.test";
+  issuedUsername.includes(":")
+    ? issuedUsername.slice(issuedUsername.indexOf(":") + 1)
+    : (typeof matrix.homeserverDomain === "string" && matrix.homeserverDomain.length > 0
+        ? matrix.homeserverDomain
+        : "matrix.local.test");
 const slug = homeserverDomain
   .toLowerCase()
   .replace(/[^a-z0-9]+/g, "-")
@@ -1894,92 +1993,46 @@ const slug = homeserverDomain
   .replace(/-+$/, "");
 const caPath = `/var/lib/sovereign-node/bundled-matrix/${slug}/reverse-proxy-data/caddy/pki/authorities/local/root.crt`;
 const normalizedBaseUrl = publicBaseUrl.replace(/\/+$/, "");
-const onboardingUrl = `${normalizedBaseUrl}/onboard`;
+const onboardingUrl = issuedOnboardingUrl || `${normalizedBaseUrl}/onboard`;
 const caDownloadUrl = `${normalizedBaseUrl}/downloads/caddy-root-ca.crt`;
-const operatorUsername =
-  typeof req?.operator?.username === "string" && req.operator.username.length > 0
-    ? req.operator.username
-    : "operator";
+const operatorUserId =
+  issuedUsername.length > 0
+    ? issuedUsername
+    : (typeof req?.operator?.username === "string" && req.operator.username.length > 0
+        ? `@${req.operator.username}:${homeserverDomain}`
+        : `@operator:${homeserverDomain}`);
 const elementLink =
   `https://app.element.io/#/login?hs_url=${encodeURIComponent(publicBaseUrl)}`
-  + `&login_hint=${encodeURIComponent(`@${operatorUsername}:${homeserverDomain}`)}`;
+  + `&login_hint=${encodeURIComponent(operatorUserId)}`;
 const lines = [
   "Phone onboarding:",
   `- Onboarding page: ${onboardingUrl}`,
   `- Element Web login: ${elementLink}`,
   "- Use a one-time onboarding code to unlock the password on the onboarding page.",
 ];
+if (typeof onboarding.code === "string" && onboarding.code.length > 0) {
+  lines.push(`- One-time onboarding code: ${onboarding.code}`);
+}
+if (typeof onboarding.expiresAt === "string" && onboarding.expiresAt.length > 0) {
+  lines.push(`- Code expires at: ${onboarding.expiresAt}`);
+}
+if (issuedUsername.length > 0) {
+  lines.push(`- Username: ${issuedUsername}`);
+  lines.push("- Regenerate later: sudo sovereign-node onboarding issue");
+}
 if (tlsMode === "internal") {
   lines.push(`- CA download URL: ${caDownloadUrl}`);
   lines.push(`- Client CA certificate: ${caPath}`);
   lines.push("- Install this CA on every client device before using Element Web.");
 }
-process.stdout.write(
-  lines.join("\n"),
-);
+process.stdout.write(`${onboardingUrl}\n${lines.join("\n")}`);
 NODE
   )" || return 0
 
-  if [[ -n "$guidance" ]]; then
+  if [[ -n "$guidance_payload" ]]; then
+    onboarding_url="${guidance_payload%%$'\n'*}"
+    guidance="${guidance_payload#*$'\n'}"
     printf '\n%s\n' "$guidance"
-    onboarding_json="$(sovereign-node onboarding issue --json 2>/dev/null || true)"
-    onboarding_parse="$(
-      node - "$onboarding_json" <<'NODE'
-const raw = process.argv[2] ?? "";
-if (!raw) {
-  process.exit(0);
-}
-let parsed;
-try {
-  parsed = JSON.parse(raw);
-} catch {
-  process.exit(0);
-}
-const result = parsed?.result;
-if (!result || typeof result !== "object") {
-  process.exit(0);
-}
-const fields = [
-  typeof result.code === "string" ? result.code : "",
-  typeof result.expiresAt === "string" ? result.expiresAt : "",
-  typeof result.onboardingUrl === "string" ? result.onboardingUrl : "",
-  typeof result.username === "string" ? result.username : "",
-];
-if (fields.some((value) => value.length === 0)) {
-  process.exit(0);
-}
-process.stdout.write(fields.join("\t"));
-NODE
-    )" || onboarding_parse=""
-    if [[ -n "$onboarding_parse" ]]; then
-      local onboarding_code onboarding_expires onboarding_url_from_issue onboarding_username
-      onboarding_code="${onboarding_parse%%$'\t'*}"
-      onboarding_parse="${onboarding_parse#*$'\t'}"
-      onboarding_expires="${onboarding_parse%%$'\t'*}"
-      onboarding_parse="${onboarding_parse#*$'\t'}"
-      onboarding_url_from_issue="${onboarding_parse%%$'\t'*}"
-      onboarding_username="${onboarding_parse#*$'\t'}"
-      printf '%s\n' \
-        "- One-time onboarding code: ${onboarding_code}" \
-        "- Code expires at: ${onboarding_expires}" \
-        "- Username: ${onboarding_username}" \
-        "- Regenerate later: sudo sovereign-node onboarding issue"
-      onboarding_url="$onboarding_url_from_issue"
-    fi
-    onboarding_url="$(
-      node - "$REQUEST_FILE" <<'NODE'
-const fs = require("node:fs");
-const req = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-const publicBaseUrl = typeof req?.matrix?.publicBaseUrl === "string" ? req.matrix.publicBaseUrl : "";
-if (!publicBaseUrl || !publicBaseUrl.startsWith("https://")) {
-  process.exit(0);
-}
-process.stdout.write(`${publicBaseUrl.replace(/\/+$/, "")}/onboard`);
-NODE
-    )" || onboarding_url=""
-    if [[ -z "$onboarding_url" && -n "${onboarding_url_from_issue:-}" ]]; then
-      onboarding_url="$onboarding_url_from_issue"
-    fi
     print_onboarding_qr "$onboarding_url"
   fi
 }
@@ -2062,6 +2115,7 @@ main() {
   ensure_service_account
   ensure_runtime_directories
   sync_app_source
+  sync_bots_source
   build_app
   install_wrappers
   install_systemd_unit
