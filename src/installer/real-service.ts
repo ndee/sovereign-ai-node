@@ -177,6 +177,7 @@ type RelayEnrollmentResult = {
 };
 
 const OPENCLAW_EXEC_TOOL_ID = "exec";
+const OPENCLAW_STATUS_PROBE_TIMEOUT_MS = 5_000;
 const SOVEREIGN_EXECUTABLE_PATHS: Record<string, string> = {
   "sovereign-node": "/usr/local/bin/sovereign-node",
   "sovereign-node-api": "/usr/local/bin/sovereign-node-api",
@@ -1181,20 +1182,54 @@ export class RealInstallerService implements InstallerService {
     };
   }
 
+  private upsertInstalledBotTemplateEntry(
+    existing: RuntimeConfig["templates"]["installed"],
+    botPackage: LoadedBotPackage,
+  ): {
+    installed: RuntimeConfig["templates"]["installed"];
+    changed: boolean;
+  } {
+    const ref = botPackage.templateRef;
+    const current = existing.find((entry) => formatTemplateRef(entry.id, entry.version) === ref);
+    const next = this.buildInstalledTemplateEntryFromBot(botPackage);
+    if (
+      current !== undefined
+      && current.description === next.description
+      && current.trusted === next.trusted
+      && current.pinned === next.pinned
+      && current.keyId === next.keyId
+      && current.manifestSha256 === next.manifestSha256
+      && current.source === next.source
+    ) {
+      return {
+        installed: existing,
+        changed: false,
+      };
+    }
+
+    return {
+      installed: sortInstalledTemplates([
+        ...existing.filter((entry) => formatTemplateRef(entry.id, entry.version) !== ref),
+        current === undefined
+          ? next
+          : {
+              ...next,
+              installedAt: current.installedAt,
+            },
+      ]),
+      changed: true,
+    };
+  }
+
   private async ensureBotTemplateInstalled(
     runtimeConfig: RuntimeConfig,
     botPackage: LoadedBotPackage,
   ): Promise<boolean> {
-    const existing = runtimeConfig.templates.installed.find(
-      (entry) => formatTemplateRef(entry.id, entry.version) === botPackage.templateRef,
-    );
-    if (existing !== undefined) {
+    const updated = this.upsertInstalledBotTemplateEntry(runtimeConfig.templates.installed, botPackage);
+    if (!updated.changed) {
       return false;
     }
-    runtimeConfig.templates.installed = sortInstalledTemplates([
-      ...runtimeConfig.templates.installed,
-      this.buildInstalledTemplateEntryFromBot(botPackage),
-    ]);
+    runtimeConfig.templates.installed = updated.installed;
     return true;
   }
 
@@ -2709,7 +2744,9 @@ export class RealInstallerService implements InstallerService {
     ok: boolean;
     message: string;
   }> {
-    const probe = await this.safeExec("openclaw", ["health"]);
+    const probe = await this.safeExec("openclaw", ["health"], {
+      timeoutMs: OPENCLAW_STATUS_PROBE_TIMEOUT_MS,
+    });
     if (!probe.ok) {
       return {
         ok: false,
@@ -2734,7 +2771,9 @@ export class RealInstallerService implements InstallerService {
   ): Promise<{ present: boolean; verified: boolean }> {
     const attempts = [baseArgs, [...baseArgs, "--json"]];
     for (const args of attempts) {
-      const probe = await this.safeExec("openclaw", args);
+      const probe = await this.safeExec("openclaw", args, {
+        timeoutMs: OPENCLAW_STATUS_PROBE_TIMEOUT_MS,
+      });
       if (!probe.ok) {
         continue;
       }
@@ -2879,6 +2918,9 @@ export class RealInstallerService implements InstallerService {
   private async safeExec(
     command: string,
     args: string[],
+    options?: {
+      timeoutMs?: number;
+    },
   ): Promise<
     | {
         ok: true;
@@ -2923,7 +2965,7 @@ export class RealInstallerService implements InstallerService {
         command: effectiveCommand,
         args: effectiveArgs,
         options: {
-          timeout: INSTALLER_EXEC_TIMEOUT_MS,
+          timeout: options?.timeoutMs ?? INSTALLER_EXEC_TIMEOUT_MS,
           ...(command === "openclaw"
             ? {
                 env: {
@@ -4854,15 +4896,10 @@ export class RealInstallerService implements InstallerService {
       requiredCoreTemplateRefs,
     );
     for (const botPackage of selectedBotPackages) {
-      const hasTemplateInstalled = installedTemplates.some(
-        (entry) => formatTemplateRef(entry.id, entry.version) === botPackage.templateRef,
-      );
-      if (!hasTemplateInstalled) {
-        installedTemplates = sortInstalledTemplates([
-          ...installedTemplates,
-          this.buildInstalledTemplateEntryFromBot(botPackage),
-        ]);
-      }
+      installedTemplates = this.upsertInstalledBotTemplateEntry(
+        installedTemplates,
+        botPackage,
+      ).installed;
     }
 
     const baseMatrixConfig = {

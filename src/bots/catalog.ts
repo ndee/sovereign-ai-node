@@ -230,9 +230,12 @@ export class FilesystemBotCatalog implements BotCatalog {
 
     const currentRepoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
     const workspaceRoot = dirname(currentRepoRoot);
-    const preferred = [
-      join(workspaceRoot, "sovereign-ai-bots"),
-    ];
+    const preferred = Array.from(
+      new Set([
+        join(currentRepoRoot, "sovereign-ai-bots"),
+        join(workspaceRoot, "sovereign-ai-bots"),
+      ]),
+    );
     for (const candidate of preferred) {
       if (await pathExists(join(candidate, "bots"))) {
         return candidate;
@@ -256,7 +259,9 @@ export class FilesystemBotCatalog implements BotCatalog {
         "The Sovereign bot repository was not found. Set SOVEREIGN_BOTS_REPO_DIR or place sovereign-ai-bots beside sovereign-ai-node.",
       retryable: false,
       details: {
+        currentRepoRoot,
         workspaceRoot,
+        searched: preferred,
       },
     };
   }
