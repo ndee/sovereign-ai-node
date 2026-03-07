@@ -247,6 +247,62 @@ const writeLegacyCorePinnedMailSentinelTemplate = async (
   await writeFile(paths.configPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
 };
 
+const writeNoCronManagedAgentRuntime = async (
+  paths: SovereignPaths,
+): Promise<void> => {
+  const raw = await readFile(paths.configPath, "utf8");
+  const parsed = JSON.parse(raw) as {
+    openclawProfile?: {
+      agents?: Array<Record<string, unknown>>;
+      crons?: Array<Record<string, unknown>>;
+    };
+    matrix?: {
+      bot?: Record<string, unknown>;
+    };
+  };
+
+  parsed.openclawProfile = {
+    ...(parsed.openclawProfile ?? {}),
+    agents: [
+      {
+        id: "node-operator",
+        workspace: join(paths.stateDir, "node-operator", "workspace"),
+        templateRef: "node-operator@1.0.0",
+        botId: "node-operator",
+        matrix: {
+          localpart: "node-operator",
+          userId: "@node-operator:matrix.example.org",
+          passwordSecretRef: "file:/tmp/node-operator.password",
+        },
+      },
+    ],
+    crons: [],
+  };
+
+  parsed.matrix = {
+    ...(parsed.matrix ?? {}),
+    bot: {
+      localpart: "node-operator",
+      userId: "@node-operator:matrix.example.org",
+      accessTokenSecretRef: "file:/tmp/node-operator-access-token",
+    },
+  };
+
+  await mkdir(join(paths.stateDir, "node-operator"), { recursive: true });
+  await writeFile(
+    join(paths.stateDir, "node-operator", "registration.json"),
+    `${JSON.stringify(
+      {
+        agentId: "node-operator",
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  await writeFile(paths.configPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+};
+
 describe("RealInstallerService", () => {
   it("generates an immutable relay slug during enrollment instead of honoring caller-provided slugs", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
@@ -1924,6 +1980,134 @@ describe("RealInstallerService", () => {
       expect(status.openclaw.agentPresent).toBe(true);
       expect(status.openclaw.cronPresent).toBe(true);
       expect(status.services.find((entry) => entry.name === "openclaw-gateway")?.state).toBe("running");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("treats cron presence as satisfied when no managed crons are configured", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+    await writeRuntimeArtifacts(paths);
+    await writeNoCronManagedAgentRuntime(paths);
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      mailSentinelRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert",
+          cronCommand: "openclaw cron add",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async (input): Promise<ExecResult> => {
+          const serialized = [input.command, ...(input.args ?? [])].join(" ");
+          if (serialized.startsWith("systemctl is-active")) {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "active",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw health") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw agents list") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "node-operator",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw cron list") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+            };
+          }
+          return {
+            command: serialized,
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          };
+        },
+      },
+    });
+
+    try {
+      const status = await service.getStatus();
+      expect(status.openclaw.agentPresent).toBe(true);
+      expect(status.openclaw.cronPresent).toBe(true);
+      expect(status.openclaw.health).toBe("healthy");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
