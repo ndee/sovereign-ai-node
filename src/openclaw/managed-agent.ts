@@ -2,6 +2,8 @@ import type { Logger } from "../logging/logger.js";
 import type { ExecResult, ExecRunner } from "../system/exec.js";
 
 const OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS = 90_000;
+const OPENCLAW_GATEWAY_RETRY_ATTEMPTS = 15;
+const OPENCLAW_GATEWAY_RETRY_DELAY_MS = 2_000;
 
 export type ManagedAgentRegistrationInput = {
   agentId: string;
@@ -129,16 +131,7 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
       stdout: string;
     }[] = [];
     for (const args of input.commands) {
-      const result = await this.execRunner.run({
-        command: "openclaw",
-        args,
-        options: {
-          timeout: OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS,
-          env: {
-            CI: "1",
-          },
-        },
-      });
+      const result = await this.runOpenClawCommandWithGatewayRetry(args);
       if (result.exitCode === 0) {
         return result;
       }
@@ -163,51 +156,97 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
   }
 
   private async listCronJobs(): Promise<CronListJob[]> {
-    const jsonResult = await this.execRunner.run({
-      command: "openclaw",
-      args: ["cron", "list", "--json"],
-      options: {
-        timeout: OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS,
-        env: {
-          CI: "1",
-        },
-      },
-    });
-    if (jsonResult.exitCode === 0) {
-      const parsed = parseCronListJson(jsonResult.stdout);
-      if (parsed !== null) {
-        return parsed;
+    let lastJsonResult: ExecResult | null = null;
+    let lastTextResult: ExecResult | null = null;
+
+    for (let attempt = 1; attempt <= OPENCLAW_GATEWAY_RETRY_ATTEMPTS; attempt += 1) {
+      const jsonResult = await this.runOpenClawCommandWithGatewayRetry(["cron", "list", "--json"]);
+      lastJsonResult = jsonResult;
+      if (jsonResult.exitCode === 0) {
+        const parsed = parseCronListJson(jsonResult.stdout);
+        if (parsed !== null) {
+          return parsed;
+        }
       }
+
+      const textResult = await this.runOpenClawCommandWithGatewayRetry(["cron", "list"]);
+      lastTextResult = textResult;
+      if (textResult.exitCode === 0) {
+        return parseCronListTable(textResult.stdout);
+      }
+
+      const gatewayUnavailable =
+        isGatewayUnavailableResult(jsonResult) || isGatewayUnavailableResult(textResult);
+      if (!gatewayUnavailable || attempt >= OPENCLAW_GATEWAY_RETRY_ATTEMPTS) {
+        break;
+      }
+      this.logger.warn(
+        {
+          attempt,
+          maxAttempts: OPENCLAW_GATEWAY_RETRY_ATTEMPTS,
+          jsonExitCode: jsonResult.exitCode,
+          textExitCode: textResult.exitCode,
+        },
+        "OpenClaw gateway unavailable while listing cron jobs; retrying",
+      );
+      await delay(OPENCLAW_GATEWAY_RETRY_DELAY_MS);
     }
 
-    const textResult = await this.execRunner.run({
-      command: "openclaw",
-      args: ["cron", "list"],
-      options: {
-        timeout: OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS,
-        env: {
-          CI: "1",
-        },
+    throw {
+      code: "MANAGED_AGENT_REGISTER_FAILED",
+      message: "Failed to list existing OpenClaw cron jobs",
+      retryable: true,
+      details: {
+        attempts: OPENCLAW_GATEWAY_RETRY_ATTEMPTS,
+        jsonCommand: lastJsonResult?.command ?? "openclaw cron list --json",
+        jsonExitCode: lastJsonResult?.exitCode ?? -1,
+        jsonStdout: truncateText(lastJsonResult?.stdout ?? "", 1200),
+        jsonStderr: truncateText(lastJsonResult?.stderr ?? "", 1200),
+        textCommand: lastTextResult?.command ?? "openclaw cron list",
+        textExitCode: lastTextResult?.exitCode ?? -1,
+        textStdout: truncateText(lastTextResult?.stdout ?? "", 1200),
+        textStderr: truncateText(lastTextResult?.stderr ?? "", 1200),
       },
-    });
-    if (textResult.exitCode !== 0) {
-      throw {
-        code: "MANAGED_AGENT_REGISTER_FAILED",
-        message: "Failed to list existing OpenClaw cron jobs",
-        retryable: true,
-        details: {
-          jsonCommand: jsonResult.command,
-          jsonExitCode: jsonResult.exitCode,
-          jsonStdout: truncateText(jsonResult.stdout, 1200),
-          jsonStderr: truncateText(jsonResult.stderr, 1200),
-          textCommand: textResult.command,
-          textExitCode: textResult.exitCode,
-          textStdout: truncateText(textResult.stdout, 1200),
-          textStderr: truncateText(textResult.stderr, 1200),
+    };
+  }
+
+  private async runOpenClawCommandWithGatewayRetry(args: string[]): Promise<ExecResult> {
+    let result: ExecResult | null = null;
+    for (let attempt = 1; attempt <= OPENCLAW_GATEWAY_RETRY_ATTEMPTS; attempt += 1) {
+      result = await this.execRunner.run({
+        command: "openclaw",
+        args,
+        options: {
+          timeout: OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS,
+          env: {
+            CI: "1",
+          },
         },
-      };
+      });
+      if (result.exitCode === 0 || !isGatewayUnavailableResult(result)) {
+        return result;
+      }
+      if (attempt >= OPENCLAW_GATEWAY_RETRY_ATTEMPTS) {
+        break;
+      }
+      this.logger.warn(
+        {
+          command: result.command,
+          attempt,
+          maxAttempts: OPENCLAW_GATEWAY_RETRY_ATTEMPTS,
+          exitCode: result.exitCode,
+        },
+        "OpenClaw gateway temporarily unavailable; retrying command",
+      );
+      await delay(OPENCLAW_GATEWAY_RETRY_DELAY_MS);
     }
-    return parseCronListTable(textResult.stdout);
+
+    return result ?? {
+      command: `openclaw ${args.join(" ")}`,
+      exitCode: 1,
+      stdout: "",
+      stderr: "openclaw command did not execute",
+    };
   }
 }
 
@@ -245,6 +284,19 @@ const isAlreadyExistsResult = (result: ExecResult): boolean =>
 
 const isNotFoundResult = (result: ExecResult): boolean =>
   /not\s+found|unknown\s+job|no\s+such/i.test(`${result.stderr}\n${result.stdout}`);
+
+const isGatewayUnavailableResult = (result: ExecResult): boolean =>
+  isGatewayUnavailableOutput(`${result.stderr}\n${result.stdout}`);
+
+const isGatewayUnavailableOutput = (value: string): boolean =>
+  /gateway\s+closed|gateway\s+unavailable|abnormal\s+closure|econnrefused|connect\s+econnrefused|socket\s+hang\s+up/i.test(
+    value.toLowerCase(),
+  );
+
+const delay = async (ms: number): Promise<void> =>
+  new Promise((resolveTimeout) => {
+    setTimeout(resolveTimeout, ms);
+  });
 
 const parseCronListJson = (value: string): CronListJob[] | null => {
   try {

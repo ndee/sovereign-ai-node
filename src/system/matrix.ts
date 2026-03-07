@@ -12,7 +12,10 @@ import { buildMatrixOnboardingUrl } from "../onboarding/bootstrap-code.js";
 import type { ExecRunner, ExecResult } from "./exec.js";
 
 const MATRIX_INTERNAL_BASE_URL = "http://127.0.0.1:8008";
-const MATRIX_READY_TIMEOUT_MS = 180_000;
+const MATRIX_READY_TIMEOUT_MS = resolveDurationFromEnv(
+  "SOVEREIGN_MATRIX_READY_TIMEOUT_MS",
+  600_000,
+);
 const MATRIX_READY_POLL_INTERVAL_MS = 1_500;
 const MATRIX_HTTP_TIMEOUT_MS = 8_000;
 const MATRIX_LOGIN_RETRY_ATTEMPTS = 5;
@@ -20,7 +23,10 @@ const MATRIX_LOGIN_RETRY_DELAY_MS = 500;
 const MATRIX_LOGIN_RATE_LIMIT_FALLBACK_DELAY_MS = 1_000;
 const MATRIX_LOGIN_RATE_LIMIT_MAX_DELAY_MS = MATRIX_READY_TIMEOUT_MS;
 const MATRIX_LOGIN_RATE_LIMIT_FAST_RETRY_THRESHOLD_MS = 10_000;
-const MATRIX_COMPOSE_COMMAND_TIMEOUT_MS = 180_000;
+const MATRIX_COMPOSE_COMMAND_TIMEOUT_MS = resolveDurationFromEnv(
+  "SOVEREIGN_MATRIX_COMPOSE_TIMEOUT_MS",
+  600_000,
+);
 const DEFAULT_SYNAPSE_IMAGE = "matrixdotorg/synapse:v1.125.0";
 const DEFAULT_CADDY_IMAGE = "caddy:2.10.2-alpine";
 const DEFAULT_ONBOARDING_API_IMAGE = "node:22-alpine";
@@ -2080,6 +2086,18 @@ const renderFallbackQrSvg = (value: string): string => {
     "</svg>",
   ].join("\n");
 };
+
+function resolveDurationFromEnv(name: string, fallbackMs: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) {
+    return fallbackMs;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallbackMs;
+  }
+  return Math.trunc(parsed);
+}
 
 const defaultFetch: FetchLike = (input, init) => globalThis.fetch(input, init);
 
