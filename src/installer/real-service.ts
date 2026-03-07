@@ -516,7 +516,7 @@ export class RealInstallerService implements InstallerService {
     const cliInstalled = detectedOpenClaw !== null;
     const managedBySovereign = runtimeConfig?.openclaw.managedInstallation ?? true;
     const pluginIds = runtimeConfig?.openclawProfile.plugins.allow;
-    const agentPresent = agentProbes.length > 0 && agentProbes.every((probe) => !probe.verified || probe.present);
+    const agentPresent = agentProbes.every((probe) => !probe.verified || probe.present);
     const cronPresent = cronProbes.every((probe) => !probe.verified || probe.present);
     const openclawHealth = deriveOpenClawHealth({
       cliInstalled,
@@ -658,7 +658,7 @@ export class RealInstallerService implements InstallerService {
     const cronProbes = await Promise.all(
       expectedCronIds.map(async (id) => await this.inspectOpenClawListContains(["cron", "list"], id)),
     );
-    const agentPresent = agentProbes.length > 0 && agentProbes.every((probe) => !probe.verified || probe.present);
+    const agentPresent = agentProbes.every((probe) => !probe.verified || probe.present);
     const cronPresent = cronProbes.every((probe) => !probe.verified || probe.present);
     const wiringCheck = await this.inspectOpenClawRuntimeWiring(runtimeConfig);
 
