@@ -228,4 +228,53 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
     expect(calls).toContain("openclaw cron rm 22222222-2222-2222-2222-222222222222");
     expect(calls.at(-1)).toContain("openclaw cron add --name mail-sentinel-poll");
   });
+
+  it("retries cron listing when OpenClaw gateway is temporarily unavailable", async () => {
+    const calls: string[] = [];
+    let jsonListAttempts = 0;
+    const execRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        const serialized = [input.command, ...(input.args ?? [])].join(" ");
+        calls.push(serialized);
+        if (serialized === "openclaw cron list --json") {
+          jsonListAttempts += 1;
+          if (jsonListAttempts === 1) {
+            return {
+              command: serialized,
+              exitCode: 1,
+              stdout: "",
+              stderr: "Error: gateway closed (1006 abnormal closure (no close frame))",
+            };
+          }
+          return {
+            command: serialized,
+            exitCode: 0,
+            stdout: "{\"jobs\":[]}",
+            stderr: "",
+          };
+        }
+        return {
+          command: serialized,
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        };
+      },
+    };
+
+    const registrar = new ShellOpenClawManagedAgentRegistrar(execRunner, createLogger());
+    const result = await registrar.register({
+      agentId: "mail-sentinel",
+      workspaceDir: "/tmp/ws",
+      cron: {
+        id: "mail-sentinel-poll",
+        every: "5m",
+        message: "Summarize new inbox mail",
+      },
+    });
+
+    expect(result.cronJobId).toBe("mail-sentinel-poll");
+    expect(jsonListAttempts).toBe(2);
+    expect(calls).toContain("openclaw cron list --json");
+  });
 });
