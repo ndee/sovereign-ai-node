@@ -1,12 +1,5 @@
 import type { KeyObject } from "node:crypto";
 import { createHash, createPublicKey, verify } from "node:crypto";
-import {
-  MAIL_SENTINEL_AGENTS_MD,
-  MAIL_SENTINEL_SKILL_MD,
-  NODE_OPERATOR_AGENTS_MD,
-  NODE_OPERATOR_SKILL_MD,
-  SHARED_ALLOWED_TOOLS_MD,
-} from "./core-workspace-files.js";
 
 export type TemplateSignature = {
   algorithm: "ed25519";
@@ -74,13 +67,6 @@ const CORE_PUBLIC_KEY_PEM_2026_03 = [
   "MCowBQYDK2VwAyEA1NjeN4Uzn3Eh1cuWIZv4zxfO+WQU2HyRMasiwO4/DGE=",
   "-----END PUBLIC KEY-----",
 ].join("\n");
-const CORE_KEY_ID_2026_03_07 = "sovereign-core-ed25519-2026-03-07";
-const CORE_PUBLIC_KEY_PEM_2026_03_07 = [
-  "-----BEGIN PUBLIC KEY-----",
-  "MCowBQYDK2VwAyEAXjJxn/mN5HIo4wRLQOpZRD6IRohKnWVzAp8C1PGGfJI=",
-  "-----END PUBLIC KEY-----",
-].join("\n");
-
 export const CORE_TRUSTED_TEMPLATE_KEYS: TrustedTemplateKey[] = [
   {
     keyId: CORE_KEY_ID,
@@ -90,13 +76,9 @@ export const CORE_TRUSTED_TEMPLATE_KEYS: TrustedTemplateKey[] = [
     keyId: CORE_KEY_ID_2026_03,
     publicKeyPem: CORE_PUBLIC_KEY_PEM_2026_03,
   },
-  {
-    keyId: CORE_KEY_ID_2026_03_07,
-    publicKeyPem: CORE_PUBLIC_KEY_PEM_2026_03_07,
-  },
 ];
 
-export const CORE_TEMPLATE_MANIFESTS: SovereignTemplateManifest[] = [
+export const CORE_TEMPLATE_MANIFESTS: ToolTemplateManifest[] = [
   {
     kind: "sovereign-tool-template",
     id: "node-cli-ops",
@@ -143,88 +125,13 @@ export const CORE_TEMPLATE_MANIFESTS: SovereignTemplateManifest[] = [
       value: "iC9gCncfVhI6ZCknRjuGy93IWVIntGuLktSNdpGaNfO+flWST34eosIQT4F/fYWtnJEI7KHSzAXOJzJHj1S+DA==",
     },
   },
-  {
-    kind: "sovereign-agent-template",
-    id: "mail-sentinel",
-    version: "1.0.0",
-    description: "Conversational inbox sentinel for read-only IMAP triage and Matrix summaries.",
-    matrix: {
-      localpartPrefix: "mail-sentinel",
-    },
-    requiredToolTemplates: [],
-    optionalToolTemplates: [
-      {
-        id: "imap-readonly",
-        version: "1.0.0",
-      },
-    ],
-    workspaceFiles: [
-      {
-        path: "AGENTS.md",
-        content: MAIL_SENTINEL_AGENTS_MD,
-      },
-      {
-        path: "TOOLS.md",
-        content: SHARED_ALLOWED_TOOLS_MD,
-      },
-      {
-        path: "skills/mail-sentinel-core/SKILL.md",
-        content: MAIL_SENTINEL_SKILL_MD,
-      },
-    ],
-    signature: {
-      algorithm: "ed25519",
-      keyId: CORE_KEY_ID_2026_03_07,
-      value: "Bw0N0McoAU/JX3PCd0OVsJn4WM5fog1lej8ZgK1MNtLOpqIQL9phvf2gvPdYzqLfCQFTYX40+seehSgNTTjcAQ==",
-    },
-  },
-  {
-    kind: "sovereign-agent-template",
-    id: "node-operator",
-    version: "1.0.0",
-    description: "Conversational operator that manages Sovereign Node and managed agents.",
-    matrix: {
-      localpartPrefix: "node-operator",
-    },
-    requiredToolTemplates: [
-      {
-        id: "node-cli-ops",
-        version: "1.0.0",
-      },
-    ],
-    optionalToolTemplates: [
-      {
-        id: "imap-readonly",
-        version: "1.0.0",
-      },
-    ],
-    workspaceFiles: [
-      {
-        path: "AGENTS.md",
-        content: NODE_OPERATOR_AGENTS_MD,
-      },
-      {
-        path: "TOOLS.md",
-        content: SHARED_ALLOWED_TOOLS_MD,
-      },
-      {
-        path: "skills/node-operator-core/SKILL.md",
-        content: NODE_OPERATOR_SKILL_MD,
-      },
-    ],
-    signature: {
-      algorithm: "ed25519",
-      keyId: CORE_KEY_ID,
-      value: "/7JBdQpwF6Y1E9GSzx9Rufx+5C3Gw5jWjHz1slwHK92vFcEK69VErnOlxHe/R5xYRF5OY8CRUF4Ibhbs487wCw==",
-    },
-  },
 ];
 
 export const parseTemplateRef = (ref: string): { id: string; version: string } => {
   const normalized = ref.trim();
   const match = /^([a-z0-9][a-z0-9._-]{1,62})@([0-9]+\.[0-9]+\.[0-9]+)$/.exec(normalized);
   if (match === null || match[1] === undefined || match[2] === undefined) {
-    throw new Error("Template ref must match <id>@<semver> (example: node-operator@1.0.0)");
+    throw new Error("Template ref must match <id>@<semver> (example: example-template@1.0.0)");
   }
   return {
     id: match[1],

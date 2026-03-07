@@ -29,6 +29,8 @@ import type {
   ManagedAgentDeleteResult,
   ManagedAgentListResult,
   ManagedAgentUpsertResult,
+  SovereignBotInstantiateResult,
+  SovereignBotListResult,
   SovereignTemplateInstallResult,
   SovereignTemplateListResult,
   SovereignToolInstanceDeleteResult,
@@ -322,6 +324,61 @@ export class StubInstallerService implements InstallerService {
     return {
       id: req.id,
       deleted: true,
+      restartRequiredServices: ["openclaw-gateway"],
+    };
+  }
+
+  async listSovereignBots(): Promise<SovereignBotListResult> {
+    return {
+      bots: [
+        {
+          id: "mail-sentinel",
+          version: "1.0.0",
+          displayName: "Mail Sentinel",
+          description: "Conversational inbox sentinel for read-only IMAP triage and Matrix summaries.",
+          defaultInstall: true,
+          templateRef: "mail-sentinel@1.0.0",
+          installed: true,
+          instantiated: true,
+          agentId: "mail-sentinel",
+          cronJobIds: ["mail-sentinel-poll"],
+        },
+        {
+          id: "node-operator",
+          version: "1.0.0",
+          displayName: "Node Operator",
+          description: "Conversational operator that manages Sovereign Node and managed agents.",
+          defaultInstall: false,
+          templateRef: "node-operator@1.0.0",
+          installed: false,
+          instantiated: false,
+        },
+      ],
+    };
+  }
+
+  async instantiateSovereignBot(req: {
+    id: string;
+    workspace?: string;
+  }): Promise<SovereignBotInstantiateResult> {
+    return {
+      bot: {
+        id: req.id,
+        version: "1.0.0",
+        displayName: req.id,
+        description: "Scaffold bot package",
+        defaultInstall: req.id === "mail-sentinel",
+        templateRef: `${req.id}@1.0.0`,
+        installed: true,
+        instantiated: true,
+        agentId: req.id,
+      },
+      agent: {
+        id: req.id,
+        workspace: req.workspace ?? `/var/lib/sovereign-node/${req.id}/workspace`,
+        templateRef: `${req.id}@1.0.0`,
+      },
+      changed: true,
       restartRequiredServices: ["openclaw-gateway"],
     };
   }

@@ -35,6 +35,7 @@ export const jobStepIdSchema = z.enum([
   "matrix_bootstrap_room",
   "openclaw_gateway_service_install",
   "openclaw_configure",
+  "bots_configure",
   "mail_sentinel_register",
   "smoke_checks",
   "test_alert",
@@ -85,10 +86,18 @@ export const openrouterInstallInputSchema = z
     apiKey: z.string().min(1).optional(),
     secretRef: z.string().min(1).optional(),
   })
-  .refine((value) => value.apiKey !== undefined || value.secretRef !== undefined, {
-    message: "openrouter.apiKey or openrouter.secretRef is required",
-    path: ["secretRef"],
-  });
+  .refine(
+    (value: {
+      model?: string | undefined;
+      apiKey?: string | undefined;
+      secretRef?: string | undefined;
+    }) =>
+      value.apiKey !== undefined || value.secretRef !== undefined,
+    {
+      message: "openrouter.apiKey or openrouter.secretRef is required",
+      path: ["secretRef"],
+    },
+  );
 
 export const connectivityInstallInputSchema = z.object({
   mode: z.enum(["direct", "relay"]).optional(),
@@ -110,6 +119,13 @@ export const matrixInstallInputSchema = z.object({
 export const operatorInstallInputSchema = z.object({
   username: z.string().min(1),
   password: z.string().min(1).optional(),
+});
+
+export const botConfigValueSchema = z.union([z.string(), z.number().finite(), z.boolean()]);
+
+export const botsInstallInputSchema = z.object({
+  selected: z.array(z.string().min(1)).optional(),
+  config: z.record(z.string(), z.record(z.string(), botConfigValueSchema)).optional(),
 });
 
 export const mailSentinelInstallInputSchema = z.object({
@@ -135,6 +151,7 @@ export const installRequestSchema = z.object({
   imap: imapInstallInputSchema.optional(),
   matrix: matrixInstallInputSchema,
   operator: operatorInstallInputSchema,
+  bots: botsInstallInputSchema.optional(),
   mailSentinel: mailSentinelInstallInputSchema.optional(),
   advanced: advancedInstallInputSchema.optional(),
 });

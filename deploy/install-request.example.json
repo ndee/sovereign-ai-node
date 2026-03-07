@@ -28,10 +28,17 @@
   "operator": {
     "username": "operator"
   },
-  "mailSentinel": {
-    "pollInterval": "5m",
-    "lookbackWindow": "15m",
-    "e2eeAlertRoom": false
+  "bots": {
+    "selected": [
+      "mail-sentinel"
+    ],
+    "config": {
+      "mail-sentinel": {
+        "pollInterval": "5m",
+        "lookbackWindow": "15m",
+        "e2eeAlertRoom": false
+      }
+    }
   },
   "advanced": {
     "nonInteractive": true

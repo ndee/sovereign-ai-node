@@ -536,7 +536,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       const room = await provisioner.bootstrapRoom(req, provision, accounts);
 
       expect(accounts.operator.userId).toBe("@operator:matrix.local.test");
-      expect(accounts.bot.userId).toBe("@mail-sentinel:matrix.local.test");
+      expect(accounts.bot.userId).toBe("@service-bot:matrix.local.test");
       expect(accounts.operator.passwordSecretRef.startsWith("file:")).toBe(true);
       expect(accounts.bot.passwordSecretRef.startsWith("file:")).toBe(true);
       expect(room.roomId).toBe("!alerts:matrix.local.test");
@@ -656,7 +656,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       const accounts = await provisioner.bootstrapAccounts(req, provision);
 
       expect(accounts.operator.userId).toBe("@operator:matrix.local.test");
-      expect(accounts.bot.userId).toBe("@mail-sentinel:matrix.local.test");
+      expect(accounts.bot.userId).toBe("@service-bot:matrix.local.test");
 
       const downCalls = recordedExecCalls.filter(
         (call) => call.command === "docker" && (call.args ?? []).includes("down"),
@@ -750,7 +750,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
         "utf8",
       );
       await writeFile(
-        join(paths.secretsDir, "matrix-mail-sentinel.password"),
+        join(paths.secretsDir, "matrix-service-bot.password"),
         "stale-bot-password\n",
         "utf8",
       );
@@ -758,7 +758,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       const accounts = await provisioner.bootstrapAccounts(req, provision);
 
       expect(accounts.operator.userId).toBe("@operator:matrix.local.test");
-      expect(accounts.bot.userId).toBe("@mail-sentinel:matrix.local.test");
+      expect(accounts.bot.userId).toBe("@service-bot:matrix.local.test");
       const operatorSecretPath = accounts.operator.passwordSecretRef.slice("file:".length);
       expect((await readFile(operatorSecretPath, "utf8")).trim()).not.toBe(
         "stale-operator-password",
@@ -850,7 +850,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       const accounts = await provisioner.bootstrapAccounts(req, provision);
 
       expect(accounts.operator.userId).toBe("@operator:matrix.local.test");
-      expect(accounts.bot.userId).toBe("@mail-sentinel:matrix.local.test");
+      expect(accounts.bot.userId).toBe("@service-bot:matrix.local.test");
       const downCalls = recordedExecCalls.filter(
         (call) => call.command === "docker" && (call.args ?? []).includes("down"),
       );

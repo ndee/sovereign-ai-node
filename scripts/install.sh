@@ -35,6 +35,7 @@ LEGACY_MATRIX_PUBLIC_BASE_URL="http://127.0.0.1:8008"
 LEGACY_MATRIX_ALT_PUBLIC_BASE_URL="http://matrix.local.test:8008"
 DEFAULT_OPERATOR_USERNAME="operator"
 DEFAULT_ALERT_ROOM_NAME="Sovereign Alerts"
+DEFAULT_SELECTED_BOTS="mail-sentinel"
 DEFAULT_POLL_INTERVAL="5m"
 DEFAULT_LOOKBACK_WINDOW="15m"
 DEFAULT_FEDERATION_ENABLED="0"
@@ -573,6 +574,38 @@ prompt_required_secret() {
   printf '%s' "$value"
 }
 
+bot_list_contains() {
+  local selected bot_id
+  selected="$1"
+  bot_id="$2"
+  case ",${selected}," in
+    *,"${bot_id}",*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+describe_selected_bots() {
+  local selected joined
+  selected="$1"
+  joined=""
+  if bot_list_contains "$selected" "mail-sentinel"; then
+    joined="Mail Sentinel"
+  fi
+  if bot_list_contains "$selected" "node-operator"; then
+    if [[ -n "$joined" ]]; then
+      joined="${joined}, Node Operator"
+    else
+      joined="Node Operator"
+    fi
+  fi
+  if [[ -z "$joined" ]]; then
+    joined="none"
+  fi
+  printf '%s' "$joined"
+}
+
 reset_request_defaults() {
   EXISTING_REQUEST_VALID="0"
   LAST_REQUEST_LOAD_ERROR=""
@@ -582,6 +615,7 @@ reset_request_defaults() {
   DEFAULT_MATRIX_PUBLIC_BASE_URL="$RECOMMENDED_MATRIX_PUBLIC_BASE_URL"
   DEFAULT_OPERATOR_USERNAME="operator"
   DEFAULT_ALERT_ROOM_NAME="Sovereign Alerts"
+  DEFAULT_SELECTED_BOTS="mail-sentinel"
   DEFAULT_POLL_INTERVAL="5m"
   DEFAULT_LOOKBACK_WINDOW="15m"
   DEFAULT_FEDERATION_ENABLED="0"
@@ -673,7 +707,23 @@ const connectivity = req.connectivity ?? {};
 const relay = req.relay ?? {};
 const matrix = req.matrix ?? {};
 const operator = req.operator ?? {};
-const mailSentinel = req.mailSentinel ?? {};
+const bots = req.bots ?? {};
+const selectedBots = Array.isArray(bots.selected)
+  ? bots.selected
+    .filter((entry) => typeof entry === "string")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+  : [];
+const botConfig = bots && typeof bots === "object" && !Array.isArray(bots)
+  && bots.config && typeof bots.config === "object" && !Array.isArray(bots.config)
+  ? bots.config
+  : {};
+const legacyMailSentinel = req.mailSentinel ?? {};
+const mailSentinel =
+  botConfig["mail-sentinel"] && typeof botConfig["mail-sentinel"] === "object"
+  && !Array.isArray(botConfig["mail-sentinel"])
+    ? botConfig["mail-sentinel"]
+    : legacyMailSentinel;
 const imap = req.imap ?? {};
 let runtime = {};
 try {
@@ -751,6 +801,7 @@ if (runtimeRelayEnabled || connectivity.mode === "relay" || relay.controlUrl) {
 }
 emit("DEFAULT_RELAY_CONTROL_URL", runtimeRelayControlUrl || relay.controlUrl || "");
 emit("EXISTING_RELAY_ENROLLMENT_TOKEN", relay.enrollmentToken || "");
+emit("DEFAULT_SELECTED_BOTS", selectedBots.length > 0 ? selectedBots.join(",") : "mail-sentinel");
 if (runtimeRelayHostname) {
   emit("DEFAULT_MATRIX_DOMAIN", runtimeRelayHostname);
 }
@@ -811,6 +862,9 @@ NODE
         ;;
       DEFAULT_ALERT_ROOM_NAME)
         DEFAULT_ALERT_ROOM_NAME="$value"
+        ;;
+      DEFAULT_SELECTED_BOTS)
+        DEFAULT_SELECTED_BOTS="$value"
         ;;
       DEFAULT_OPERATOR_USERNAME)
         DEFAULT_OPERATOR_USERNAME="$value"
@@ -1105,6 +1159,10 @@ const inferMatrixTlsMode = (value) => {
 };
 
 const matrixTlsMode = process.env.SN_MATRIX_TLS_MODE || inferMatrixTlsMode(matrixPublicBaseUrl);
+const selectedBots = (process.env.SN_SELECTED_BOTS || "")
+  .split(",")
+  .map((entry) => entry.trim())
+  .filter((entry) => entry.length > 0);
 const req = {
   mode: "bundled_matrix",
   connectivity: {
@@ -1132,15 +1190,25 @@ const req = {
   operator: {
     username: process.env.SN_OPERATOR_USERNAME,
   },
-  mailSentinel: {
-    pollInterval: process.env.SN_POLL_INTERVAL,
-    lookbackWindow: process.env.SN_LOOKBACK_WINDOW,
-    e2eeAlertRoom: false,
-  },
   advanced: {
     nonInteractive: true,
   },
 };
+
+if (selectedBots.length > 0) {
+  req.bots = {
+    selected: selectedBots,
+  };
+  if (selectedBots.includes("mail-sentinel")) {
+    req.bots.config = {
+      "mail-sentinel": {
+        pollInterval: process.env.SN_POLL_INTERVAL,
+        lookbackWindow: process.env.SN_LOOKBACK_WINDOW,
+        e2eeAlertRoom: false,
+      },
+    };
+  }
+}
 
 if (connectivityMode === "relay") {
   req.relay = {
@@ -1217,22 +1285,29 @@ review_install_request() {
   fi
   ui_info "Operator username: ${SN_OPERATOR_USERNAME}"
   ui_info "Alert room name: ${SN_ALERT_ROOM_NAME}"
-  ui_info "Mail Sentinel poll interval: ${SN_POLL_INTERVAL}"
-  ui_info "Mail Sentinel lookback window: ${SN_LOOKBACK_WINDOW}"
-  if [[ "${SN_IMAP_CONFIGURE}" == "1" ]]; then
-    ui_info "IMAP: configured (${SN_IMAP_SECRET_MODE})"
-    ui_info "IMAP host: ${SN_IMAP_HOST}"
-    ui_info "IMAP username: ${SN_IMAP_USERNAME}"
-    ui_info "IMAP mailbox: ${SN_IMAP_MAILBOX}"
+  ui_info "Bots: $(describe_selected_bots "$SN_SELECTED_BOTS")"
+  if bot_list_contains "$SN_SELECTED_BOTS" "mail-sentinel"; then
+    ui_info "Mail Sentinel poll interval: ${SN_POLL_INTERVAL}"
+    ui_info "Mail Sentinel lookback window: ${SN_LOOKBACK_WINDOW}"
+    if [[ "${SN_IMAP_CONFIGURE}" == "1" ]]; then
+      ui_info "IMAP: configured (${SN_IMAP_SECRET_MODE})"
+      ui_info "IMAP host: ${SN_IMAP_HOST}"
+      ui_info "IMAP username: ${SN_IMAP_USERNAME}"
+      ui_info "IMAP mailbox: ${SN_IMAP_MAILBOX}"
+    else
+      ui_info "IMAP: pending"
+    fi
   else
-    ui_info "IMAP: pending"
+    ui_info "Mail Sentinel: not selected"
+    ui_info "IMAP: not required"
   fi
 }
 
 run_install_wizard() {
   local defaults_status openrouter_api_key openrouter_model matrix_domain matrix_public_base_url
-  local operator_username alert_room_name poll_interval lookback_window federation_enabled
+  local operator_username alert_room_name selected_bots poll_interval lookback_window federation_enabled
   local matrix_tls_mode connectivity_choice connectivity_choice_default connectivity_mode
+  local install_mail_sentinel install_node_operator install_mail_sentinel_default install_node_operator_default
   local relay_control_url relay_enrollment_token
   local openrouter_secret_ref openrouter_secret_path openrouter_secret_mode
   local configure_imap imap_choice imap_host imap_port imap_tls imap_username imap_password
@@ -1252,6 +1327,7 @@ run_install_wizard() {
   matrix_public_base_url="$DEFAULT_MATRIX_PUBLIC_BASE_URL"
   operator_username="$DEFAULT_OPERATOR_USERNAME"
   alert_room_name="$DEFAULT_ALERT_ROOM_NAME"
+  selected_bots="$DEFAULT_SELECTED_BOTS"
   poll_interval="$DEFAULT_POLL_INTERVAL"
   lookback_window="$DEFAULT_LOOKBACK_WINDOW"
   federation_enabled="$DEFAULT_FEDERATION_ENABLED"
@@ -1368,10 +1444,6 @@ run_install_wizard() {
     fi
   fi
 
-  ui_section "Mail Sentinel"
-  poll_interval="$(prompt_value "Mail Sentinel poll interval" "$poll_interval")"
-  lookback_window="$(prompt_value "Mail Sentinel lookback window" "$lookback_window")"
-
   configure_imap="0"
   imap_host="$DEFAULT_IMAP_HOST"
   imap_port="$DEFAULT_IMAP_PORT"
@@ -1381,74 +1453,122 @@ run_install_wizard() {
   imap_secret_ref="$EXISTING_IMAP_SECRET_REF"
   imap_secret_mode="pending"
 
-  ui_section "IMAP (optional)"
-  if [[ "$DEFAULT_IMAP_CONFIGURED" == "1" ]] && [[ "$EXISTING_REQUEST_VALID" == "1" ]]; then
-    imap_choice="$(
-      ui_choice_menu \
-        "Choose how to handle IMAP:" \
-        "1" \
-        "Keep current IMAP configuration" \
-        "Replace IMAP configuration" \
-        "Leave IMAP pending"
-    )"
-    case "$imap_choice" in
-      1)
-        if secret_ref_path_exists "$imap_secret_ref"; then
-          configure_imap="1"
-          imap_secret_mode="kept"
-        else
-          ui_warn "Existing IMAP secret is missing. Enter replacement IMAP credentials."
-          imap_choice="2"
-        fi
-        ;;
-      3)
-        configure_imap="0"
-        imap_secret_ref=""
-        imap_secret_mode="pending"
-        ;;
-    esac
-    if [[ "$imap_choice" == "2" ]]; then
-      configure_imap="1"
-      imap_host="$(prompt_value "IMAP host" "$imap_host")"
-      imap_port="$(prompt_value "IMAP port" "$imap_port")"
-      if ui_confirm "Use TLS for IMAP?" "$( [[ "$imap_tls" == "1" ]] && printf 'y' || printf 'n' )"; then
-        imap_tls="1"
-      else
-        imap_tls="0"
-      fi
-      imap_username="$(prompt_value "IMAP username" "$imap_username")"
-      imap_password="$(
-        prompt_required_secret \
-          "IMAP password/app password" \
-          "IMAP password is required when IMAP is configured."
-      )"
-      imap_mailbox="$(prompt_value "IMAP mailbox" "$imap_mailbox")"
-      imap_secret_path="/etc/sovereign-node/secrets/imap-password"
-      write_secret_file "$imap_secret_path" "$imap_password"
-      imap_secret_ref="file:${imap_secret_path}"
-      imap_secret_mode="replaced"
+  ui_section "Bots"
+  while true; do
+    if bot_list_contains "$selected_bots" "mail-sentinel"; then
+      install_mail_sentinel_default="y"
+    else
+      install_mail_sentinel_default="n"
     fi
-  else
-    if ui_confirm "Configure IMAP now? (choose no to keep IMAP pending)" "n"; then
-      configure_imap="1"
-      imap_host="$(prompt_value "IMAP host" "$imap_host")"
-      imap_port="$(prompt_value "IMAP port" "$imap_port")"
-      if ui_confirm "Use TLS for IMAP?" "y"; then
-        imap_tls="1"
+    if bot_list_contains "$selected_bots" "node-operator"; then
+      install_node_operator_default="y"
+    else
+      install_node_operator_default="n"
+    fi
+
+    if ui_confirm "Install Mail Sentinel?" "$install_mail_sentinel_default"; then
+      install_mail_sentinel="1"
+    else
+      install_mail_sentinel="0"
+    fi
+    if ui_confirm "Install Node Operator?" "$install_node_operator_default"; then
+      install_node_operator="1"
+    else
+      install_node_operator="0"
+    fi
+
+    selected_bots=""
+    if [[ "$install_mail_sentinel" == "1" ]]; then
+      selected_bots="mail-sentinel"
+    fi
+    if [[ "$install_node_operator" == "1" ]]; then
+      if [[ -n "$selected_bots" ]]; then
+        selected_bots="${selected_bots},node-operator"
       else
-        imap_tls="0"
+        selected_bots="node-operator"
       fi
-      imap_username="$(prompt_value "IMAP username" "$imap_username")"
-      imap_password="$(
-        prompt_required_secret \
-          "IMAP password/app password" \
-          "IMAP password is required when IMAP is configured."
+    fi
+
+    if [[ -n "$selected_bots" ]]; then
+      break
+    fi
+    ui_warn "Select at least one bot to install."
+  done
+
+  if bot_list_contains "$selected_bots" "mail-sentinel"; then
+    ui_section "Mail Sentinel"
+    poll_interval="$(prompt_value "Mail Sentinel poll interval" "$poll_interval")"
+    lookback_window="$(prompt_value "Mail Sentinel lookback window" "$lookback_window")"
+
+    ui_section "IMAP (optional)"
+    if [[ "$DEFAULT_IMAP_CONFIGURED" == "1" ]] && [[ "$EXISTING_REQUEST_VALID" == "1" ]]; then
+      imap_choice="$(
+        ui_choice_menu \
+          "Choose how to handle IMAP:" \
+          "1" \
+          "Keep current IMAP configuration" \
+          "Replace IMAP configuration" \
+          "Leave IMAP pending"
       )"
-      imap_mailbox="$(prompt_value "IMAP mailbox" "$imap_mailbox")"
-      imap_secret_path="/etc/sovereign-node/secrets/imap-password"
-      write_secret_file "$imap_secret_path" "$imap_password"
-      imap_secret_ref="file:${imap_secret_path}"
-      imap_secret_mode="replaced"
+      case "$imap_choice" in
+        1)
+          if secret_ref_path_exists "$imap_secret_ref"; then
+            configure_imap="1"
+            imap_secret_mode="kept"
+          else
+            ui_warn "Existing IMAP secret is missing. Enter replacement IMAP credentials."
+            imap_choice="2"
+          fi
+          ;;
+        3)
+          configure_imap="0"
+          imap_secret_ref=""
+          imap_secret_mode="pending"
+          ;;
+      esac
+      if [[ "$imap_choice" == "2" ]]; then
+        configure_imap="1"
+        imap_host="$(prompt_value "IMAP host" "$imap_host")"
+        imap_port="$(prompt_value "IMAP port" "$imap_port")"
+        if ui_confirm "Use TLS for IMAP?" "$( [[ "$imap_tls" == "1" ]] && printf 'y' || printf 'n' )"; then
+          imap_tls="1"
+        else
+          imap_tls="0"
+        fi
+        imap_username="$(prompt_value "IMAP username" "$imap_username")"
+        imap_password="$(
+          prompt_required_secret \
+            "IMAP password/app password" \
+            "IMAP password is required when IMAP is configured."
+        )"
+        imap_mailbox="$(prompt_value "IMAP mailbox" "$imap_mailbox")"
+        imap_secret_path="/etc/sovereign-node/secrets/imap-password"
+        write_secret_file "$imap_secret_path" "$imap_password"
+        imap_secret_ref="file:${imap_secret_path}"
+        imap_secret_mode="replaced"
+      fi
+    else
+      if ui_confirm "Configure IMAP now? (choose no to keep IMAP pending)" "n"; then
+        configure_imap="1"
+        imap_host="$(prompt_value "IMAP host" "$imap_host")"
+        imap_port="$(prompt_value "IMAP port" "$imap_port")"
+        if ui_confirm "Use TLS for IMAP?" "y"; then
+          imap_tls="1"
+        else
+          imap_tls="0"
+        fi
+        imap_username="$(prompt_value "IMAP username" "$imap_username")"
+        imap_password="$(
+          prompt_required_secret \
+            "IMAP password/app password" \
+            "IMAP password is required when IMAP is configured."
+        )"
+        imap_mailbox="$(prompt_value "IMAP mailbox" "$imap_mailbox")"
+        imap_secret_path="/etc/sovereign-node/secrets/imap-password"
+        write_secret_file "$imap_secret_path" "$imap_password"
+        imap_secret_ref="file:${imap_secret_path}"
+        imap_secret_mode="replaced"
+      fi
     fi
   fi
 
@@ -1466,6 +1586,7 @@ run_install_wizard() {
   export SN_MATRIX_FEDERATION_ENABLED="$federation_enabled"
   export SN_OPERATOR_USERNAME="$operator_username"
   export SN_ALERT_ROOM_NAME="$alert_room_name"
+  export SN_SELECTED_BOTS="$selected_bots"
   export SN_POLL_INTERVAL="$poll_interval"
   export SN_LOOKBACK_WINDOW="$lookback_window"
   export SN_IMAP_CONFIGURE="$configure_imap"

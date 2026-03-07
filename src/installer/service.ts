@@ -68,6 +68,30 @@ export type SovereignTemplateInstallResult = {
   changed: boolean;
 };
 
+export type SovereignBotSummary = {
+  id: string;
+  version: string;
+  displayName: string;
+  description: string;
+  defaultInstall: boolean;
+  templateRef: string;
+  installed: boolean;
+  instantiated: boolean;
+  agentId?: string;
+  cronJobIds?: string[];
+};
+
+export type SovereignBotListResult = {
+  bots: SovereignBotSummary[];
+};
+
+export type SovereignBotInstantiateResult = {
+  bot: SovereignBotSummary;
+  agent: ManagedAgent;
+  changed: boolean;
+  restartRequiredServices: string[];
+};
+
 export type SovereignToolInstance = {
   id: string;
   templateRef: string;
@@ -117,6 +141,11 @@ export interface InstallerService {
     toolInstanceIds?: string[];
   }): Promise<ManagedAgentUpsertResult>;
   deleteManagedAgent(req: { id: string }): Promise<ManagedAgentDeleteResult>;
+  listSovereignBots(): Promise<SovereignBotListResult>;
+  instantiateSovereignBot(req: {
+    id: string;
+    workspace?: string;
+  }): Promise<SovereignBotInstantiateResult>;
   listSovereignTemplates(): Promise<SovereignTemplateListResult>;
   installSovereignTemplate(req: { ref: string }): Promise<SovereignTemplateInstallResult>;
   listSovereignToolInstances(): Promise<SovereignToolInstanceListResult>;

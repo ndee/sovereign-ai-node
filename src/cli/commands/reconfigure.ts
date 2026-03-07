@@ -54,8 +54,12 @@ export const registerReconfigureCommand = (
           matrix: {
             publicBaseUrl: "https://matrix.example.org",
           },
-          mailSentinel: {
-            e2eeAlertRoom: false,
+          bots: {
+            config: {
+              "mail-sentinel": {
+                e2eeAlertRoom: false,
+              },
+            },
           },
         });
         writeCliSuccess(command, result, reconfigureResultSchema, Boolean(opts.json));

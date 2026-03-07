@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import JSON5 from "json5";
 
+import type { BotConfigValue } from "../bots/catalog.js";
 import type { CheckResult, ComponentHealth } from "../contracts/common.js";
 import type { DoctorReport } from "../contracts/index.js";
 import { formatTemplateRef, parseTemplateRef } from "../templates/catalog.js";
@@ -66,6 +67,7 @@ export type RuntimeConfig = {
       workspace: string;
       templateRef?: string;
       toolInstanceIds?: string[];
+      botId?: string;
       matrix?: {
         localpart: string;
         userId: string;
@@ -73,7 +75,13 @@ export type RuntimeConfig = {
         accessTokenSecretRef?: string;
       };
     }>;
-    cron: {
+    crons: Array<{
+      id: string;
+      every: string;
+      agentId: string;
+      botId?: string;
+    }>;
+    cron?: {
       id: string;
       every: string;
     };
@@ -87,7 +95,10 @@ export type RuntimeConfig = {
     mailbox: string;
     secretRef: string;
   };
-  mailSentinel: {
+  bots: {
+    config: Record<string, Record<string, BotConfigValue>>;
+  };
+  mailSentinel?: {
     pollInterval: string;
     lookbackWindow: string;
     e2eeAlertRoom: boolean;
@@ -128,7 +139,7 @@ export type RuntimeConfig = {
       keyId: string;
       manifestSha256: string;
       installedAt: string;
-      source: "core";
+      source: "core" | "bot-repo";
     }>;
   };
   sovereignTools: {
@@ -169,7 +180,7 @@ export const DEFAULT_SERVICE_GROUP = "root";
 export const RELAY_TUNNEL_SYSTEMD_UNIT = "sovereign-matrix-relay-tunnel.service";
 export const RELAY_TUNNEL_DEFAULT_IMAGE = "ghcr.io/fatedier/frpc:v0.61.1";
 export const RELAY_LOCAL_EDGE_PORT = 18080;
-export const RESERVED_AGENT_IDS = new Set([MAIL_SENTINEL_AGENT_ID, NODE_OPERATOR_AGENT_ID]);
+export const RESERVED_AGENT_IDS = new Set<string>();
 const now = () => new Date().toISOString();
 
 const defaultFetch: FetchLike = (input, init) => globalThis.fetch(input, init);
@@ -305,11 +316,16 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
                 (entry): entry is string => typeof entry === "string" && entry.length > 0,
               )
             : undefined;
+          const botId =
+            typeof agent.botId === "string" && agent.botId.length > 0
+              ? agent.botId
+              : undefined;
           return [
             {
               id: agent.id,
               workspace: agent.workspace,
               ...(templateRef === undefined ? {} : { templateRef }),
+              ...(botId === undefined ? {} : { botId }),
               ...(toolInstanceIds === undefined || toolInstanceIds.length === 0
                 ? {}
                 : { toolInstanceIds }),
@@ -317,16 +333,70 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
             },
           ];
         })
-    : [
-        {
-          id: MAIL_SENTINEL_AGENT_ID,
-          workspace: join("/var/lib/sovereign-node", MAIL_SENTINEL_AGENT_ID, "workspace"),
-        },
-      ];
-  const openclawCron = isRecord(openclawProfile.cron) ? openclawProfile.cron : {};
+    : [];
+  const openclawCrons = Array.isArray(openclawProfile.crons)
+    ? openclawProfile.crons.flatMap((entry) => {
+        if (
+          !isRecord(entry)
+          || typeof entry.id !== "string"
+          || entry.id.length === 0
+          || typeof entry.every !== "string"
+          || entry.every.length === 0
+          || typeof entry.agentId !== "string"
+          || entry.agentId.length === 0
+        ) {
+          return [];
+        }
+        return [
+          {
+            id: entry.id,
+            every: entry.every,
+            agentId: entry.agentId,
+            ...(typeof entry.botId === "string" && entry.botId.length > 0
+              ? { botId: entry.botId }
+              : {}),
+          },
+        ];
+      })
+    : isRecord(openclawProfile.cron)
+      && typeof openclawProfile.cron.id === "string"
+      && openclawProfile.cron.id.length > 0
+      && typeof openclawProfile.cron.every === "string"
+      && openclawProfile.cron.every.length > 0
+        ? [
+            {
+              id: openclawProfile.cron.id,
+              every: openclawProfile.cron.every,
+              agentId: MAIL_SENTINEL_AGENT_ID,
+              botId: MAIL_SENTINEL_AGENT_ID,
+            },
+          ]
+        : [];
   const openrouter = isRecord(parsed.openrouter) ? parsed.openrouter : {};
   const imap = isRecord(parsed.imap) ? parsed.imap : {};
-  const mailSentinel = isRecord(parsed.mailSentinel) ? parsed.mailSentinel : {};
+  const legacyMailSentinel = isRecord(parsed.mailSentinel) ? parsed.mailSentinel : {};
+  const bots = isRecord(parsed.bots) ? parsed.bots : {};
+  const botConfig = isRecord(bots.config)
+    ? Object.fromEntries(
+        Object.entries(bots.config).flatMap((pair) => {
+          const [botId, value] = pair;
+          if (!isRecord(value) || botId.length === 0) {
+            return [];
+          }
+          const configEntries = Object.entries(value).filter(
+            (entry): entry is [string, BotConfigValue] =>
+              typeof entry[0] === "string"
+              && entry[0].length > 0
+              && (
+                typeof entry[1] === "string"
+                || typeof entry[1] === "number"
+                || typeof entry[1] === "boolean"
+              ),
+          );
+          return [[botId, Object.fromEntries(configEntries)]];
+        }),
+      )
+    : {};
   const templates = isRecord(parsed.templates) ? parsed.templates : {};
   const templateInstalledEntries = Array.isArray(templates.installed)
     ? templates.installed.flatMap((entry) => {
@@ -360,7 +430,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
               typeof entry.installedAt === "string" && entry.installedAt.length > 0
                 ? entry.installedAt
                 : now(),
-            source: "core" as const,
+            source: entry.source === "bot-repo" ? "bot-repo" as const : "core" as const,
           },
         ];
       })
@@ -531,16 +601,15 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
           : ["matrix"],
       },
       agents: openclawAgents,
-      cron: {
-        id:
-          typeof openclawCron.id === "string" && openclawCron.id.length > 0
-            ? openclawCron.id
-            : MAIL_SENTINEL_CRON_ID,
-        every:
-          typeof openclawCron.every === "string" && openclawCron.every.length > 0
-            ? openclawCron.every
-            : "5m",
-      },
+      crons: openclawCrons,
+      ...(openclawCrons[0] === undefined
+        ? {}
+        : {
+            cron: {
+              id: openclawCrons[0].id,
+              every: openclawCrons[0].every,
+            },
+          }),
     },
     imap: {
       status:
@@ -596,7 +665,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
         userId:
           typeof bot.userId === "string" && bot.userId.length > 0
             ? bot.userId
-            : "@mail-sentinel:local",
+            : "@sovereign-bot:local",
         ...(typeof bot.localpart === "string" && bot.localpart.length > 0
           ? { localpart: bot.localpart }
           : {}),
@@ -614,17 +683,33 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
       },
     },
     ...(relayConfig === undefined ? {} : { relay: relayConfig }),
-    mailSentinel: {
-      pollInterval:
-        typeof mailSentinel.pollInterval === "string" && mailSentinel.pollInterval.length > 0
-          ? mailSentinel.pollInterval
-          : "5m",
-      lookbackWindow:
-        typeof mailSentinel.lookbackWindow === "string" && mailSentinel.lookbackWindow.length > 0
-          ? mailSentinel.lookbackWindow
-          : "15m",
-      e2eeAlertRoom:
-        typeof mailSentinel.e2eeAlertRoom === "boolean" ? mailSentinel.e2eeAlertRoom : false,
+    bots: {
+      config: Object.keys(botConfig).length > 0
+        ? botConfig
+        : (
+            legacyMailSentinel.pollInterval !== undefined
+            || legacyMailSentinel.lookbackWindow !== undefined
+            || legacyMailSentinel.e2eeAlertRoom !== undefined
+          )
+          ? {
+              [MAIL_SENTINEL_AGENT_ID]: {
+                pollInterval:
+                  typeof legacyMailSentinel.pollInterval === "string"
+                  && legacyMailSentinel.pollInterval.length > 0
+                    ? legacyMailSentinel.pollInterval
+                    : "5m",
+                lookbackWindow:
+                  typeof legacyMailSentinel.lookbackWindow === "string"
+                  && legacyMailSentinel.lookbackWindow.length > 0
+                    ? legacyMailSentinel.lookbackWindow
+                    : "15m",
+                e2eeAlertRoom:
+                  typeof legacyMailSentinel.e2eeAlertRoom === "boolean"
+                    ? legacyMailSentinel.e2eeAlertRoom
+                    : false,
+              },
+            }
+          : {},
     },
     templates: {
       installed: templateInstalledEntries,
@@ -791,21 +876,9 @@ const isAlreadyJoinedOrInvitedRoomError = (status: number, body: unknown): boole
 
 const ensureCoreManagedAgents = (
   agents: RuntimeAgentEntry[],
-  stateDir: string,
 ): RuntimeAgentEntry[] => {
-  const ordered: RuntimeAgentEntry[] = [
-    {
-      id: MAIL_SENTINEL_AGENT_ID,
-      workspace: join(stateDir, MAIL_SENTINEL_AGENT_ID, "workspace"),
-    },
-    {
-      id: NODE_OPERATOR_AGENT_ID,
-      workspace: join(stateDir, NODE_OPERATOR_AGENT_ID, "workspace"),
-    },
-    ...agents,
-  ];
   const byId = new Map<string, RuntimeAgentEntry>();
-  for (const entry of ordered) {
+  for (const entry of agents) {
     if (entry.id.trim().length === 0 || entry.workspace.trim().length === 0) {
       continue;
     }
@@ -813,18 +886,14 @@ const ensureCoreManagedAgents = (
       id: entry.id,
       workspace: entry.workspace,
       ...(entry.templateRef === undefined ? {} : { templateRef: entry.templateRef }),
+      ...(entry.botId === undefined ? {} : { botId: entry.botId }),
       ...(entry.toolInstanceIds === undefined || entry.toolInstanceIds.length === 0
         ? {}
         : { toolInstanceIds: entry.toolInstanceIds }),
       ...(entry.matrix === undefined ? {} : { matrix: entry.matrix }),
     });
   }
-  const coreOrder = [MAIL_SENTINEL_AGENT_ID, NODE_OPERATOR_AGENT_ID];
-  const orderedIds = [
-    ...coreOrder.filter((id) => byId.has(id)),
-    ...Array.from(byId.keys()).filter((id) => !coreOrder.includes(id)),
-  ];
-  return orderedIds
+  return Array.from(byId.keys()).sort((left, right) => left.localeCompare(right))
     .map((id) => byId.get(id))
     .filter((entry): entry is RuntimeAgentEntry => entry !== undefined);
 };

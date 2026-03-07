@@ -70,6 +70,9 @@ export interface BundledMatrixProvisioner {
   bootstrapAccounts(
     req: InstallRequest,
     provision: BundledMatrixProvisionResult,
+    options?: {
+      botLocalpart?: string;
+    },
   ): Promise<BundledMatrixAccountsResult>;
   bootstrapRoom(
     req: InstallRequest,
@@ -299,12 +302,18 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
   async bootstrapAccounts(
     req: InstallRequest,
     provision: BundledMatrixProvisionResult,
+    options?: {
+      botLocalpart?: string;
+    },
   ): Promise<BundledMatrixAccountsResult> {
     await this.ensureStackRunning(provision);
     await this.waitForSynapseReadyWithRecovery(provision);
 
     const operatorLocalpart = sanitizeMatrixLocalpart(req.operator.username, "operator");
-    const botLocalpart = chooseBotLocalpart(operatorLocalpart);
+    const botLocalpart = chooseServiceBotLocalpart(
+      operatorLocalpart,
+      options?.botLocalpart,
+    );
     const secretsDir = await this.ensureManagedSecretsDir();
     const operatorSecretName = `matrix-${operatorLocalpart}.password`;
     const botSecretName = `matrix-${botLocalpart}.password`;
@@ -2079,9 +2088,6 @@ const delay = async (ms: number): Promise<void> =>
     setTimeout(resolveTimeout, ms);
   });
 
-const chooseBotLocalpart = (operatorLocalpart: string): string =>
-  operatorLocalpart === "mail-sentinel" ? "mail-sentinel-bot" : "mail-sentinel";
-
 const sanitizeMatrixLocalpart = (value: string, fallback: string): string => {
   const normalized = value
     .trim()
@@ -2092,6 +2098,14 @@ const sanitizeMatrixLocalpart = (value: string, fallback: string): string => {
     return normalized;
   }
   return fallback;
+};
+
+const chooseServiceBotLocalpart = (
+  operatorLocalpart: string,
+  preferredLocalpart?: string,
+): string => {
+  const desiredLocalpart = sanitizeMatrixLocalpart(preferredLocalpart ?? "service-bot", "service-bot");
+  return operatorLocalpart === desiredLocalpart ? `${desiredLocalpart}-bot` : desiredLocalpart;
 };
 
 const generatePassword = (): string => `sn_${randomBytes(24).toString("base64url")}`;

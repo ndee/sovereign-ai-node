@@ -30,6 +30,7 @@ const buildRuntimeConfig = (secretRef: string): RuntimeConfig => ({
       allow: ["matrix", "imap-readonly"],
     },
     agents: [],
+    crons: [],
     cron: {
       id: "mail-sentinel-poll",
       every: "5m",
@@ -48,6 +49,15 @@ const buildRuntimeConfig = (secretRef: string): RuntimeConfig => ({
     pollInterval: "5m",
     lookbackWindow: "15m",
     e2eeAlertRoom: false,
+  },
+  bots: {
+    config: {
+      "mail-sentinel": {
+        pollInterval: "5m",
+        lookbackWindow: "15m",
+        e2eeAlertRoom: false,
+      },
+    },
   },
   matrix: {
     accessMode: "relay",

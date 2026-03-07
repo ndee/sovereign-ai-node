@@ -1,23 +1,26 @@
 import type { Logger } from "../logging/logger.js";
 import type { ExecResult, ExecRunner } from "../system/exec.js";
 
-const OPENCLAW_MAIL_SENTINEL_COMMAND_TIMEOUT_MS = 90_000;
+const OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS = 90_000;
 
-export type MailSentinelRegistrationInput = {
+export type ManagedAgentRegistrationInput = {
   agentId: string;
   workspaceDir: string;
-  cronJobName: string;
-  pollInterval: string;
-  lookbackWindow: string;
-  roomId: string;
+  cron?: {
+    id: string;
+    every: string;
+    message: string;
+    announceRoomId?: string;
+    session?: "isolated";
+  };
 };
 
-export type MailSentinelRegistrationResult = {
+export type ManagedAgentRegistrationResult = {
   agentId: string;
-  cronJobId: string;
   workspaceDir: string;
   agentCommand: string;
-  cronCommand: string;
+  cronJobId?: string;
+  cronCommand?: string;
 };
 
 type CronListJob = {
@@ -26,189 +29,73 @@ type CronListJob = {
   agentId?: string;
 };
 
-export interface OpenClawMailSentinelRegistrar {
-  register(input: MailSentinelRegistrationInput): Promise<MailSentinelRegistrationResult>;
+export interface OpenClawManagedAgentRegistrar {
+  register(input: ManagedAgentRegistrationInput): Promise<ManagedAgentRegistrationResult>;
 }
 
-export class ShellOpenClawMailSentinelRegistrar
-  implements OpenClawMailSentinelRegistrar
-{
+export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentRegistrar {
   constructor(
     private readonly execRunner: ExecRunner,
     private readonly logger: Logger,
   ) {}
 
-  async register(
-    input: MailSentinelRegistrationInput,
-  ): Promise<MailSentinelRegistrationResult> {
+  async register(input: ManagedAgentRegistrationInput): Promise<ManagedAgentRegistrationResult> {
     const agentCommandResult = await this.runCommandAlternatives({
-      label: "mail-sentinel-agent",
+      label: `${input.agentId}-agent`,
       commands: [
-        [
-          "agents",
-          "add",
-          input.agentId,
-          "--workspace",
-          input.workspaceDir,
-        ],
-        [
-          "agents",
-          "create",
-          input.agentId,
-          "--workspace",
-          input.workspaceDir,
-        ],
-        [
-          "agents",
-          "upsert",
-          input.agentId,
-          "--workspace",
-          input.workspaceDir,
-        ],
-        [
-          "agents",
-          "upsert",
-          "--id",
-          input.agentId,
-          "--workspace",
-          input.workspaceDir,
-        ],
-        [
-          "agents",
-          "add",
-          "--id",
-          input.agentId,
-          "--workspace",
-          input.workspaceDir,
-        ],
-        [
-          "agents",
-          "create",
-          "--id",
-          input.agentId,
-          "--workspace",
-          input.workspaceDir,
-        ],
+        ["agents", "add", input.agentId, "--workspace", input.workspaceDir],
+        ["agents", "create", input.agentId, "--workspace", input.workspaceDir],
+        ["agents", "upsert", input.agentId, "--workspace", input.workspaceDir],
+        ["agents", "upsert", "--id", input.agentId, "--workspace", input.workspaceDir],
+        ["agents", "add", "--id", input.agentId, "--workspace", input.workspaceDir],
+        ["agents", "create", "--id", input.agentId, "--workspace", input.workspaceDir],
       ],
       allowAlreadyExists: true,
     });
 
-    await this.removeExistingCronJobs(input);
-
-    const cronMessage = [
-      "Summarize the latest 3 emails in INBOX using read-only IMAP tools.",
-      "The tool instance is already scoped to the configured mailbox, so use --query ALL for the whole mailbox and do not include INBOX in the query string.",
-      "Highlight urgent or security-relevant items.",
-      "If IMAP is not configured, report the missing setup clearly.",
-    ].join(" ");
-    const cronCommandResult = await this.runCommandAlternatives({
-      label: "mail-sentinel-cron",
-      commands: [
-        [
-          "cron",
-          "add",
-          "--name",
-          input.cronJobName,
-          "--agent",
-          input.agentId,
-          "--every",
-          input.pollInterval,
-          "--session",
-          "isolated",
-          "--message",
-          cronMessage,
-          "--announce",
-          "--channel",
-          "matrix",
-          "--to",
-          input.roomId,
-          "--replace",
-        ],
-        [
-          "cron",
-          "add",
-          "--name",
-          input.cronJobName,
-          "--agent",
-          input.agentId,
-          "--every",
-          input.pollInterval,
-          "--session",
-          "isolated",
-          "--message",
-          cronMessage,
-          "--announce",
-          "--channel",
-          "matrix",
-          "--to",
-          input.roomId,
-        ],
-        [
-          "cron",
-          "add",
-          "--name",
-          input.cronJobName,
-          "--agent",
-          input.agentId,
-          "--every",
-          input.pollInterval,
-          "--session",
-          "isolated",
-          "--message",
-          cronMessage,
-          "--replace",
-        ],
-        [
-          "cron",
-          "add",
-          "--name",
-          input.cronJobName,
-          "--agent",
-          input.agentId,
-          "--every",
-          input.pollInterval,
-          "--session",
-          "isolated",
-          "--message",
-          cronMessage,
-        ],
-      ],
-      allowAlreadyExists: true,
-    });
+    let cronCommandResult: ExecResult | undefined;
+    if (input.cron !== undefined) {
+      await this.removeExistingCronJobs(input.agentId, input.cron.id);
+      cronCommandResult = await this.runCommandAlternatives({
+        label: `${input.agentId}-cron`,
+        commands: buildCronCommands(input),
+        allowAlreadyExists: true,
+      });
+    }
 
     this.logger.info(
       {
         agentId: input.agentId,
-        cronJobName: input.cronJobName,
         workspaceDir: input.workspaceDir,
+        cronJobId: input.cron?.id,
       },
-      "OpenClaw Mail Sentinel registration completed",
+      "OpenClaw managed agent registration completed",
     );
 
     return {
       agentId: input.agentId,
-      cronJobId: input.cronJobName,
       workspaceDir: input.workspaceDir,
       agentCommand: agentCommandResult.command,
-      cronCommand: cronCommandResult.command,
+      ...(input.cron === undefined
+        ? {}
+        : {
+            cronJobId: input.cron.id,
+            ...(cronCommandResult === undefined ? {} : { cronCommand: cronCommandResult.command }),
+          }),
     };
   }
 
-  private async removeExistingCronJobs(
-    input: MailSentinelRegistrationInput,
-  ): Promise<void> {
+  private async removeExistingCronJobs(agentId: string, cronJobId: string): Promise<void> {
     const jobs = await this.listCronJobs();
     const staleJobs = jobs.filter((job) =>
-      job.name === input.cronJobName
-      && (job.agentId === undefined || job.agentId === input.agentId)
+      job.name === cronJobId && (job.agentId === undefined || job.agentId === agentId)
     );
-
     for (const job of staleJobs) {
       const result = await this.execRunner.run({
         command: "openclaw",
         args: ["cron", "rm", job.id],
         options: {
-          timeout: OPENCLAW_MAIL_SENTINEL_COMMAND_TIMEOUT_MS,
+          timeout: OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS,
           env: {
             CI: "1",
           },
@@ -216,7 +103,7 @@ export class ShellOpenClawMailSentinelRegistrar
       });
       if (result.exitCode !== 0 && !isNotFoundResult(result)) {
         throw {
-          code: "MAIL_SENTINEL_REGISTER_FAILED",
+          code: "MANAGED_AGENT_REGISTER_FAILED",
           message: `Failed to remove existing OpenClaw cron job ${job.id}`,
           retryable: true,
           details: {
@@ -241,13 +128,12 @@ export class ShellOpenClawMailSentinelRegistrar
       stderr: string;
       stdout: string;
     }[] = [];
-
     for (const args of input.commands) {
       const result = await this.execRunner.run({
         command: "openclaw",
         args,
         options: {
-          timeout: OPENCLAW_MAIL_SENTINEL_COMMAND_TIMEOUT_MS,
+          timeout: OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS,
           env: {
             CI: "1",
           },
@@ -266,9 +152,8 @@ export class ShellOpenClawMailSentinelRegistrar
         stdout: truncateText(result.stdout, 1200),
       });
     }
-
     throw {
-      code: "MAIL_SENTINEL_REGISTER_FAILED",
+      code: "MANAGED_AGENT_REGISTER_FAILED",
       message: `OpenClaw ${input.label} registration commands failed`,
       retryable: true,
       details: {
@@ -282,7 +167,7 @@ export class ShellOpenClawMailSentinelRegistrar
       command: "openclaw",
       args: ["cron", "list", "--json"],
       options: {
-        timeout: OPENCLAW_MAIL_SENTINEL_COMMAND_TIMEOUT_MS,
+        timeout: OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS,
         env: {
           CI: "1",
         },
@@ -299,7 +184,7 @@ export class ShellOpenClawMailSentinelRegistrar
       command: "openclaw",
       args: ["cron", "list"],
       options: {
-        timeout: OPENCLAW_MAIL_SENTINEL_COMMAND_TIMEOUT_MS,
+        timeout: OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS,
         env: {
           CI: "1",
         },
@@ -307,7 +192,7 @@ export class ShellOpenClawMailSentinelRegistrar
     });
     if (textResult.exitCode !== 0) {
       throw {
-        code: "MAIL_SENTINEL_REGISTER_FAILED",
+        code: "MANAGED_AGENT_REGISTER_FAILED",
         message: "Failed to list existing OpenClaw cron jobs",
         retryable: true,
         details: {
@@ -325,6 +210,35 @@ export class ShellOpenClawMailSentinelRegistrar
     return parseCronListTable(textResult.stdout);
   }
 }
+
+const buildCronCommands = (input: ManagedAgentRegistrationInput): string[][] => {
+  if (input.cron === undefined) {
+    return [];
+  }
+  const sharedArgs = [
+    "cron",
+    "add",
+    "--name",
+    input.cron.id,
+    "--agent",
+    input.agentId,
+    "--every",
+    input.cron.every,
+    "--session",
+    input.cron.session ?? "isolated",
+    "--message",
+    input.cron.message,
+  ];
+  const announceArgs = input.cron.announceRoomId === undefined
+    ? []
+    : ["--announce", "--channel", "matrix", "--to", input.cron.announceRoomId];
+  return [
+    [...sharedArgs, ...announceArgs, "--replace"],
+    [...sharedArgs, ...announceArgs],
+    [...sharedArgs, "--replace"],
+    [...sharedArgs],
+  ];
+};
 
 const isAlreadyExistsResult = (result: ExecResult): boolean =>
   /already\s+exists|exists/i.test(`${result.stderr}\n${result.stdout}`);
@@ -369,18 +283,25 @@ const parseCronListTable = (value: string): CronListJob[] =>
         /^([0-9a-f-]{36})\s+(\S+)(?:\s+.+?\s+(?:isolated|main)\s+(\S+))?$/i,
       );
       if (match === null) {
+        const id = line.split(/\s+/, 1)[0];
+        if (id === undefined || id.length === 0) {
+          return null;
+        }
         return {
-          id: line.split(/\s+/, 1)[0] ?? "",
+          id,
         };
       }
       const [, id, name, agentId] = match;
+      if (id === undefined || id.length === 0) {
+        return null;
+      }
       return {
         id,
         ...(name === undefined ? {} : { name }),
         ...(agentId === undefined ? {} : { agentId }),
       };
     })
-    .filter((job) => job.id.length > 0);
+    .filter((job): job is CronListJob => job !== null);
 
 const truncateText = (value: string, maxChars: number): string => {
   if (value.length <= maxChars) {

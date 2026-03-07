@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import { createLogger } from "../logging/logger.js";
 import type { ExecInput, ExecResult, ExecRunner } from "../system/exec.js";
-import { ShellOpenClawMailSentinelRegistrar } from "./mail-sentinel.js";
+import { ShellOpenClawManagedAgentRegistrar } from "./managed-agent.js";
 
-describe("ShellOpenClawMailSentinelRegistrar", () => {
+describe("ShellOpenClawManagedAgentRegistrar", () => {
   it("registers agent and cron when commands succeed", async () => {
     const calls: ExecInput[] = [];
     const execRunner: ExecRunner = {
@@ -20,14 +20,17 @@ describe("ShellOpenClawMailSentinelRegistrar", () => {
       },
     };
 
-    const registrar = new ShellOpenClawMailSentinelRegistrar(execRunner, createLogger());
+    const registrar = new ShellOpenClawManagedAgentRegistrar(execRunner, createLogger());
     const result = await registrar.register({
       agentId: "mail-sentinel",
       workspaceDir: "/var/lib/sovereign-node/mail-sentinel/workspace",
-      cronJobName: "mail-sentinel-poll",
-      pollInterval: "5m",
-      lookbackWindow: "15m",
-      roomId: "!alerts:matrix.example.org",
+      cron: {
+        id: "mail-sentinel-poll",
+        every: "5m",
+        message: "Summarize new inbox mail",
+        announceRoomId: "!alerts:matrix.example.org",
+        session: "isolated",
+      },
     });
 
     expect(result.agentId).toBe("mail-sentinel");
@@ -93,17 +96,18 @@ describe("ShellOpenClawMailSentinelRegistrar", () => {
       },
     };
 
-    const registrar = new ShellOpenClawMailSentinelRegistrar(execRunner, createLogger());
+    const registrar = new ShellOpenClawManagedAgentRegistrar(execRunner, createLogger());
     const result = await registrar.register({
       agentId: "mail-sentinel",
       workspaceDir: "/tmp/ws",
-      cronJobName: "mail-sentinel-poll",
-      pollInterval: "5m",
-      lookbackWindow: "15m",
-      roomId: "!alerts:matrix.example.org",
+      cron: {
+        id: "mail-sentinel-poll",
+        every: "5m",
+        message: "Summarize new inbox mail",
+      },
     });
 
-    expect(result.cronCommand.includes("--replace")).toBe(false);
+    expect(result.cronCommand?.includes("--replace")).toBe(false);
     expect(calls.some((entry) => entry.includes("--replace"))).toBe(true);
   });
 
@@ -154,14 +158,15 @@ describe("ShellOpenClawMailSentinelRegistrar", () => {
       },
     };
 
-    const registrar = new ShellOpenClawMailSentinelRegistrar(execRunner, createLogger());
+    const registrar = new ShellOpenClawManagedAgentRegistrar(execRunner, createLogger());
     const result = await registrar.register({
       agentId: "mail-sentinel",
       workspaceDir: "/tmp/ws",
-      cronJobName: "mail-sentinel-poll",
-      pollInterval: "5m",
-      lookbackWindow: "15m",
-      roomId: "!alerts:matrix.example.org",
+      cron: {
+        id: "mail-sentinel-poll",
+        every: "5m",
+        message: "Summarize new inbox mail",
+      },
     });
 
     expect(result.agentCommand).toContain(
@@ -208,14 +213,15 @@ describe("ShellOpenClawMailSentinelRegistrar", () => {
       },
     };
 
-    const registrar = new ShellOpenClawMailSentinelRegistrar(execRunner, createLogger());
+    const registrar = new ShellOpenClawManagedAgentRegistrar(execRunner, createLogger());
     await registrar.register({
       agentId: "mail-sentinel",
       workspaceDir: "/tmp/ws",
-      cronJobName: "mail-sentinel-poll",
-      pollInterval: "5m",
-      lookbackWindow: "15m",
-      roomId: "!alerts:matrix.example.org",
+      cron: {
+        id: "mail-sentinel-poll",
+        every: "5m",
+        message: "Summarize new inbox mail",
+      },
     });
 
     expect(calls).toContain("openclaw cron rm 11111111-1111-1111-1111-111111111111");

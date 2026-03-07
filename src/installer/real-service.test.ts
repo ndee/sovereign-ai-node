@@ -624,7 +624,7 @@ describe("RealInstallerService", () => {
     }
   });
 
-  it("runs through mail_sentinel_register and fails at smoke_checks when matrix probe fails", async () => {
+  it("runs through bots_configure and fails at smoke_checks when matrix probe fails", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {
       configPath: join(tempRoot, "etc", "sovereign-node.json5"),
@@ -755,7 +755,7 @@ describe("RealInstallerService", () => {
       expect(stepStates.matrix_bootstrap_room).toBe("succeeded");
       expect(stepStates.openclaw_gateway_service_install).toBe("succeeded");
       expect(stepStates.openclaw_configure).toBe("succeeded");
-      expect(stepStates.mail_sentinel_register).toBe("succeeded");
+      expect(stepStates.bots_configure).toBe("succeeded");
       expect(stepStates.smoke_checks).toBe("failed");
       expect(stepStates.test_alert).toBe("pending");
 
@@ -908,7 +908,7 @@ describe("RealInstallerService", () => {
       expect(stepStates.matrix_bootstrap_room).toBe("succeeded");
       expect(stepStates.openclaw_gateway_service_install).toBe("succeeded");
       expect(stepStates.openclaw_configure).toBe("succeeded");
-      expect(stepStates.mail_sentinel_register).toBe("succeeded");
+      expect(stepStates.bots_configure).toBe("succeeded");
       expect(stepStates.smoke_checks).toBe("succeeded");
       expect(stepStates.test_alert).toBe("succeeded");
       expect(matrixProbeUrls).toEqual(["http://127.0.0.1:8008"]);
@@ -991,17 +991,6 @@ describe("RealInstallerService", () => {
         expect.arrayContaining([
           expect.objectContaining({
             id: "mail-sentinel",
-            tools: {
-              allow: ["exec"],
-              exec: {
-                host: "gateway",
-                security: "allowlist",
-                ask: "off",
-              },
-            },
-          }),
-          expect.objectContaining({
-            id: "node-operator",
             tools: {
               allow: ["exec"],
               exec: {
@@ -1188,7 +1177,7 @@ describe("RealInstallerService", () => {
       );
       expect(stepStates.openclaw_gateway_service_install).toBe("succeeded");
       expect(stepStates.openclaw_configure).toBe("succeeded");
-      expect(stepStates.mail_sentinel_register).toBe("succeeded");
+      expect(stepStates.bots_configure).toBe("succeeded");
       expect(stepStates.smoke_checks).toBe("succeeded");
       expect(stepStates.test_alert).toBe("succeeded");
       expect(sentMessageBody).toContain("Hello from Mail Sentinel");
@@ -1449,7 +1438,7 @@ describe("RealInstallerService", () => {
       );
       expect(stepStates.openclaw_gateway_service_install).toBe("succeeded");
       expect(stepStates.openclaw_configure).toBe("succeeded");
-      expect(stepStates.mail_sentinel_register).toBe("succeeded");
+      expect(stepStates.bots_configure).toBe("succeeded");
       expect(stepStates.smoke_checks).toBe("succeeded");
       expect(stepStates.test_alert).toBe("succeeded");
       expect(sentMessageBody).toContain("Hello from Mail Sentinel");
@@ -2133,6 +2122,186 @@ describe("RealInstallerService", () => {
     }
   });
 
+  it("lists available bot packages and instantiates node-operator from the bot repo", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+    await writeRuntimeArtifacts(paths);
+    const priorOpenrouterApiKey = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "sk-or-test";
+
+    let gatewayRestartCalls = 0;
+    const fetchCalls: string[] = [];
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {
+          gatewayRestartCalls += 1;
+        },
+      },
+      mailSentinelRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert",
+          cronCommand: "openclaw cron add",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      fetchImpl: async (url, init) => {
+        fetchCalls.push(url);
+        if (url.includes("/_synapse/admin/v2/users/")) {
+          const encoded = url.split("/_synapse/admin/v2/users/")[1] ?? "";
+          const decoded = decodeURIComponent(encoded);
+          return new Response(JSON.stringify({ name: decoded }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (url.endsWith("/_matrix/client/v3/login")) {
+          const body =
+            typeof init?.body === "string"
+              ? (JSON.parse(init.body) as { identifier?: { user?: string } })
+              : {};
+          const localpart = body.identifier?.user ?? "unknown";
+          return new Response(
+            JSON.stringify({
+              user_id: `@${localpart}:matrix.example.org`,
+              access_token: `${localpart}-token`,
+            }),
+            {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            },
+          );
+        }
+        if (url.includes("/_matrix/client/v3/rooms/") && url.endsWith("/invite")) {
+          return new Response("{}", {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (url.includes("/_matrix/client/v3/rooms/") && url.endsWith("/join")) {
+          return new Response("{}", {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+
+    try {
+      const listed = await service.listSovereignBots();
+      const listedNodeOperator = listed.bots.find((bot) => bot.id === "node-operator");
+      expect(listedNodeOperator).toMatchObject({
+        id: "node-operator",
+        defaultInstall: false,
+        instantiated: false,
+      });
+
+      const instantiated = await service.instantiateSovereignBot({ id: "node-operator" });
+      expect(instantiated.changed).toBe(true);
+      expect(instantiated.restartRequiredServices).toEqual(["openclaw-gateway"]);
+      expect(instantiated.bot.id).toBe("node-operator");
+      expect(instantiated.bot.instantiated).toBe(true);
+      expect(instantiated.agent.id).toBe("node-operator");
+      expect(instantiated.agent.workspace).toBe(join(paths.stateDir, "node-operator", "workspace"));
+      expect(instantiated.agent.matrixUserId).toBe("@node-operator:matrix.example.org");
+      expect(instantiated.agent.toolInstanceIds).toEqual(["node-operator-cli"]);
+      expect(gatewayRestartCalls).toBe(1);
+
+      const configRaw = await readFile(paths.configPath, "utf8");
+      const config = JSON.parse(configRaw) as {
+        templates?: {
+          installed?: Array<{ id?: string; source?: string }>;
+        };
+        openclawProfile?: {
+          agents?: Array<{ id?: string; botId?: string }>;
+        };
+        sovereignTools?: {
+          instances?: Array<{ id?: string; templateRef?: string }>;
+        };
+      };
+      expect(config.templates?.installed?.some((entry) =>
+        entry.id === "node-operator" && entry.source === "bot-repo")).toBe(true);
+      expect(config.openclawProfile?.agents?.some((entry) =>
+        entry.id === "node-operator" && entry.botId === "node-operator")).toBe(true);
+      expect(config.sovereignTools?.instances).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: "node-operator-cli",
+            templateRef: "node-cli-ops@1.0.0",
+          }),
+        ]),
+      );
+
+      expect(fetchCalls.some((url) => url.includes("/_synapse/admin/v2/users/"))).toBe(true);
+      expect(fetchCalls.some((url) => url.endsWith("/_matrix/client/v3/login"))).toBe(true);
+      expect(fetchCalls.some((url) => url.endsWith("/invite"))).toBe(true);
+      expect(fetchCalls.some((url) => url.endsWith("/join"))).toBe(true);
+    } finally {
+      if (priorOpenrouterApiKey === undefined) {
+        delete process.env.OPENROUTER_API_KEY;
+      } else {
+        process.env.OPENROUTER_API_KEY = priorOpenrouterApiKey;
+      }
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("reports doctor failures when gateway health and registration checks fail", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {
@@ -2258,7 +2427,7 @@ describe("RealInstallerService", () => {
         report.checks.find((entry) => entry.id === "gateway-service-health")?.status,
       ).toBe("fail");
       expect(
-        report.checks.find((entry) => entry.id === "mail-sentinel-registration")?.status,
+        report.checks.find((entry) => entry.id === "managed-bot-registration")?.status,
       ).toBe("fail");
       expect(report.suggestedCommands.some((entry) => entry.includes("openclaw gateway restart"))).toBe(
         true,

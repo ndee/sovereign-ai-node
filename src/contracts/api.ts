@@ -6,6 +6,7 @@ import {
   idSchema,
 } from "./common.js";
 import {
+  botsInstallInputSchema,
   doctorReportSchema,
   imapInstallInputSchema,
   installJobStatusResponseSchema,
@@ -43,6 +44,7 @@ export const reconfigureImapRequestSchema = z.object({
 export const reconfigureMatrixRequestSchema = z.object({
   matrix: installRequestSchema.shape.matrix.partial().optional(),
   operator: installRequestSchema.shape.operator.partial().optional(),
+  bots: botsInstallInputSchema.partial().optional(),
   mailSentinel: z
     .object({
       e2eeAlertRoom: z.boolean().optional(),

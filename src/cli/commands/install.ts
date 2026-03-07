@@ -17,6 +17,7 @@ type InstallOptions = {
   openclawVersion?: string;
   skipOpenclawInstall?: boolean;
   forceOpenclawReinstall?: boolean;
+  bot?: string[];
   connectivityMode?: "direct" | "relay";
   relayControlUrl?: string;
   relayEnrollmentToken?: string;
@@ -28,6 +29,9 @@ const DEFAULT_MANAGED_RELAY_CONTROL_URL = "https://relay.sovereign-ai-node.com";
 
 const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => {
   const connectivityMode = opts.connectivityMode ?? "relay";
+  const selectedBots = opts.bot
+    ?.map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
   return {
     mode: "bundled_matrix",
     connectivity: {
@@ -67,11 +71,13 @@ const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => {
     operator: {
       username: "operator",
     },
-    mailSentinel: {
-      pollInterval: "5m",
-      lookbackWindow: "15m",
-      e2eeAlertRoom: false,
-    },
+    ...(selectedBots === undefined || selectedBots.length === 0
+      ? {}
+      : {
+          bots: {
+            selected: selectedBots,
+          },
+        }),
     advanced: {
       nonInteractive: opts.nonInteractive ?? false,
     },
@@ -87,6 +93,11 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
     .option("--openclaw-version <ver>", "Override pinned OpenClaw version (advanced)")
     .option("--skip-openclaw-install", "Reuse existing OpenClaw install only (advanced)")
     .option("--force-openclaw-reinstall", "Force OpenClaw reinstall (repair path)")
+    .option(
+      "--bot <id>",
+      "Bot package id to install (repeatable; omit to use repo defaults)",
+      (value: string, prev: string[] = []) => [...prev, value],
+    )
     .option(
       "--connectivity-mode <mode>",
       "Connection mode (direct|relay) (scaffold/dev)",

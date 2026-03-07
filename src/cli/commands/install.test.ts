@@ -63,6 +63,7 @@ describe("resolveInstallRequest", () => {
     expect(req.imap).toBeUndefined();
     expect(req.connectivity?.mode).toBe("relay");
     expect(req.operator.username).toBe("operator");
+    expect(req.bots).toBeUndefined();
   });
 
   it("prefers an explicit request file over the default path", async () => {
@@ -94,5 +95,17 @@ describe("resolveInstallRequest", () => {
 
     expect(req.matrix.homeserverDomain).toBe("explicit.example.org");
     expect(req.operator.username).toBe("explicit-operator");
+  });
+
+  it("uses repeatable --bot flags to build a multi-bot install request", async () => {
+    const req = await resolveInstallRequest(
+      {
+        bot: ["mail-sentinel", "node-operator"],
+      },
+      join(tmpdir(), "missing-install-request.json"),
+    );
+
+    expect(req.bots?.selected).toEqual(["mail-sentinel", "node-operator"]);
+    expect(req.bots?.config).toBeUndefined();
   });
 });
