@@ -1097,7 +1097,11 @@ const isAlreadyExistsOutput = (value: string): boolean =>
   /already\s+exists|already\s+bound|already\s+configured|already\s+registered/i.test(value);
 
 const isCoreAgentBindingBestEffortSkippable = (error: unknown): boolean => {
-  if (!isRecord(error) || error.code !== "MAIL_SENTINEL_REGISTER_FAILED") {
+  if (
+    !isRecord(error)
+    || (error.code !== "MAIL_SENTINEL_REGISTER_FAILED"
+      && error.code !== "MANAGED_AGENT_REGISTER_FAILED")
+  ) {
     return false;
   }
   const messages: string[] = [];
@@ -1126,7 +1130,9 @@ const isCoreAgentBindingBestEffortSkippable = (error: unknown): boolean => {
     }
   }
   const combined = messages.join("\n").toLowerCase();
-  return /unknown command|unknown option|unexpected command|not implemented|plugins enable/.test(combined);
+  return /unknown command|unknown option|unexpected command|not implemented|plugins enable|unknown channel "matrix"|failed to load from .*extensions\/matrix|cannot find module .*plugin-sdk\/index\.js\/keyed-async-queue/.test(
+    combined,
+  );
 };
 
 const normalizeOpenClawAgentModel = (value: string): string => {
