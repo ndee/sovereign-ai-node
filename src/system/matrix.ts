@@ -881,12 +881,28 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         const diagnostics = await this.collectComposeDiagnostics(provision);
         const synapseLogs =
           typeof diagnostics.synapseLogs === "string" ? diagnostics.synapseLogs : "";
-        const recoverable = isRecoverablePostgresBootstrapFailure(synapseLogs);
+        const postgresLogs =
+          typeof diagnostics.postgresLogs === "string" ? diagnostics.postgresLogs : "";
+        const combinedLogs = `${synapseLogs}\n${postgresLogs}`;
+        const recoverable = isRecoverablePostgresBootstrapFailure(combinedLogs);
         diagnosticsTrail.push({
           attempt: attempt + 1,
           recoverable,
           diagnostics,
         });
+
+        if (!recoverable && attempt === 0) {
+          this.logger.warn(
+            {
+              projectDir: provision.projectDir,
+              recoveryAttempt: attempt + 1,
+              maxRecoveries,
+            },
+            "Matrix readiness timed out without a recoverable Postgres signal; retrying compose stack start once",
+          );
+          await this.ensureStackRunning(provision);
+          continue;
+        }
 
         if (!recoverable || attempt === maxRecoveries) {
           throw {
@@ -935,14 +951,20 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       ["ps", "-a"],
       "ps-unavailable",
     );
-    const logs = await this.safeComposeDiagnosticCommand(
+    const synapseLogs = await this.safeComposeDiagnosticCommand(
       provision,
       ["logs", "--no-color", "--tail", "200", "synapse"],
       "logs-unavailable",
     );
+    const postgresLogs = await this.safeComposeDiagnosticCommand(
+      provision,
+      ["logs", "--no-color", "--tail", "200", "postgres"],
+      "logs-unavailable",
+    );
     return {
       composePs: ps,
-      synapseLogs: logs,
+      synapseLogs,
+      postgresLogs,
     };
   }
 
