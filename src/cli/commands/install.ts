@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 
 import type { Command } from "commander";
 
@@ -8,6 +8,7 @@ import {
   startInstallResultSchema,
   type InstallRequest,
 } from "../../contracts/index.js";
+import { DEFAULT_INSTALL_REQUEST_FILE } from "../../installer/real-service-shared.js";
 import { writeCliError, writeCliSuccess } from "../output.js";
 
 type InstallOptions = {
@@ -109,10 +110,7 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
     .action(async (opts: InstallOptions) => {
       const command = "install";
       try {
-        const req =
-          opts.requestFile === undefined
-            ? buildScaffoldInstallRequest(opts)
-            : await readInstallRequestFromFile(opts.requestFile);
+        const req = await resolveInstallRequest(opts);
         const result = await app.installerService.startInstall(req);
         writeCliSuccess(command, result, startInstallResultSchema, Boolean(opts.json));
       } catch (error) {
@@ -122,8 +120,30 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
     });
 };
 
+export const resolveInstallRequest = async (
+  opts: InstallOptions,
+  defaultRequestFile: string = DEFAULT_INSTALL_REQUEST_FILE,
+): Promise<InstallRequest> => {
+  if (opts.requestFile !== undefined) {
+    return await readInstallRequestFromFile(opts.requestFile);
+  }
+
+  try {
+    await access(defaultRequestFile);
+    return await readInstallRequestFromFile(defaultRequestFile);
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") {
+      return buildScaffoldInstallRequest(opts);
+    }
+    throw error;
+  }
+};
+
 const readInstallRequestFromFile = async (path: string): Promise<InstallRequest> => {
   const raw = await readFile(path, "utf8");
   const parsed = JSON.parse(raw) as unknown;
   return installRequestSchema.parse(parsed);
 };
+
+const isNodeError = (error: unknown): error is NodeJS.ErrnoException =>
+  error instanceof Error && "code" in error;
