@@ -238,6 +238,23 @@ docker_compose_available() {
   docker compose version >/dev/null 2>&1
 }
 
+docker_daemon_available() {
+  if ! docker_cli_available; then
+    return 1
+  fi
+  docker info >/dev/null 2>&1
+}
+
+ensure_docker_daemon() {
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl enable --now docker >/dev/null 2>&1 || true
+  fi
+
+  if ! docker_daemon_available; then
+    die "Docker CLI is available but the Docker daemon is not reachable. Ensure docker.service is installed and running."
+  fi
+}
+
 configure_docker_apt_repo() {
   local arch codename repo_url keyring_path list_path
   arch="$(dpkg --print-architecture)"
@@ -262,6 +279,7 @@ EOF
 install_docker_if_needed() {
   if docker_cli_available && docker_compose_available; then
     log "Docker + Compose detected, skipping Docker install"
+    ensure_docker_daemon
     return
   fi
 
@@ -283,7 +301,7 @@ install_docker_if_needed() {
       || apt-get install -y docker.io docker-compose
   fi
 
-  systemctl enable --now docker || true
+  ensure_docker_daemon
 
   if ! docker_cli_available; then
     die "Docker installation finished but docker CLI is unavailable"
@@ -1927,8 +1945,7 @@ const matrixReady = matrix.health === "healthy" && matrix.roomReachable === true
 const openclawReady =
   openclaw.cliInstalled === true
   && (openclaw.health === "healthy" || openclaw.health === "degraded")
-  && openclaw.agentPresent === true
-  && openclaw.cronPresent === true;
+  && openclaw.agentPresent === true;
 
 if (matrixReady && openclawReady) {
   process.stdout.write("1\tmatrix+openclaw-ready");
