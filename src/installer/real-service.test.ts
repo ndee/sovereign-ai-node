@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { InstallRequest } from "../contracts/index.js";
 import { createLogger } from "../logging/logger.js";
@@ -21,6 +21,12 @@ import type {
 import type { HostPreflightChecker } from "../system/preflight.js";
 import type { ExecInput, ExecResult } from "../system/exec.js";
 import { RealInstallerService } from "./real-service.js";
+
+const priorBotRepoDir = process.env.SOVEREIGN_BOTS_REPO_DIR;
+const priorBotRepoUrl = process.env.SOVEREIGN_BOTS_REPO_URL;
+const priorBotRepoRef = process.env.SOVEREIGN_BOTS_REPO_REF;
+
+let testBotRepoDir = "";
 
 const buildInstallRequest = (): InstallRequest => ({
   mode: "bundled_matrix",
@@ -62,6 +68,201 @@ const buildInstallRequest = (): InstallRequest => ({
   advanced: {
     nonInteractive: true,
   },
+});
+
+const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
+  const writeBotPackage = async (input: {
+    id: string;
+    displayName: string;
+    description: string;
+    defaultInstall: boolean;
+    helloMessage?: string;
+    matrixMode: "dedicated-account" | "service-account";
+    configDefaults?: Record<string, string | boolean | number>;
+    toolInstances?: unknown[];
+    openclaw?: Record<string, unknown>;
+    requiredToolTemplates?: Array<{ id: string; version: string }>;
+    optionalToolTemplates?: Array<{ id: string; version: string }>;
+  }): Promise<void> => {
+    const packageDir = join(rootDir, "bots", input.id);
+    await mkdir(join(packageDir, "workspace", "skills", `${input.id}-core`), { recursive: true });
+    await writeFile(join(packageDir, "workspace", "README.md"), `# ${input.displayName}\n`, "utf8");
+    await writeFile(join(packageDir, "workspace", "AGENTS.md"), `# ${input.id}\n`, "utf8");
+    await writeFile(join(packageDir, "workspace", "TOOLS.md"), "{{TOOL_SECTION}}\n", "utf8");
+    await writeFile(
+      join(packageDir, "workspace", "skills", `${input.id}-core`, "SKILL.md"),
+      `# ${input.displayName}\n`,
+      "utf8",
+    );
+    await writeFile(
+      join(packageDir, "sovereign-bot.json"),
+      `${JSON.stringify({
+        kind: "sovereign-bot-package",
+        id: input.id,
+        version: "1.0.0",
+        displayName: input.displayName,
+        description: input.description,
+        defaultInstall: input.defaultInstall,
+        ...(input.helloMessage === undefined ? {} : { helloMessage: input.helloMessage }),
+        matrixIdentity: {
+          mode: input.matrixMode,
+          localpartPrefix: input.id,
+        },
+        configDefaults: input.configDefaults ?? {},
+        toolInstances: input.toolInstances ?? [],
+        openclaw: input.openclaw ?? {},
+        agentTemplate: {
+          id: input.id,
+          version: "1.0.0",
+          description: input.description,
+          matrix: {
+            localpartPrefix: input.id,
+          },
+          requiredToolTemplates: input.requiredToolTemplates ?? [],
+          optionalToolTemplates: input.optionalToolTemplates ?? [],
+          workspaceFiles: [
+            {
+              path: "README.md",
+              source: "workspace/README.md",
+            },
+            {
+              path: "AGENTS.md",
+              source: "workspace/AGENTS.md",
+            },
+            {
+              path: "TOOLS.md",
+              source: "workspace/TOOLS.md",
+            },
+            {
+              path: `skills/${input.id}-core/SKILL.md`,
+              source: `workspace/skills/${input.id}-core/SKILL.md`,
+            },
+          ],
+        },
+      }, null, 2)}\n`,
+      "utf8",
+    );
+  };
+
+  await writeBotPackage({
+    id: "mail-sentinel",
+    displayName: "Mail Sentinel",
+    description: "Conversational inbox sentinel for read-only IMAP triage and Matrix summaries.",
+    defaultInstall: true,
+    helloMessage: "Hello from Mail Sentinel. I can summarize your latest 3 inbox mails.",
+    matrixMode: "dedicated-account",
+    configDefaults: {
+      pollInterval: "5m",
+      lookbackWindow: "15m",
+      e2eeAlertRoom: false,
+    },
+    toolInstances: [
+      {
+        id: "mail-sentinel-imap",
+        templateRef: "imap-readonly@1.0.0",
+        enabledWhen: {
+          path: "imap.status",
+          equals: "configured",
+        },
+        config: {
+          host: {
+            from: "imap.host",
+          },
+          port: {
+            from: "imap.port",
+            stringify: true,
+          },
+          tls: {
+            from: "imap.tls",
+            stringify: true,
+          },
+          username: {
+            from: "imap.username",
+          },
+          mailbox: {
+            from: "imap.mailbox",
+          },
+        },
+        secretRefs: {
+          password: {
+            from: "imap.secretRef",
+          },
+        },
+      },
+    ],
+    openclaw: {
+      cron: {
+        id: "mail-sentinel-poll",
+        everyConfigKey: "pollInterval",
+        defaultEvery: "5m",
+        session: "isolated",
+        message:
+          "Summarize the latest 3 emails in INBOX using read-only IMAP tools. The tool instance is already scoped to the configured mailbox, so use --query ALL for the whole mailbox and do not include INBOX in the query string. Highlight urgent or security-relevant items. If IMAP is not configured, report the missing setup clearly.",
+      },
+    },
+    optionalToolTemplates: [
+      {
+        id: "imap-readonly",
+        version: "1.0.0",
+      },
+    ],
+  });
+
+  await writeBotPackage({
+    id: "node-operator",
+    displayName: "Node Operator",
+    description: "Conversational operator that manages Sovereign Node and managed agents.",
+    defaultInstall: false,
+    helloMessage: "Hello from Node Operator. Ask me for Sovereign Node and system status.",
+    matrixMode: "dedicated-account",
+    toolInstances: [
+      {
+        id: "node-operator-cli",
+        templateRef: "node-cli-ops@1.0.0",
+        config: {},
+        secretRefs: {},
+      },
+    ],
+    requiredToolTemplates: [
+      {
+        id: "node-cli-ops",
+        version: "1.0.0",
+      },
+    ],
+    optionalToolTemplates: [
+      {
+        id: "imap-readonly",
+        version: "1.0.0",
+      },
+    ],
+  });
+};
+
+beforeAll(async () => {
+  testBotRepoDir = await mkdtemp(join(tmpdir(), "sovereign-node-bot-repo-test-"));
+  await writeBotRepoFixture(testBotRepoDir);
+  process.env.SOVEREIGN_BOTS_REPO_DIR = testBotRepoDir;
+  delete process.env.SOVEREIGN_BOTS_REPO_URL;
+  delete process.env.SOVEREIGN_BOTS_REPO_REF;
+});
+
+afterAll(async () => {
+  await rm(testBotRepoDir, { recursive: true, force: true });
+  if (priorBotRepoDir === undefined) {
+    delete process.env.SOVEREIGN_BOTS_REPO_DIR;
+  } else {
+    process.env.SOVEREIGN_BOTS_REPO_DIR = priorBotRepoDir;
+  }
+  if (priorBotRepoUrl === undefined) {
+    delete process.env.SOVEREIGN_BOTS_REPO_URL;
+  } else {
+    process.env.SOVEREIGN_BOTS_REPO_URL = priorBotRepoUrl;
+  }
+  if (priorBotRepoRef === undefined) {
+    delete process.env.SOVEREIGN_BOTS_REPO_REF;
+  } else {
+    process.env.SOVEREIGN_BOTS_REPO_REF = priorBotRepoRef;
+  }
 });
 
 const writeRuntimeArtifacts = async (paths: SovereignPaths): Promise<void> => {
@@ -302,6 +503,50 @@ const writeNoCronManagedAgentRuntime = async (
     "utf8",
   );
   await writeFile(paths.configPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+};
+
+const buildManagedAgentMatrixProvisionResponse = (
+  url: string,
+  init?: RequestInit,
+): Response | null => {
+  if (url.includes("/_synapse/admin/v2/users/")) {
+    const encoded = url.split("/_synapse/admin/v2/users/")[1] ?? "";
+    const decoded = decodeURIComponent(encoded);
+    return new Response(JSON.stringify({ name: decoded }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  if (url.endsWith("/_matrix/client/v3/login")) {
+    const body =
+      typeof init?.body === "string"
+        ? (JSON.parse(init.body) as { identifier?: { user?: string } })
+        : {};
+    const localpart = body.identifier?.user ?? "unknown";
+    return new Response(
+      JSON.stringify({
+        user_id: `@${localpart}:matrix.example.org`,
+        access_token: `${localpart}-token`,
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  }
+  if (url.includes("/_matrix/client/v3/rooms/") && url.endsWith("/invite")) {
+    return new Response("{}", {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  if (url.includes("/_matrix/client/v3/rooms/") && url.endsWith("/join")) {
+    return new Response("{}", {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  return null;
 };
 
 describe("RealInstallerService", () => {
@@ -996,6 +1241,10 @@ describe("RealInstallerService", () => {
         },
       },
       fetchImpl: async (url, init) => {
+        const provisionResponse = buildManagedAgentMatrixProvisionResponse(url, init);
+        if (provisionResponse !== null) {
+          return provisionResponse;
+        }
         if (!url.includes("/_matrix/client/v3/rooms/")) {
           return new Response("not found", { status: 404 });
         }
@@ -1398,6 +1647,10 @@ describe("RealInstallerService", () => {
         }),
       },
       fetchImpl: async (url) => {
+        const provisionResponse = buildManagedAgentMatrixProvisionResponse(url);
+        if (provisionResponse !== null) {
+          return provisionResponse;
+        }
         observedMatrixUrls.push(url.toString());
         return new Response(JSON.stringify({ event_id: "$evt1" }), {
           status: 200,
@@ -1562,6 +1815,10 @@ describe("RealInstallerService", () => {
         }),
       },
       fetchImpl: async (url, init) => {
+        const provisionResponse = buildManagedAgentMatrixProvisionResponse(url, init);
+        if (provisionResponse !== null) {
+          return provisionResponse;
+        }
         if (url.includes("/joined_members")) {
           return new Response(JSON.stringify({ joined: {} }), {
             status: 200,
@@ -1817,6 +2074,10 @@ describe("RealInstallerService", () => {
         },
       },
       fetchImpl: async (url, init) => {
+        const provisionResponse = buildManagedAgentMatrixProvisionResponse(url, init);
+        if (provisionResponse !== null) {
+          return provisionResponse;
+        }
         if (url.includes("/joined_members")) {
           return new Response(JSON.stringify({ joined: {} }), {
             status: 200,

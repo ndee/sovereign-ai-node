@@ -56,6 +56,9 @@ EXISTING_OPENROUTER_SECRET_REF=""
 EXISTING_RELAY_ENROLLMENT_TOKEN=""
 EXISTING_IMAP_SECRET_REF=""
 LEGACY_OPENROUTER_MODEL_DETECTED="0"
+AVAILABLE_BOT_IDS=()
+AVAILABLE_BOT_DISPLAY_NAMES=()
+AVAILABLE_BOT_DEFAULT_INSTALLS=()
 
 log() {
   printf '[%s] %s\n' "$SCRIPT_NAME" "$*"
@@ -408,14 +411,14 @@ resolve_source_mode() {
     return
   fi
 
+  if [[ -n "$BOTS_REPO_URL" ]]; then
+    return
+  fi
+
   detected_bots_source="$(find_local_bots_source_dir)"
   if [[ -n "$detected_bots_source" ]]; then
     BOTS_SOURCE_DIR="$detected_bots_source"
     log "Using local bots source directory: $BOTS_SOURCE_DIR"
-    return
-  fi
-
-  if [[ -n "$BOTS_REPO_URL" ]]; then
     return
   fi
 
@@ -549,11 +552,38 @@ EOF
 }
 
 install_request_template() {
-  local src dst
+  local src dst selected_bots
   src="$APP_DIR/deploy/install-request.example.json"
   dst="/etc/sovereign-node/install-request.example.json"
   [[ -f "$src" ]] || die "Missing request template: $src"
-  cp "$src" "$dst"
+  selected_bots="$(default_selected_bots_from_catalog)"
+  SN_TEMPLATE_SELECTED_BOTS="$selected_bots" node - "$src" "$dst" <<'NODE'
+const fs = require("node:fs");
+
+const src = process.argv[2];
+const dst = process.argv[3];
+const selectedBots = (process.env.SN_TEMPLATE_SELECTED_BOTS || "")
+  .split(",")
+  .map((entry) => entry.trim())
+  .filter((entry) => entry.length > 0);
+const parsed = JSON.parse(fs.readFileSync(src, "utf8"));
+
+if (!parsed.bots || typeof parsed.bots !== "object" || Array.isArray(parsed.bots)) {
+  parsed.bots = {};
+}
+parsed.bots.selected = selectedBots;
+
+if (parsed.bots.config && typeof parsed.bots.config === "object" && !Array.isArray(parsed.bots.config)) {
+  if (!selectedBots.includes("mail-sentinel")) {
+    delete parsed.bots.config["mail-sentinel"];
+  }
+  if (Object.keys(parsed.bots.config).length === 0) {
+    delete parsed.bots.config;
+  }
+}
+
+fs.writeFileSync(dst, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+NODE
   chmod 0640 "$dst"
 }
 
@@ -749,20 +779,122 @@ bot_list_contains() {
   return 1
 }
 
+append_selected_bot() {
+  local selected bot_id
+  selected="$1"
+  bot_id="$2"
+  if [[ -z "$selected" ]]; then
+    printf '%s' "$bot_id"
+  else
+    printf '%s,%s' "$selected" "$bot_id"
+  fi
+}
+
+load_available_bot_catalog() {
+  local output id display default_install
+  AVAILABLE_BOT_IDS=()
+  AVAILABLE_BOT_DISPLAY_NAMES=()
+  AVAILABLE_BOT_DEFAULT_INSTALLS=()
+
+  if ! output="$(
+    SOVEREIGN_BOTS_REPO_DIR="$BOTS_DIR" node <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+
+const repoDir = process.env.SOVEREIGN_BOTS_REPO_DIR || "";
+const botsDir = path.join(repoDir, "bots");
+if (!fs.existsSync(botsDir)) {
+  throw new Error(`Bot repository is missing a bots/ directory: ${botsDir}`);
+}
+
+const packages = fs.readdirSync(botsDir, { withFileTypes: true })
+  .filter((entry) => entry.isDirectory())
+  .map((entry) => {
+    const manifestPath = path.join(botsDir, entry.name, "sovereign-bot.json");
+    if (!fs.existsSync(manifestPath)) {
+      throw new Error(`Missing sovereign-bot.json for bot package: ${entry.name}`);
+    }
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+      throw new Error(`Invalid bot manifest: ${manifestPath}`);
+    }
+    if (manifest.kind !== "sovereign-bot-package") {
+      throw new Error(`Unsupported bot manifest kind in ${manifestPath}`);
+    }
+    if (typeof manifest.id !== "string" || manifest.id.trim().length === 0) {
+      throw new Error(`Bot manifest is missing a valid id: ${manifestPath}`);
+    }
+    if (typeof manifest.displayName !== "string" || manifest.displayName.trim().length === 0) {
+      throw new Error(`Bot manifest is missing a valid displayName: ${manifestPath}`);
+    }
+    return {
+      id: manifest.id.trim(),
+      displayName: manifest.displayName.trim(),
+      defaultInstall: manifest.defaultInstall === true,
+    };
+  })
+  .sort((left, right) =>
+    left.displayName.localeCompare(right.displayName) || left.id.localeCompare(right.id));
+
+if (packages.length === 0) {
+  throw new Error(`No sovereign bot packages found in ${botsDir}`);
+}
+
+process.stdout.write(packages.map((entry) =>
+  [entry.id, entry.displayName, entry.defaultInstall ? "1" : "0"].join("\t")).join("\n"));
+NODE
+  )"; then
+    die "Failed to load bot packages from ${BOTS_DIR}"
+  fi
+
+  while IFS=$'\t' read -r id display default_install; do
+    [[ -n "$id" ]] || continue
+    AVAILABLE_BOT_IDS+=("$id")
+    AVAILABLE_BOT_DISPLAY_NAMES+=("$display")
+    AVAILABLE_BOT_DEFAULT_INSTALLS+=("$default_install")
+  done <<< "$output"
+}
+
+default_selected_bots_from_catalog() {
+  local selected index
+  selected=""
+  for index in "${!AVAILABLE_BOT_IDS[@]}"; do
+    if [[ "${AVAILABLE_BOT_DEFAULT_INSTALLS[$index]}" == "1" ]]; then
+      selected="$(append_selected_bot "$selected" "${AVAILABLE_BOT_IDS[$index]}")"
+    fi
+  done
+  printf '%s' "$selected"
+}
+
+resolve_bot_display_name() {
+  local bot_id index
+  bot_id="$1"
+  for index in "${!AVAILABLE_BOT_IDS[@]}"; do
+    if [[ "${AVAILABLE_BOT_IDS[$index]}" == "$bot_id" ]]; then
+      printf '%s' "${AVAILABLE_BOT_DISPLAY_NAMES[$index]}"
+      return 0
+    fi
+  done
+  return 1
+}
+
 describe_selected_bots() {
-  local selected joined
+  local selected joined entry display
+  local -a entries
   selected="$1"
   joined=""
-  if bot_list_contains "$selected" "mail-sentinel"; then
-    joined="Mail Sentinel"
-  fi
-  if bot_list_contains "$selected" "node-operator"; then
-    if [[ -n "$joined" ]]; then
-      joined="${joined}, Node Operator"
-    else
-      joined="Node Operator"
+  IFS=',' read -r -a entries <<< "$selected"
+  for entry in "${entries[@]}"; do
+    [[ -n "$entry" ]] || continue
+    if ! display="$(resolve_bot_display_name "$entry")"; then
+      display="$entry"
     fi
-  fi
+    if [[ -n "$joined" ]]; then
+      joined="${joined}, ${display}"
+      continue
+    fi
+    joined="$display"
+  done
   if [[ -z "$joined" ]]; then
     joined="none"
   fi
@@ -778,7 +910,7 @@ reset_request_defaults() {
   DEFAULT_MATRIX_PUBLIC_BASE_URL="$RECOMMENDED_MATRIX_PUBLIC_BASE_URL"
   DEFAULT_OPERATOR_USERNAME="operator"
   DEFAULT_ALERT_ROOM_NAME="Sovereign Alerts"
-  DEFAULT_SELECTED_BOTS="mail-sentinel"
+  DEFAULT_SELECTED_BOTS="$(default_selected_bots_from_catalog)"
   DEFAULT_POLL_INTERVAL="5m"
   DEFAULT_LOOKBACK_WINDOW="15m"
   DEFAULT_FEDERATION_ENABLED="0"
@@ -848,6 +980,7 @@ load_existing_defaults() {
   fi
 
   if ! output="$(
+    SN_DEFAULT_SELECTED_BOTS="$DEFAULT_SELECTED_BOTS" \
     SN_RECOMMENDED_MATRIX_DOMAIN="$RECOMMENDED_MATRIX_DOMAIN" \
     SN_RECOMMENDED_MATRIX_PUBLIC_BASE_URL="$RECOMMENDED_MATRIX_PUBLIC_BASE_URL" \
     node - "$REQUEST_FILE" "$RUNTIME_CONFIG_FILE" <<'NODE'
@@ -964,7 +1097,10 @@ if (runtimeRelayEnabled || connectivity.mode === "relay" || relay.controlUrl) {
 }
 emit("DEFAULT_RELAY_CONTROL_URL", runtimeRelayControlUrl || relay.controlUrl || "");
 emit("EXISTING_RELAY_ENROLLMENT_TOKEN", relay.enrollmentToken || "");
-emit("DEFAULT_SELECTED_BOTS", selectedBots.length > 0 ? selectedBots.join(",") : "mail-sentinel");
+emit(
+  "DEFAULT_SELECTED_BOTS",
+  selectedBots.length > 0 ? selectedBots.join(",") : (process.env.SN_DEFAULT_SELECTED_BOTS || ""),
+);
 if (runtimeRelayHostname) {
   emit("DEFAULT_MATRIX_DOMAIN", runtimeRelayHostname);
 }
@@ -1470,7 +1606,7 @@ run_install_wizard() {
   local defaults_status openrouter_api_key openrouter_model matrix_domain matrix_public_base_url
   local operator_username alert_room_name selected_bots poll_interval lookback_window federation_enabled
   local matrix_tls_mode connectivity_choice connectivity_choice_default connectivity_mode
-  local install_mail_sentinel install_node_operator install_mail_sentinel_default install_node_operator_default
+  local prompted_selected_bots bot_prompt_default index
   local relay_control_url relay_enrollment_token
   local openrouter_secret_ref openrouter_secret_path openrouter_secret_mode
   local configure_imap imap_choice imap_host imap_port imap_tls imap_username imap_password
@@ -1618,41 +1754,19 @@ run_install_wizard() {
 
   ui_section "Bots"
   while true; do
-    if bot_list_contains "$selected_bots" "mail-sentinel"; then
-      install_mail_sentinel_default="y"
-    else
-      install_mail_sentinel_default="n"
-    fi
-    if bot_list_contains "$selected_bots" "node-operator"; then
-      install_node_operator_default="y"
-    else
-      install_node_operator_default="n"
-    fi
-
-    if ui_confirm "Install Mail Sentinel?" "$install_mail_sentinel_default"; then
-      install_mail_sentinel="1"
-    else
-      install_mail_sentinel="0"
-    fi
-    if ui_confirm "Install Node Operator?" "$install_node_operator_default"; then
-      install_node_operator="1"
-    else
-      install_node_operator="0"
-    fi
-
-    selected_bots=""
-    if [[ "$install_mail_sentinel" == "1" ]]; then
-      selected_bots="mail-sentinel"
-    fi
-    if [[ "$install_node_operator" == "1" ]]; then
-      if [[ -n "$selected_bots" ]]; then
-        selected_bots="${selected_bots},node-operator"
+    prompted_selected_bots=""
+    for index in "${!AVAILABLE_BOT_IDS[@]}"; do
+      if bot_list_contains "$selected_bots" "${AVAILABLE_BOT_IDS[$index]}"; then
+        bot_prompt_default="y"
       else
-        selected_bots="node-operator"
+        bot_prompt_default="n"
       fi
-    fi
-
-    if [[ -n "$selected_bots" ]]; then
+      if ui_confirm "Install ${AVAILABLE_BOT_DISPLAY_NAMES[$index]}?" "$bot_prompt_default"; then
+        prompted_selected_bots="$(append_selected_bot "$prompted_selected_bots" "${AVAILABLE_BOT_IDS[$index]}")"
+      fi
+    done
+    if [[ -n "$prompted_selected_bots" ]]; then
+      selected_bots="$prompted_selected_bots"
       break
     fi
     ui_warn "Select at least one bot to install."
@@ -2200,6 +2314,7 @@ main() {
   ensure_runtime_directories
   sync_app_source
   sync_bots_source
+  load_available_bot_catalog
   build_app
   install_wrappers
   install_systemd_unit
