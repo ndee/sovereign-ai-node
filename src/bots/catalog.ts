@@ -47,6 +47,17 @@ const botCronSchema = z.object({
   message: z.string().min(1),
 });
 
+const matrixRoutingSchema = z.object({
+  defaultAccount: z.boolean().optional(),
+  dm: z.object({
+    enabled: z.boolean().optional(),
+  }).optional(),
+  alertRoom: z.object({
+    autoReply: z.boolean().optional(),
+    requireMention: z.boolean().optional(),
+  }).optional(),
+});
+
 const workspaceFileSchema = z.object({
   path: z.string().min(1),
   source: z.string().min(1),
@@ -86,6 +97,7 @@ const botPackageSchema = z.object({
     mode: z.enum(["service-account", "dedicated-account"]),
     localpartPrefix: z.string().min(1),
   }),
+  matrixRouting: matrixRoutingSchema.optional(),
   configDefaults: z.record(z.string(), botConfigValueSchema).default({}),
   toolInstances: z.array(toolInstanceSchema).default([]),
   openclaw: z.object({

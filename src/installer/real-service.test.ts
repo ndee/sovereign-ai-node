@@ -79,6 +79,16 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
     defaultInstall: boolean;
     helloMessage?: string;
     matrixMode: "dedicated-account" | "service-account";
+    matrixRouting?: {
+      defaultAccount?: boolean;
+      dm?: {
+        enabled?: boolean;
+      };
+      alertRoom?: {
+        autoReply?: boolean;
+        requireMention?: boolean;
+      };
+    };
     configDefaults?: Record<string, string | boolean | number>;
     toolInstances?: unknown[];
     openclaw?: Record<string, unknown>;
@@ -109,6 +119,7 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
           mode: input.matrixMode,
           localpartPrefix: input.id,
         },
+        ...(input.matrixRouting === undefined ? {} : { matrixRouting: input.matrixRouting }),
         configDefaults: input.configDefaults ?? {},
         toolInstances: input.toolInstances ?? [],
         openclaw: input.openclaw ?? {},
@@ -146,12 +157,40 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
   };
 
   await writeBotPackage({
+    id: "bitcoin-skill-match",
+    displayName: "Bitcoin Skill Match",
+    description: "Matrix-based community matchmaker that stores local skill profiles and trusted matches.",
+    defaultInstall: false,
+    helloMessage: "Hello from Bitcoin Skill Match. I can capture profiles and suggest trusted matches for your local Bitcoin community.",
+    matrixMode: "dedicated-account",
+    matrixRouting: {
+      defaultAccount: true,
+      dm: {
+        enabled: true,
+      },
+      alertRoom: {
+        autoReply: true,
+        requireMention: false,
+      },
+    },
+  });
+
+  await writeBotPackage({
     id: "mail-sentinel",
     displayName: "Mail Sentinel",
     description: "Conversational inbox sentinel for read-only IMAP triage and Matrix summaries.",
     defaultInstall: true,
     helloMessage: "Hello from Mail Sentinel. I can summarize your latest 3 inbox mails.",
     matrixMode: "dedicated-account",
+    matrixRouting: {
+      dm: {
+        enabled: true,
+      },
+      alertRoom: {
+        autoReply: false,
+        requireMention: true,
+      },
+    },
     configDefaults: {
       pollInterval: "5m",
       lookbackWindow: "15m",
@@ -216,6 +255,15 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
     defaultInstall: false,
     helloMessage: "Hello from Node Operator. Ask me for Sovereign Node and system status.",
     matrixMode: "dedicated-account",
+    matrixRouting: {
+      dm: {
+        enabled: true,
+      },
+      alertRoom: {
+        autoReply: false,
+        requireMention: true,
+      },
+    },
     toolInstances: [
       {
         id: "node-operator-cli",
@@ -245,6 +293,16 @@ const buildTestLoadedBotPackage = (input: {
   description: string;
   matrixMode: "dedicated-account" | "service-account";
   helloMessage?: string;
+  matrixRouting?: {
+    defaultAccount?: boolean;
+    dm?: {
+      enabled?: boolean;
+    };
+    alertRoom?: {
+      autoReply?: boolean;
+      requireMention?: boolean;
+    };
+  };
 }): LoadedBotPackage => ({
   manifest: {
     kind: "sovereign-bot-package",
@@ -258,6 +316,7 @@ const buildTestLoadedBotPackage = (input: {
       mode: input.matrixMode,
       localpartPrefix: input.id,
     },
+    ...(input.matrixRouting === undefined ? {} : { matrixRouting: input.matrixRouting }),
     configDefaults: {},
     toolInstances: [],
     openclaw: {},
@@ -1421,9 +1480,16 @@ describe("RealInstallerService", () => {
             enabled?: boolean;
             homeserver?: string;
             userId?: string;
+            defaultAccount?: string;
             groupAllowFrom?: string[];
             groups?: Record<string, { allow?: boolean; users?: string[] }>;
-            accounts?: Record<string, { userId?: string; homeserver?: string; accessToken?: string }>;
+            accounts?: Record<string, {
+              userId?: string;
+              homeserver?: string;
+              accessToken?: string;
+              dm?: { enabled?: boolean };
+              groups?: Record<string, { autoReply?: boolean; requireMention?: boolean }>;
+            }>;
           };
         };
       };
@@ -1447,11 +1513,21 @@ describe("RealInstallerService", () => {
           users: ["@operator:matrix.example.org"],
         }),
       );
+      expect(openclawConfig.channels?.matrix?.defaultAccount).toBe("mail-sentinel");
       expect(Object.keys(openclawConfig.channels?.matrix?.accounts ?? {}).sort()).toEqual([
-        "default",
+        "mail-sentinel",
       ]);
-      expect(openclawConfig.channels?.matrix?.accounts?.default?.userId).toBe(
+      expect(openclawConfig.channels?.matrix?.accounts?.["mail-sentinel"]?.userId).toBe(
         "@mail-sentinel:matrix.example.org",
+      );
+      expect(openclawConfig.channels?.matrix?.accounts?.["mail-sentinel"]?.dm?.enabled).toBe(true);
+      expect(
+        openclawConfig.channels?.matrix?.accounts?.["mail-sentinel"]?.groups?.["!alerts:matrix.example.org"],
+      ).toEqual(
+        expect.objectContaining({
+          autoReply: false,
+          requireMention: true,
+        }),
       );
       expect(
         openclawConfig.agents?.list?.every((entry) => Object.hasOwn(entry, "matrix") === false),
@@ -3705,6 +3781,216 @@ describe("RealInstallerService", () => {
       );
       expect((await stat(join(paths.stateDir, "bitcoin-skill-match", "workspace", ".openclaw"))).isDirectory()).toBe(true);
       expect(sentMessageBody).toContain("Hello from Bitcoin Skill Match");
+    } finally {
+      if (priorOpenrouterApiKey === undefined) {
+        delete process.env.OPENROUTER_API_KEY;
+      } else {
+        process.env.OPENROUTER_API_KEY = priorOpenrouterApiKey;
+      }
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("uses a dedicated repo bot as the primary Matrix account and narrows room auto-replies per bot", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+    const priorOpenrouterApiKey = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "sk-or-test";
+
+    let bootstrapBotLocalpart = "";
+    const sentBodies: string[] = [];
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async (opts) => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: opts.version,
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async (input) => ({
+          agentId: input.agentId,
+          workspaceDir: input.workspaceDir,
+          agentCommand: `openclaw agents upsert --id ${input.agentId}`,
+          ...(input.cron === undefined ? {} : { cronJobId: input.cron.id }),
+          ...(input.cron === undefined ? {} : { cronCommand: `openclaw cron add --name ${input.cron.id}` }),
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async (req) => ({
+          projectDir: join(tempRoot, "matrix"),
+          composeFilePath: join(tempRoot, "matrix", "compose.yaml"),
+          accessMode: "direct",
+          homeserverDomain: req.matrix.homeserverDomain,
+          publicBaseUrl: req.matrix.publicBaseUrl,
+          adminBaseUrl: "http://127.0.0.1:8008",
+          federationEnabled: req.matrix.federationEnabled ?? false,
+          tlsMode: "local-dev",
+        }),
+        bootstrapAccounts: async (_req, _provision, options) => {
+          bootstrapBotLocalpart = options?.botLocalpart ?? "service-bot";
+          return {
+            operator: {
+              localpart: "operator",
+              userId: "@operator:matrix.example.org",
+              passwordSecretRef: "file:/tmp/operator.password",
+              accessToken: "operator-token",
+            },
+            bot: {
+              localpart: bootstrapBotLocalpart,
+              userId: `@${bootstrapBotLocalpart}:matrix.example.org`,
+              passwordSecretRef: `file:/tmp/${bootstrapBotLocalpart}.password`,
+              accessToken: `${bootstrapBotLocalpart}-bootstrap-token`,
+            },
+          };
+        },
+        bootstrapRoom: async () => ({
+          roomId: "!alerts:matrix.example.org",
+          roomName: "Sovereign Alerts",
+        }),
+        test: async (req) => ({
+          ok: true,
+          homeserverUrl: req.publicBaseUrl,
+          checks: [],
+        }),
+      },
+      fetchImpl: async (url, init) => {
+        const provisionResponse = buildManagedAgentMatrixProvisionResponse(url, init);
+        if (provisionResponse !== null) {
+          return provisionResponse;
+        }
+        if (url.includes("/joined_members")) {
+          return new Response(JSON.stringify({ joined: {} }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (url.includes("/send/m.room.message/")) {
+          sentBodies.push(typeof init?.body === "string" ? init.body : "");
+          return new Response(JSON.stringify({ event_id: "$evt1" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+
+    try {
+      const req = buildInstallRequest();
+      req.bots = {
+        selected: ["bitcoin-skill-match", "node-operator"],
+      };
+
+      const started = await service.startInstall(req);
+      expect(started.job.state).toBe("succeeded");
+      expect(bootstrapBotLocalpart).toBe("bitcoin-skill-match");
+
+      const configRaw = await readFile(paths.configPath, "utf8");
+      expect(configRaw).not.toContain("@service-bot:");
+      const config = JSON.parse(configRaw) as {
+        matrix?: {
+          bot?: {
+            localpart?: string;
+            userId?: string;
+          };
+        };
+      };
+      expect(config.matrix?.bot?.localpart).toBe("bitcoin-skill-match");
+      expect(config.matrix?.bot?.userId).toBe("@bitcoin-skill-match:matrix.example.org");
+
+      const openclawConfigRaw = await readFile(
+        join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
+        "utf8",
+      );
+      expect(openclawConfigRaw).not.toContain("@service-bot:");
+      const openclawConfig = JSON.parse(openclawConfigRaw) as {
+        channels?: {
+          matrix?: {
+            userId?: string;
+            defaultAccount?: string;
+            accounts?: Record<string, {
+              userId?: string;
+              dm?: { enabled?: boolean };
+              groups?: Record<string, { autoReply?: boolean; requireMention?: boolean }>;
+            }>;
+          };
+        };
+      };
+      expect(openclawConfig.channels?.matrix?.userId).toBe("@bitcoin-skill-match:matrix.example.org");
+      expect(openclawConfig.channels?.matrix?.defaultAccount).toBe("bitcoin-skill-match");
+      expect(Object.keys(openclawConfig.channels?.matrix?.accounts ?? {}).sort()).toEqual([
+        "bitcoin-skill-match",
+        "node-operator",
+      ]);
+      expect(openclawConfig.channels?.matrix?.accounts?.["bitcoin-skill-match"]).toEqual(
+        expect.objectContaining({
+          userId: "@bitcoin-skill-match:matrix.example.org",
+          dm: {
+            enabled: true,
+          },
+        }),
+      );
+      expect(
+        openclawConfig.channels?.matrix?.accounts?.["bitcoin-skill-match"]?.groups?.["!alerts:matrix.example.org"],
+      ).toEqual(
+        expect.objectContaining({
+          autoReply: true,
+          requireMention: false,
+        }),
+      );
+      expect(openclawConfig.channels?.matrix?.accounts?.["node-operator"]).toEqual(
+        expect.objectContaining({
+          userId: "@node-operator:matrix.example.org",
+          dm: {
+            enabled: true,
+          },
+        }),
+      );
+      expect(
+        openclawConfig.channels?.matrix?.accounts?.["node-operator"]?.groups?.["!alerts:matrix.example.org"],
+      ).toEqual(
+        expect.objectContaining({
+          autoReply: false,
+          requireMention: true,
+        }),
+      );
+      expect(sentBodies.some((body) => body.includes("Hello from Bitcoin Skill Match"))).toBe(true);
+      expect(sentBodies.some((body) => body.includes("Hello from Node Operator"))).toBe(true);
     } finally {
       if (priorOpenrouterApiKey === undefined) {
         delete process.env.OPENROUTER_API_KEY;
