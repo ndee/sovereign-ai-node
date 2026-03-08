@@ -5704,7 +5704,11 @@ export class RealInstallerService implements InstallerService {
         accessToken: string;
         dm?: {
           enabled: boolean;
+          policy: "allowlist";
+          allowFrom: string[];
         };
+        groupPolicy?: "allowlist";
+        groupAllowFrom?: string[];
         groups?: Record<
           string,
           {
@@ -5735,7 +5739,11 @@ export class RealInstallerService implements InstallerService {
         accessToken: await this.resolveSecretRef(agent.matrix.accessTokenSecretRef),
         dm: {
           enabled: routing.dmEnabled,
+          policy: "allowlist",
+          allowFrom: operatorAllowlist,
         },
+        groupPolicy: "allowlist",
+        groupAllowFrom: operatorAllowlist,
         groups: {
           [runtimeConfig.matrix.alertRoom.roomId]: {
             enabled: true,
@@ -5752,6 +5760,21 @@ export class RealInstallerService implements InstallerService {
         homeserver: runtimeConfig.matrix.adminBaseUrl,
         userId: runtimeConfig.matrix.bot.userId,
         accessToken: await this.resolveSecretRef(runtimeConfig.matrix.bot.accessTokenSecretRef),
+        dm: {
+          enabled: true,
+          policy: "allowlist",
+          allowFrom: operatorAllowlist,
+        },
+        groupPolicy: "allowlist",
+        groupAllowFrom: operatorAllowlist,
+        groups: {
+          [runtimeConfig.matrix.alertRoom.roomId]: {
+            enabled: true,
+            allow: true,
+            autoReply: true,
+            users: operatorAllowlist,
+          },
+        },
       };
     }
 
