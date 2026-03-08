@@ -4254,6 +4254,9 @@ describe("RealInstallerService", () => {
       );
       expect(openclawConfigRaw).not.toContain("@service-bot:");
       const openclawConfig = JSON.parse(openclawConfigRaw) as {
+        agents?: {
+          list?: Array<{ id?: string; default?: boolean }>;
+        };
         channels?: {
           matrix?: {
             userId?: string;
@@ -4270,6 +4273,17 @@ describe("RealInstallerService", () => {
       };
       expect(openclawConfig.channels?.matrix?.userId).toBe("@bitcoin-skill-match:matrix.example.org");
       expect(openclawConfig.channels?.matrix?.defaultAccount).toBe("bitcoin-skill-match");
+      expect(openclawConfig.agents?.list).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: "node-operator",
+            default: true,
+          }),
+        ]),
+      );
+      expect(
+        openclawConfig.agents?.list?.find((entry) => entry.id === "bitcoin-skill-match")?.default,
+      ).not.toBe(true);
       expect(Object.keys(openclawConfig.channels?.matrix?.accounts ?? {}).sort()).toEqual([
         "bitcoin-skill-match",
         "node-operator",

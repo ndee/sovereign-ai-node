@@ -5830,6 +5830,7 @@ export class RealInstallerService implements InstallerService {
           return {
             id: entry.id,
             workspace: entry.workspace,
+            ...(entry.default === true ? { default: true } : {}),
             ...(tools === null ? {} : { tools }),
           };
         }),
