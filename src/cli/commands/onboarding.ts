@@ -40,6 +40,7 @@ export const registerOnboardingCommand = (
             `Code: ${result.code}`,
             `Expires: ${result.expiresAt}`,
             `Onboarding URL: ${result.onboardingUrl}`,
+            `Shareable link: ${result.onboardingLink}`,
             `Username: ${result.username}`,
             "Regenerate: sudo sovereign-node onboarding issue",
             "",

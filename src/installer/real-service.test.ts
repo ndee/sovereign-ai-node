@@ -2965,6 +2965,7 @@ describe("RealInstallerService", () => {
       expect(issued.code).toMatch(/^[A-Z2-9]{4}(?:-[A-Z2-9]{4}){2}$/);
       expect(issued.username).toBe("@operator:matrix.example.org");
       expect(issued.onboardingUrl).toBe("https://matrix.example.org/onboard");
+      expect(issued.onboardingLink).toBe(`https://matrix.example.org/onboard#code=${issued.code}`);
 
       const onboardingStateRaw = await readFile(
         join(paths.stateDir, "bundled-matrix", "matrix-example-org", "onboarding", "state.json"),
@@ -2985,6 +2986,243 @@ describe("RealInstallerService", () => {
       expect(onboardingState.passwordSecretRef).toBe(
         `file:${join(paths.secretsDir, "matrix-operator.password")}`,
       );
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("invites a local Matrix user with a shareable onboarding link", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+    await writeRuntimeArtifacts(paths);
+    const fetchCalls: string[] = [];
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      mailSentinelRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert",
+          cronCommand: "openclaw cron add",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      fetchImpl: async (input, init) => {
+        const url = String(input);
+        fetchCalls.push(url);
+        if (url.includes("/_synapse/admin/v2/users/")) {
+          return new Response(JSON.stringify({
+            name: "@satoshi:matrix.example.org",
+          }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (url.endsWith("/_matrix/client/v3/login")) {
+          return new Response(JSON.stringify({
+            user_id: "@satoshi:matrix.example.org",
+            access_token: "satoshi-access-token",
+          }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (url.endsWith("/invite") || url.endsWith("/join")) {
+          return new Response("{}", {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            method: init?.method ?? "GET",
+            url,
+          }),
+          {
+            status: 404,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      },
+    });
+
+    try {
+      const issued = await service.inviteMatrixUser({ username: "Satoshi" });
+      expect(issued.username).toBe("@satoshi:matrix.example.org");
+      expect(issued.onboardingUrl).toBe("https://matrix.example.org/onboard");
+      expect(issued.onboardingLink).toBe(`https://matrix.example.org/onboard#code=${issued.code}`);
+
+      const onboardingStateRaw = await readFile(
+        join(paths.stateDir, "bundled-matrix", "matrix-example-org", "onboarding", "state.json"),
+        "utf8",
+      );
+      const onboardingState = JSON.parse(onboardingStateRaw) as {
+        username?: string;
+        passwordSecretRef?: string;
+      };
+      expect(onboardingState.username).toBe("@satoshi:matrix.example.org");
+      expect(onboardingState.passwordSecretRef).toBe(
+        `file:${join(paths.secretsDir, "matrix-user-satoshi.password")}`,
+      );
+      expect(onboardingStateRaw).not.toContain(issued.code);
+      expect(fetchCalls.some((url) => url.includes("/_synapse/admin/v2/users/"))).toBe(true);
+      expect(fetchCalls.some((url) => url.endsWith("/_matrix/client/v3/login"))).toBe(true);
+      expect(fetchCalls.some((url) => url.endsWith("/invite"))).toBe(true);
+      expect(fetchCalls.some((url) => url.endsWith("/join"))).toBe(true);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("deactivates a local Matrix user and removes the managed invite secret", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+    await writeRuntimeArtifacts(paths);
+    await writeFile(join(paths.secretsDir, "matrix-user-satoshi.password"), "secret\n", "utf8");
+    const fetchCalls: string[] = [];
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      mailSentinelRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert",
+          cronCommand: "openclaw cron add",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      fetchImpl: async (input) => {
+        const url = String(input);
+        fetchCalls.push(url);
+        if (url.includes("/_synapse/admin/v1/deactivate/")) {
+          return new Response(JSON.stringify({ id_server_unbind_result: "no-support" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+
+    try {
+      const removed = await service.removeMatrixUser({ username: "@satoshi:matrix.example.org" });
+      expect(removed).toEqual({
+        localpart: "satoshi",
+        userId: "@satoshi:matrix.example.org",
+        removed: true,
+      });
+      await expect(stat(join(paths.secretsDir, "matrix-user-satoshi.password"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      expect(fetchCalls.some((url) => url.includes("/_synapse/admin/v1/deactivate/"))).toBe(true);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -3075,282 +3313,6 @@ describe("RealInstallerService", () => {
       await expect(service.issueMatrixOnboardingCode()).rejects.toMatchObject({
         code: "MATRIX_ONBOARDING_UNAVAILABLE",
       });
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  it("invites a human Matrix user and issues a one-time onboarding code", async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
-    const paths: SovereignPaths = {
-      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
-      secretsDir: join(tempRoot, "etc", "secrets"),
-      stateDir: join(tempRoot, "var", "lib"),
-      logsDir: join(tempRoot, "var", "log"),
-      installJobsDir: join(tempRoot, "install-jobs"),
-      openclawServiceHome: join(tempRoot, "openclaw-home"),
-    };
-    await writeRuntimeArtifacts(paths);
-
-    const fetchCalls: Array<{ url: string; method: string; authorization: string | null }> = [];
-    const service = new RealInstallerService(createLogger(), paths, {
-      openclawBootstrapper: {
-        detectInstalled: async () => null,
-        ensureInstalled: async () => ({
-          binaryPath: "/usr/local/bin/openclaw",
-          version: "0.2.0",
-          installMethod: "install_sh",
-        }),
-      },
-      openclawGatewayServiceManager: {
-        install: async () => {},
-        start: async () => {},
-        restart: async () => {},
-      },
-      mailSentinelRegistrar: {
-        register: async () => ({
-          agentId: "mail-sentinel",
-          cronJobId: "mail-sentinel-poll",
-          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
-          agentCommand: "openclaw agents upsert",
-          cronCommand: "openclaw cron add",
-        }),
-      },
-      preflightChecker: {
-        run: async () => ({
-          mode: "bundled_matrix",
-          overall: "pass",
-          checks: [],
-          recommendedActions: [],
-        }),
-      },
-      imapTester: {
-        test: async (req) => ({
-          ok: true,
-          host: req.imap.host,
-          port: req.imap.port,
-          tls: req.imap.tls,
-          auth: "ok",
-          mailbox: req.imap.mailbox ?? "INBOX",
-        }),
-      },
-      matrixProvisioner: {
-        provision: async () => {
-          throw new Error("not used");
-        },
-        bootstrapAccounts: async () => {
-          throw new Error("not used");
-        },
-        bootstrapRoom: async () => {
-          throw new Error("not used");
-        },
-        test: async () => ({
-          ok: true,
-          homeserverUrl: "https://matrix.example.org",
-          checks: [],
-        }),
-      },
-      fetchImpl: async (url, init) => {
-        const headers = new Headers(init?.headers);
-        fetchCalls.push({
-          url,
-          method: init?.method ?? "GET",
-          authorization: headers.get("Authorization"),
-        });
-        if (url.includes("/_synapse/admin/v2/users/")) {
-          const encoded = url.split("/_synapse/admin/v2/users/")[1] ?? "";
-          const decoded = decodeURIComponent(encoded);
-          return new Response(JSON.stringify({ name: decoded }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-        if (url.includes("/_matrix/client/v3/rooms/") && url.endsWith("/invite")) {
-          return new Response("{}", {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-        return new Response("not found", { status: 404 });
-      },
-    });
-
-    try {
-      const invited = await service.inviteHumanMatrixUser({
-        username: "@Alice:matrix.example.org",
-        ttlMinutes: 15,
-      });
-      expect(invited.localpart).toBe("alice");
-      expect(invited.userId).toBe("@alice:matrix.example.org");
-      expect(invited.onboardingUrl).toBe("https://matrix.example.org/onboard");
-      expect(invited.invitedToAlertRoom).toBe(true);
-
-      const onboardingStatePath = join(
-        paths.stateDir,
-        "bundled-matrix",
-        "matrix-example-org",
-        "onboarding",
-        "state.json",
-      );
-      const onboardingStateRaw = await readFile(onboardingStatePath, "utf8");
-      const onboardingState = JSON.parse(onboardingStateRaw) as {
-        username?: string;
-        passwordSecretRef?: string;
-      };
-      expect(onboardingState.username).toBe("@alice:matrix.example.org");
-      expect(onboardingState.passwordSecretRef).toBe(
-        `file:${join(paths.secretsDir, "matrix-human-alice.password")}`,
-      );
-      const password = await readFile(join(paths.secretsDir, "matrix-human-alice.password"), "utf8");
-      expect(password.trim().length).toBeGreaterThan(0);
-
-      expect(fetchCalls).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            method: "PUT",
-            url: expect.stringContaining("/_synapse/admin/v2/users/"),
-            authorization: "Bearer operator-token",
-          }),
-          expect.objectContaining({
-            method: "POST",
-            url: expect.stringContaining("/invite"),
-            authorization: "Bearer operator-token",
-          }),
-        ]),
-      );
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  it("removes a human Matrix user, deactivates the account, and clears onboarding state", async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
-    const paths: SovereignPaths = {
-      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
-      secretsDir: join(tempRoot, "etc", "secrets"),
-      stateDir: join(tempRoot, "var", "lib"),
-      logsDir: join(tempRoot, "var", "log"),
-      installJobsDir: join(tempRoot, "install-jobs"),
-      openclawServiceHome: join(tempRoot, "openclaw-home"),
-    };
-    await writeRuntimeArtifacts(paths);
-
-    const humanPasswordPath = join(paths.secretsDir, "matrix-human-alice.password");
-    await writeFile(humanPasswordPath, "alice-password\n", "utf8");
-    const onboardingStatePath = join(
-      paths.stateDir,
-      "bundled-matrix",
-      "matrix-example-org",
-      "onboarding",
-      "state.json",
-    );
-    const issued = issueMatrixOnboardingState({
-      passwordSecretRef: `file:${humanPasswordPath}`,
-      username: "@alice:matrix.example.org",
-      homeserverUrl: "https://matrix.example.org",
-      now: new Date("2026-03-08T10:00:00.000Z"),
-    });
-    await writeFile(onboardingStatePath, `${JSON.stringify(issued.state, null, 2)}\n`, "utf8");
-
-    const fetchCalls: string[] = [];
-    const service = new RealInstallerService(createLogger(), paths, {
-      openclawBootstrapper: {
-        detectInstalled: async () => null,
-        ensureInstalled: async () => ({
-          binaryPath: "/usr/local/bin/openclaw",
-          version: "0.2.0",
-          installMethod: "install_sh",
-        }),
-      },
-      openclawGatewayServiceManager: {
-        install: async () => {},
-        start: async () => {},
-        restart: async () => {},
-      },
-      mailSentinelRegistrar: {
-        register: async () => ({
-          agentId: "mail-sentinel",
-          cronJobId: "mail-sentinel-poll",
-          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
-          agentCommand: "openclaw agents upsert",
-          cronCommand: "openclaw cron add",
-        }),
-      },
-      preflightChecker: {
-        run: async () => ({
-          mode: "bundled_matrix",
-          overall: "pass",
-          checks: [],
-          recommendedActions: [],
-        }),
-      },
-      imapTester: {
-        test: async (req) => ({
-          ok: true,
-          host: req.imap.host,
-          port: req.imap.port,
-          tls: req.imap.tls,
-          auth: "ok",
-          mailbox: req.imap.mailbox ?? "INBOX",
-        }),
-      },
-      matrixProvisioner: {
-        provision: async () => {
-          throw new Error("not used");
-        },
-        bootstrapAccounts: async () => {
-          throw new Error("not used");
-        },
-        bootstrapRoom: async () => {
-          throw new Error("not used");
-        },
-        test: async () => ({
-          ok: true,
-          homeserverUrl: "https://matrix.example.org",
-          checks: [],
-        }),
-      },
-      fetchImpl: async (url, init) => {
-        fetchCalls.push(`${init?.method ?? "GET"} ${url}`);
-        if (url.includes("/_synapse/admin/v2/users/")) {
-          const encoded = url.split("/_synapse/admin/v2/users/")[1] ?? "";
-          const decoded = decodeURIComponent(encoded);
-          return new Response(JSON.stringify({ name: decoded }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-        if (url.includes("/_synapse/admin/v1/deactivate/")) {
-          return new Response(JSON.stringify({ id_server_unbind_result: "no-support" }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-        return new Response("not found", { status: 404 });
-      },
-    });
-
-    try {
-      const removed = await service.deleteHumanMatrixUser({ username: "alice" });
-      expect(removed).toEqual({
-        localpart: "alice",
-        userId: "@alice:matrix.example.org",
-        deleted: true,
-        deactivated: true,
-        onboardingCleared: true,
-      });
-      await expect(readFile(humanPasswordPath, "utf8")).rejects.toMatchObject({
-        code: "ENOENT",
-      });
-      await expect(readFile(onboardingStatePath, "utf8")).rejects.toMatchObject({
-        code: "ENOENT",
-      });
-      expect(fetchCalls).toEqual(
-        expect.arrayContaining([
-          expect.stringContaining("GET http://127.0.0.1:8008/_synapse/admin/v2/users/%40alice%3Amatrix.example.org"),
-          expect.stringContaining("POST http://127.0.0.1:8008/_synapse/admin/v1/deactivate/%40alice%3Amatrix.example.org"),
-        ]),
-      );
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -3849,6 +3811,13 @@ describe("RealInstallerService", () => {
           }),
         ]),
       );
+      const toolsMd = await readFile(
+        join(paths.stateDir, "node-operator", "workspace", "TOOLS.md"),
+        "utf8",
+      );
+      expect(toolsMd).toContain("sovereign-node users invite <username> --json");
+      expect(toolsMd).toContain("sovereign-node users remove <username> --json");
+      expect(toolsMd).toContain("sovereign-node onboarding issue --ttl-minutes <minutes> --json");
 
       expect(fetchCalls.some((url) => url.includes("/_synapse/admin/v2/users/"))).toBe(true);
       expect(fetchCalls.some((url) => url.endsWith("/_matrix/client/v3/login"))).toBe(true);

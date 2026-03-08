@@ -2,69 +2,57 @@ import type { Command } from "commander";
 import { z } from "zod";
 
 import type { AppContainer } from "../../app/create-app.js";
+import { matrixOnboardingIssueResultSchema } from "../../contracts/index.js";
 import { writeCliError, writeCliSuccess } from "../output.js";
 
-const inviteHumanUserResultSchema = z.object({
+const matrixUserRemoveResultSchema = z.object({
   localpart: z.string().min(1),
   userId: z.string().min(1),
-  code: z.string().min(1),
-  expiresAt: z.string().min(1),
-  onboardingUrl: z.string().min(1),
-  invitedToAlertRoom: z.boolean(),
+  removed: z.boolean(),
 });
 
-const deleteHumanUserResultSchema = z.object({
-  localpart: z.string().min(1),
-  userId: z.string().min(1),
-  deleted: z.boolean(),
-  deactivated: z.boolean(),
-  onboardingCleared: z.boolean(),
-});
-
-type InviteUserOptions = {
+type UserInviteOptions = {
   ttlMinutes?: string;
   json?: boolean;
 };
 
-type RemoveUserOptions = {
-  json?: boolean;
-};
-
-export const registerUsersCommand = (program: Command, app: AppContainer): void => {
+export const registerUsersCommand = (
+  program: Command,
+  app: AppContainer,
+): void => {
   const users = program
     .command("users")
-    .description("Manage human Matrix users on this node");
+    .description("Manage local human Matrix users for this node");
 
   users
     .command("invite")
-    .description("Create or reset a human Matrix user and issue a one-time onboarding code")
-    .argument("<username>", "Matrix localpart or full user ID")
-    .option("--ttl-minutes <minutes>", "Override code lifetime in minutes", "10")
+    .description("Create or refresh a local Matrix user invite")
+    .argument("<username>", "Localpart or same-server Matrix user ID")
+    .option("--ttl-minutes <minutes>", "Override code lifetime in minutes", "1440")
     .option("--json", "Emit JSON output")
-    .action(async (username: string, opts: InviteUserOptions) => {
+    .action(async (username: string, opts: UserInviteOptions) => {
       const command = "users invite";
       try {
-        const ttlMinutes = Number.parseInt(opts.ttlMinutes ?? "10", 10);
+        const ttlMinutes = Number.parseInt(opts.ttlMinutes ?? "1440", 10);
         if (!Number.isFinite(ttlMinutes) || ttlMinutes <= 0) {
           throw new Error("Provide a positive integer for --ttl-minutes");
         }
-        const result = await app.installerService.inviteHumanMatrixUser({
+        const result = await app.installerService.inviteMatrixUser({
           username,
           ttlMinutes,
         });
         if (opts.json) {
-          writeCliSuccess(command, result, inviteHumanUserResultSchema, true);
+          writeCliSuccess(command, result, matrixOnboardingIssueResultSchema, true);
           return;
         }
         process.stdout.write(
           [
-            "Matrix user invited.",
-            `User ID: ${result.userId}`,
-            `Localpart: ${result.localpart}`,
+            "Matrix user invite issued.",
+            `Username: ${result.username}`,
             `Code: ${result.code}`,
             `Expires: ${result.expiresAt}`,
             `Onboarding URL: ${result.onboardingUrl}`,
-            `Invited to alert room: ${result.invitedToAlertRoom ? "yes" : "no"}`,
+            `Shareable link: ${result.onboardingLink}`,
             "",
           ].join("\n"),
         );
@@ -76,28 +64,14 @@ export const registerUsersCommand = (program: Command, app: AppContainer): void 
 
   users
     .command("remove")
-    .alias("delete")
-    .description("Deactivate a human Matrix user")
-    .argument("<username>", "Matrix localpart or full user ID")
+    .description("Deactivate a local human Matrix user")
+    .argument("<username>", "Localpart or same-server Matrix user ID")
     .option("--json", "Emit JSON output")
-    .action(async (username: string, opts: RemoveUserOptions) => {
+    .action(async (username: string, opts: { json?: boolean }) => {
       const command = "users remove";
       try {
-        const result = await app.installerService.deleteHumanMatrixUser({ username });
-        if (opts.json) {
-          writeCliSuccess(command, result, deleteHumanUserResultSchema, true);
-          return;
-        }
-        process.stdout.write(
-          [
-            result.deleted ? "Matrix user removed." : "Matrix user was not found.",
-            `User ID: ${result.userId}`,
-            `Localpart: ${result.localpart}`,
-            `Deactivated in Synapse: ${result.deactivated ? "yes" : "no"}`,
-            `Onboarding state cleared: ${result.onboardingCleared ? "yes" : "no"}`,
-            "",
-          ].join("\n"),
-        );
+        const result = await app.installerService.removeMatrixUser({ username });
+        writeCliSuccess(command, result, matrixUserRemoveResultSchema, Boolean(opts.json));
       } catch (error) {
         writeCliError(command, error, Boolean(opts.json));
         process.exitCode = 1;
