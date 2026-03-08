@@ -102,6 +102,7 @@ import {
   DEFAULT_SERVICE_USER,
   INSTALLER_EXEC_TIMEOUT_MS,
   MAIL_SENTINEL_AGENT_ID,
+  NODE_OPERATOR_AGENT_ID,
   RELAY_LOCAL_EDGE_PORT,
   RELAY_TUNNEL_DEFAULT_IMAGE,
   RELAY_TUNNEL_SYSTEMD_UNIT,
@@ -800,7 +801,164 @@ export class RealInstallerService implements InstallerService {
   }
 
   async reconfigureMatrix(req: ReconfigureMatrixRequest): Promise<ReconfigureResult> {
-    return this.stubService.reconfigureMatrix(req);
+    const runtimeConfig = await this.readRuntimeConfig();
+    const raw = await readFile(this.paths.configPath, "utf8");
+    const parsed = parseJsonDocument(raw);
+    if (!isRecord(parsed)) {
+      throw {
+        code: "CONFIG_INVALID",
+        message: "Sovereign runtime config does not match expected shape",
+        retryable: false,
+        details: {
+          configPath: this.paths.configPath,
+        },
+      };
+    }
+
+    const unsupportedMatrixKeys = Object.keys(req.matrix ?? {}).filter(
+      (key) => key !== "federationEnabled",
+    );
+    const hasUnsupportedSections =
+      req.operator !== undefined || req.bots !== undefined || req.mailSentinel !== undefined;
+    if (unsupportedMatrixKeys.length > 0 || hasUnsupportedSections) {
+      throw {
+        code: "MATRIX_RECONFIGURE_UNSUPPORTED",
+        message: "Only matrix.federationEnabled can be reconfigured in this release",
+        retryable: false,
+        details: {
+          unsupportedMatrixKeys,
+          unsupportedSections: [
+            ...(req.operator === undefined ? [] : ["operator"]),
+            ...(req.bots === undefined ? [] : ["bots"]),
+            ...(req.mailSentinel === undefined ? [] : ["mailSentinel"]),
+          ],
+        },
+      };
+    }
+
+    const nextFederationEnabled =
+      req.matrix?.federationEnabled ?? runtimeConfig.matrix.federationEnabled;
+    const federationChanged = nextFederationEnabled !== runtimeConfig.matrix.federationEnabled;
+    const changed: string[] = [];
+
+    if (federationChanged) {
+      const provisionRequest = this.buildMatrixReconfigureInstallRequest(
+        runtimeConfig,
+        nextFederationEnabled,
+      );
+      const provision = await this.matrixProvisioner.provision(provisionRequest);
+      const accounts = await this.matrixProvisioner.bootstrapAccounts(
+        provisionRequest,
+        provision,
+        runtimeConfig.matrix.bot.localpart === undefined
+          ? undefined
+          : { botLocalpart: runtimeConfig.matrix.bot.localpart },
+      );
+      const operatorTokenSecretRef = await this.writeSecretFile(
+        "matrix-operator-access-token",
+        accounts.operator.accessToken,
+      );
+      const botTokenSecretRef = await this.writeSecretFile(
+        "matrix-bot-access-token",
+        accounts.bot.accessToken,
+      );
+      const onboardingStatePath = join(provision.projectDir, "onboarding", "state.json");
+
+      const nextRuntimeConfig: RuntimeConfig = {
+        ...runtimeConfig,
+        matrix: {
+          ...runtimeConfig.matrix,
+          homeserverDomain: provision.homeserverDomain,
+          publicBaseUrl: provision.publicBaseUrl,
+          adminBaseUrl: provision.adminBaseUrl,
+          federationEnabled: provision.federationEnabled,
+          tlsMode: provision.tlsMode,
+          projectDir: provision.projectDir,
+          onboardingStatePath,
+          operator: {
+            ...runtimeConfig.matrix.operator,
+            localpart: accounts.operator.localpart,
+            userId: accounts.operator.userId,
+            passwordSecretRef: accounts.operator.passwordSecretRef,
+            accessTokenSecretRef: operatorTokenSecretRef,
+          },
+          bot: {
+            ...runtimeConfig.matrix.bot,
+            localpart: accounts.bot.localpart,
+            userId: accounts.bot.userId,
+            passwordSecretRef: accounts.bot.passwordSecretRef,
+            accessTokenSecretRef: botTokenSecretRef,
+          },
+        },
+      };
+
+      const matrixConfig = isRecord(parsed.matrix) ? parsed.matrix : {};
+      const operatorConfig = isRecord(matrixConfig.operator) ? matrixConfig.operator : {};
+      const botConfig = isRecord(matrixConfig.bot) ? matrixConfig.bot : {};
+      matrixConfig["accessMode"] = nextRuntimeConfig.matrix.accessMode;
+      matrixConfig["homeserverDomain"] = nextRuntimeConfig.matrix.homeserverDomain;
+      matrixConfig["publicBaseUrl"] = nextRuntimeConfig.matrix.publicBaseUrl;
+      matrixConfig["adminBaseUrl"] = nextRuntimeConfig.matrix.adminBaseUrl;
+      matrixConfig["federationEnabled"] = nextRuntimeConfig.matrix.federationEnabled;
+      matrixConfig["tlsMode"] = nextRuntimeConfig.matrix.tlsMode;
+      matrixConfig["projectDir"] = nextRuntimeConfig.matrix.projectDir;
+      matrixConfig["onboardingStatePath"] = nextRuntimeConfig.matrix.onboardingStatePath;
+      operatorConfig["localpart"] = nextRuntimeConfig.matrix.operator.localpart;
+      operatorConfig["userId"] = nextRuntimeConfig.matrix.operator.userId;
+      operatorConfig["passwordSecretRef"] = nextRuntimeConfig.matrix.operator.passwordSecretRef;
+      operatorConfig["accessTokenSecretRef"] =
+        nextRuntimeConfig.matrix.operator.accessTokenSecretRef;
+      botConfig["localpart"] = nextRuntimeConfig.matrix.bot.localpart;
+      botConfig["userId"] = nextRuntimeConfig.matrix.bot.userId;
+      botConfig["passwordSecretRef"] = nextRuntimeConfig.matrix.bot.passwordSecretRef;
+      botConfig["accessTokenSecretRef"] = nextRuntimeConfig.matrix.bot.accessTokenSecretRef;
+      matrixConfig["operator"] = operatorConfig;
+      matrixConfig["bot"] = botConfig;
+      parsed["matrix"] = matrixConfig;
+      parsed["generatedAt"] = now();
+      await this.writeInstallerJsonFile(this.paths.configPath, parsed, 0o644);
+
+      await this.writeOpenClawRuntimeArtifacts(nextRuntimeConfig);
+      this.setManagedOpenClawEnv(nextRuntimeConfig);
+      await this.refreshGatewayAfterRuntimeConfig(nextRuntimeConfig);
+      changed.push("matrix.federationEnabled");
+    }
+
+    const requestUpdate = await this.updateInstallRequestMatrix({
+      federationEnabled: nextFederationEnabled,
+      federationChanged,
+    });
+
+    return {
+      target: "matrix",
+      changed: [...changed, ...requestUpdate.changed],
+      restartRequiredServices: federationChanged
+        ? [
+            "synapse",
+            ...(runtimeConfig.matrix.accessMode === "relay"
+              || runtimeConfig.matrix.tlsMode !== "local-dev"
+              ? ["reverse-proxy"]
+              : []),
+            "openclaw-gateway",
+          ]
+        : [],
+      validation: [
+        check(
+          "matrix-config",
+          "Matrix configuration",
+          "pass",
+          federationChanged
+            ? `Matrix federation ${nextFederationEnabled ? "enabled" : "disabled"}`
+            : "Matrix settings already matched the requested federation state",
+          {
+            accessMode: runtimeConfig.matrix.accessMode,
+            homeserverDomain: runtimeConfig.matrix.homeserverDomain,
+            federationEnabled: nextFederationEnabled,
+          },
+        ),
+        ...requestUpdate.validation,
+      ],
+    };
   }
 
   async reconfigureOpenrouter(req: ReconfigureOpenrouterRequest): Promise<ReconfigureResult> {
@@ -1712,6 +1870,96 @@ export class RealInstallerService implements InstallerService {
     };
   }
 
+  private buildMatrixReconfigureInstallRequest(
+    runtimeConfig: RuntimeConfig,
+    federationEnabled: boolean,
+  ): InstallRequest {
+    const operatorUsername =
+      runtimeConfig.matrix.operator.localpart
+      ?? runtimeConfig.matrix.operator.userId.replace(/^@/, "").split(":")[0]
+      ?? "operator";
+    return {
+      mode: "bundled_matrix",
+      ...(runtimeConfig.matrix.accessMode === "relay"
+        ? {
+            connectivity: {
+              mode: "relay" as const,
+            },
+          }
+        : {}),
+      openrouter: {
+        secretRef: runtimeConfig.openrouter.apiKeySecretRef,
+        model: runtimeConfig.openrouter.model,
+      },
+      ...(runtimeConfig.imap.status !== "configured"
+        ? {}
+        : {
+            imap: {
+              host: runtimeConfig.imap.host,
+              port: runtimeConfig.imap.port,
+              tls: runtimeConfig.imap.tls,
+              username: runtimeConfig.imap.username,
+              secretRef: runtimeConfig.imap.secretRef,
+              mailbox: runtimeConfig.imap.mailbox,
+            },
+          }),
+      matrix: {
+        homeserverDomain: runtimeConfig.matrix.homeserverDomain,
+        publicBaseUrl: runtimeConfig.matrix.publicBaseUrl,
+        federationEnabled,
+        tlsMode: runtimeConfig.matrix.tlsMode,
+        alertRoomName: runtimeConfig.matrix.alertRoom.roomName,
+      },
+      operator: {
+        username: operatorUsername,
+      },
+      bots: runtimeConfig.bots,
+      ...(runtimeConfig.mailSentinel === undefined
+        ? {}
+        : {
+            mailSentinel: runtimeConfig.mailSentinel,
+          }),
+      advanced: {
+        nonInteractive: true,
+      },
+    };
+  }
+
+  private resolveMatrixRoomRuntimeConfig(
+    runtimeConfig: RuntimeConfig,
+    agent?: RuntimeConfig["openclawProfile"]["agents"][number],
+  ): {
+    enabled: true;
+    allow: true;
+    autoReply: boolean;
+    requireMention?: true;
+    users?: string[];
+  } {
+    const operatorOnlyUsers = [runtimeConfig.matrix.operator.userId];
+    if (agent === undefined || agent.id === MAIL_SENTINEL_AGENT_ID) {
+      return {
+        enabled: true,
+        allow: true,
+        autoReply: true,
+        users: operatorOnlyUsers,
+      };
+    }
+    if (agent.id === NODE_OPERATOR_AGENT_ID) {
+      return {
+        enabled: true,
+        allow: true,
+        autoReply: false,
+        requireMention: true,
+        users: operatorOnlyUsers,
+      };
+    }
+    return {
+      enabled: true,
+      allow: true,
+      autoReply: true,
+    };
+  }
+
   private validateToolInstanceBindings(input: {
     template: ToolTemplateManifest;
     config: Record<string, string>;
@@ -2448,6 +2696,12 @@ export class RealInstallerService implements InstallerService {
               `  capabilities: ${manifest.capabilities.join(", ")}`,
               ...manifest.allowedCommands.map((command) =>
                 `  command: \`${this.renderSovereignToolCommand(tool.id, command)}\``),
+              ...(manifest.id === "node-cli-ops"
+                ? [
+                    `  command: \`${this.renderSovereignToolCommand(tool.id, "sovereign-node reconfigure matrix --federation <enabled|disabled> --json")}\``,
+                    "  note: enabling Matrix federation is global for the homeserver; it is not configured per remote server",
+                  ]
+                : []),
               ...(manifest.id === "imap-readonly"
                 ? [
                     "  note: searches already run inside the configured mailbox",
@@ -3801,7 +4055,7 @@ export class RealInstallerService implements InstallerService {
         ...req.matrix,
         homeserverDomain: enrollment.hostname,
         publicBaseUrl: enrollment.publicBaseUrl,
-        federationEnabled: false,
+        federationEnabled: req.matrix.federationEnabled ?? false,
       },
     };
   }
@@ -4805,6 +5059,115 @@ export class RealInstallerService implements InstallerService {
     };
   }
 
+  private async updateInstallRequestMatrix(input: {
+    federationEnabled: boolean;
+    federationChanged: boolean;
+  }): Promise<{ changed: string[]; validation: CheckResult[] }> {
+    const requestPath = this.getInstallRequestPath();
+    let raw = "";
+    try {
+      raw = await readFile(requestPath, "utf8");
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return {
+          changed: [],
+          validation: [
+            check(
+              "install-request-sync",
+              "Saved install request sync",
+              "warn",
+              "Saved install request file was not found; future installer updates will keep the previous Matrix federation setting until the request file is refreshed",
+              {
+                requestFile: requestPath,
+              },
+            ),
+          ],
+        };
+      }
+      throw {
+        code: "REQUEST_UPDATE_FAILED",
+        message: "Failed to read the saved install request file",
+        retryable: false,
+        details: {
+          requestFile: requestPath,
+          error: describeError(error),
+        },
+      };
+    }
+
+    const parsed = parseJsonDocument(raw);
+    const validated = installRequestSchema.safeParse(parsed);
+    if (!validated.success) {
+      return {
+        changed: [],
+        validation: [
+          check(
+            "install-request-sync",
+            "Saved install request sync",
+            "warn",
+            "Saved install request could not be updated because it is invalid",
+            {
+              requestFile: requestPath,
+            },
+          ),
+        ],
+      };
+    }
+
+    const requestPayload = validated.data;
+    const changed: string[] = [];
+    if (input.federationChanged && requestPayload.matrix.federationEnabled !== input.federationEnabled) {
+      requestPayload.matrix.federationEnabled = input.federationEnabled;
+      changed.push("request.matrix.federationEnabled");
+    }
+
+    if (changed.length === 0) {
+      return {
+        changed,
+        validation: [
+          check(
+            "install-request-sync",
+            "Saved install request sync",
+            "pass",
+            "Saved install request already matched the current Matrix federation setting",
+            {
+              requestFile: requestPath,
+            },
+          ),
+        ],
+      };
+    }
+
+    try {
+      await this.writeInstallerJsonFile(requestPath, requestPayload, 0o640);
+    } catch (error) {
+      throw {
+        code: "REQUEST_UPDATE_FAILED",
+        message: "Failed to write the saved install request file",
+        retryable: false,
+        details: {
+          requestFile: requestPath,
+          error: describeError(error),
+        },
+      };
+    }
+
+    return {
+      changed,
+      validation: [
+        check(
+          "install-request-sync",
+          "Saved install request sync",
+          "pass",
+          "Saved install request updated to match the new Matrix federation setting",
+          {
+            requestFile: requestPath,
+          },
+        ),
+      ],
+    };
+  }
+
   private async refreshGatewayAfterRuntimeConfig(runtimeConfig: RuntimeConfig): Promise<void> {
     if (this.shouldPreferSystemGatewayService(runtimeConfig)) {
       const started = await this.ensureSystemGatewayServiceFallback(runtimeConfig);
@@ -4948,6 +5311,7 @@ export class RealInstallerService implements InstallerService {
       accessMode: input.relayEnrollment === undefined ? "direct" as const : "relay" as const,
       homeserverDomain: input.matrixProvision.homeserverDomain,
       federationEnabled: input.matrixProvision.federationEnabled,
+      tlsMode: input.matrixProvision.tlsMode,
       publicBaseUrl: input.matrixProvision.publicBaseUrl,
       adminBaseUrl: input.matrixProvision.adminBaseUrl,
       projectDir: input.matrixProvision.projectDir,
@@ -5286,6 +5650,12 @@ export class RealInstallerService implements InstallerService {
       runtimeConfig.openclawProfile.agents,
     );
     const operatorAllowlist = [runtimeConfig.matrix.operator.userId];
+    const defaultMatrixAgent = managedAgents.find((agent) =>
+      this.usesSharedMatrixBotIdentity(runtimeConfig, agent));
+    const defaultRoomConfig = this.resolveMatrixRoomRuntimeConfig(
+      runtimeConfig,
+      defaultMatrixAgent,
+    );
     const pluginEntries: Record<string, unknown> = {
       matrix: {
         enabled: true,
@@ -5297,6 +5667,21 @@ export class RealInstallerService implements InstallerService {
         homeserver: string;
         userId: string;
         accessToken: string;
+        dm: {
+          policy: "allowlist";
+          allowFrom: string[];
+        };
+        groupPolicy: "allowlist";
+        groups: Record<
+          string,
+          {
+            enabled: true;
+            allow: true;
+            autoReply: boolean;
+            requireMention?: true;
+            users?: string[];
+          }
+        >;
       }
     > = {};
     for (const agent of managedAgents) {
@@ -5306,16 +5691,33 @@ export class RealInstallerService implements InstallerService {
       if (this.usesSharedMatrixBotIdentity(runtimeConfig, agent)) {
         continue;
       }
+      const roomConfig = this.resolveMatrixRoomRuntimeConfig(runtimeConfig, agent);
       matrixAccounts[agent.id] = {
         homeserver: runtimeConfig.matrix.adminBaseUrl,
         userId: agent.matrix.userId,
         accessToken: await this.resolveSecretRef(agent.matrix.accessTokenSecretRef),
+        dm: {
+          policy: "allowlist",
+          allowFrom: operatorAllowlist,
+        },
+        groupPolicy: "allowlist",
+        groups: {
+          [runtimeConfig.matrix.alertRoom.roomId]: roomConfig,
+        },
       };
     }
     matrixAccounts["default"] = {
       homeserver: runtimeConfig.matrix.adminBaseUrl,
       userId: runtimeConfig.matrix.bot.userId,
       accessToken: await this.resolveSecretRef(runtimeConfig.matrix.bot.accessTokenSecretRef),
+      dm: {
+        policy: "allowlist",
+        allowFrom: operatorAllowlist,
+      },
+      groupPolicy: "allowlist",
+      groups: {
+        [runtimeConfig.matrix.alertRoom.roomId]: defaultRoomConfig,
+      },
     };
 
     const runtimePayload = {
@@ -5341,14 +5743,8 @@ export class RealInstallerService implements InstallerService {
             allowFrom: operatorAllowlist,
           },
           groupPolicy: "allowlist" as const,
-          groupAllowFrom: operatorAllowlist,
           groups: {
-            [runtimeConfig.matrix.alertRoom.roomId]: {
-              enabled: true,
-              allow: true,
-              autoReply: true,
-              users: operatorAllowlist,
-            },
+            [runtimeConfig.matrix.alertRoom.roomId]: defaultRoomConfig,
           },
         },
       },

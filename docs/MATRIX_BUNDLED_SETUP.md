@@ -277,7 +277,7 @@ Failure and rollback behavior for partial bundled Matrix installs is defined in 
 
 Relay v1 note:
 
-- federation is intentionally disabled in relay mode
+- relay mode can expose Matrix federation when `matrix.federationEnabled` is enabled
 
 ## Operations and Backup Expectations
 

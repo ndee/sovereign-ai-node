@@ -63,6 +63,7 @@ const buildRuntimeConfig = (secretRef: string): RuntimeConfig => ({
     accessMode: "relay",
     homeserverDomain: "matrix.example.org",
     federationEnabled: false,
+    tlsMode: "auto",
     publicBaseUrl: "https://matrix.example.org",
     adminBaseUrl: "https://matrix.example.org",
     operator: {

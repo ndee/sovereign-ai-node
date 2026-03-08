@@ -1421,7 +1421,6 @@ describe("RealInstallerService", () => {
             enabled?: boolean;
             homeserver?: string;
             userId?: string;
-            groupAllowFrom?: string[];
             groups?: Record<string, { allow?: boolean; users?: string[] }>;
             accounts?: Record<string, { userId?: string; homeserver?: string; accessToken?: string }>;
           };
@@ -1438,9 +1437,6 @@ describe("RealInstallerService", () => {
       expect(openclawConfig.channels?.matrix?.enabled).toBe(true);
       expect(openclawConfig.channels?.matrix?.homeserver).toBe("http://127.0.0.1:8008");
       expect(openclawConfig.channels?.matrix?.userId).toBe("@mail-sentinel:matrix.example.org");
-      expect(openclawConfig.channels?.matrix?.groupAllowFrom).toEqual([
-        "@operator:matrix.example.org",
-      ]);
       expect(openclawConfig.channels?.matrix?.groups?.["!alerts:matrix.example.org"]).toEqual(
         expect.objectContaining({
           allow: true,
@@ -3130,6 +3126,217 @@ describe("RealInstallerService", () => {
     }
   });
 
+  it("reconfigures Matrix federation in relay mode and syncs the saved install request", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+    await writeRuntimeArtifacts(paths);
+    const priorOpenrouterApiKey = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "sk-or-test";
+
+    const relayRuntimeRaw = await readFile(paths.configPath, "utf8");
+    const relayRuntime = JSON.parse(relayRuntimeRaw) as {
+      matrix?: Record<string, unknown>;
+      relay?: Record<string, unknown>;
+    };
+    relayRuntime.matrix = {
+      ...(relayRuntime.matrix ?? {}),
+      accessMode: "relay",
+      homeserverDomain: "relay-node.example.com",
+      publicBaseUrl: "https://relay-node.example.com",
+      federationEnabled: false,
+      tlsMode: "auto",
+    };
+    relayRuntime.relay = {
+      enabled: true,
+      controlUrl: "https://relay.example.com",
+      hostname: "relay-node.example.com",
+      publicBaseUrl: "https://relay-node.example.com",
+      connected: true,
+      serviceName: "sovereign-matrix-relay-tunnel.service",
+      configPath: join(paths.stateDir, "relay", "frpc.toml"),
+      tunnel: {
+        serverAddr: "relay.example.com",
+        serverPort: 7000,
+        tokenSecretRef: "file:/tmp/relay-token",
+        proxyName: "relay-relay-node",
+        type: "http",
+        localIp: "127.0.0.1",
+        localPort: 18080,
+      },
+    };
+    await writeFile(paths.configPath, `${JSON.stringify(relayRuntime, null, 2)}\n`, "utf8");
+
+    const installRequest = buildInstallRequest();
+    installRequest.connectivity = {
+      mode: "relay",
+    };
+    installRequest.relay = {
+      controlUrl: "https://relay.example.com",
+      enrollmentToken: "relay-token",
+    };
+    installRequest.matrix.homeserverDomain = "relay-node.example.com";
+    installRequest.matrix.publicBaseUrl = "https://relay-node.example.com";
+    installRequest.matrix.federationEnabled = false;
+    installRequest.matrix.tlsMode = "auto";
+
+    const requestPath = join(dirname(paths.configPath), "install-request.json");
+    await writeFile(requestPath, `${JSON.stringify(installRequest, null, 2)}\n`, "utf8");
+
+    let gatewayRestartCalls = 0;
+    let provisionedFederationEnabled: boolean | null = null;
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {
+          gatewayRestartCalls += 1;
+        },
+      },
+      mailSentinelRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents add",
+          cronCommand: "openclaw cron add",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async (req) => {
+          provisionedFederationEnabled = req.matrix.federationEnabled ?? null;
+          return {
+            projectDir: join(paths.stateDir, "bundled-matrix", "relay-node-example-com"),
+            composeFilePath: join(
+              paths.stateDir,
+              "bundled-matrix",
+              "relay-node-example-com",
+              "compose.yaml",
+            ),
+            accessMode: "relay",
+            homeserverDomain: req.matrix.homeserverDomain,
+            publicBaseUrl: req.matrix.publicBaseUrl,
+            adminBaseUrl: "http://127.0.0.1:8008",
+            federationEnabled: req.matrix.federationEnabled ?? false,
+            tlsMode: "auto",
+          };
+        },
+        bootstrapAccounts: async () => ({
+          operator: {
+            localpart: "operator",
+            userId: "@operator:relay-node.example.com",
+            passwordSecretRef: `file:${join(paths.secretsDir, "matrix-operator.password")}`,
+            accessToken: "operator-token-updated",
+          },
+          bot: {
+            localpart: "mail-sentinel",
+            userId: "@mail-sentinel:relay-node.example.com",
+            passwordSecretRef: `file:${join(paths.secretsDir, "matrix-bot.password")}`,
+            accessToken: "bot-token-updated",
+          },
+        }),
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://relay-node.example.com",
+          checks: [],
+        }),
+      },
+    });
+
+    try {
+      const result = await service.reconfigureMatrix({
+        matrix: {
+          federationEnabled: true,
+        },
+      });
+
+      expect(provisionedFederationEnabled).toBe(true);
+      expect(result.target).toBe("matrix");
+      expect(result.changed).toEqual(
+        expect.arrayContaining([
+          "matrix.federationEnabled",
+          "request.matrix.federationEnabled",
+        ]),
+      );
+      expect(result.restartRequiredServices).toEqual([
+        "synapse",
+        "reverse-proxy",
+        "openclaw-gateway",
+      ]);
+      expect(gatewayRestartCalls).toBe(1);
+
+      const updatedConfigRaw = await readFile(paths.configPath, "utf8");
+      const updatedConfig = JSON.parse(updatedConfigRaw) as {
+        matrix?: {
+          federationEnabled?: boolean;
+          homeserverDomain?: string;
+          publicBaseUrl?: string;
+          tlsMode?: string;
+        };
+      };
+      expect(updatedConfig.matrix?.federationEnabled).toBe(true);
+      expect(updatedConfig.matrix?.homeserverDomain).toBe("relay-node.example.com");
+      expect(updatedConfig.matrix?.publicBaseUrl).toBe("https://relay-node.example.com");
+      expect(updatedConfig.matrix?.tlsMode).toBe("auto");
+
+      const operatorToken = await readFile(join(paths.secretsDir, "matrix-operator-access-token"), "utf8");
+      const botToken = await readFile(join(paths.secretsDir, "matrix-bot-access-token"), "utf8");
+      expect(operatorToken).toBe("operator-token-updated\n");
+      expect(botToken).toBe("bot-token-updated\n");
+
+      const updatedRequestRaw = await readFile(requestPath, "utf8");
+      const updatedRequest = JSON.parse(updatedRequestRaw) as {
+        matrix?: { federationEnabled?: boolean };
+      };
+      expect(updatedRequest.matrix?.federationEnabled).toBe(true);
+    } finally {
+      if (priorOpenrouterApiKey === undefined) {
+        delete process.env.OPENROUTER_API_KEY;
+      } else {
+        process.env.OPENROUTER_API_KEY = priorOpenrouterApiKey;
+      }
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("provisions Matrix identity for created managed agents and exposes matrixUserId", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {
@@ -3445,7 +3652,46 @@ describe("RealInstallerService", () => {
       expect(instantiated.agent.matrixUserId).toBe("@node-operator:matrix.example.org");
       expect(instantiated.agent.toolInstanceIds).toEqual(["node-operator-cli"]);
       expect((await stat(join(paths.stateDir, "node-operator", "workspace", ".openclaw"))).isDirectory()).toBe(true);
+      const toolsDoc = await readFile(
+        join(paths.stateDir, "node-operator", "workspace", "TOOLS.md"),
+        "utf8",
+      );
+      expect(toolsDoc).toContain(
+        "sovereign-node reconfigure matrix --federation <enabled|disabled> --json",
+      );
       expect(gatewayRestartCalls).toBe(1);
+
+      const openclawConfigRaw = await readFile(
+        join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
+        "utf8",
+      );
+      const openclawConfig = JSON.parse(openclawConfigRaw) as {
+        channels?: {
+          matrix?: {
+            groups?: Record<string, { users?: string[] }>;
+            accounts?: Record<
+              string,
+              {
+                groups?: Record<string, { users?: string[]; requireMention?: boolean; autoReply?: boolean }>;
+              }
+            >;
+          };
+        };
+      };
+      expect(openclawConfig.channels?.matrix?.groups?.["!alerts:matrix.example.org"]?.users).toEqual([
+        "@operator:matrix.example.org",
+      ]);
+      expect(
+        openclawConfig.channels?.matrix?.accounts?.["node-operator"]?.groups?.[
+          "!alerts:matrix.example.org"
+        ],
+      ).toEqual(
+        expect.objectContaining({
+          users: ["@operator:matrix.example.org"],
+          requireMention: true,
+          autoReply: false,
+        }),
+      );
 
       const configRaw = await readFile(paths.configPath, "utf8");
       const config = JSON.parse(configRaw) as {
@@ -3691,7 +3937,14 @@ describe("RealInstallerService", () => {
       const openclawConfig = JSON.parse(openclawConfigRaw) as {
         channels?: {
           matrix?: {
-            accounts?: Record<string, { userId?: string }>;
+            groups?: Record<string, { users?: string[] }>;
+            accounts?: Record<
+              string,
+              {
+                userId?: string;
+                groups?: Record<string, { users?: string[] }>;
+              }
+            >;
           };
         };
       };
@@ -3699,6 +3952,10 @@ describe("RealInstallerService", () => {
       expect(openclawConfig.channels?.matrix?.accounts?.default?.userId).toBe(
         "@bitcoin-skill-match:matrix.example.org",
       );
+      expect(openclawConfig.channels?.matrix?.groups?.["!alerts:matrix.example.org"]?.users).toBeUndefined();
+      expect(
+        openclawConfig.channels?.matrix?.accounts?.default?.groups?.["!alerts:matrix.example.org"]?.users,
+      ).toBeUndefined();
       expect(commandCalls).toContain("openclaw agents bind --agent bitcoin-skill-match --bind matrix");
       expect(commandCalls).not.toContain(
         "openclaw agents bind --agent bitcoin-skill-match --bind matrix:bitcoin-skill-match",

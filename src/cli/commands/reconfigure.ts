@@ -11,6 +11,11 @@ type ReconfigureOpenrouterOptions = {
   json?: boolean;
 };
 
+type ReconfigureMatrixOptions = {
+  federation?: string;
+  json?: boolean;
+};
+
 export const registerReconfigureCommand = (
   program: Command,
   app: AppContainer,
@@ -45,21 +50,19 @@ export const registerReconfigureCommand = (
 
   reconfigure
     .command("matrix")
-    .description("Reconfigure Matrix settings (scaffold)")
+    .description("Reconfigure Matrix federation settings")
+    .option("--federation <state>", "Set federation to enabled or disabled")
     .option("--json", "Emit JSON output")
-    .action(async (opts: { json?: boolean }) => {
+    .action(async (opts: ReconfigureMatrixOptions) => {
       const command = "reconfigure matrix";
       try {
+        const normalizedFederation = opts.federation?.trim().toLowerCase();
+        if (normalizedFederation !== "enabled" && normalizedFederation !== "disabled") {
+          throw new Error("Provide --federation enabled or --federation disabled");
+        }
         const result = await app.installerService.reconfigureMatrix({
           matrix: {
-            publicBaseUrl: "https://matrix.example.org",
-          },
-          bots: {
-            config: {
-              "mail-sentinel": {
-                e2eeAlertRoom: false,
-              },
-            },
+            federationEnabled: normalizedFederation === "enabled",
           },
         });
         writeCliSuccess(command, result, reconfigureResultSchema, Boolean(opts.json));

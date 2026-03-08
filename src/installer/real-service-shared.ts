@@ -108,6 +108,7 @@ export type RuntimeConfig = {
     accessMode: "direct" | "relay";
     homeserverDomain: string;
     federationEnabled: boolean;
+    tlsMode: "auto" | "internal" | "local-dev";
     publicBaseUrl: string;
     adminBaseUrl: string;
     projectDir?: string;
@@ -214,6 +215,20 @@ const parseJsonDocument = (raw: string): unknown => {
       return raw;
     }
   }
+};
+
+const parseMatrixTlsMode = (
+  value: unknown,
+  accessMode: RuntimeConfig["matrix"]["accessMode"],
+  publicBaseUrl: string,
+): RuntimeConfig["matrix"]["tlsMode"] => {
+  if (value === "auto" || value === "internal" || value === "local-dev") {
+    return value;
+  }
+  if (typeof publicBaseUrl === "string" && publicBaseUrl.startsWith("http://")) {
+    return "local-dev";
+  }
+  return accessMode === "relay" ? "auto" : "auto";
 };
 
 const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
@@ -641,6 +656,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
       homeserverDomain,
       federationEnabled:
         typeof matrix.federationEnabled === "boolean" ? matrix.federationEnabled : false,
+      tlsMode: parseMatrixTlsMode(matrix.tlsMode, accessMode, matrix.publicBaseUrl),
       publicBaseUrl: matrix.publicBaseUrl,
       adminBaseUrl,
       ...(projectDir === undefined ? {} : { projectDir }),

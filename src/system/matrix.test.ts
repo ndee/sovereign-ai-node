@@ -420,23 +420,28 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       };
       req.matrix.homeserverDomain = "node-abc.relay.example.com";
       req.matrix.publicBaseUrl = "https://node-abc.relay.example.com";
-      req.matrix.federationEnabled = false;
+      req.matrix.federationEnabled = true;
       req.matrix.tlsMode = "auto";
 
       const result = await provisioner.provision(req);
 
       expect(result.accessMode).toBe("relay");
+      expect(result.federationEnabled).toBe(true);
       const composeText = await readFile(result.composeFilePath, "utf8");
       expect(composeText).toContain("onboarding-api:");
       expect(composeText).toContain('"127.0.0.1:18080:80"');
       expect(composeText).not.toContain('"80:80"');
       expect(composeText).not.toContain(':443"');
+      const envText = await readFile(join(result.projectDir, ".env"), "utf8");
+      expect(envText).toContain("MATRIX_FEDERATION_ENABLED=true");
 
       const caddyText = await readFile(join(result.projectDir, "reverse-proxy", "Caddyfile"), "utf8");
       expect(caddyText).toContain(":80 {");
       expect(caddyText).not.toContain("tls internal");
       expect(caddyText).not.toContain("/downloads/caddy-root-ca.crt");
       expect(caddyText).toContain("@onboardApi path /onboard/api /onboard/api/*");
+      const homeserverText = await readFile(join(result.projectDir, "synapse", "homeserver.yaml"), "utf8");
+      expect(homeserverText).not.toContain("federation_domain_whitelist: []");
 
       const onboardPage = await readFile(
         join(result.projectDir, "well-known", "onboard", "index.html"),
