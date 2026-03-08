@@ -1492,7 +1492,9 @@ describe("RealInstallerService", () => {
               userId?: string;
               homeserver?: string;
               accessToken?: string;
-              dm?: { enabled?: boolean };
+              groupPolicy?: string;
+              groupAllowFrom?: string[];
+              dm?: { enabled?: boolean; policy?: string; allowFrom?: string[] };
               groups?: Record<string, { autoReply?: boolean; requireMention?: boolean }>;
             }>;
           };
@@ -1525,7 +1527,15 @@ describe("RealInstallerService", () => {
       expect(openclawConfig.channels?.matrix?.accounts?.["mail-sentinel"]?.userId).toBe(
         "@mail-sentinel:matrix.example.org",
       );
-      expect(openclawConfig.channels?.matrix?.accounts?.["mail-sentinel"]?.dm?.enabled).toBe(true);
+      expect(openclawConfig.channels?.matrix?.accounts?.["mail-sentinel"]?.dm).toEqual({
+        enabled: true,
+        policy: "allowlist",
+        allowFrom: ["@operator:matrix.example.org"],
+      });
+      expect(openclawConfig.channels?.matrix?.accounts?.["mail-sentinel"]?.groupPolicy).toBe("allowlist");
+      expect(openclawConfig.channels?.matrix?.accounts?.["mail-sentinel"]?.groupAllowFrom).toEqual([
+        "@operator:matrix.example.org",
+      ]);
       expect(
         openclawConfig.channels?.matrix?.accounts?.["mail-sentinel"]?.groups?.["!alerts:matrix.example.org"],
       ).toEqual(
@@ -4250,7 +4260,9 @@ describe("RealInstallerService", () => {
             defaultAccount?: string;
             accounts?: Record<string, {
               userId?: string;
-              dm?: { enabled?: boolean };
+              groupPolicy?: string;
+              groupAllowFrom?: string[];
+              dm?: { enabled?: boolean; policy?: string; allowFrom?: string[] };
               groups?: Record<string, { autoReply?: boolean; requireMention?: boolean }>;
             }>;
           };
@@ -4267,7 +4279,11 @@ describe("RealInstallerService", () => {
           userId: "@bitcoin-skill-match:matrix.example.org",
           dm: {
             enabled: true,
+            policy: "allowlist",
+            allowFrom: ["@operator:matrix.example.org"],
           },
+          groupPolicy: "allowlist",
+          groupAllowFrom: ["@operator:matrix.example.org"],
         }),
       );
       expect(
@@ -4283,7 +4299,11 @@ describe("RealInstallerService", () => {
           userId: "@node-operator:matrix.example.org",
           dm: {
             enabled: true,
+            policy: "allowlist",
+            allowFrom: ["@operator:matrix.example.org"],
           },
+          groupPolicy: "allowlist",
+          groupAllowFrom: ["@operator:matrix.example.org"],
         }),
       );
       expect(
