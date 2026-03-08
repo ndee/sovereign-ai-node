@@ -2125,6 +2125,8 @@ export class RealInstallerService implements InstallerService {
     runtimeConfig: RuntimeConfig;
   }): Promise<void> {
     await mkdir(input.workspace, { recursive: true });
+    const openclawWorkspaceStateDir = join(input.workspace, ".openclaw");
+    await mkdir(openclawWorkspaceStateDir, { recursive: true });
     const agent = input.runtimeConfig.openclawProfile.agents.find((entry) => entry.id === input.id);
     if (agent?.templateRef !== undefined) {
       const template = await this.resolveInstalledAgentTemplate(input.runtimeConfig, agent.templateRef);
@@ -2139,7 +2141,15 @@ export class RealInstallerService implements InstallerService {
       const readme = buildManagedAgentWorkspaceReadme(input.id);
       await writeFile(join(input.workspace, "README.md"), `${readme}\n`, "utf8");
     }
+    await this.applyRuntimeOwnership(openclawWorkspaceStateDir);
     await this.applyRuntimeOwnership(input.workspace);
+  }
+
+  private usesSharedMatrixBotIdentity(
+    runtimeConfig: RuntimeConfig,
+    agent: RuntimeConfig["openclawProfile"]["agents"][number],
+  ): boolean {
+    return agent.matrix?.userId === runtimeConfig.matrix.bot.userId;
   }
 
   private async ensureManagedAgentMatrixIdentity(
@@ -4185,24 +4195,33 @@ export class RealInstallerService implements InstallerService {
       });
       await this.runOpenClawCommandAlternatives({
         label: `${agent.id}-matrix-bind`,
-        commands: [
-          [
-            "agents",
-            "bind",
-            "--agent",
-            agent.id,
-            "--bind",
-            `matrix:${agent.id}`,
-          ],
-          [
-            "agents",
-            "bind",
-            "--agent",
-            agent.id,
-            "--bind",
-            "matrix",
-          ],
-        ],
+        commands: this.usesSharedMatrixBotIdentity(runtimeConfig, agent)
+          ? [[
+              "agents",
+              "bind",
+              "--agent",
+              agent.id,
+              "--bind",
+              "matrix",
+            ]]
+          : [
+              [
+                "agents",
+                "bind",
+                "--agent",
+                agent.id,
+                "--bind",
+                `matrix:${agent.id}`,
+              ],
+              [
+                "agents",
+                "bind",
+                "--agent",
+                agent.id,
+                "--bind",
+                "matrix",
+              ],
+            ],
         allowAlreadyExists: true,
       });
       for (const pattern of this.listAgentExecAllowlistPatterns(
@@ -5282,6 +5301,9 @@ export class RealInstallerService implements InstallerService {
     > = {};
     for (const agent of managedAgents) {
       if (agent.matrix === undefined || agent.matrix.accessTokenSecretRef === undefined) {
+        continue;
+      }
+      if (this.usesSharedMatrixBotIdentity(runtimeConfig, agent)) {
         continue;
       }
       matrixAccounts[agent.id] = {

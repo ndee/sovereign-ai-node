@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import type { LoadedBotPackage } from "../bots/catalog.js";
 import type { InstallRequest } from "../contracts/index.js";
 import { createLogger } from "../logging/logger.js";
 import type { SovereignPaths } from "../config/paths.js";
@@ -237,6 +238,97 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
     ],
   });
 };
+
+const buildTestLoadedBotPackage = (input: {
+  id: string;
+  displayName: string;
+  description: string;
+  matrixMode: "dedicated-account" | "service-account";
+  helloMessage?: string;
+}): LoadedBotPackage => ({
+  manifest: {
+    kind: "sovereign-bot-package",
+    id: input.id,
+    version: "1.0.0",
+    displayName: input.displayName,
+    description: input.description,
+    defaultInstall: false,
+    ...(input.helloMessage === undefined ? {} : { helloMessage: input.helloMessage }),
+    matrixIdentity: {
+      mode: input.matrixMode,
+      localpartPrefix: input.id,
+    },
+    configDefaults: {},
+    toolInstances: [],
+    openclaw: {},
+    agentTemplate: {
+      id: input.id,
+      version: "1.0.0",
+      description: input.description,
+      matrix: {
+        localpartPrefix: input.id,
+      },
+      requiredToolTemplates: [],
+      optionalToolTemplates: [],
+      workspaceFiles: [
+        {
+          path: "README.md",
+          source: "workspace/README.md",
+        },
+        {
+          path: "AGENTS.md",
+          source: "workspace/AGENTS.md",
+        },
+        {
+          path: "TOOLS.md",
+          source: "workspace/TOOLS.md",
+        },
+        {
+          path: `skills/${input.id}-core/SKILL.md`,
+          source: `workspace/skills/${input.id}-core/SKILL.md`,
+        },
+      ],
+    },
+  },
+  template: {
+    kind: "sovereign-agent-template",
+    id: input.id,
+    version: "1.0.0",
+    description: input.description,
+    matrix: {
+      localpartPrefix: input.id,
+    },
+    requiredToolTemplates: [],
+    optionalToolTemplates: [],
+    workspaceFiles: [
+      {
+        path: "README.md",
+        content: `# ${input.displayName}\n`,
+      },
+      {
+        path: "AGENTS.md",
+        content: `# ${input.id}\n`,
+      },
+      {
+        path: "TOOLS.md",
+        content: "{{TOOL_SECTION}}\n",
+      },
+      {
+        path: `skills/${input.id}-core/SKILL.md`,
+        content: `# ${input.displayName}\n`,
+      },
+    ],
+    signature: {
+      algorithm: "ed25519",
+      keyId: "repo:sovereign-ai-bots",
+      value: "filesystem-trust",
+    },
+  },
+  templateRef: `${input.id}@1.0.0`,
+  keyId: "repo:sovereign-ai-bots",
+  manifestSha256: `test-sha-${input.id}`,
+  rootDir: join("/tmp", "sovereign-bot-tests", input.id),
+});
 
 beforeAll(async () => {
   testBotRepoDir = await mkdtemp(join(tmpdir(), "sovereign-node-bot-repo-test-"));
@@ -1355,9 +1447,9 @@ describe("RealInstallerService", () => {
           users: ["@operator:matrix.example.org"],
         }),
       );
-      expect(openclawConfig.channels?.matrix?.accounts?.["mail-sentinel"]?.userId).toBe(
-        "@mail-sentinel:matrix.example.org",
-      );
+      expect(Object.keys(openclawConfig.channels?.matrix?.accounts ?? {}).sort()).toEqual([
+        "default",
+      ]);
       expect(openclawConfig.channels?.matrix?.accounts?.default?.userId).toBe(
         "@mail-sentinel:matrix.example.org",
       );
@@ -3166,6 +3258,7 @@ describe("RealInstallerService", () => {
       expect(created.agent.id).toBe("ops-helper");
       expect(created.agent.workspace).toBe(join(paths.stateDir, "ops-helper", "workspace"));
       expect(created.agent.matrixUserId).toBe("@ops-helper:matrix.example.org");
+      expect((await stat(join(paths.stateDir, "ops-helper", "workspace", ".openclaw"))).isDirectory()).toBe(true);
       expect(gatewayRestartCalls).toBe(1);
 
       const listed = await service.listManagedAgents();
@@ -3351,6 +3444,7 @@ describe("RealInstallerService", () => {
       expect(instantiated.agent.workspace).toBe(join(paths.stateDir, "node-operator", "workspace"));
       expect(instantiated.agent.matrixUserId).toBe("@node-operator:matrix.example.org");
       expect(instantiated.agent.toolInstanceIds).toEqual(["node-operator-cli"]);
+      expect((await stat(join(paths.stateDir, "node-operator", "workspace", ".openclaw"))).isDirectory()).toBe(true);
       expect(gatewayRestartCalls).toBe(1);
 
       const configRaw = await readFile(paths.configPath, "utf8");
@@ -3382,6 +3476,235 @@ describe("RealInstallerService", () => {
       expect(fetchCalls.some((url) => url.endsWith("/_matrix/client/v3/login"))).toBe(true);
       expect(fetchCalls.some((url) => url.endsWith("/invite"))).toBe(true);
       expect(fetchCalls.some((url) => url.endsWith("/join"))).toBe(true);
+    } finally {
+      if (priorOpenrouterApiKey === undefined) {
+        delete process.env.OPENROUTER_API_KEY;
+      } else {
+        process.env.OPENROUTER_API_KEY = priorOpenrouterApiKey;
+      }
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("deduplicates shared service-account Matrix bindings for managed repo bots", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+    const botPackage = buildTestLoadedBotPackage({
+      id: "bitcoin-skill-match",
+      displayName: "Bitcoin Skill Match",
+      description: "Matrix-based community matchmaker for a local Bitcoin community.",
+      matrixMode: "service-account",
+      helloMessage: "Hello from Bitcoin Skill Match.",
+    });
+    const priorOpenrouterApiKey = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "sk-or-test";
+
+    const commandCalls: string[] = [];
+    let sentMessageBody = "";
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async (opts) => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: opts.version,
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "bitcoin-skill-match",
+          workspaceDir: join(paths.stateDir, "bitcoin-skill-match", "workspace"),
+          agentCommand: "openclaw agents upsert --id bitcoin-skill-match",
+        }),
+      },
+      botCatalog: {
+        listPackages: async () => [botPackage],
+        getPackage: async (id) => {
+          if (id !== "bitcoin-skill-match") {
+            throw new Error(`unexpected bot package lookup: ${id}`);
+          }
+          return botPackage;
+        },
+        getDefaultSelectedIds: async () => [],
+        findPackageByTemplateRef: async (ref) => ref === botPackage.templateRef ? botPackage : null,
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async (req) => ({
+          projectDir: join(tempRoot, "matrix"),
+          composeFilePath: join(tempRoot, "matrix", "compose.yaml"),
+          accessMode: "direct",
+          homeserverDomain: req.matrix.homeserverDomain,
+          publicBaseUrl: req.matrix.publicBaseUrl,
+          adminBaseUrl: "http://127.0.0.1:8008",
+          federationEnabled: req.matrix.federationEnabled ?? false,
+          tlsMode: "local-dev",
+        }),
+        bootstrapAccounts: async () => ({
+          operator: {
+            localpart: "operator",
+            userId: "@operator:matrix.example.org",
+            passwordSecretRef: "file:/tmp/operator.password",
+            accessToken: "operator-token",
+          },
+          bot: {
+            localpart: "bitcoin-skill-match",
+            userId: "@bitcoin-skill-match:matrix.example.org",
+            passwordSecretRef: "file:/tmp/bitcoin-skill-match.password",
+            accessToken: "bot-token",
+          },
+        }),
+        bootstrapRoom: async () => ({
+          roomId: "!alerts:matrix.example.org",
+          roomName: "Sovereign Alerts",
+        }),
+        test: async (req) => ({
+          ok: true,
+          homeserverUrl: req.publicBaseUrl,
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async (input): Promise<ExecResult> => {
+          const serialized = [input.command, ...(input.args ?? [])].join(" ");
+          commandCalls.push(serialized);
+
+          if (serialized === "openclaw health") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw gateway status") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "Service: systemd\nState: running",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw agents list") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "bitcoin-skill-match",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw cron list") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw plugins enable matrix") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "enabled",
+              stderr: "",
+            };
+          }
+          if (serialized.startsWith("openclaw agents ")) {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+          return {
+            command: serialized,
+            exitCode: 1,
+            stdout: "",
+            stderr: "unexpected command",
+          };
+        },
+      },
+      fetchImpl: async (url, init) => {
+        if (url.includes("/joined_members")) {
+          return new Response(JSON.stringify({ joined: {} }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (url.includes("/send/m.room.message/")) {
+          sentMessageBody = typeof init?.body === "string" ? init.body : "";
+          return new Response(JSON.stringify({ event_id: "$evt1" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+
+    try {
+      const req = buildInstallRequest();
+      req.bots = {
+        selected: ["bitcoin-skill-match"],
+      };
+
+      const started = await service.startInstall(req);
+      expect(started.job.state).toBe("succeeded");
+
+      const openclawConfigRaw = await readFile(
+        join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
+        "utf8",
+      );
+      const openclawConfig = JSON.parse(openclawConfigRaw) as {
+        channels?: {
+          matrix?: {
+            accounts?: Record<string, { userId?: string }>;
+          };
+        };
+      };
+      expect(Object.keys(openclawConfig.channels?.matrix?.accounts ?? {}).sort()).toEqual(["default"]);
+      expect(openclawConfig.channels?.matrix?.accounts?.default?.userId).toBe(
+        "@bitcoin-skill-match:matrix.example.org",
+      );
+      expect(commandCalls).toContain("openclaw agents bind --agent bitcoin-skill-match --bind matrix");
+      expect(commandCalls).not.toContain(
+        "openclaw agents bind --agent bitcoin-skill-match --bind matrix:bitcoin-skill-match",
+      );
+      expect((await stat(join(paths.stateDir, "bitcoin-skill-match", "workspace", ".openclaw"))).isDirectory()).toBe(true);
+      expect(sentMessageBody).toContain("Hello from Bitcoin Skill Match");
     } finally {
       if (priorOpenrouterApiKey === undefined) {
         delete process.env.OPENROUTER_API_KEY;
