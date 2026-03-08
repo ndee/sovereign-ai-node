@@ -75,6 +75,22 @@ Default install behavior:
   - `mail-sentinel-imap` (only when IMAP is configured)
 - Sends hello messages from both core agents to the alert room.
 
+## Optional Bot Packages
+
+Additional installable bot packages can be added from the companion `sovereign-ai-bots` repository without changing runtime code.
+
+Example optional package:
+
+- `bali-compass@1.0.0`
+  - Practical guide for travel, relocation, life, business, and Bitcoin in Bali and wider Indonesia
+
+Useful commands:
+
+- `sovereign-node bots list --json`
+- `sovereign-node bots instantiate bali-compass --json`
+
+For a non-interactive install example that includes the Bali bot, see `deploy/install-request.bali-compass.example.json`.
+
 ## Architecture Overview
 
 ### System Layers

@@ -1,0 +1,52 @@
+{
+  "mode": "bundled_matrix",
+  "connectivity": {
+    "mode": "relay"
+  },
+  "relay": {
+    "controlUrl": "https://relay.sovereign-ai-node.com"
+  },
+  "openclaw": {
+    "manageInstallation": true,
+    "installMethod": "install_sh",
+    "version": "pinned-by-sovereign",
+    "skipIfCompatibleInstalled": true,
+    "forceReinstall": false,
+    "runOnboard": false
+  },
+  "openrouter": {
+    "model": "openai/gpt-5-nano",
+    "secretRef": "file:/etc/sovereign-node/secrets/openrouter-api-key"
+  },
+  "matrix": {
+    "homeserverDomain": "relay-pending.invalid",
+    "publicBaseUrl": "https://relay-pending.invalid",
+    "federationEnabled": false,
+    "tlsMode": "auto",
+    "alertRoomName": "Sovereign Alerts"
+  },
+  "operator": {
+    "username": "operator"
+  },
+  "bots": {
+    "selected": [
+      "mail-sentinel",
+      "bali-compass"
+    ],
+    "config": {
+      "mail-sentinel": {
+        "pollInterval": "5m",
+        "lookbackWindow": "15m",
+        "e2eeAlertRoom": false
+      },
+      "bali-compass": {
+        "focusRegion": "Bali",
+        "planningMode": "practical-checklists",
+        "regulatoryWarnings": true
+      }
+    }
+  },
+  "advanced": {
+    "nonInteractive": true
+  }
+}
