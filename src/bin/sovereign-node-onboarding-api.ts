@@ -129,7 +129,7 @@ const main = async (): Promise<void> => {
         return;
       }
 
-      const secretPath = resolveAllowedSecretPath(outcome.state.operatorPasswordSecretRef);
+      const secretPath = resolveAllowedSecretPath(outcome.state.passwordSecretRef);
       const password = (await readFile(secretPath, "utf8")).trim();
       if (password.length === 0) {
         throw new Error("Resolved password secret file is empty");
