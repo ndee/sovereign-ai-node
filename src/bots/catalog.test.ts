@@ -35,6 +35,16 @@ const writeBotPackage = async (rootDir: string, input: {
   id: string;
   displayName: string;
   defaultInstall: boolean;
+  matrixRouting?: {
+    defaultAccount?: boolean;
+    dm?: {
+      enabled?: boolean;
+    };
+    alertRoom?: {
+      autoReply?: boolean;
+      requireMention?: boolean;
+    };
+  };
 }): Promise<void> => {
   const packageDir = join(rootDir, "bots", input.id);
   await mkdir(join(packageDir, "workspace"), { recursive: true });
@@ -53,6 +63,7 @@ const writeBotPackage = async (rootDir: string, input: {
         mode: "service-account",
         localpartPrefix: input.id,
       },
+      ...(input.matrixRouting === undefined ? {} : { matrixRouting: input.matrixRouting }),
       configDefaults: {},
       toolInstances: [],
       openclaw: {},
@@ -109,6 +120,7 @@ describe("FilesystemBotCatalog", () => {
 
     expect(packages.map((entry) => entry.manifest.id)).toEqual(["mail-sentinel", "node-operator"]);
     expect(packages[0]?.templateRef).toBe("mail-sentinel@1.0.0");
+    expect(packages[0]?.manifest.matrixRouting).toBeUndefined();
     expect(packages[0]?.template.workspaceFiles).toEqual([
       {
         path: "README.md",
@@ -152,6 +164,16 @@ describe("FilesystemBotCatalog", () => {
       id: "bitcoin-skill-match",
       displayName: "Bitcoin Skill Match",
       defaultInstall: false,
+      matrixRouting: {
+        defaultAccount: true,
+        dm: {
+          enabled: true,
+        },
+        alertRoom: {
+          autoReply: true,
+          requireMention: false,
+        },
+      },
     });
     await writeBotPackage(tempRoot, {
       id: "mail-sentinel",
@@ -171,6 +193,16 @@ describe("FilesystemBotCatalog", () => {
       "bitcoin-skill-match",
       "mail-sentinel",
     ]);
+    expect(packages[0]?.manifest.matrixRouting).toEqual({
+      defaultAccount: true,
+      dm: {
+        enabled: true,
+      },
+      alertRoom: {
+        autoReply: true,
+        requireMention: false,
+      },
+    });
     await expect(catalog.getDefaultSelectedIds()).resolves.toEqual(["mail-sentinel"]);
   });
 

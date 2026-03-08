@@ -344,6 +344,43 @@ export class RealInstallerService implements InstallerService {
       ?.manifest.matrixIdentity.localpartPrefix;
   }
 
+  private resolvePreferredDedicatedMatrixBot(packages: LoadedBotPackage[]): LoadedBotPackage | undefined {
+    return packages.find((entry) =>
+      entry.manifest.matrixIdentity.mode === "dedicated-account"
+      && entry.manifest.matrixRouting?.defaultAccount === true)
+      ?? packages.find((entry) => entry.manifest.matrixIdentity.mode === "dedicated-account");
+  }
+
+  private resolveBootstrapMatrixBotLocalpart(packages: LoadedBotPackage[]): string | undefined {
+    return this.resolveSharedServiceBotLocalpart(packages)
+      ?? this.resolvePreferredDedicatedMatrixBot(packages)?.manifest.matrixIdentity.localpartPrefix;
+  }
+
+  private resolveBotMatrixRouting(manifest: LoadedBotPackage["manifest"] | undefined): {
+    defaultAccount: boolean;
+    dmEnabled: boolean;
+    alertRoom: {
+      autoReply: boolean;
+      requireMention: boolean;
+    };
+  } {
+    const defaultAutoReply = true;
+    const configuredAutoReply = manifest?.matrixRouting?.alertRoom?.autoReply;
+    const autoReply = configuredAutoReply ?? defaultAutoReply;
+    const configuredRequireMention = manifest?.matrixRouting?.alertRoom?.requireMention;
+
+    return {
+      defaultAccount: manifest?.matrixRouting?.defaultAccount === true,
+      dmEnabled: manifest?.matrixRouting?.dm?.enabled ?? true,
+      alertRoom: {
+        autoReply,
+        requireMention:
+          configuredRequireMention
+          ?? (autoReply ? false : true),
+      },
+    };
+  }
+
   private resolveRequestedBotIds(req: InstallRequest, defaultBotIds: string[]): string[] {
     const selected = req.bots?.selected
       ?.map((entry: string) => entry.trim())
@@ -2145,13 +2182,6 @@ export class RealInstallerService implements InstallerService {
     await this.applyRuntimeOwnership(input.workspace);
   }
 
-  private usesSharedMatrixBotIdentity(
-    runtimeConfig: RuntimeConfig,
-    agent: RuntimeConfig["openclawProfile"]["agents"][number],
-  ): boolean {
-    return agent.matrix?.userId === runtimeConfig.matrix.bot.userId;
-  }
-
   private async ensureManagedAgentMatrixIdentity(
     runtimeConfig: RuntimeConfig,
     agentId: string,
@@ -3204,20 +3234,17 @@ export class RealInstallerService implements InstallerService {
             stepState.selectedBots = (await this.resolveRequestedBots(stepState.effectiveRequest ?? req))
               .packages;
           }
-          const sharedServiceBotLocalpart = this.resolveSharedServiceBotLocalpart(
+          const bootstrapBotLocalpart = this.resolveBootstrapMatrixBotLocalpart(
             stepState.selectedBots,
           );
-          if (sharedServiceBotLocalpart !== undefined) {
-            stepState.sharedServiceBotLocalpart = sharedServiceBotLocalpart;
-          }
           try {
             stepState.matrixAccounts = await this.matrixProvisioner.bootstrapAccounts(
               stepState.effectiveRequest ?? req,
               stepState.matrixProvision,
               {
-                ...(sharedServiceBotLocalpart === undefined
+                ...(bootstrapBotLocalpart === undefined
                   ? {}
-                  : { botLocalpart: sharedServiceBotLocalpart }),
+                  : { botLocalpart: bootstrapBotLocalpart }),
               },
             );
           } catch (error) {
@@ -3225,9 +3252,9 @@ export class RealInstallerService implements InstallerService {
               req: stepState.effectiveRequest ?? req,
               provision: stepState.matrixProvision,
               error,
-              ...(sharedServiceBotLocalpart === undefined
+              ...(bootstrapBotLocalpart === undefined
                 ? {}
-                : { botLocalpart: sharedServiceBotLocalpart }),
+                : { botLocalpart: bootstrapBotLocalpart }),
             });
             if (reusedAccounts !== null) {
               stepState.matrixAccounts = reusedAccounts;
@@ -3238,9 +3265,9 @@ export class RealInstallerService implements InstallerService {
               req: stepState.effectiveRequest ?? req,
               provision: stepState.matrixProvision,
               error,
-              ...(sharedServiceBotLocalpart === undefined
+              ...(bootstrapBotLocalpart === undefined
                 ? {}
-                : { botLocalpart: sharedServiceBotLocalpart }),
+                : { botLocalpart: bootstrapBotLocalpart }),
             });
             if (resetAccounts !== null) {
               stepState.matrixAccounts = resetAccounts;
@@ -4181,6 +4208,10 @@ export class RealInstallerService implements InstallerService {
         );
         continue;
       }
+      const botPackage = await this.findBotPackageByTemplateRef(agent.templateRef);
+      const usesSharedServiceIdentity =
+        agent.matrix.userId === runtimeConfig.matrix.bot.userId
+        && botPackage?.manifest.matrixIdentity.mode === "service-account";
       await this.runOpenClawCommandAlternatives({
         label: `${agent.id}-agent`,
         commands: [
@@ -4195,7 +4226,7 @@ export class RealInstallerService implements InstallerService {
       });
       await this.runOpenClawCommandAlternatives({
         label: `${agent.id}-matrix-bind`,
-        commands: this.usesSharedMatrixBotIdentity(runtimeConfig, agent)
+        commands: usesSharedServiceIdentity
           ? [[
               "agents",
               "bind",
@@ -5286,6 +5317,23 @@ export class RealInstallerService implements InstallerService {
       runtimeConfig.openclawProfile.agents,
     );
     const operatorAllowlist = [runtimeConfig.matrix.operator.userId];
+    const managedAgentPackages = new Map(
+      await Promise.all(
+        managedAgents.map(async (agent) => [
+          agent.id,
+          await this.findBotPackageByTemplateRef(agent.templateRef),
+        ] as const),
+      ),
+    );
+    const hasSharedServiceBot = managedAgents.some((agent) => {
+      const botPackage = managedAgentPackages.get(agent.id);
+      return botPackage?.manifest.matrixIdentity.mode === "service-account";
+    });
+    const preferredDefaultAccountId =
+      this.resolvePreferredDedicatedMatrixBot(
+        Array.from(managedAgentPackages.values())
+          .filter((entry): entry is LoadedBotPackage => entry !== null),
+      )?.manifest.id;
     const pluginEntries: Record<string, unknown> = {
       matrix: {
         enabled: true,
@@ -5297,26 +5345,58 @@ export class RealInstallerService implements InstallerService {
         homeserver: string;
         userId: string;
         accessToken: string;
+        dm?: {
+          enabled: boolean;
+        };
+        groups?: Record<
+          string,
+          {
+            enabled: boolean;
+            allow: boolean;
+            autoReply?: boolean;
+            requireMention?: boolean;
+            users: string[];
+          }
+        >;
       }
     > = {};
     for (const agent of managedAgents) {
       if (agent.matrix === undefined || agent.matrix.accessTokenSecretRef === undefined) {
         continue;
       }
-      if (this.usesSharedMatrixBotIdentity(runtimeConfig, agent)) {
+      const botPackage = managedAgentPackages.get(agent.id);
+      const usesSharedServiceIdentity =
+        agent.matrix.userId === runtimeConfig.matrix.bot.userId
+        && botPackage?.manifest.matrixIdentity.mode === "service-account";
+      if (usesSharedServiceIdentity) {
         continue;
       }
+      const routing = this.resolveBotMatrixRouting(botPackage?.manifest);
       matrixAccounts[agent.id] = {
         homeserver: runtimeConfig.matrix.adminBaseUrl,
         userId: agent.matrix.userId,
         accessToken: await this.resolveSecretRef(agent.matrix.accessTokenSecretRef),
+        dm: {
+          enabled: routing.dmEnabled,
+        },
+        groups: {
+          [runtimeConfig.matrix.alertRoom.roomId]: {
+            enabled: true,
+            allow: true,
+            autoReply: routing.alertRoom.autoReply,
+            requireMention: routing.alertRoom.requireMention,
+            users: operatorAllowlist,
+          },
+        },
       };
     }
-    matrixAccounts["default"] = {
-      homeserver: runtimeConfig.matrix.adminBaseUrl,
-      userId: runtimeConfig.matrix.bot.userId,
-      accessToken: await this.resolveSecretRef(runtimeConfig.matrix.bot.accessTokenSecretRef),
-    };
+    if (hasSharedServiceBot || Object.keys(matrixAccounts).length === 0) {
+      matrixAccounts["default"] = {
+        homeserver: runtimeConfig.matrix.adminBaseUrl,
+        userId: runtimeConfig.matrix.bot.userId,
+        accessToken: await this.resolveSecretRef(runtimeConfig.matrix.bot.accessTokenSecretRef),
+      };
+    }
 
     const runtimePayload = {
       gateway: {
@@ -5331,6 +5411,12 @@ export class RealInstallerService implements InstallerService {
           enabled: true,
           homeserver: runtimeConfig.matrix.adminBaseUrl,
           userId: runtimeConfig.matrix.bot.userId,
+          ...(
+            !hasSharedServiceBot
+            && preferredDefaultAccountId !== undefined
+              ? { defaultAccount: preferredDefaultAccountId }
+              : {}
+          ),
           ...(Object.keys(matrixAccounts).length === 0
             ? {}
             : {
