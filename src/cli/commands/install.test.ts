@@ -108,4 +108,16 @@ describe("resolveInstallRequest", () => {
     expect(req.bots?.selected).toEqual(["mail-sentinel", "node-operator"]);
     expect(req.bots?.config).toBeUndefined();
   });
+
+  it("normalizes an optional relay node name in scaffold mode", async () => {
+    const req = await resolveInstallRequest(
+      {
+        connectivityMode: "relay",
+        relayNodeName: "  My Fancy Node  ",
+      },
+      join(tmpdir(), "missing-install-request.json"),
+    );
+
+    expect(req.relay?.requestedNodeName).toBe("my-fancy-node");
+  });
 });

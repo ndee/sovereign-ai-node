@@ -225,6 +225,7 @@ Bundled Matrix supports:
 - `relay`: managed relay path (no user domain and no port forwarding)
   - default managed relay: `https://relay.sovereign-ai-node.com`
   - no enrollment token prompt on the default managed path
+  - optional node name selection; leave it empty to keep the random generated default
   - custom relays still require an enrollment token
 
 Use `sovereign-node status --json` to confirm the active mode and relay state.

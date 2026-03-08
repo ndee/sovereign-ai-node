@@ -304,7 +304,7 @@ const writeNoCronManagedAgentRuntime = async (
 };
 
 describe("RealInstallerService", () => {
-  it("generates an immutable relay slug during enrollment instead of honoring caller-provided slugs", async () => {
+  it("honors a requested relay node name during enrollment", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {
       configPath: join(tempRoot, "etc", "sovereign-node.json5"),
@@ -420,13 +420,13 @@ describe("RealInstallerService", () => {
 
     try {
       const req = buildInstallRequest() as InstallRequest & {
-        relay: { controlUrl: string; enrollmentToken: string; requestedSlug: string };
+        relay: { controlUrl: string; enrollmentToken: string; requestedNodeName: string };
       };
       req.connectivity = { mode: "relay" };
       req.relay = {
         controlUrl: "https://relay.sovereign-ai-node.com",
         enrollmentToken: "relay-enrollment-token",
-        requestedSlug: "user-picked-name",
+        requestedNodeName: "pilot-node",
       };
       req.imap = undefined;
       req.matrix.homeserverDomain = "relay-pending.invalid";
@@ -441,10 +441,292 @@ describe("RealInstallerService", () => {
         }>;
       }).resolveRelayEnrollment(req, "inst_test_custom_relay");
 
-      expect(capturedRequestedSlug).toMatch(/^[a-z0-9-]{1,63}$/);
-      expect(capturedRequestedSlug).not.toBe("user-picked-name");
+      expect(capturedRequestedSlug).toBe("pilot-node");
       expect(enrollment.hostname).toBe("pilot-node.relay.sovereign-ai-node.com");
       expect(enrollment.publicBaseUrl).toBe("https://pilot-node.relay.sovereign-ai-node.com");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the random relay node name default when none is requested", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+
+    let capturedRequestedSlug = "";
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "pinned-by-sovereign",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      mailSentinelRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: "/tmp/ws",
+          agentCommand: "openclaw agents add mail-sentinel",
+          cronCommand: "openclaw cron add --name mail-sentinel-poll",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async (req) => ({
+          projectDir: "/tmp/fake-matrix",
+          composeFilePath: "/tmp/fake-matrix/compose.yaml",
+          accessMode: "relay",
+          homeserverDomain: req.matrix.homeserverDomain,
+          publicBaseUrl: req.matrix.publicBaseUrl,
+          adminBaseUrl: "http://127.0.0.1:8008",
+          federationEnabled: false,
+          tlsMode: "auto",
+        }),
+        bootstrapAccounts: async () => ({
+          operator: {
+            localpart: "operator",
+            userId: "@operator:pilot-node.relay.sovereign-ai-node.com",
+            passwordSecretRef: "file:/tmp/operator.password",
+            accessToken: "operator-token",
+          },
+          bot: {
+            localpart: "mail-sentinel",
+            userId: "@mail-sentinel:pilot-node.relay.sovereign-ai-node.com",
+            passwordSecretRef: "file:/tmp/mail-sentinel.password",
+            accessToken: "bot-token",
+          },
+        }),
+        bootstrapRoom: async () => ({
+          roomId: "!alerts:pilot-node.relay.sovereign-ai-node.com",
+          roomName: "Sovereign Alerts",
+        }),
+        test: async (req) => ({
+          ok: true,
+          homeserverUrl: req.publicBaseUrl,
+          checks: [],
+        }),
+      },
+      fetchImpl: async (_input, init) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { requestedSlug?: unknown };
+        capturedRequestedSlug =
+          typeof body.requestedSlug === "string" ? body.requestedSlug : "";
+        return new Response(
+          JSON.stringify({
+            result: {
+              assignedHostname: "pilot-node.relay.sovereign-ai-node.com",
+              publicBaseUrl: "https://pilot-node.relay.sovereign-ai-node.com",
+              tunnel: {
+                serverAddr: "relay.sovereign-ai-node.com",
+                serverPort: 7000,
+                token: "relay-token",
+                proxyName: "relay-pilot-node",
+              },
+            },
+          }),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+            },
+          },
+        );
+      },
+    });
+
+    try {
+      const req = buildInstallRequest() as InstallRequest & {
+        relay: { controlUrl: string; enrollmentToken: string };
+      };
+      req.connectivity = { mode: "relay" };
+      req.relay = {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+        enrollmentToken: "relay-enrollment-token",
+      };
+      req.imap = undefined;
+      req.matrix.homeserverDomain = "relay-pending.invalid";
+      req.matrix.publicBaseUrl = "https://relay-pending.invalid";
+      req.matrix.federationEnabled = false;
+      req.matrix.tlsMode = "auto";
+
+      await (service as unknown as {
+        resolveRelayEnrollment: (value: InstallRequest, installationId: string) => Promise<{
+          hostname: string;
+          publicBaseUrl: string;
+        }>;
+      }).resolveRelayEnrollment(req, "inst_test_random_relay_name");
+
+      expect(capturedRequestedSlug).toMatch(/^[a-z0-9-]{1,63}$/);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails when the requested relay node name is unavailable", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "pinned-by-sovereign",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      mailSentinelRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: "/tmp/ws",
+          agentCommand: "openclaw agents add mail-sentinel",
+          cronCommand: "openclaw cron add --name mail-sentinel-poll",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async (req) => ({
+          projectDir: "/tmp/fake-matrix",
+          composeFilePath: "/tmp/fake-matrix/compose.yaml",
+          accessMode: "relay",
+          homeserverDomain: req.matrix.homeserverDomain,
+          publicBaseUrl: req.matrix.publicBaseUrl,
+          adminBaseUrl: "http://127.0.0.1:8008",
+          federationEnabled: false,
+          tlsMode: "auto",
+        }),
+        bootstrapAccounts: async () => ({
+          operator: {
+            localpart: "operator",
+            userId: "@operator:pilot-node.relay.sovereign-ai-node.com",
+            passwordSecretRef: "file:/tmp/operator.password",
+            accessToken: "operator-token",
+          },
+          bot: {
+            localpart: "mail-sentinel",
+            userId: "@mail-sentinel:pilot-node.relay.sovereign-ai-node.com",
+            passwordSecretRef: "file:/tmp/mail-sentinel.password",
+            accessToken: "bot-token",
+          },
+        }),
+        bootstrapRoom: async () => ({
+          roomId: "!alerts:pilot-node.relay.sovereign-ai-node.com",
+          roomName: "Sovereign Alerts",
+        }),
+        test: async (req) => ({
+          ok: true,
+          homeserverUrl: req.publicBaseUrl,
+          checks: [],
+        }),
+      },
+      fetchImpl: async () => new Response(
+        JSON.stringify({
+          result: {
+            assignedHostname: "pilot-node-2.relay.sovereign-ai-node.com",
+            publicBaseUrl: "https://pilot-node-2.relay.sovereign-ai-node.com",
+            tunnel: {
+              serverAddr: "relay.sovereign-ai-node.com",
+              serverPort: 7000,
+              token: "relay-token",
+              proxyName: "relay-pilot-node-2",
+            },
+          },
+        }),
+        {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json",
+          },
+        },
+      ),
+    });
+
+    try {
+      const req = buildInstallRequest() as InstallRequest & {
+        relay: { controlUrl: string; enrollmentToken: string; requestedNodeName: string };
+      };
+      req.connectivity = { mode: "relay" };
+      req.relay = {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+        enrollmentToken: "relay-enrollment-token",
+        requestedNodeName: "pilot-node",
+      };
+      req.imap = undefined;
+      req.matrix.homeserverDomain = "relay-pending.invalid";
+      req.matrix.publicBaseUrl = "https://relay-pending.invalid";
+      req.matrix.federationEnabled = false;
+      req.matrix.tlsMode = "auto";
+
+      await expect((service as unknown as {
+        resolveRelayEnrollment: (value: InstallRequest, installationId: string) => Promise<{
+          hostname: string;
+          publicBaseUrl: string;
+        }>;
+      }).resolveRelayEnrollment(req, "inst_test_taken_relay_name")).rejects.toMatchObject({
+        code: "RELAY_NAME_UNAVAILABLE",
+        details: {
+          requestedNodeName: "pilot-node",
+          assignedHostname: "pilot-node-2.relay.sovereign-ai-node.com",
+        },
+      });
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }

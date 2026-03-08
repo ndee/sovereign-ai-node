@@ -492,6 +492,7 @@ type InstallRequest = {
   relay?: {
     controlUrl: string;
     enrollmentToken?: string;
+    requestedNodeName?: string; // optional slug-style relay node name; default is random
   };
   openclaw?: {
     manageInstallation?: boolean; // default true
@@ -554,7 +555,8 @@ Constraints:
 - `connectivity.mode = "relay"` requires a valid `relay` object
 - `relay.enrollmentToken` is optional only for the default Sovereign managed relay (`https://relay.sovereign-ai-node.com`)
 - custom relays must provide `relay.enrollmentToken`
-- relay hostname selection is installer-managed; user-provided relay slugs are not part of the public contract
+- `relay.requestedNodeName`, when provided, must be a lowercase slug (`a-z`, `0-9`, `-`) and is checked for availability during relay enrollment
+- omitting `relay.requestedNodeName` keeps the default random relay node name behavior
 - `matrix.federationEnabled` defaults to `false`
 - `mailSentinel.e2eeAlertRoom` defaults to `false`
 

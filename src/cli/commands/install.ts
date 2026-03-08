@@ -8,6 +8,7 @@ import {
   startInstallResultSchema,
   type InstallRequest,
 } from "../../contracts/index.js";
+import { normalizeOptionalRelayNodeName } from "../../contracts/relay-node-name.js";
 import { DEFAULT_INSTALL_REQUEST_FILE } from "../../installer/real-service-shared.js";
 import { writeCliError, writeCliSuccess } from "../output.js";
 
@@ -21,6 +22,7 @@ type InstallOptions = {
   connectivityMode?: "direct" | "relay";
   relayControlUrl?: string;
   relayEnrollmentToken?: string;
+  relayNodeName?: string;
   matrixTlsMode?: "auto" | "internal" | "manual" | "local-dev";
   requestFile?: string;
 };
@@ -29,6 +31,7 @@ const DEFAULT_MANAGED_RELAY_CONTROL_URL = "https://relay.sovereign-ai-node.com";
 
 const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => {
   const connectivityMode = opts.connectivityMode ?? "relay";
+  const relayNodeName = normalizeOptionalRelayNodeName(opts.relayNodeName);
   const selectedBots = opts.bot
     ?.map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
@@ -44,6 +47,9 @@ const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => {
             ...(opts.relayEnrollmentToken === undefined
               ? {}
               : { enrollmentToken: opts.relayEnrollmentToken }),
+            ...(relayNodeName === undefined
+              ? {}
+              : { requestedNodeName: relayNodeName }),
           },
         }
       : {}),
@@ -109,6 +115,10 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
     .option(
       "--relay-enrollment-token <token>",
       "Custom relay enrollment token (required for non-Sovereign relays)",
+    )
+    .option(
+      "--relay-node-name <name>",
+      "Optional relay node name (slug-style; defaults to a random generated name)",
     )
     .option(
       "--matrix-tls-mode <mode>",

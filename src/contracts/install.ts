@@ -7,6 +7,7 @@ import {
   idSchema,
   isoTimestampSchema,
 } from "./common.js";
+import { relayNodeNameSchema } from "./relay-node-name.js";
 
 export const jobStateSchema = z.enum([
   "pending",
@@ -106,6 +107,7 @@ export const connectivityInstallInputSchema = z.object({
 export const relayInstallInputSchema = z.object({
   controlUrl: z.string().min(1),
   enrollmentToken: z.string().min(1).optional(),
+  requestedNodeName: relayNodeNameSchema.optional(),
 });
 
 export const matrixInstallInputSchema = z.object({

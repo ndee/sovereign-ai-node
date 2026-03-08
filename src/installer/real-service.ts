@@ -26,6 +26,7 @@ import {
   type TestImapResult,
   type TestMatrixResult,
 } from "../contracts/index.js";
+import { sanitizeRelayNodeName } from "../contracts/relay-node-name.js";
 import type {
   PreflightRequest,
   ReconfigureImapRequest,
@@ -3539,12 +3540,29 @@ export class RealInstallerService implements InstallerService {
     installationId: string,
   ): Promise<RelayEnrollmentResult> {
     const relay = this.getRelayRequest(req);
+    const requestedNodeName = this.resolveRequestedRelayNodeName(relay);
     const reused = await this.tryReuseExistingRelayEnrollment(relay);
     if (reused !== null) {
+      if (
+        requestedNodeName !== undefined
+        && !this.doesRelayHostnameMatchRequestedNodeName(reused.hostname, requestedNodeName)
+      ) {
+        throw {
+          code: "RELAY_NAME_IMMUTABLE",
+          message: "Existing relay node name cannot be changed without a fresh relay enrollment",
+          retryable: false,
+          details: {
+            requestedNodeName,
+            currentHostname: reused.hostname,
+            controlUrl: relay.controlUrl,
+          },
+        };
+      }
       this.logger.info(
         {
           hostname: reused.hostname,
           publicBaseUrl: reused.publicBaseUrl,
+          ...(requestedNodeName === undefined ? {} : { requestedNodeName }),
         },
         "Reusing existing managed relay assignment",
       );
@@ -3572,7 +3590,7 @@ export class RealInstallerService implements InstallerService {
     ).toString();
     let lastFailure: { status?: number; responseText?: string; error?: unknown } | null = null;
     for (let attempt = 1; attempt <= 6; attempt += 1) {
-      const requestedSlug = this.generateManagedRelayRequestedSlug();
+      const requestedSlug = requestedNodeName ?? this.generateManagedRelayRequestedSlug();
       let response: Response;
       try {
         response = await this.fetchImpl(endpoint, {
@@ -3612,6 +3630,19 @@ export class RealInstallerService implements InstallerService {
               || responseTextLower.includes("exists")
             )
           );
+        if (slugConflict && requestedNodeName !== undefined) {
+          throw {
+            code: "RELAY_NAME_UNAVAILABLE",
+            message: `Relay node name "${requestedNodeName}" is not available`,
+            retryable: false,
+            details: {
+              controlUrl: relay.controlUrl,
+              requestedNodeName,
+              status: response.status,
+              body: summarizeText(responseText, 1200),
+            },
+          };
+        }
         if (slugConflict && attempt < 6) {
           this.logger.warn(
             {
@@ -3701,12 +3732,30 @@ export class RealInstallerService implements InstallerService {
         };
       }
 
+      if (
+        requestedNodeName !== undefined
+        && !this.doesRelayHostnameMatchRequestedNodeName(hostname, requestedNodeName)
+      ) {
+        throw {
+          code: "RELAY_NAME_UNAVAILABLE",
+          message: `Relay node name "${requestedNodeName}" is not available`,
+          retryable: false,
+          details: {
+            controlUrl: relay.controlUrl,
+            requestedNodeName,
+            assignedHostname: hostname,
+            response: summarizeText(responseText, 1200),
+          },
+        };
+      }
+
       this.logger.info(
         {
           hostname,
           publicBaseUrl,
           controlUrl: relay.controlUrl,
           requestedSlug,
+          ...(requestedNodeName === undefined ? {} : { requestedNodeName }),
         },
         "Managed relay enrollment succeeded",
       );
@@ -3741,6 +3790,37 @@ export class RealInstallerService implements InstallerService {
         ...(lastFailure?.error === undefined ? {} : { error: describeError(lastFailure.error) }),
       },
     };
+  }
+
+  private resolveRequestedRelayNodeName(
+    relay: NonNullable<InstallRequest["relay"]>,
+  ): string | undefined {
+    const requestedNodeName = relay.requestedNodeName?.trim();
+    if (requestedNodeName === undefined || requestedNodeName.length === 0) {
+      return undefined;
+    }
+    const normalized = sanitizeRelayNodeName(requestedNodeName);
+    if (normalized.length === 0) {
+      throw {
+        code: "RELAY_NAME_INVALID",
+        message: "Relay node names must include at least one lowercase letter or number",
+        retryable: false,
+        details: {
+          controlUrl: relay.controlUrl,
+        },
+      };
+    }
+    return normalized;
+  }
+
+  private doesRelayHostnameMatchRequestedNodeName(
+    hostname: string,
+    requestedNodeName: string,
+  ): boolean {
+    const normalizedHostname = hostname.trim().toLowerCase();
+    const normalizedRequestedNodeName = requestedNodeName.trim().toLowerCase();
+    return normalizedHostname === normalizedRequestedNodeName
+      || normalizedHostname.startsWith(`${normalizedRequestedNodeName}.`);
   }
 
   private generateManagedRelayRequestedSlug(): string {
