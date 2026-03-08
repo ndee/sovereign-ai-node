@@ -1,8 +1,20 @@
+import { access, readFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { createRequire } from "node:module";
+import { join } from "node:path";
+
 import type { Logger } from "../logging/logger.js";
 import type { ExecRunner } from "../system/exec.js";
 
 const OPENCLAW_DETECT_TIMEOUT_MS = 20_000;
 const OPENCLAW_INSTALL_TIMEOUT_MS = 15 * 60_000;
+const OPENCLAW_EXTENSION_REPAIR_TIMEOUT_MS = 5 * 60_000;
+const BUNDLED_OPENCLAW_EXTENSION_REPAIR_TARGETS = [
+  {
+    label: "matrix",
+    relativeDir: join("extensions", "matrix"),
+  },
+] as const;
 
 // OpenClaw 2026.3.2 regressed Matrix plugin loading, so Sovereign stays on the
 // prior known-good release until the upstream fix is adopted.
@@ -79,6 +91,7 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
       && (opts.skipIfCompatibleInstalled ?? true)
       && versionsMatch(detected.version, desiredVersion)
     ) {
+      await this.repairBundledExtensionRuntimeDependencies();
       this.logger.info(
         {
           openclawVersion: detected.version,
@@ -152,11 +165,104 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
       );
     }
 
+    await this.repairBundledExtensionRuntimeDependencies();
+
     return {
       binaryPath: installed.binaryPath,
       version: installed.version,
       installMethod: "install_sh",
     };
+  }
+
+  private async repairBundledExtensionRuntimeDependencies(): Promise<void> {
+    const packageRoot = await resolveInstalledOpenClawPackageRoot(this.execRunner);
+    if (packageRoot === null) {
+      this.logger.warn(
+        "OpenClaw package root could not be resolved after install; skipping bundled extension dependency repair",
+      );
+      return;
+    }
+
+    for (const target of BUNDLED_OPENCLAW_EXTENSION_REPAIR_TARGETS) {
+      const extensionDir = join(packageRoot, target.relativeDir);
+      const repairPlan = await planBundledExtensionDependencyRepair(extensionDir);
+      if (repairPlan === null || repairPlan.missingDependencies.length === 0) {
+        continue;
+      }
+
+      this.logger.warn(
+        {
+          extension: repairPlan.packageName,
+          extensionDir,
+          missingDependencies: repairPlan.missingDependencies.map(
+            (dependency) => dependency.name,
+          ),
+        },
+        "Repairing missing bundled OpenClaw extension runtime dependencies",
+      );
+
+      const installResult = await this.execRunner.run({
+        command: "npm",
+        args: [
+          "install",
+          "--omit=dev",
+          "--no-package-lock",
+          "--no-save",
+          ...repairPlan.missingDependencies.map(
+            (dependency) => `${dependency.name}@${dependency.spec}`,
+          ),
+        ],
+        options: {
+          cwd: extensionDir,
+          timeout: OPENCLAW_EXTENSION_REPAIR_TIMEOUT_MS,
+          env: {
+            CI: "1",
+          },
+        },
+      });
+
+      if (installResult.exitCode !== 0) {
+        throw {
+          code: "OPENCLAW_INSTALL_FAILED",
+          message: `Bundled OpenClaw ${target.label} extension dependency repair failed`,
+          retryable: true,
+          details: {
+            command: installResult.command,
+            exitCode: installResult.exitCode,
+            stderr: truncateText(installResult.stderr, 4000),
+            stdout: truncateText(installResult.stdout, 2000),
+          },
+        };
+      }
+
+      const remainingMissing = await findMissingExtensionDependencies(
+        extensionDir,
+        repairPlan.missingDependencies,
+      );
+      if (remainingMissing.length > 0) {
+        throw {
+          code: "OPENCLAW_INSTALL_FAILED",
+          message: `Bundled OpenClaw ${target.label} extension dependencies are still missing after repair`,
+          retryable: true,
+          details: {
+            extension: repairPlan.packageName,
+            extensionDir,
+            missingDependencies: remainingMissing.map((dependency) => dependency.name),
+          },
+        };
+      }
+
+      this.logger.info(
+        {
+          extension: repairPlan.packageName,
+          extensionDir,
+          repairedDependencies: repairPlan.missingDependencies.map(
+            (dependency) => dependency.name,
+          ),
+        },
+        "Bundled OpenClaw extension runtime dependencies repaired successfully",
+      );
+    }
   }
 }
 
@@ -164,6 +270,21 @@ type InstallShellArgs = {
   version?: string;
   noPrompt: boolean;
   noOnboard: boolean;
+};
+
+type PackageJsonWithDependencies = {
+  name?: string;
+  dependencies?: Record<string, string>;
+};
+
+type ExtensionDependencySpec = {
+  name: string;
+  spec: string;
+};
+
+type BundledExtensionRepairPlan = {
+  packageName: string;
+  missingDependencies: ExtensionDependencySpec[];
 };
 
 const buildInstallShellScript = (args: InstallShellArgs): string => {
@@ -194,6 +315,98 @@ const parseVersionToken = (value: string): string | null => {
   }
   const semverMatch = trimmed.match(/\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b/);
   return semverMatch?.[0] ?? trimmed.split(/\s+/)[0] ?? null;
+};
+
+const resolveInstalledOpenClawPackageRoot = async (
+  execRunner: ExecRunner,
+): Promise<string | null> => {
+  const candidates: string[] = [];
+  const npmRootResult = await execRunner.run({
+    command: "npm",
+    args: ["root", "-g"],
+    options: {
+      timeout: OPENCLAW_DETECT_TIMEOUT_MS,
+      env: {
+        CI: "1",
+      },
+    },
+  });
+  if (npmRootResult.exitCode === 0) {
+    const npmRoot = npmRootResult.stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line.length > 0);
+    if (npmRoot !== undefined) {
+      candidates.push(join(npmRoot, "openclaw"));
+    }
+  }
+  candidates.push("/usr/lib/node_modules/openclaw", "/usr/local/lib/node_modules/openclaw");
+
+  for (const candidate of candidates) {
+    try {
+      await access(join(candidate, "package.json"), fsConstants.R_OK);
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+};
+
+const planBundledExtensionDependencyRepair = async (
+  extensionDir: string,
+): Promise<BundledExtensionRepairPlan | null> => {
+  const packageJsonPath = join(extensionDir, "package.json");
+  try {
+    await access(packageJsonPath, fsConstants.R_OK);
+  } catch {
+    return null;
+  }
+
+  const packageJson = JSON.parse(
+    await readFile(packageJsonPath, "utf8"),
+  ) as PackageJsonWithDependencies;
+  const declaredDependencies = Object.entries(packageJson.dependencies ?? {})
+    .filter(([, spec]) => isInstallableDependencySpec(spec))
+    .map(([name, spec]) => ({ name, spec }));
+
+  if (declaredDependencies.length === 0) {
+    return null;
+  }
+
+  const missingDependencies = await findMissingExtensionDependencies(
+    extensionDir,
+    declaredDependencies,
+  );
+  if (missingDependencies.length === 0) {
+    return null;
+  }
+
+  return {
+    packageName: packageJson.name?.trim() || extensionDir,
+    missingDependencies,
+  };
+};
+
+const findMissingExtensionDependencies = async (
+  extensionDir: string,
+  dependencies: ExtensionDependencySpec[],
+): Promise<ExtensionDependencySpec[]> => {
+  const resolveFromExtension = createRequire(join(extensionDir, "package.json"));
+  return dependencies.filter((dependency) => {
+    try {
+      resolveFromExtension.resolve(dependency.name);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+};
+
+const isInstallableDependencySpec = (spec: string): boolean => {
+  const trimmed = spec.trim();
+  return !trimmed.startsWith("file:") && !trimmed.startsWith("link:") && !trimmed.startsWith("workspace:");
 };
 
 const versionsMatch = (detectedVersion: string, requestedVersion: string): boolean => {
