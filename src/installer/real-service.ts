@@ -2704,6 +2704,7 @@ export class RealInstallerService implements InstallerService {
                     `  command: \`${this.renderSovereignToolCommand(tool.id, "sovereign-node users invite <username> --ttl-minutes <minutes> --json")}\``,
                     `  command: \`${this.renderSovereignToolCommand(tool.id, "sovereign-node users remove <username> --json")}\``,
                     "  note: user invite/remove commands are restricted to direct messages from the configured operator",
+                    "  note: these listed user commands are already the authorized local admin path on this node; do not ask for extra admin tokens or external panel actions",
                   ]
                 : []),
               ...(manifest.id === "imap-readonly"

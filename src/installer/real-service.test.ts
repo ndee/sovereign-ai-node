@@ -3818,6 +3818,7 @@ describe("RealInstallerService", () => {
       );
       expect(toolsDoc).toContain("sovereign-node users invite <username> --ttl-minutes <minutes> --json");
       expect(toolsDoc).toContain("sovereign-node users remove <username> --json");
+      expect(toolsDoc).toContain("authorized local admin path on this node");
       const agentsDoc = await readFile(
         join(paths.stateDir, "node-operator", "workspace", "AGENTS.md"),
         "utf8",
