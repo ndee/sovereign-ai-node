@@ -59,6 +59,18 @@ LEGACY_OPENROUTER_MODEL_DETECTED="0"
 AVAILABLE_BOT_IDS=()
 AVAILABLE_BOT_DISPLAY_NAMES=()
 AVAILABLE_BOT_DEFAULT_INSTALLS=()
+UI_TOTAL_STEPS=0
+UI_CURRENT_STEP=0
+UI_ACTIVE_STEP_LABEL=""
+UI_ACTIVE_STEP_STARTED_AT=0
+UI_STEP_LOG_DIR=""
+UI_PRESERVE_STEP_LOGS="0"
+UI_BAR_WIDTH=28
+UI_FANCY="0"
+INSTALL_COMMAND_OUTPUT=""
+RUNTIME_STATUS_OUTPUT=""
+DOCTOR_REPORT_OUTPUT=""
+declare -a UI_SPINNER_FRAMES=("[    ]" "[=   ]" "[==  ]" "[=== ]" "[ ===]" "[  ==]" "[   =]")
 
 log() {
   printf '[%s] %s\n' "$SCRIPT_NAME" "$*"
@@ -688,6 +700,357 @@ ui_success() {
   else
     ui_print "[ok] $1\n"
   fi
+}
+
+ui_is_fancy() {
+  [[ "$UI_FANCY" == "1" ]]
+}
+
+cleanup_ui_runtime() {
+  if [[ "$UI_PRESERVE_STEP_LOGS" != "1" ]] && [[ -n "$UI_STEP_LOG_DIR" ]] && [[ -d "$UI_STEP_LOG_DIR" ]]; then
+    rm -rf "$UI_STEP_LOG_DIR"
+  fi
+}
+
+ui_setup_runtime() {
+  UI_FANCY="0"
+  if has_tty; then
+    UI_FANCY="1"
+  fi
+  UI_STEP_LOG_DIR="$(mktemp -d /tmp/sovereign-node-installer.XXXXXX)"
+  trap cleanup_ui_runtime EXIT
+}
+
+ui_configure_progress_plan() {
+  UI_TOTAL_STEPS=17
+}
+
+format_duration() {
+  local total_seconds minutes seconds
+  total_seconds="${1:-0}"
+  minutes=$((total_seconds / 60))
+  seconds=$((total_seconds % 60))
+  if [[ "$minutes" -gt 0 ]]; then
+    printf '%dm%02ds' "$minutes" "$seconds"
+  else
+    printf '%ds' "$seconds"
+  fi
+}
+
+ui_progress_percent() {
+  local completed total
+  completed="${1:-0}"
+  total="${2:-0}"
+  if [[ "$total" -le 0 ]]; then
+    printf '0'
+    return 0
+  fi
+  printf '%d' $((completed * 100 / total))
+}
+
+ui_progress_bar() {
+  local completed total active width filled index bar
+  completed="${1:-0}"
+  total="${2:-0}"
+  active="${3:-0}"
+  width="${4:-$UI_BAR_WIDTH}"
+  filled=0
+  bar=""
+
+  if [[ "$total" -gt 0 ]]; then
+    filled=$((completed * width / total))
+  fi
+  if [[ "$filled" -gt "$width" ]]; then
+    filled="$width"
+  fi
+
+  for ((index = 0; index < width; index += 1)); do
+    if [[ "$index" -lt "$filled" ]]; then
+      bar="${bar}="
+    elif [[ "$active" == "1" ]] && [[ "$index" -eq "$filled" ]] && [[ "$filled" -lt "$width" ]]; then
+      bar="${bar}>"
+    else
+      bar="${bar}-"
+    fi
+  done
+
+  printf '%s' "$bar"
+}
+
+ui_step_log_path() {
+  local slug
+  slug="$(
+    printf '%s' "${UI_ACTIVE_STEP_LABEL:-step}" \
+      | tr '[:upper:]' '[:lower:]' \
+      | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
+  )"
+  if [[ -z "$slug" ]]; then
+    slug="step"
+  fi
+  printf '%s/%02d-%s.log' "$UI_STEP_LOG_DIR" "$UI_CURRENT_STEP" "$slug"
+}
+
+ui_preserve_logs() {
+  UI_PRESERVE_STEP_LOGS="1"
+}
+
+ui_show_log_excerpt() {
+  local path
+  path="$1"
+  [[ -f "$path" ]] || return 0
+
+  ui_print "\nRecent output:\n"
+  while IFS= read -r line; do
+    ui_print "  ${line}\n"
+  done < <(tail -n 20 "$path")
+}
+
+ui_render_step_line() {
+  local state label detail frame completed percent bar counter line prefix
+  state="$1"
+  label="$2"
+  detail="${3:-}"
+  frame="${4:-}"
+
+  case "$state" in
+    running)
+      completed=$((UI_CURRENT_STEP - 1))
+      prefix="$frame"
+      if [[ -z "$prefix" ]]; then
+        prefix="[....]"
+      fi
+      ;;
+    success)
+      completed="$UI_CURRENT_STEP"
+      prefix="[ok]"
+      ;;
+    failed)
+      completed=$((UI_CURRENT_STEP - 1))
+      prefix="[!!]"
+      ;;
+    skipped)
+      completed="$UI_CURRENT_STEP"
+      prefix="[--]"
+      ;;
+    *)
+      completed="$UI_CURRENT_STEP"
+      prefix="[--]"
+      ;;
+  esac
+
+  percent="$(ui_progress_percent "$completed" "$UI_TOTAL_STEPS")"
+  bar="$(ui_progress_bar "$completed" "$UI_TOTAL_STEPS" "$( [[ "$state" == "running" ]] && printf '1' || printf '0' )")"
+  counter="$(printf '%02d/%02d' "$UI_CURRENT_STEP" "$UI_TOTAL_STEPS")"
+  line="$(printf '%3s%% |%s| %s %s' "$percent" "$bar" "$counter" "$label")"
+  if [[ -n "$detail" ]]; then
+    line="${line} - ${detail}"
+  fi
+
+  if supports_color; then
+    case "$state" in
+      running)
+        prefix="\033[36m${prefix}\033[0m"
+        ;;
+      success)
+        prefix="\033[32m${prefix}\033[0m"
+        ;;
+      failed)
+        prefix="\033[31m${prefix}\033[0m"
+        ;;
+      skipped)
+        prefix="\033[33m${prefix}\033[0m"
+        ;;
+    esac
+  fi
+
+  if ui_is_fancy; then
+    if [[ "$state" == "running" ]]; then
+      ui_print "\r\033[2K${prefix} ${line}"
+    else
+      ui_print "\r\033[2K${prefix} ${line}\n"
+    fi
+  elif [[ "$state" == "success" ]]; then
+    log "${label}: ${detail:-done}"
+  elif [[ "$state" == "failed" ]]; then
+    log "${label}: ${detail:-failed}"
+  elif [[ "$state" == "skipped" ]]; then
+    log "${label}: ${detail:-skipped}"
+  else
+    log "$label"
+  fi
+}
+
+ui_begin_step() {
+  UI_CURRENT_STEP=$((UI_CURRENT_STEP + 1))
+  UI_ACTIVE_STEP_LABEL="$1"
+  UI_ACTIVE_STEP_STARTED_AT="$SECONDS"
+  ui_render_step_line "running" "$UI_ACTIVE_STEP_LABEL" "starting" "${UI_SPINNER_FRAMES[0]}"
+}
+
+ui_begin_step_static() {
+  UI_CURRENT_STEP=$((UI_CURRENT_STEP + 1))
+  UI_ACTIVE_STEP_LABEL="$1"
+  UI_ACTIVE_STEP_STARTED_AT="$SECONDS"
+  ui_render_step_line "running" "$UI_ACTIVE_STEP_LABEL" "${2:-working}" "${UI_SPINNER_FRAMES[0]}"
+  if ui_is_fancy; then
+    ui_print "\n"
+  fi
+}
+
+ui_update_step() {
+  local detail frame_index frame_count frame
+  detail="${1:-working}"
+  frame_index="${2:-0}"
+  frame_count="${#UI_SPINNER_FRAMES[@]}"
+  frame="${UI_SPINNER_FRAMES[$((frame_index % frame_count))]}"
+  ui_render_step_line "running" "$UI_ACTIVE_STEP_LABEL" "$detail" "$frame"
+}
+
+ui_complete_step() {
+  local detail elapsed formatted
+  detail="${1:-done}"
+  elapsed=$((SECONDS - UI_ACTIVE_STEP_STARTED_AT))
+  formatted="$(format_duration "$elapsed")"
+  ui_render_step_line "success" "$UI_ACTIVE_STEP_LABEL" "${detail} (${formatted})"
+  UI_ACTIVE_STEP_LABEL=""
+  UI_ACTIVE_STEP_STARTED_AT=0
+}
+
+ui_fail_step() {
+  local detail elapsed formatted
+  detail="${1:-failed}"
+  elapsed=$((SECONDS - UI_ACTIVE_STEP_STARTED_AT))
+  formatted="$(format_duration "$elapsed")"
+  ui_render_step_line "failed" "$UI_ACTIVE_STEP_LABEL" "${detail} (${formatted})"
+  UI_ACTIVE_STEP_LABEL=""
+  UI_ACTIVE_STEP_STARTED_AT=0
+}
+
+ui_skip_step() {
+  local label reason
+  label="$1"
+  reason="$2"
+  UI_CURRENT_STEP=$((UI_CURRENT_STEP + 1))
+  ui_render_step_line "skipped" "$label" "$reason"
+}
+
+ui_run_step_captured() {
+  local label log_path step_status frame_index pid
+  label="$1"
+  shift
+
+  if ! ui_is_fancy; then
+    ui_begin_step_static "$label"
+    set +e
+    "$@"
+    step_status=$?
+    set -e
+    if [[ "$step_status" -eq 0 ]]; then
+      ui_complete_step
+      return 0
+    fi
+    ui_fail_step
+    return "$step_status"
+  fi
+
+  ui_begin_step "$label"
+  log_path="$(ui_step_log_path)"
+  : > "$log_path"
+  "$@" >"$log_path" 2>&1 &
+  pid=$!
+  frame_index=0
+
+  while kill -0 "$pid" 2>/dev/null; do
+    ui_update_step "working" "$frame_index"
+    frame_index=$((frame_index + 1))
+    sleep 0.12
+  done
+
+  set +e
+  wait "$pid"
+  step_status=$?
+  set -e
+
+  if [[ "$step_status" -eq 0 ]]; then
+    ui_complete_step
+    return 0
+  fi
+
+  ui_preserve_logs
+  ui_fail_step "see $(basename "$log_path")"
+  ui_error "Step log: $log_path"
+  ui_show_log_excerpt "$log_path"
+  return "$step_status"
+}
+
+ui_run_step_foreground() {
+  local label step_status
+  label="$1"
+  shift
+  ui_begin_step_static "$label"
+  set +e
+  "$@"
+  step_status=$?
+  set -e
+  if [[ "$step_status" -eq 0 ]]; then
+    ui_complete_step
+    return 0
+  fi
+  ui_fail_step
+  return "$step_status"
+}
+
+ui_run_step_interactive() {
+  local label step_status
+  label="$1"
+  shift
+  ui_begin_step_static "$label" "interactive"
+  set +e
+  "$@"
+  step_status=$?
+  set -e
+  if [[ "$step_status" -eq 0 ]]; then
+    ui_complete_step
+    return 0
+  fi
+  ui_fail_step
+  return "$step_status"
+}
+
+ui_print_banner() {
+  local subtitle
+  if [[ "${ACTION:-install}" == "update" ]]; then
+    subtitle="Upgrade the existing Sovereign node in place."
+  else
+    subtitle="Provision and configure a Sovereign node from the terminal."
+  fi
+
+  ui_print "\n"
+  if supports_color; then
+    ui_print "\033[1;36m"
+  fi
+  ui_print "   ____                                 _               _   \n"
+  ui_print "  / ___|  ___  _   _  ___ _ __ ___  ___| |__   ___  ___| |_ \n"
+  ui_print "  \\___ \\ / _ \\| | | |/ _ \\ '__/ _ \\/ __| '_ \\ / _ \\/ __| __|\n"
+  ui_print "   ___) | (_) | |_| |  __/ | |  __/ (__| | | |  __/ (__| |_ \n"
+  ui_print "  |____/ \\___/ \\__,_|\\___|_|  \\___|\\___|_| |_|\\___|\\___|\\__|\n"
+  if supports_color; then
+    ui_print "\033[0m"
+  fi
+  ui_print "  ${subtitle}\n"
+  ui_print "  ${UI_TOTAL_STEPS} phases queued.\n\n"
+}
+
+ui_print_summary_block() {
+  local title payload
+  title="$1"
+  payload="$2"
+  [[ -n "$payload" ]] || return 0
+  ui_section "$title"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    ui_print "  ${line}\n"
+  done <<< "$payload"
 }
 
 ui_choice_menu() {
@@ -2129,12 +2492,20 @@ NODE
 }
 
 wait_for_runtime_ready() {
-  local max_attempts delay_s attempt status_output parsed readiness_flag readiness_reason
+  local max_attempts delay_s log_path attempt status_output parsed readiness_flag readiness_reason frame_index
   max_attempts="${1:-45}"
   delay_s="${2:-2}"
+  log_path="${3:-}"
+  frame_index=0
 
   for attempt in $(seq 1 "$max_attempts"); do
     status_output="$(timeout --foreground 20s sovereign-node status --json || true)"
+    if [[ -n "$log_path" ]]; then
+      {
+        printf '%s\n' "--- runtime probe ${attempt}/${max_attempts} ---"
+        printf '%s\n\n' "$status_output"
+      } >> "$log_path"
+    fi
     parsed="$(parse_runtime_readiness "$status_output")"
     readiness_flag="${parsed%%$'\t'*}"
     readiness_reason="${parsed#*$'\t'}"
@@ -2145,13 +2516,191 @@ wait_for_runtime_ready() {
     fi
 
     if [[ "$attempt" -lt "$max_attempts" ]]; then
-      log "Runtime not ready yet (${attempt}/${max_attempts}): ${readiness_reason}"
+      if ui_is_fancy; then
+        ui_update_step "probe ${attempt}/${max_attempts}: ${readiness_reason}" "$frame_index"
+        frame_index=$((frame_index + 1))
+      else
+        log "Runtime not ready yet (${attempt}/${max_attempts}): ${readiness_reason}"
+      fi
       sleep "$delay_s"
     else
       printf '%s\n' "$status_output"
       return 1
     fi
   done
+}
+
+summarize_install_command_output() {
+  node - "$1" <<'NODE'
+const raw = process.argv[2] ?? "";
+let parsed;
+try {
+  parsed = JSON.parse(raw);
+} catch {
+  parsed = recoverJsonObject(raw);
+}
+
+const job = parsed?.result?.job ?? parsed?.job;
+if (!job || typeof job !== "object") {
+  process.exit(0);
+}
+
+const steps = Array.isArray(job.steps) ? job.steps : [];
+const completed = steps.filter((step) => step?.state === "succeeded" || step?.state === "skipped").length;
+const lines = [
+  `Job id: ${typeof job.jobId === "string" ? job.jobId : "unknown"}`,
+  `Job state: ${typeof job.state === "string" ? job.state : "unknown"}`,
+  `Installer steps: ${completed}/${steps.length} complete`,
+];
+
+if (typeof job.currentStepId === "string") {
+  lines.push(`Last recorded step: ${job.currentStepId}`);
+}
+
+process.stdout.write(lines.join("\n"));
+
+function recoverJsonObject(input) {
+  const lines = input.split(/\r?\n/);
+
+  for (let start = 0; start < lines.length; start += 1) {
+    const candidate = lines.slice(start).join("\n").trim();
+    if (!candidate.startsWith("{")) {
+      continue;
+    }
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // keep scanning
+    }
+  }
+
+  return null;
+}
+NODE
+}
+
+summarize_status_output() {
+  node - "$1" <<'NODE'
+const raw = process.argv[2] ?? "";
+let parsed;
+try {
+  parsed = JSON.parse(raw);
+} catch {
+  parsed = recoverJsonObject(raw);
+}
+
+const result = parsed?.result;
+if (!result || typeof result !== "object") {
+  process.exit(0);
+}
+
+const lines = [];
+if (typeof result.matrix?.homeserverUrl === "string") {
+  lines.push(`Matrix URL: ${result.matrix.homeserverUrl}`);
+}
+lines.push(
+  `Matrix: ${String(result.matrix?.health ?? "unknown")} (${result.matrix?.roomReachable === true ? "alert room reachable" : "alert room pending"})`,
+);
+
+const openclawVersion =
+  typeof result.openclaw?.version === "string" && result.openclaw.version.length > 0
+    ? ` ${result.openclaw.version}`
+    : "";
+lines.push(
+  `OpenClaw${openclawVersion}: ${String(result.openclaw?.health ?? "unknown")} (service ${String(result.openclaw?.serviceState ?? "unknown")})`,
+);
+
+if (result.relay?.enabled === true) {
+  const relayTarget =
+    typeof result.relay.hostname === "string" && result.relay.hostname.length > 0
+      ? result.relay.hostname
+      : typeof result.relay.publicBaseUrl === "string" && result.relay.publicBaseUrl.length > 0
+        ? result.relay.publicBaseUrl
+        : "managed relay";
+  lines.push(`Relay: ${relayTarget} (${result.relay.connected === true ? "connected" : "not connected"})`);
+}
+
+process.stdout.write(lines.join("\n"));
+
+function recoverJsonObject(input) {
+  const lines = input.split(/\r?\n/);
+
+  for (let start = 0; start < lines.length; start += 1) {
+    const candidate = lines.slice(start).join("\n").trim();
+    if (!candidate.startsWith("{")) {
+      continue;
+    }
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // keep scanning
+    }
+  }
+
+  return null;
+}
+NODE
+}
+
+summarize_doctor_output() {
+  node - "$1" <<'NODE'
+const raw = process.argv[2] ?? "";
+let parsed;
+try {
+  parsed = JSON.parse(raw);
+} catch {
+  parsed = recoverJsonObject(raw);
+}
+
+const report = parsed?.result ?? parsed;
+if (!report || typeof report !== "object") {
+  process.exit(0);
+}
+
+const checks = Array.isArray(report.checks) ? report.checks : [];
+const flagged = checks.filter((entry) => entry?.status === "warn" || entry?.status === "fail");
+const lines = [
+  `Doctor overall: ${typeof report.overall === "string" ? report.overall : "unknown"} (${checks.length} checks)`,
+];
+
+for (const entry of flagged.slice(0, 3)) {
+  const label =
+    typeof entry?.label === "string" && entry.label.length > 0
+      ? entry.label
+      : typeof entry?.id === "string" && entry.id.length > 0
+        ? entry.id
+        : "check";
+  const message =
+    typeof entry?.message === "string" && entry.message.length > 0
+      ? ` - ${entry.message}`
+      : "";
+  lines.push(`Attention: ${label}${message}`);
+}
+
+if (flagged.length > 0 && Array.isArray(report.suggestedCommands) && report.suggestedCommands.length > 0) {
+  lines.push(`Suggested command: ${String(report.suggestedCommands[0])}`);
+}
+
+process.stdout.write(lines.join("\n"));
+
+function recoverJsonObject(input) {
+  const lines = input.split(/\r?\n/);
+
+  for (let start = 0; start < lines.length; start += 1) {
+    const candidate = lines.slice(start).join("\n").trim();
+    if (!candidate.startsWith("{")) {
+      continue;
+    }
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // keep scanning
+    }
+  }
+
+  return null;
+}
+NODE
 }
 
 print_matrix_client_onboarding_guidance() {
@@ -2250,13 +2799,12 @@ NODE
   fi
 }
 
-run_install_flow() {
-  local install_output install_exit_code parsed install_state install_summary status_output doctor_output
-  local action_label
+run_install_command() {
+  local install_output install_exit_code parsed install_state install_summary
+  local action_label log_path pid frame_index
 
   if [[ "$RUN_INSTALL" != "1" ]]; then
-    log "Skipping ${ACTION:-install} run (--skip-install-run)"
-    return
+    return 0
   fi
 
   if [[ ! -f "$REQUEST_FILE" ]]; then
@@ -2264,53 +2812,172 @@ run_install_flow() {
   fi
 
   action_label="${ACTION:-install}"
-  if [[ "$action_label" == "update" ]]; then
-    log "Running Sovereign Node update"
+  if ! ui_is_fancy; then
+    if [[ "$action_label" == "update" ]]; then
+      log "Running Sovereign Node update"
+    else
+      log "Running Sovereign Node install"
+    fi
+    set +e
+    install_output="$(
+      timeout --foreground 30m env \
+        "SOVEREIGN_NODE_SERVICE_USER=$SERVICE_USER" \
+        "SOVEREIGN_NODE_SERVICE_GROUP=$SERVICE_GROUP" \
+        sovereign-node install --request-file "$REQUEST_FILE" --json
+    )"
+    install_exit_code=$?
+    set -e
+    INSTALL_COMMAND_OUTPUT="$install_output"
+    printf '%s\n' "$install_output"
   else
-    log "Running Sovereign Node install"
-  fi
-  set +e
-  install_output="$(
+    ui_begin_step "Apply ${action_label}"
+    log_path="$(ui_step_log_path)"
+    : > "$log_path"
+    set +e
     timeout --foreground 30m env \
       "SOVEREIGN_NODE_SERVICE_USER=$SERVICE_USER" \
       "SOVEREIGN_NODE_SERVICE_GROUP=$SERVICE_GROUP" \
-      sovereign-node install --request-file "$REQUEST_FILE" --json
-  )"
-  install_exit_code=$?
-  set -e
-  printf '%s\n' "$install_output"
+      sovereign-node install --request-file "$REQUEST_FILE" --json >"$log_path" 2>&1 &
+    pid=$!
+    frame_index=0
+    while kill -0 "$pid" 2>/dev/null; do
+      if [[ "$action_label" == "update" ]]; then
+        ui_update_step "reconciling services" "$frame_index"
+      else
+        ui_update_step "provisioning services" "$frame_index"
+      fi
+      frame_index=$((frame_index + 1))
+      sleep 0.12
+    done
+    wait "$pid"
+    install_exit_code=$?
+    set -e
+    INSTALL_COMMAND_OUTPUT="$(cat "$log_path" 2>/dev/null || true)"
+  fi
 
   if [[ "$install_exit_code" -eq 124 ]]; then
-    die "Install did not complete within 30 minutes"
+    if ui_is_fancy; then
+      ui_preserve_logs
+      ui_fail_step "timed out after 30 minutes"
+      ui_error "Step log: $log_path"
+      ui_show_log_excerpt "$log_path"
+    else
+      die "Install did not complete within 30 minutes"
+    fi
+    return 1
   fi
   if [[ "$install_exit_code" -ne 0 ]]; then
-    die "Install command exited with status ${install_exit_code}"
+    if ui_is_fancy; then
+      ui_preserve_logs
+      ui_fail_step "command exited with status ${install_exit_code}"
+      ui_error "Step log: $log_path"
+      ui_show_log_excerpt "$log_path"
+    else
+      die "Install command exited with status ${install_exit_code}"
+    fi
+    return 1
   fi
 
-  parsed="$(parse_install_result "$install_output")"
+  parsed="$(parse_install_result "$INSTALL_COMMAND_OUTPUT")"
   install_state="${parsed%%$'\t'*}"
   install_summary="${parsed#*$'\t'}"
   if [[ "$install_state" != "succeeded" ]]; then
-    if [[ "$action_label" == "update" ]]; then
+    if ui_is_fancy; then
+      ui_preserve_logs
+      ui_fail_step "$install_summary"
+      ui_error "Step log: $log_path"
+      ui_show_log_excerpt "$log_path"
+    elif [[ "$action_label" == "update" ]]; then
       die "Update did not complete successfully (${install_summary})"
+    else
+      die "Install did not complete successfully (${install_summary})"
     fi
-    die "Install did not complete successfully (${install_summary})"
+    return 1
   fi
 
-  if [[ "$action_label" == "update" ]]; then
-    log "Update job succeeded. Waiting for Matrix and OpenClaw runtime readiness"
-  else
-    log "Install job succeeded. Waiting for Matrix and OpenClaw runtime readiness"
+  if ui_is_fancy; then
+    ui_complete_step "job completed"
   fi
-  if ! status_output="$(wait_for_runtime_ready 45 2)"; then
+  return 0
+}
+
+run_runtime_readiness_step() {
+  local status_output log_path
+
+  if [[ "$RUN_INSTALL" != "1" ]]; then
+    return 0
+  fi
+
+  if ! ui_is_fancy; then
+    if ! status_output="$(wait_for_runtime_ready 45 2)"; then
+      RUNTIME_STATUS_OUTPUT="$status_output"
+      printf '%s\n' "$status_output"
+      die "Runtime did not reach healthy state for Matrix/OpenClaw within timeout"
+    fi
+    RUNTIME_STATUS_OUTPUT="$status_output"
     printf '%s\n' "$status_output"
-    die "Runtime did not reach healthy state for Matrix/OpenClaw within timeout"
+    return 0
   fi
-  printf '%s\n' "$status_output"
 
-  log "Running post-install diagnostics"
-  doctor_output="$(sovereign-node doctor --json || true)"
-  printf '%s\n' "$doctor_output"
+  ui_begin_step "Wait for runtime health"
+  log_path="$(ui_step_log_path)"
+  : > "$log_path"
+  if status_output="$(wait_for_runtime_ready 45 2 "$log_path")"; then
+    RUNTIME_STATUS_OUTPUT="$status_output"
+    ui_complete_step "Matrix and OpenClaw healthy"
+    return 0
+  fi
+
+  RUNTIME_STATUS_OUTPUT="$status_output"
+  ui_preserve_logs
+  ui_fail_step "runtime probes did not converge"
+  ui_error "Step log: $log_path"
+  ui_show_log_excerpt "$log_path"
+  return 1
+}
+
+run_post_install_diagnostics_step() {
+  local doctor_exit_code summary_headline log_path pid frame_index
+
+  if [[ "$RUN_INSTALL" != "1" ]]; then
+    return 0
+  fi
+
+  if ! ui_is_fancy; then
+    log "Running post-install diagnostics"
+    DOCTOR_REPORT_OUTPUT="$(sovereign-node doctor --json || true)"
+    printf '%s\n' "$DOCTOR_REPORT_OUTPUT"
+    return 0
+  fi
+
+  ui_begin_step "Run post-install diagnostics"
+  log_path="$(ui_step_log_path)"
+  : > "$log_path"
+  set +e
+  sovereign-node doctor --json >"$log_path" 2>&1 &
+  pid=$!
+  frame_index=0
+  while kill -0 "$pid" 2>/dev/null; do
+    ui_update_step "collecting health report" "$frame_index"
+    frame_index=$((frame_index + 1))
+    sleep 0.12
+  done
+  wait "$pid"
+  doctor_exit_code=$?
+  set -e
+  DOCTOR_REPORT_OUTPUT="$(cat "$log_path" 2>/dev/null || true)"
+  summary_headline="$(summarize_doctor_output "$DOCTOR_REPORT_OUTPUT")"
+  summary_headline="${summary_headline%%$'\n'*}"
+  if [[ -z "$summary_headline" ]]; then
+    summary_headline="report ready"
+  fi
+
+  ui_complete_step "$summary_headline"
+  if [[ "$doctor_exit_code" -ne 0 ]]; then
+    ui_preserve_logs
+    ui_warn "Doctor command exited with status ${doctor_exit_code}."
+    ui_warn "Step log: $log_path"
+  fi
 }
 
 main() {
@@ -2322,26 +2989,54 @@ main() {
   ensure_supported_os
   detect_installation_state
   resolve_action
-  resolve_source_mode
-  install_base_packages
-  install_docker_if_needed
-  install_node22_if_needed
-  ensure_service_account
-  ensure_runtime_directories
-  sync_app_source
-  sync_bots_source
-  load_available_bot_catalog
-  build_app
-  install_wrappers
-  install_systemd_unit
-  install_request_template
-  prepare_request_file
-  run_install_flow
+  ui_setup_runtime
+  ui_configure_progress_plan
+  if ui_is_fancy; then
+    ui_print_banner
+  fi
 
-  if [[ "${ACTION:-install}" == "update" ]]; then
+  ui_run_step_foreground "Check source inputs" resolve_source_mode
+  ui_run_step_captured "Install base packages" install_base_packages
+  ui_run_step_captured "Prepare Docker runtime" install_docker_if_needed
+  ui_run_step_captured "Prepare Node runtime" install_node22_if_needed
+  ui_run_step_captured "Ensure service account" ensure_service_account
+  ui_run_step_captured "Prepare runtime directories" ensure_runtime_directories
+  ui_run_step_captured "Sync application source" sync_app_source
+  ui_run_step_captured "Sync bot package source" sync_bots_source
+  ui_run_step_captured "Load bot catalog" load_available_bot_catalog
+  ui_run_step_captured "Build application" build_app
+  ui_run_step_captured "Install CLI wrappers" install_wrappers
+  ui_run_step_captured "Install systemd service" install_systemd_unit
+  ui_run_step_captured "Write request template" install_request_template
+  if [[ "$NON_INTERACTIVE" == "1" ]] || ! has_tty; then
+    ui_run_step_foreground "Configure request file" prepare_request_file
+  else
+    ui_run_step_interactive "Configure request file" prepare_request_file
+  fi
+
+  if [[ "$RUN_INSTALL" == "1" ]]; then
+    run_install_command
+    run_runtime_readiness_step
+    run_post_install_diagnostics_step
+  else
+    ui_skip_step "Apply ${ACTION:-install}" "--skip-install-run"
+    ui_skip_step "Wait for runtime health" "install run skipped"
+    ui_skip_step "Run post-install diagnostics" "install run skipped"
+  fi
+
+  if [[ "$RUN_INSTALL" != "1" ]]; then
+    completion_label="Bootstrap completed. Install run skipped."
+  elif [[ "${ACTION:-install}" == "update" ]]; then
     completion_label="Update completed."
   else
     completion_label="Install completed."
+  fi
+
+  if ui_is_fancy; then
+    ui_title "Summary" "$completion_label"
+    ui_print_summary_block "Installer" "$(summarize_install_command_output "$INSTALL_COMMAND_OUTPUT")"
+    ui_print_summary_block "Runtime" "$(summarize_status_output "$RUNTIME_STATUS_OUTPUT")"
+    ui_print_summary_block "Diagnostics" "$(summarize_doctor_output "$DOCTOR_REPORT_OUTPUT")"
   fi
 
   cat <<EOF
