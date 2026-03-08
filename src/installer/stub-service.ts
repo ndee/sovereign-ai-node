@@ -273,6 +273,47 @@ export class StubInstallerService implements InstallerService {
     };
   }
 
+  async inviteHumanMatrixUser(req: {
+    username: string;
+    ttlMinutes?: number;
+  }): Promise<{
+    localpart: string;
+    userId: string;
+    code: string;
+    expiresAt: string;
+    onboardingUrl: string;
+    invitedToAlertRoom: boolean;
+  }> {
+    const localpart = req.username.trim().replace(/^@/, "").split(":")[0] ?? "user";
+    return {
+      localpart,
+      userId: `@${localpart}:matrix.example.org`,
+      code: "SCFD-0000-0000",
+      expiresAt: now(),
+      onboardingUrl: "https://matrix.example.org/onboard",
+      invitedToAlertRoom: true,
+    };
+  }
+
+  async deleteHumanMatrixUser(req: {
+    username: string;
+  }): Promise<{
+    localpart: string;
+    userId: string;
+    deleted: boolean;
+    deactivated: boolean;
+    onboardingCleared: boolean;
+  }> {
+    const localpart = req.username.trim().replace(/^@/, "").split(":")[0] ?? "user";
+    return {
+      localpart,
+      userId: `@${localpart}:matrix.example.org`,
+      deleted: true,
+      deactivated: true,
+      onboardingCleared: true,
+    };
+  }
+
   async listManagedAgents(): Promise<ManagedAgentListResult> {
     return {
       agents: [

@@ -13,7 +13,7 @@ export type MatrixOnboardingState = {
   maxAttempts: number;
   codeSalt: string;
   codeHash: string;
-  operatorPasswordSecretRef: string;
+  passwordSecretRef: string;
   username: string;
   homeserverUrl: string;
 };
@@ -65,7 +65,7 @@ export const hashMatrixOnboardingCode = (code: string, salt: string): string =>
     .digest("hex");
 
 export const issueMatrixOnboardingState = (input: {
-  operatorPasswordSecretRef: string;
+  passwordSecretRef: string;
   username: string;
   homeserverUrl: string;
   ttlMinutes?: number;
@@ -86,7 +86,7 @@ export const issueMatrixOnboardingState = (input: {
       maxAttempts: MAX_MATRIX_ONBOARDING_FAILED_ATTEMPTS,
       codeSalt: salt,
       codeHash: hashMatrixOnboardingCode(code, salt),
-      operatorPasswordSecretRef: input.operatorPasswordSecretRef,
+      passwordSecretRef: input.passwordSecretRef,
       username: input.username,
       homeserverUrl: input.homeserverUrl,
     },
@@ -106,10 +106,18 @@ export const parseMatrixOnboardingState = (value: unknown): MatrixOnboardingStat
     || typeof candidate.maxAttempts !== "number"
     || typeof candidate.codeSalt !== "string"
     || typeof candidate.codeHash !== "string"
-    || typeof candidate.operatorPasswordSecretRef !== "string"
     || typeof candidate.username !== "string"
     || typeof candidate.homeserverUrl !== "string"
   ) {
+    return null;
+  }
+  const passwordSecretRef =
+    typeof candidate.passwordSecretRef === "string"
+      ? candidate.passwordSecretRef
+      : typeof candidate.operatorPasswordSecretRef === "string"
+        ? candidate.operatorPasswordSecretRef
+        : null;
+  if (passwordSecretRef === null) {
     return null;
   }
   return {
@@ -121,7 +129,7 @@ export const parseMatrixOnboardingState = (value: unknown): MatrixOnboardingStat
     maxAttempts: Math.max(1, Math.trunc(candidate.maxAttempts)),
     codeSalt: candidate.codeSalt,
     codeHash: candidate.codeHash,
-    operatorPasswordSecretRef: candidate.operatorPasswordSecretRef,
+    passwordSecretRef,
     username: candidate.username,
     homeserverUrl: candidate.homeserverUrl,
   };
