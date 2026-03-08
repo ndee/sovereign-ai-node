@@ -3806,6 +3806,7 @@ describe("RealInstallerService", () => {
 
     let bootstrapBotLocalpart = "";
     const sentBodies: string[] = [];
+    const joinedMemberAuthorizations: string[] = [];
     const service = new RealInstallerService(createLogger(), paths, {
       openclawBootstrapper: {
         detectInstalled: async () => ({
@@ -3894,8 +3895,10 @@ describe("RealInstallerService", () => {
           return provisionResponse;
         }
         if (url.includes("/joined_members")) {
+          const authorization = new Headers(init?.headers).get("Authorization") ?? "";
+          joinedMemberAuthorizations.push(authorization);
           return new Response(JSON.stringify({ joined: {} }), {
-            status: 200,
+            status: authorization === "Bearer bitcoin-skill-match-token" ? 200 : 401,
             headers: { "Content-Type": "application/json" },
           });
         }
@@ -3927,11 +3930,21 @@ describe("RealInstallerService", () => {
           bot?: {
             localpart?: string;
             userId?: string;
+            passwordSecretRef?: string;
+            accessTokenSecretRef?: string;
           };
         };
       };
       expect(config.matrix?.bot?.localpart).toBe("bitcoin-skill-match");
       expect(config.matrix?.bot?.userId).toBe("@bitcoin-skill-match:matrix.example.org");
+      expect(config.matrix?.bot?.passwordSecretRef).toBe(
+        `file:${join(paths.secretsDir, "matrix-agent-bitcoin-skill-match-password")}`,
+      );
+      expect(config.matrix?.bot?.accessTokenSecretRef).toBe(
+        `file:${join(paths.secretsDir, "matrix-agent-bitcoin-skill-match-access-token")}`,
+      );
+      expect(joinedMemberAuthorizations).toContain("Bearer bitcoin-skill-match-token");
+      expect(joinedMemberAuthorizations).not.toContain("Bearer bitcoin-skill-match-bootstrap-token");
 
       const openclawConfigRaw = await readFile(
         join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
