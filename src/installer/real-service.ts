@@ -2308,6 +2308,43 @@ export class RealInstallerService implements InstallerService {
     await this.applyRuntimeOwnership(input.workspace);
   }
 
+  private resolveManagedAgentSessionsDir(runtimeConfig: RuntimeConfig, agentId: string): string {
+    return join(runtimeConfig.openclaw.openclawHome, ".openclaw", "agents", agentId, "sessions");
+  }
+
+  private async resetManagedAgentSessions(
+    runtimeConfig: RuntimeConfig,
+    agentId: string,
+  ): Promise<void> {
+    const sessionsDir = this.resolveManagedAgentSessionsDir(runtimeConfig, agentId);
+    let sessionsStat;
+    try {
+      sessionsStat = await stat(sessionsDir);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return;
+      }
+      throw error;
+    }
+    if (!sessionsStat.isDirectory()) {
+      return;
+    }
+
+    const resetSuffix = now().replaceAll(":", "-").replaceAll(".", "-");
+    const resetPath = `${sessionsDir}.reset.${resetSuffix}`;
+    await rename(sessionsDir, resetPath);
+    await mkdir(sessionsDir, { recursive: true });
+    await this.applyRuntimeOwnership(sessionsDir);
+    this.logger.info(
+      {
+        agentId,
+        sessionsDir,
+        resetPath,
+      },
+      "Reset managed agent sessions to apply refreshed workspace instructions",
+    );
+  }
+
   private async ensureManagedAgentMatrixIdentity(
     runtimeConfig: RuntimeConfig,
     agentId: string,
@@ -3619,6 +3656,7 @@ export class RealInstallerService implements InstallerService {
               workspace: agent.workspace,
               runtimeConfig,
             });
+            await this.resetManagedAgentSessions(runtimeConfig, agent.id);
           }
           let topologyChanged = false;
           for (const agent of runtimeConfig.openclawProfile.agents) {
@@ -5830,6 +5868,7 @@ export class RealInstallerService implements InstallerService {
           return {
             id: entry.id,
             workspace: entry.workspace,
+            ...(entry.default === true ? { default: true } : {}),
             ...(tools === null ? {} : { tools }),
           };
         }),

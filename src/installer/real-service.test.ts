@@ -4220,6 +4220,16 @@ describe("RealInstallerService", () => {
       req.bots = {
         selected: ["bitcoin-skill-match", "node-operator"],
       };
+      const nodeOperatorSessionsDir = join(
+        paths.openclawServiceHome,
+        ".openclaw",
+        ".openclaw",
+        "agents",
+        "node-operator",
+        "sessions",
+      );
+      await mkdir(nodeOperatorSessionsDir, { recursive: true });
+      await writeFile(join(nodeOperatorSessionsDir, "legacy-session.jsonl"), "{\"legacy\":true}\n", "utf8");
 
       const started = await service.startInstall(req);
       expect(started.job.state).toBe("succeeded");
@@ -4254,6 +4264,9 @@ describe("RealInstallerService", () => {
       );
       expect(openclawConfigRaw).not.toContain("@service-bot:");
       const openclawConfig = JSON.parse(openclawConfigRaw) as {
+        agents?: {
+          list?: Array<{ id?: string; default?: boolean }>;
+        };
         channels?: {
           matrix?: {
             userId?: string;
@@ -4270,6 +4283,17 @@ describe("RealInstallerService", () => {
       };
       expect(openclawConfig.channels?.matrix?.userId).toBe("@bitcoin-skill-match:matrix.example.org");
       expect(openclawConfig.channels?.matrix?.defaultAccount).toBe("bitcoin-skill-match");
+      expect(openclawConfig.agents?.list).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: "node-operator",
+            default: true,
+          }),
+        ]),
+      );
+      expect(
+        openclawConfig.agents?.list?.find((entry) => entry.id === "bitcoin-skill-match")?.default,
+      ).not.toBe(true);
       expect(Object.keys(openclawConfig.channels?.matrix?.accounts ?? {}).sort()).toEqual([
         "bitcoin-skill-match",
         "node-operator",
@@ -4314,6 +4338,29 @@ describe("RealInstallerService", () => {
           requireMention: true,
         }),
       );
+      expect((await stat(nodeOperatorSessionsDir)).isDirectory()).toBe(true);
+      const nodeOperatorSessionsEntries = await readdir(dirname(nodeOperatorSessionsDir));
+      expect(nodeOperatorSessionsEntries).toContain("sessions");
+      const archivedNodeOperatorSessionsEntry = nodeOperatorSessionsEntries.find((entry) =>
+        entry.startsWith("sessions.reset."));
+      expect(archivedNodeOperatorSessionsEntry).toBeDefined();
+      expect(
+        (
+          await stat(
+            join(dirname(nodeOperatorSessionsDir), archivedNodeOperatorSessionsEntry ?? "missing"),
+          )
+        ).isDirectory(),
+      ).toBe(true);
+      expect(
+        await readFile(
+          join(
+            dirname(nodeOperatorSessionsDir),
+            archivedNodeOperatorSessionsEntry ?? "missing",
+            "legacy-session.jsonl",
+          ),
+          "utf8",
+        ),
+      ).toContain("\"legacy\":true");
       expect(sentBodies.some((body) => body.includes("Hello from Bitcoin Skill Match"))).toBe(true);
       expect(sentBodies.some((body) => body.includes("Hello from Node Operator"))).toBe(true);
     } finally {
