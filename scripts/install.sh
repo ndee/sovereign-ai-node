@@ -1334,7 +1334,7 @@ const req = {
   openclaw: {
     manageInstallation: true,
     installMethod: "install_sh",
-    version: "pinned-by-sovereign",
+    version: "2026.3.1",
     skipIfCompatibleInstalled: true,
     forceReinstall: false,
     runOnboard: false,

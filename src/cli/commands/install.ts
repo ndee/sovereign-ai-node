@@ -9,6 +9,7 @@ import {
   type InstallRequest,
 } from "../../contracts/index.js";
 import { DEFAULT_INSTALL_REQUEST_FILE } from "../../installer/real-service-shared.js";
+import { SOVEREIGN_PINNED_OPENCLAW_VERSION } from "../../openclaw/bootstrap.js";
 import { writeCliError, writeCliSuccess } from "../output.js";
 
 type InstallOptions = {
@@ -50,7 +51,7 @@ const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => {
     openclaw: {
       manageInstallation: !opts.skipOpenclawInstall,
       installMethod: "install_sh",
-      version: opts.openclawVersion ?? "pinned-by-sovereign",
+      version: opts.openclawVersion ?? SOVEREIGN_PINNED_OPENCLAW_VERSION,
       skipIfCompatibleInstalled: true,
       forceReinstall: opts.forceOpenclawReinstall ?? false,
       runOnboard: false,
@@ -90,7 +91,10 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
     .description("Run the Sovereign Node installer flow (scaffold)")
     .option("--json", "Emit JSON output")
     .option("--non-interactive", "Run without interactive prompts")
-    .option("--openclaw-version <ver>", "Override pinned OpenClaw version (advanced)")
+    .option(
+      "--openclaw-version <ver>",
+      `Override pinned OpenClaw version (advanced; default ${SOVEREIGN_PINNED_OPENCLAW_VERSION})`,
+    )
     .option("--skip-openclaw-install", "Reuse existing OpenClaw install only (advanced)")
     .option("--force-openclaw-reinstall", "Force OpenClaw reinstall (repair path)")
     .option(

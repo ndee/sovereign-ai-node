@@ -4,6 +4,11 @@ import type { ExecRunner } from "../system/exec.js";
 const OPENCLAW_DETECT_TIMEOUT_MS = 20_000;
 const OPENCLAW_INSTALL_TIMEOUT_MS = 15 * 60_000;
 
+// OpenClaw 2026.3.2 regressed Matrix plugin loading, so Sovereign stays on the
+// prior known-good release until the upstream fix is adopted.
+export const SOVEREIGN_PINNED_OPENCLAW_VERSION = "2026.3.1";
+export const SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS = "pinned-by-sovereign";
+
 export type OpenClawInstallOptions = {
   version: string;
   noPrompt?: boolean;
@@ -65,7 +70,7 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
   }
 
   async ensureInstalled(opts: OpenClawInstallOptions): Promise<OpenClawInstallInfo> {
-    const desiredVersion = opts.version.trim();
+    const desiredVersion = resolveRequestedOpenClawVersion(opts.version);
     const installVersion = resolveInstallVersion(desiredVersion);
     const detected = await this.detectInstalled();
     if (
@@ -95,7 +100,7 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
     });
     this.logger.info(
       {
-        openclawVersion: installVersion ?? "default-channel",
+        openclawVersion: installVersion,
         noPrompt: opts.noPrompt ?? true,
         noOnboard: opts.noOnboard ?? true,
         forceReinstall: opts.forceReinstall ?? false,
@@ -192,24 +197,26 @@ const parseVersionToken = (value: string): string | null => {
 };
 
 const versionsMatch = (detectedVersion: string, requestedVersion: string): boolean => {
-  if (isAbstractSovereignPin(requestedVersion)) {
-    return true;
-  }
   const normalizedDetected = normalizeVersion(detectedVersion);
-  const normalizedRequested = normalizeVersion(requestedVersion);
+  const normalizedRequested = normalizeVersion(resolveRequestedOpenClawVersion(requestedVersion));
   return normalizedDetected === normalizedRequested;
 };
 
 const resolveInstallVersion = (requestedVersion: string): string | undefined => {
-  const trimmed = requestedVersion.trim();
-  if (trimmed.length === 0 || isAbstractSovereignPin(trimmed)) {
-    return undefined;
-  }
-  return trimmed;
+  const trimmed = resolveRequestedOpenClawVersion(requestedVersion).trim();
+  return trimmed.length === 0 ? undefined : trimmed;
 };
 
 const isAbstractSovereignPin = (value: string): boolean =>
-  value.trim().toLowerCase() === "pinned-by-sovereign";
+  value.trim().toLowerCase() === SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS;
+
+export const resolveRequestedOpenClawVersion = (requestedVersion?: string | null): string => {
+  const trimmed = requestedVersion?.trim() ?? "";
+  if (trimmed.length === 0 || isAbstractSovereignPin(trimmed)) {
+    return SOVEREIGN_PINNED_OPENCLAW_VERSION;
+  }
+  return trimmed;
+};
 
 const normalizeVersion = (value: string): string => parseVersionToken(value) ?? value.trim();
 
