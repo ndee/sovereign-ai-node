@@ -381,6 +381,38 @@ export class RealInstallerService implements InstallerService {
     };
   }
 
+  private syncPrimaryDedicatedMatrixBotIdentity(
+    runtimeConfig: RuntimeConfig,
+    identity: {
+      localpart: string;
+      userId: string;
+      passwordSecretRef?: string;
+      accessTokenSecretRef: string;
+    },
+  ): boolean {
+    const current = runtimeConfig.matrix.bot;
+    if (current.localpart !== identity.localpart && current.userId !== identity.userId) {
+      return false;
+    }
+    if (
+      current.localpart === identity.localpart
+      && current.userId === identity.userId
+      && current.passwordSecretRef === identity.passwordSecretRef
+      && current.accessTokenSecretRef === identity.accessTokenSecretRef
+    ) {
+      return false;
+    }
+    runtimeConfig.matrix.bot = {
+      localpart: identity.localpart,
+      userId: identity.userId,
+      ...(identity.passwordSecretRef === undefined
+        ? {}
+        : { passwordSecretRef: identity.passwordSecretRef }),
+      accessTokenSecretRef: identity.accessTokenSecretRef,
+    };
+    return true;
+  }
+
   private resolveRequestedBotIds(req: InstallRequest, defaultBotIds: string[]): string[] {
     const selected = req.bots?.selected
       ?.map((entry: string) => entry.trim())
@@ -2152,6 +2184,18 @@ export class RealInstallerService implements InstallerService {
     parsed["bots"] = runtimeConfig.bots;
     parsed["templates"] = runtimeConfig.templates;
     parsed["sovereignTools"] = runtimeConfig.sovereignTools;
+    parsed["matrix"] = {
+      ...(isRecord(parsed["matrix"]) ? parsed["matrix"] : {}),
+      bot: {
+        localpart: runtimeConfig.matrix.bot.localpart,
+        userId: runtimeConfig.matrix.bot.userId,
+        ...(runtimeConfig.matrix.bot.passwordSecretRef === undefined
+          ? {}
+          : { passwordSecretRef: runtimeConfig.matrix.bot.passwordSecretRef }),
+        accessTokenSecretRef: runtimeConfig.matrix.bot.accessTokenSecretRef,
+      },
+      alertRoom: runtimeConfig.matrix.alertRoom,
+    };
 
     await this.writeInstallerJsonFile(this.paths.configPath, parsed, 0o644);
   }
@@ -2273,9 +2317,10 @@ export class RealInstallerService implements InstallerService {
     };
     const changed = !areMatrixIdentitiesEqual(entry.matrix, nextIdentity);
     entry.matrix = nextIdentity;
+    const primaryBotChanged = this.syncPrimaryDedicatedMatrixBotIdentity(runtimeConfig, nextIdentity);
     return {
       runtimeConfig,
-      changed,
+      changed: changed || primaryBotChanged,
     };
   }
 
