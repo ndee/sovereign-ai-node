@@ -2,10 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import { createLogger } from "../logging/logger.js";
 import type { ExecInput, ExecResult, ExecRunner } from "../system/exec.js";
-import { ShellOpenClawBootstrapper } from "./bootstrap.js";
+import {
+  ShellOpenClawBootstrapper,
+  SOVEREIGN_PINNED_OPENCLAW_VERSION,
+  SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
+} from "./bootstrap.js";
 
 describe("ShellOpenClawBootstrapper", () => {
-  it("omits --version when requested version is pinned-by-sovereign", async () => {
+  it("resolves pinned-by-sovereign to the concrete pinned version during install", async () => {
     const calls: ExecInput[] = [];
     const results: ExecResult[] = [
       {
@@ -23,7 +27,7 @@ describe("ShellOpenClawBootstrapper", () => {
       {
         command: "openclaw --version",
         exitCode: 0,
-        stdout: "1.2.3",
+        stdout: SOVEREIGN_PINNED_OPENCLAW_VERSION,
         stderr: "",
       },
     ];
@@ -41,19 +45,19 @@ describe("ShellOpenClawBootstrapper", () => {
 
     const bootstrapper = new ShellOpenClawBootstrapper(execRunner, createLogger());
     const result = await bootstrapper.ensureInstalled({
-      version: "pinned-by-sovereign",
+      version: SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
       noOnboard: true,
       noPrompt: true,
       skipIfCompatibleInstalled: true,
     });
 
-    expect(result.version).toBe("1.2.3");
+    expect(result.version).toBe(SOVEREIGN_PINNED_OPENCLAW_VERSION);
     expect(calls[1]?.command).toBe("bash");
     expect(calls[1]?.args?.[1]).toContain("install.sh");
-    expect(calls[1]?.args?.[1]).not.toContain("--version");
+    expect(calls[1]?.args?.[1]).toContain(`'${SOVEREIGN_PINNED_OPENCLAW_VERSION}'`);
   });
 
-  it("skips reinstall for abstract sovereign pin when OpenClaw is already installed", async () => {
+  it("skips reinstall when installed OpenClaw already matches the concrete Sovereign pin", async () => {
     const calls: ExecInput[] = [];
     const execRunner: ExecRunner = {
       run: async (input): Promise<ExecResult> => {
@@ -61,7 +65,7 @@ describe("ShellOpenClawBootstrapper", () => {
         return {
           command: [input.command, ...(input.args ?? [])].join(" "),
           exitCode: 0,
-          stdout: "1.2.3",
+          stdout: SOVEREIGN_PINNED_OPENCLAW_VERSION,
           stderr: "",
         };
       },
@@ -69,13 +73,13 @@ describe("ShellOpenClawBootstrapper", () => {
 
     const bootstrapper = new ShellOpenClawBootstrapper(execRunner, createLogger());
     const result = await bootstrapper.ensureInstalled({
-      version: "pinned-by-sovereign",
+      version: SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
       noOnboard: true,
       noPrompt: true,
       skipIfCompatibleInstalled: true,
     });
 
-    expect(result.version).toBe("1.2.3");
+    expect(result.version).toBe(SOVEREIGN_PINNED_OPENCLAW_VERSION);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
       command: "openclaw",
@@ -87,6 +91,53 @@ describe("ShellOpenClawBootstrapper", () => {
         },
       },
     });
+  });
+
+  it("reinstalls when the detected OpenClaw version does not match the concrete Sovereign pin", async () => {
+    const calls: ExecInput[] = [];
+    const results: ExecResult[] = [
+      {
+        command: "openclaw --version",
+        exitCode: 0,
+        stdout: "2026.3.2",
+        stderr: "",
+      },
+      {
+        command: "bash -lc <install>",
+        exitCode: 0,
+        stdout: "ok",
+        stderr: "",
+      },
+      {
+        command: "openclaw --version",
+        exitCode: 0,
+        stdout: SOVEREIGN_PINNED_OPENCLAW_VERSION,
+        stderr: "",
+      },
+    ];
+
+    const execRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        calls.push(input);
+        const next = results.shift();
+        if (next === undefined) {
+          throw new Error("unexpected exec call");
+        }
+        return next;
+      },
+    };
+
+    const bootstrapper = new ShellOpenClawBootstrapper(execRunner, createLogger());
+    const result = await bootstrapper.ensureInstalled({
+      version: SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
+      noOnboard: true,
+      noPrompt: true,
+      skipIfCompatibleInstalled: true,
+    });
+
+    expect(result.version).toBe(SOVEREIGN_PINNED_OPENCLAW_VERSION);
+    expect(calls).toHaveLength(3);
+    expect(calls[1]?.args?.[1]).toContain(`'${SOVEREIGN_PINNED_OPENCLAW_VERSION}'`);
   });
 
   it("does not treat empty --version output as installed", async () => {
@@ -114,7 +165,7 @@ describe("ShellOpenClawBootstrapper", () => {
     const bootstrapper = new ShellOpenClawBootstrapper(execRunner, createLogger());
     await expect(
       bootstrapper.ensureInstalled({
-        version: "pinned-by-sovereign",
+        version: SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
         noOnboard: true,
         noPrompt: true,
         skipIfCompatibleInstalled: true,
@@ -145,7 +196,7 @@ describe("ShellOpenClawBootstrapper", () => {
     const bootstrapper = new ShellOpenClawBootstrapper(execRunner, createLogger());
     await expect(
       bootstrapper.ensureInstalled({
-        version: "pinned-by-sovereign",
+        version: SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
         noOnboard: true,
         noPrompt: true,
         skipIfCompatibleInstalled: true,

@@ -12,6 +12,7 @@ import type {
   OpenClawInstallInfo,
   OpenClawInstallOptions,
 } from "../openclaw/bootstrap.js";
+import { SOVEREIGN_PINNED_OPENCLAW_VERSION } from "../openclaw/bootstrap.js";
 import type { ImapTester } from "../system/imap.js";
 import type {
   BundledMatrixProvisioner,
@@ -671,7 +672,7 @@ describe("RealInstallerService", () => {
       expect(matrixProvisionCalls).toBe(0);
       expect(gatewayInstallCalls).toBe(0);
       expect(ensureInstalledCalls[0]).toMatchObject({
-        version: "pinned-by-sovereign",
+        version: SOVEREIGN_PINNED_OPENCLAW_VERSION,
         noOnboard: true,
         noPrompt: true,
         forceReinstall: false,
@@ -823,11 +824,13 @@ describe("RealInstallerService", () => {
 
       const writtenConfigRaw = await readFile(paths.configPath, "utf8");
       const writtenConfig = JSON.parse(writtenConfigRaw) as {
+        openclaw?: { requestedVersion?: string };
         matrix?: {
           alertRoom?: { roomId?: string };
           bot?: { accessTokenSecretRef?: string };
         };
       };
+      expect(writtenConfig.openclaw?.requestedVersion).toBe(SOVEREIGN_PINNED_OPENCLAW_VERSION);
       expect(writtenConfig.matrix?.alertRoom?.roomId).toBe("!alerts:matrix.example.org");
       expect(writtenConfig.matrix?.bot?.accessTokenSecretRef?.startsWith("file:")).toBe(
         true,

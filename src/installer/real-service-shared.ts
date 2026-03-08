@@ -6,6 +6,7 @@ import JSON5 from "json5";
 import type { BotConfigValue } from "../bots/catalog.js";
 import type { CheckResult, ComponentHealth } from "../contracts/common.js";
 import type { DoctorReport } from "../contracts/index.js";
+import { resolveRequestedOpenClawVersion } from "../openclaw/bootstrap.js";
 import { formatTemplateRef, parseTemplateRef } from "../templates/catalog.js";
 import type { SovereignTemplateKind } from "./service.js";
 
@@ -572,9 +573,9 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
       installMethod:
         openclaw.installMethod === "install_sh" ? openclaw.installMethod : "install_sh",
       requestedVersion:
-        typeof openclaw.requestedVersion === "string" && openclaw.requestedVersion.length > 0
-          ? openclaw.requestedVersion
-          : "pinned-by-sovereign",
+        resolveRequestedOpenClawVersion(
+          typeof openclaw.requestedVersion === "string" ? openclaw.requestedVersion : undefined,
+        ),
       openclawHome,
       runtimeConfigPath,
       runtimeProfilePath,
@@ -1160,10 +1161,7 @@ const resolveVersionPinStatus = (
     return "warn";
   }
 
-  const expected = runtimeConfig.openclaw.requestedVersion;
-  if (expected === "pinned-by-sovereign") {
-    return "warn";
-  }
+  const expected = resolveRequestedOpenClawVersion(runtimeConfig.openclaw.requestedVersion);
   return normalizeVersionToken(expected) === normalizeVersionToken(detectedOpenClaw.version)
     ? "pass"
     : "fail";
@@ -1180,10 +1178,7 @@ const describeVersionPin = (
     return "Sovereign runtime config is missing, so version pin cannot be validated";
   }
 
-  const expected = runtimeConfig.openclaw.requestedVersion;
-  if (expected === "pinned-by-sovereign") {
-    return "Configured OpenClaw version is abstract (pinned-by-sovereign); exact pin comparison skipped";
-  }
+  const expected = resolveRequestedOpenClawVersion(runtimeConfig.openclaw.requestedVersion);
 
   if (normalizeVersionToken(expected) === normalizeVersionToken(detectedOpenClaw.version)) {
     return "OpenClaw version matches configured pin";

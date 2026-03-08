@@ -41,7 +41,10 @@ import {
   buildMatrixOnboardingUrl,
   issueMatrixOnboardingState,
 } from "../onboarding/bootstrap-code.js";
-import type { OpenClawBootstrapper } from "../openclaw/bootstrap.js";
+import {
+  resolveRequestedOpenClawVersion,
+  type OpenClawBootstrapper,
+} from "../openclaw/bootstrap.js";
 import type { OpenClawGatewayServiceManager } from "../openclaw/gateway-service.js";
 import type {
   ManagedAgentRegistrationResult,
@@ -3111,7 +3114,7 @@ export class RealInstallerService implements InstallerService {
           }
 
           await this.openclawBootstrapper.ensureInstalled({
-            version: openclaw?.version ?? "pinned-by-sovereign",
+            version: resolveRequestedOpenClawVersion(openclaw?.version),
             noOnboard: true,
             noPrompt: true,
             forceReinstall: openclaw?.forceReinstall ?? false,
@@ -4931,7 +4934,7 @@ export class RealInstallerService implements InstallerService {
       openclaw: {
         managedInstallation: input.req.openclaw?.manageInstallation ?? true,
         installMethod: input.req.openclaw?.installMethod ?? "install_sh",
-        requestedVersion: input.req.openclaw?.version ?? "pinned-by-sovereign",
+        requestedVersion: resolveRequestedOpenClawVersion(input.req.openclaw?.version),
         openclawHome: openclawPaths.openclawHome,
         runtimeConfigPath: openclawPaths.runtimeConfigPath,
         runtimeProfilePath: openclawPaths.runtimeProfilePath,
