@@ -2956,7 +2956,7 @@ export class RealInstallerService implements InstallerService {
       ? [
           "-u",
           openclawServiceUser,
-          "--preserve-env=OPENCLAW_HOME,OPENCLAW_CONFIG,OPENCLAW_CONFIG_PATH,SOVEREIGN_NODE_CONFIG,CI",
+          "--preserve-env=OPENCLAW_HOME,OPENCLAW_CONFIG,OPENCLAW_CONFIG_PATH,SOVEREIGN_NODE_CONFIG,CI,TMPDIR,TMP,TEMP",
           "--",
           command,
           ...args,
@@ -3016,18 +3016,31 @@ export class RealInstallerService implements InstallerService {
   }
 
   private buildManagedOpenClawEnv(runtimeConfig: RuntimeConfig): Record<string, string> {
+    const tempDir = this.getManagedOpenClawTempDir(runtimeConfig);
     return {
       OPENCLAW_HOME: runtimeConfig.openclaw.openclawHome,
       OPENCLAW_CONFIG: runtimeConfig.openclaw.runtimeConfigPath,
       OPENCLAW_CONFIG_PATH: runtimeConfig.openclaw.runtimeConfigPath,
       SOVEREIGN_NODE_CONFIG: this.paths.configPath,
+      TMPDIR: tempDir,
+      TMP: tempDir,
+      TEMP: tempDir,
     };
+  }
+
+  private getManagedOpenClawTempDir(runtimeConfig?: RuntimeConfig): string {
+    const gatewayEnvPath =
+      runtimeConfig?.openclaw.gatewayEnvPath ?? join(this.paths.openclawServiceHome, "gateway.env");
+    return join(dirname(gatewayEnvPath), "tmp");
   }
 
   private setManagedOpenClawEnv(runtimeConfig: RuntimeConfig): void {
     const env = this.buildManagedOpenClawEnv(runtimeConfig);
     this.managedOpenClawEnv = env;
     for (const [key, value] of Object.entries(env)) {
+      if (key === "TMPDIR" || key === "TMP" || key === "TEMP") {
+        continue;
+      }
       process.env[key] = value;
     }
   }
@@ -4332,6 +4345,7 @@ export class RealInstallerService implements InstallerService {
     }
 
     const serviceIdentity = this.getConfiguredServiceIdentity(runtimeConfig);
+    const managedTempDir = this.getManagedOpenClawTempDir(runtimeConfig);
     const unitName = SOVEREIGN_GATEWAY_SYSTEMD_UNIT;
     const unitPath =
       process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH?.trim()
@@ -4348,6 +4362,9 @@ export class RealInstallerService implements InstallerService {
       `Group=${serviceIdentity.group}`,
       `WorkingDirectory=${this.paths.openclawServiceHome}`,
       `Environment=HOME=${this.paths.openclawServiceHome}`,
+      `Environment=TMPDIR=${managedTempDir}`,
+      `Environment=TMP=${managedTempDir}`,
+      `Environment=TEMP=${managedTempDir}`,
       `EnvironmentFile=-${runtimeConfig.openclaw.gatewayEnvPath}`,
       "ExecStart=/usr/bin/env openclaw gateway run --allow-unconfigured --bind loopback",
       "Restart=always",
@@ -4360,7 +4377,10 @@ export class RealInstallerService implements InstallerService {
 
     try {
       await mkdir(this.paths.openclawServiceHome, { recursive: true });
+      await mkdir(managedTempDir, { recursive: true });
+      await chmod(managedTempDir, 0o700);
       await this.applyRuntimeOwnership(this.paths.openclawServiceHome);
+      await this.applyRuntimeOwnership(managedTempDir);
       await mkdir(dirname(unitPath), { recursive: true });
       await writeFile(unitPath, unitContents, "utf8");
     } catch (error) {
@@ -5348,14 +5368,18 @@ export class RealInstallerService implements InstallerService {
       },
       openrouter: runtimeConfig.openrouter,
     };
+    const managedTempDir = this.getManagedOpenClawTempDir(runtimeConfig);
 
     try {
       await mkdir(this.paths.openclawServiceHome, { recursive: true });
       await mkdir(runtimeConfig.openclaw.openclawHome, { recursive: true });
       await mkdir(dirname(runtimeConfig.openclaw.runtimeProfilePath), { recursive: true });
+      await mkdir(managedTempDir, { recursive: true });
+      await chmod(managedTempDir, 0o700);
       await this.applyRuntimeOwnership(this.paths.openclawServiceHome);
       await this.applyRuntimeOwnership(runtimeConfig.openclaw.openclawHome);
       await this.applyRuntimeOwnership(dirname(runtimeConfig.openclaw.runtimeProfilePath));
+      await this.applyRuntimeOwnership(managedTempDir);
       await this.writeProtectedJsonFile(
         runtimeConfig.openclaw.runtimeConfigPath,
         runtimePayload,
@@ -5370,6 +5394,9 @@ export class RealInstallerService implements InstallerService {
         `OPENCLAW_CONFIG=${runtimeConfig.openclaw.runtimeConfigPath}`,
         `OPENCLAW_CONFIG_PATH=${runtimeConfig.openclaw.runtimeConfigPath}`,
         `SOVEREIGN_NODE_CONFIG=${this.paths.configPath}`,
+        `TMPDIR=${managedTempDir}`,
+        `TMP=${managedTempDir}`,
+        `TEMP=${managedTempDir}`,
         `OPENROUTER_API_KEY=${openrouterApiKey}`,
         `MATRIX_HOMESERVER=${runtimeConfig.matrix.adminBaseUrl}`,
         `MATRIX_USER_ID=${runtimeConfig.matrix.bot.userId}`,

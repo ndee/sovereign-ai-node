@@ -19,7 +19,7 @@ import type {
   BundledMatrixProvisionResult,
 } from "../system/matrix.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
-import type { ExecResult } from "../system/exec.js";
+import type { ExecInput, ExecResult } from "../system/exec.js";
 import { RealInstallerService } from "./real-service.js";
 
 const buildInstallRequest = (): InstallRequest => ({
@@ -1638,6 +1638,7 @@ describe("RealInstallerService", () => {
     let gatewayRestartCalls = 0;
     let registrarCalls = 0;
     const commandCalls: string[] = [];
+    const execCalls: ExecInput[] = [];
     let sentMessageBody = "";
 
     const service = new RealInstallerService(createLogger(), paths, {
@@ -1739,6 +1740,7 @@ describe("RealInstallerService", () => {
       },
       execRunner: {
         run: async (input): Promise<ExecResult> => {
+          execCalls.push(input);
           const serialized = [input.command, ...(input.args ?? [])].join(" ");
           commandCalls.push(serialized);
 
@@ -1865,6 +1867,33 @@ describe("RealInstallerService", () => {
       );
       expect(unitRaw).toContain("User=sovereign-node");
       expect(unitRaw).toContain("Group=sovereign-node");
+      expect(unitRaw).toContain(`Environment=TMPDIR=${join(paths.openclawServiceHome, "tmp")}`);
+      expect(unitRaw).toContain(`Environment=TMP=${join(paths.openclawServiceHome, "tmp")}`);
+      expect(unitRaw).toContain(`Environment=TEMP=${join(paths.openclawServiceHome, "tmp")}`);
+
+      const matrixEnableCall = execCalls.find((call) => {
+        const args = call.args ?? [];
+        return (
+          (call.command === "openclaw"
+            && args[0] === "plugins"
+            && args[1] === "enable"
+            && args[2] === "matrix")
+          || (
+            call.command === "sudo"
+            && args.includes("openclaw")
+            && args.includes("plugins")
+            && args.includes("enable")
+            && args.includes("matrix")
+          )
+        );
+      });
+      expect(matrixEnableCall?.options).toMatchObject({
+        env: {
+          TMPDIR: join(paths.openclawServiceHome, "tmp"),
+          TMP: join(paths.openclawServiceHome, "tmp"),
+          TEMP: join(paths.openclawServiceHome, "tmp"),
+        },
+      });
 
       const registrationRaw = await readFile(
         join(paths.stateDir, "mail-sentinel", "registration.json"),
@@ -2732,6 +2761,9 @@ describe("RealInstallerService", () => {
         "utf8",
       );
       expect(gatewayEnvRaw).toContain("OPENROUTER_API_KEY=sk-or-updated");
+      expect(gatewayEnvRaw).toContain(`TMPDIR=${join(paths.openclawServiceHome, "tmp")}`);
+      expect(gatewayEnvRaw).toContain(`TMP=${join(paths.openclawServiceHome, "tmp")}`);
+      expect(gatewayEnvRaw).toContain(`TEMP=${join(paths.openclawServiceHome, "tmp")}`);
 
       const updatedRequestRaw = await readFile(requestPath, "utf8");
       const updatedRequest = JSON.parse(updatedRequestRaw) as {
