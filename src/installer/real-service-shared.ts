@@ -1130,7 +1130,7 @@ const isCoreAgentBindingBestEffortSkippable = (error: unknown): boolean => {
     }
   }
   const combined = messages.join("\n").toLowerCase();
-  return /unknown command|unknown option|unexpected command|not implemented|plugins enable|unknown channel "matrix"|failed to load from .*extensions\/matrix|cannot find module .*plugin-sdk\/index\.js\/keyed-async-queue/.test(
+  return /unknown command|unknown option|unexpected command|not implemented|plugins enable/.test(
     combined,
   );
 };

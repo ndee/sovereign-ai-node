@@ -5243,6 +5243,7 @@ export class RealInstallerService implements InstallerService {
     const managedAgents = ensureCoreManagedAgents(
       runtimeConfig.openclawProfile.agents,
     );
+    const operatorAllowlist = [runtimeConfig.matrix.operator.userId];
     const pluginEntries: Record<string, unknown> = {
       matrix: {
         enabled: true,
@@ -5292,14 +5293,16 @@ export class RealInstallerService implements InstallerService {
               }),
           dm: {
             policy: "allowlist" as const,
-            allowFrom: [runtimeConfig.matrix.operator.userId],
+            allowFrom: operatorAllowlist,
           },
           groupPolicy: "allowlist" as const,
+          groupAllowFrom: operatorAllowlist,
           groups: {
             [runtimeConfig.matrix.alertRoom.roomId]: {
               enabled: true,
+              allow: true,
               autoReply: true,
-              users: [runtimeConfig.matrix.operator.userId],
+              users: operatorAllowlist,
             },
           },
         },
