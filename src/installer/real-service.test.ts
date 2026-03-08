@@ -1021,6 +1021,8 @@ describe("RealInstallerService", () => {
             enabled?: boolean;
             homeserver?: string;
             userId?: string;
+            groupAllowFrom?: string[];
+            groups?: Record<string, { allow?: boolean; users?: string[] }>;
             accounts?: Record<string, { userId?: string; homeserver?: string; accessToken?: string }>;
           };
         };
@@ -1036,6 +1038,15 @@ describe("RealInstallerService", () => {
       expect(openclawConfig.channels?.matrix?.enabled).toBe(true);
       expect(openclawConfig.channels?.matrix?.homeserver).toBe("http://127.0.0.1:8008");
       expect(openclawConfig.channels?.matrix?.userId).toBe("@mail-sentinel:matrix.example.org");
+      expect(openclawConfig.channels?.matrix?.groupAllowFrom).toEqual([
+        "@operator:matrix.example.org",
+      ]);
+      expect(openclawConfig.channels?.matrix?.groups?.["!alerts:matrix.example.org"]).toEqual(
+        expect.objectContaining({
+          allow: true,
+          users: ["@operator:matrix.example.org"],
+        }),
+      );
       expect(openclawConfig.channels?.matrix?.accounts?.["mail-sentinel"]?.userId).toBe(
         "@mail-sentinel:matrix.example.org",
       );
@@ -1075,6 +1086,158 @@ describe("RealInstallerService", () => {
       expect(mailSentinelToolsRaw).toContain(
         "/usr/local/bin/sovereign-tool imap-read-mail --instance mail-sentinel-imap --message-id <id>",
       );
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails install during bots_configure when the OpenClaw matrix plugin is broken", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+
+    let pluginEnableCalls = 0;
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async (opts) => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: opts.version,
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      mailSentinelRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert --id mail-sentinel",
+          cronCommand: "openclaw cron add --name mail-sentinel-poll --every 5m",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+          capabilities: ["IMAP4rev1"],
+        }),
+      },
+      matrixProvisioner: {
+        provision: async (req) => ({
+          projectDir: join(tempRoot, "matrix"),
+          composeFilePath: join(tempRoot, "matrix", "compose.yaml"),
+          accessMode: "direct",
+          homeserverDomain: req.matrix.homeserverDomain,
+          publicBaseUrl: req.matrix.publicBaseUrl,
+          adminBaseUrl: "http://127.0.0.1:8008",
+          federationEnabled: req.matrix.federationEnabled ?? false,
+          tlsMode: "local-dev",
+        }),
+        bootstrapAccounts: async () => ({
+          operator: {
+            localpart: "operator",
+            userId: "@operator:matrix.example.org",
+            passwordSecretRef: "file:/tmp/operator.password",
+            accessToken: "operator-token",
+          },
+          bot: {
+            localpart: "mail-sentinel",
+            userId: "@mail-sentinel:matrix.example.org",
+            passwordSecretRef: "file:/tmp/mail-sentinel.password",
+            accessToken: "bot-token",
+          },
+        }),
+        bootstrapRoom: async () => ({
+          roomId: "!alerts:matrix.example.org",
+          roomName: "Sovereign Alerts",
+        }),
+        test: async (req) => ({
+          ok: true,
+          homeserverUrl: req.publicBaseUrl,
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async (input): Promise<ExecResult> => {
+          const serialized = [input.command, ...(input.args ?? [])].join(" ");
+          if (serialized === "openclaw plugins enable matrix") {
+            pluginEnableCalls += 1;
+            return {
+              command: serialized,
+              exitCode: 1,
+              stdout: "",
+              stderr:
+                "[plugins] matrix failed to load from /usr/lib/node_modules/openclaw/extensions/matrix/index.ts: Error: Cannot find module '/usr/lib/node_modules/openclaw/dist/plugin-sdk/index.js/keyed-async-queue'\nUnknown channel \"matrix\".",
+            };
+          }
+          return {
+            command: serialized,
+            exitCode: 0,
+            stdout: "ok",
+            stderr: "",
+          };
+        },
+      },
+      fetchImpl: async (url) => {
+        if (url.includes("/_matrix/client/v3/rooms/")) {
+          return new Response(JSON.stringify({ event_id: "$evt1" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+
+    try {
+      const started = await service.startInstall(buildInstallRequest());
+
+      expect(pluginEnableCalls).toBe(1);
+      expect(started.job.state).toBe("failed");
+
+      const stepStates = Object.fromEntries(
+        started.job.steps.map((step) => [step.id, step.state]),
+      );
+      expect(stepStates.preflight).toBe("succeeded");
+      expect(stepStates.openclaw_bootstrap_cli).toBe("succeeded");
+      expect(stepStates.imap_validate).toBe("succeeded");
+      expect(stepStates.matrix_provision).toBe("succeeded");
+      expect(stepStates.matrix_bootstrap_accounts).toBe("succeeded");
+      expect(stepStates.matrix_bootstrap_room).toBe("succeeded");
+      expect(stepStates.openclaw_gateway_service_install).toBe("succeeded");
+      expect(stepStates.openclaw_configure).toBe("succeeded");
+      expect(stepStates.bots_configure).toBe("failed");
+      expect(stepStates.smoke_checks).toBe("pending");
+
+      const stored = await service.getInstallJob(started.job.jobId);
+      expect(stored.error?.code).toBe("MANAGED_AGENT_REGISTER_FAILED");
+      expect(stored.job.currentStepId).toBe("bots_configure");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
