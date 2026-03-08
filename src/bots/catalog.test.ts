@@ -2,6 +2,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { execa } from "execa";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { FilesystemBotCatalog } from "./catalog.js";
@@ -62,6 +63,14 @@ const writeBotPackage = async (rootDir: string, input: {
   );
 };
 
+const commitGitRepo = async (repoDir: string): Promise<void> => {
+  await execa("git", ["init", "--initial-branch", "main", repoDir]);
+  await execa("git", ["-C", repoDir, "config", "user.name", "Sovereign Test"]);
+  await execa("git", ["-C", repoDir, "config", "user.email", "test@example.org"]);
+  await execa("git", ["-C", repoDir, "add", "."]);
+  await execa("git", ["-C", repoDir, "commit", "-m", "Initial bots"]);
+};
+
 describe("FilesystemBotCatalog", () => {
   it("loads bot packages from an explicit repository directory", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-bot-catalog-test-"));
@@ -116,5 +125,34 @@ describe("FilesystemBotCatalog", () => {
         id: "node-operator",
       },
     });
+  });
+
+  it("loads bot packages from a git repository URL", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-bot-catalog-test-"));
+    tempRoots.push(tempRoot);
+    await writeBotPackage(tempRoot, {
+      id: "bitcoin-skill-match",
+      displayName: "Bitcoin Skill Match",
+      defaultInstall: false,
+    });
+    await writeBotPackage(tempRoot, {
+      id: "mail-sentinel",
+      displayName: "Mail Sentinel",
+      defaultInstall: true,
+    });
+    await commitGitRepo(tempRoot);
+
+    const catalog = new FilesystemBotCatalog({
+      repoUrl: tempRoot,
+      repoRef: "main",
+    });
+
+    const packages = await catalog.listPackages();
+
+    expect(packages.map((entry) => entry.manifest.id)).toEqual([
+      "bitcoin-skill-match",
+      "mail-sentinel",
+    ]);
+    await expect(catalog.getDefaultSelectedIds()).resolves.toEqual(["mail-sentinel"]);
   });
 });

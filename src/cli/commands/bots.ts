@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { z } from "zod";
 
 import type { AppContainer } from "../../app/create-app.js";
+import { applyBotCatalogSourceOptions, type BotCatalogSourceOptions } from "../bot-catalog-source.js";
 import { writeCliError, writeCliSuccess } from "../output.js";
 
 const botSchema = z.object({
@@ -39,13 +40,15 @@ export const registerBotsCommand = (program: Command, app: AppContainer): void =
     .command("bots")
     .description("List and instantiate installable Sovereign bot packages");
 
-  bots
+  addBotCatalogSourceOptions(bots
     .command("list")
     .description("List bot packages from the configured bot repository")
     .option("--json", "Emit JSON output")
-    .action(async (opts: { json?: boolean }) => {
+  )
+    .action(async (opts: BotCatalogSourceOptions & { json?: boolean }) => {
       const command = "bots list";
       try {
+        applyBotCatalogSourceOptions(opts);
         const result = await app.installerService.listSovereignBots();
         writeCliSuccess(command, result, listBotsResultSchema, Boolean(opts.json));
       } catch (error) {
@@ -54,15 +57,18 @@ export const registerBotsCommand = (program: Command, app: AppContainer): void =
       }
     });
 
-  bots
-    .command("instantiate")
-    .description("Instantiate a managed bot from the configured bot repository")
+  addBotCatalogSourceOptions(bots
+    .command("install")
+    .alias("instantiate")
+    .description("Install a managed bot from the configured bot repository")
     .argument("<id>", "Bot package ID")
     .option("--workspace <dir>", "Workspace directory override")
     .option("--json", "Emit JSON output")
-    .action(async (id: string, opts: { workspace?: string; json?: boolean }) => {
-      const command = "bots instantiate";
+  )
+    .action(async (id: string, opts: BotCatalogSourceOptions & { workspace?: string; json?: boolean }) => {
+      const command = "bots install";
       try {
+        applyBotCatalogSourceOptions(opts);
         const result = await app.installerService.instantiateSovereignBot({
           id,
           ...(opts.workspace === undefined ? {} : { workspace: opts.workspace }),
@@ -74,3 +80,9 @@ export const registerBotsCommand = (program: Command, app: AppContainer): void =
       }
     });
 };
+
+const addBotCatalogSourceOptions = <T extends Command>(command: T): T =>
+  command
+    .option("--bots-source-dir <path>", "Use a local sovereign-ai-bots checkout")
+    .option("--bots-repo-url <url>", "Clone bot packages from a Git repository URL")
+    .option("--bots-repo-ref <ref>", "Git branch, tag, or commit for --bots-repo-url");

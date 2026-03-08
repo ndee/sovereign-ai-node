@@ -304,6 +304,50 @@ const writeNoCronManagedAgentRuntime = async (
   await writeFile(paths.configPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
 };
 
+const buildManagedAgentMatrixProvisionResponse = (
+  url: string,
+  init?: RequestInit,
+): Response | null => {
+  if (url.includes("/_synapse/admin/v2/users/")) {
+    const encoded = url.split("/_synapse/admin/v2/users/")[1] ?? "";
+    const decoded = decodeURIComponent(encoded);
+    return new Response(JSON.stringify({ name: decoded }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  if (url.endsWith("/_matrix/client/v3/login")) {
+    const body =
+      typeof init?.body === "string"
+        ? (JSON.parse(init.body) as { identifier?: { user?: string } })
+        : {};
+    const localpart = body.identifier?.user ?? "unknown";
+    return new Response(
+      JSON.stringify({
+        user_id: `@${localpart}:matrix.example.org`,
+        access_token: `${localpart}-token`,
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  }
+  if (url.includes("/_matrix/client/v3/rooms/") && url.endsWith("/invite")) {
+    return new Response("{}", {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  if (url.includes("/_matrix/client/v3/rooms/") && url.endsWith("/join")) {
+    return new Response("{}", {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  return null;
+};
+
 describe("RealInstallerService", () => {
   it("generates an immutable relay slug during enrollment instead of honoring caller-provided slugs", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
@@ -996,6 +1040,10 @@ describe("RealInstallerService", () => {
         },
       },
       fetchImpl: async (url, init) => {
+        const provisionResponse = buildManagedAgentMatrixProvisionResponse(url, init);
+        if (provisionResponse !== null) {
+          return provisionResponse;
+        }
         if (!url.includes("/_matrix/client/v3/rooms/")) {
           return new Response("not found", { status: 404 });
         }
@@ -1398,6 +1446,10 @@ describe("RealInstallerService", () => {
         }),
       },
       fetchImpl: async (url) => {
+        const provisionResponse = buildManagedAgentMatrixProvisionResponse(url);
+        if (provisionResponse !== null) {
+          return provisionResponse;
+        }
         observedMatrixUrls.push(url.toString());
         return new Response(JSON.stringify({ event_id: "$evt1" }), {
           status: 200,
@@ -1562,6 +1614,10 @@ describe("RealInstallerService", () => {
         }),
       },
       fetchImpl: async (url, init) => {
+        const provisionResponse = buildManagedAgentMatrixProvisionResponse(url, init);
+        if (provisionResponse !== null) {
+          return provisionResponse;
+        }
         if (url.includes("/joined_members")) {
           return new Response(JSON.stringify({ joined: {} }), {
             status: 200,
@@ -1817,6 +1873,10 @@ describe("RealInstallerService", () => {
         },
       },
       fetchImpl: async (url, init) => {
+        const provisionResponse = buildManagedAgentMatrixProvisionResponse(url, init);
+        if (provisionResponse !== null) {
+          return provisionResponse;
+        }
         if (url.includes("/joined_members")) {
           return new Response(JSON.stringify({ joined: {} }), {
             status: 200,
