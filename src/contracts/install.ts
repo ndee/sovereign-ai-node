@@ -324,6 +324,7 @@ export const matrixOnboardingIssueResultSchema = z.object({
   code: z.string().min(1),
   expiresAt: isoTimestampSchema,
   onboardingUrl: z.string().min(1),
+  onboardingLink: z.string().min(1),
   username: z.string().min(1),
 });
 

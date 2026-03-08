@@ -29,9 +29,9 @@ export const createCliProgram = (app: AppContainer): Command => {
   registerOnboardingCommand(program, app);
   registerBotsCommand(program, app);
   registerAgentsCommand(program, app);
+  registerUsersCommand(program, app);
   registerTemplatesCommand(program, app);
   registerToolsCommand(program, app);
-  registerUsersCommand(program, app);
   registerDoctorCommand(program, app);
   registerLogsCommand(program);
   registerTestAlertCommand(program, app);

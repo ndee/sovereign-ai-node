@@ -273,7 +273,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(onboardPage).toContain("Copy Username");
       expect(onboardPage).toContain("Unlock Password");
       expect(onboardPage).toContain("/onboard/api/redeem");
-      expect(onboardPage).toContain("The password is not embedded in this page.");
+      expect(onboardPage).toContain("The username and password are not embedded in this page.");
       expect(onboardPage).toContain("sudo sovereign-node onboarding issue");
       expect(onboardPage).toContain("Bestätigung nicht möglich?");
       expect(onboardPage).toContain("<svg");
@@ -356,7 +356,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(onboardPage).toContain("package=im.vector.app");
       expect(onboardPage).toContain("Copy Server URL");
       expect(onboardPage).toContain("Unlock Password");
-      expect(onboardPage).toContain("The password is not embedded in this page.");
+      expect(onboardPage).toContain("The username and password are not embedded in this page.");
       expect(onboardPage).toContain("Native Android Matrix apps may still reject local CAs");
       expect(onboardPage).toContain("Do not type only 192.168.0.54:8448.");
       expect(onboardPage).toContain("Vanadium and Brave may behave differently");
@@ -445,7 +445,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(onboardPage).toContain("Connect via Element Web");
       expect(onboardPage).toContain("Open in Element Android App");
       expect(onboardPage).toContain("Unlock Password");
-      expect(onboardPage).toContain("The password is not embedded in this page.");
+      expect(onboardPage).toContain("The username and password are not embedded in this page.");
       expect(onboardPage).not.toContain("/downloads/caddy-root-ca.crt");
       expect(recordedExecCalls).toHaveLength(2);
     } finally {
@@ -554,7 +554,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       );
       expect(onboardPage).toContain("Copy Password");
       expect(onboardPage).toContain("Unlock Password");
-      expect(onboardPage).toContain("The password is not embedded in this page.");
+      expect(onboardPage).toContain("The username and password are not embedded in this page.");
       expect(onboardPage).not.toContain(operatorPassword);
       expect(onboardPage).toContain("Open Alert Room in Element Web");
 

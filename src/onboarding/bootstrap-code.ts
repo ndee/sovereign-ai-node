@@ -22,6 +22,7 @@ export type MatrixOnboardingIssueResult = {
   code: string;
   expiresAt: string;
   onboardingUrl: string;
+  onboardingLink: string;
   username: string;
 };
 
@@ -40,6 +41,11 @@ const nowIso = (): string => new Date().toISOString();
 
 export const buildMatrixOnboardingUrl = (homeserverUrl: string): string =>
   `${homeserverUrl.replace(/\/+$/, "")}/onboard`;
+
+export const buildMatrixOnboardingLink = (
+  onboardingUrl: string,
+  code: string,
+): string => `${onboardingUrl}#code=${encodeURIComponent(code)}`;
 
 export const normalizeMatrixOnboardingCode = (value: string): string =>
   value
@@ -98,6 +104,10 @@ export const parseMatrixOnboardingState = (value: unknown): MatrixOnboardingStat
     return null;
   }
   const candidate = value as Record<string, unknown>;
+  const legacyPasswordSecretRef =
+    typeof candidate.operatorPasswordSecretRef === "string"
+      ? candidate.operatorPasswordSecretRef
+      : "";
   if (
     candidate.version !== 1
     || typeof candidate.issuedAt !== "string"
@@ -106,18 +116,13 @@ export const parseMatrixOnboardingState = (value: unknown): MatrixOnboardingStat
     || typeof candidate.maxAttempts !== "number"
     || typeof candidate.codeSalt !== "string"
     || typeof candidate.codeHash !== "string"
+    || (
+      typeof candidate.passwordSecretRef !== "string"
+      && typeof candidate.operatorPasswordSecretRef !== "string"
+    )
     || typeof candidate.username !== "string"
     || typeof candidate.homeserverUrl !== "string"
   ) {
-    return null;
-  }
-  const passwordSecretRef =
-    typeof candidate.passwordSecretRef === "string"
-      ? candidate.passwordSecretRef
-      : typeof candidate.operatorPasswordSecretRef === "string"
-        ? candidate.operatorPasswordSecretRef
-        : null;
-  if (passwordSecretRef === null) {
     return null;
   }
   return {
@@ -129,7 +134,10 @@ export const parseMatrixOnboardingState = (value: unknown): MatrixOnboardingStat
     maxAttempts: Math.max(1, Math.trunc(candidate.maxAttempts)),
     codeSalt: candidate.codeSalt,
     codeHash: candidate.codeHash,
-    passwordSecretRef,
+    passwordSecretRef:
+      typeof candidate.passwordSecretRef === "string"
+        ? candidate.passwordSecretRef
+        : legacyPasswordSecretRef,
     username: candidate.username,
     homeserverUrl: candidate.homeserverUrl,
   };

@@ -38,6 +38,7 @@ import type {
 import type { Logger } from "../logging/logger.js";
 import type { SovereignPaths } from "../config/paths.js";
 import {
+  buildMatrixOnboardingLink,
   buildMatrixOnboardingUrl,
   issueMatrixOnboardingState,
   parseMatrixOnboardingState,
@@ -83,8 +84,7 @@ import type {
   ManagedAgentDeleteResult,
   ManagedAgentListResult,
   ManagedAgentUpsertResult,
-  MatrixHumanUserDeleteResult,
-  MatrixHumanUserInviteResult,
+  MatrixUserRemoveResult,
   SovereignBotInstantiateResult,
   SovereignBotListResult,
   SovereignTemplateInstallResult,
@@ -192,6 +192,7 @@ const SOVEREIGN_EXECUTABLE_PATHS: Record<string, string> = {
 };
 
 const DEFAULT_MANAGED_RELAY_CONTROL_URL = "https://relay.sovereign-ai-node.com";
+const DEFAULT_MATRIX_USER_INVITE_TTL_MINUTES = 1_440;
 
 const RELAY_NAME_THEMES = [
   "satoshi",
@@ -983,7 +984,6 @@ export class RealInstallerService implements InstallerService {
     ttlMinutes?: number;
   }): Promise<MatrixOnboardingIssueResult> {
     const runtimeConfig = await this.readRuntimeConfig();
-    this.assertMatrixOnboardingAvailable(runtimeConfig);
     const operatorPasswordSecretRef = runtimeConfig.matrix.operator.passwordSecretRef;
     if (operatorPasswordSecretRef === undefined || operatorPasswordSecretRef.length === 0) {
       throw {
@@ -992,113 +992,108 @@ export class RealInstallerService implements InstallerService {
         retryable: false,
       };
     }
-    return await this.issueMatrixOnboardingForUser({
-      runtimeConfig,
-      userId: runtimeConfig.matrix.operator.userId,
+    const onboardingUrl = this.assertMatrixOnboardingAvailable(runtimeConfig);
+    const issued = issueMatrixOnboardingState({
       passwordSecretRef: operatorPasswordSecretRef,
+      username: runtimeConfig.matrix.operator.userId,
+      homeserverUrl: runtimeConfig.matrix.publicBaseUrl,
       ...(req?.ttlMinutes === undefined ? {} : { ttlMinutes: req.ttlMinutes }),
     });
-  }
-
-  async inviteHumanMatrixUser(req: {
-    username: string;
-    ttlMinutes?: number;
-  }): Promise<MatrixHumanUserInviteResult> {
-    const runtimeConfig = await this.readRuntimeConfig();
-    this.assertMatrixOnboardingAvailable(runtimeConfig);
-    const localpart = this.sanitizeHumanMatrixLocalpart(req.username);
-    this.assertHumanMatrixLocalpartIsNotReserved(runtimeConfig, localpart);
-
-    const operatorTokenSecretRef = runtimeConfig.matrix.operator.accessTokenSecretRef;
-    if (operatorTokenSecretRef === undefined || operatorTokenSecretRef.length === 0) {
-      throw {
-        code: "MATRIX_HUMAN_USER_INVITE_FAILED",
-        message: "Operator Matrix access token is required to invite human users",
-        retryable: false,
-      };
-    }
-
-    const userId = this.buildMatrixUserId(runtimeConfig, localpart);
-    const operatorAccessToken = await this.resolveSecretRef(operatorTokenSecretRef);
-    const password = generateAgentPassword();
-    const passwordSecretRef = await this.writeManagedSecretFile(
-      `matrix-human-${localpart}.password`,
-      password,
-    );
-    const provisionedUserId = await this.ensureSynapseUserViaAdminApi({
-      adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
-      adminAccessToken: operatorAccessToken,
-      expectedUserId: userId,
-      password,
-      failureCode: "MATRIX_HUMAN_USER_INVITE_FAILED",
-    });
-    await this.inviteMatrixUserToRoom({
-      adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
-      roomId: runtimeConfig.matrix.alertRoom.roomId,
-      inviterAccessToken: operatorAccessToken,
-      inviteeUserId: provisionedUserId,
-      failureCode: "MATRIX_HUMAN_USER_INVITE_FAILED",
-      failureMessage: `Failed to invite ${provisionedUserId} to alert room`,
-    });
-
-    const issued = await this.issueMatrixOnboardingForUser({
-      runtimeConfig,
-      userId: provisionedUserId,
-      passwordSecretRef,
-      ...(req.ttlMinutes === undefined ? {} : { ttlMinutes: req.ttlMinutes }),
-    });
-
+    await this.writeMatrixOnboardingState(runtimeConfig, issued.state);
     return {
-      localpart,
-      userId: provisionedUserId,
       code: issued.code,
-      expiresAt: issued.expiresAt,
-      onboardingUrl: issued.onboardingUrl,
-      invitedToAlertRoom: true,
+      expiresAt: issued.state.expiresAt,
+      onboardingUrl,
+      onboardingLink: buildMatrixOnboardingLink(onboardingUrl, issued.code),
+      username: runtimeConfig.matrix.operator.userId,
     };
   }
 
-  async deleteHumanMatrixUser(req: {
+  async inviteMatrixUser(req: {
     username: string;
-  }): Promise<MatrixHumanUserDeleteResult> {
+    ttlMinutes?: number;
+  }): Promise<MatrixOnboardingIssueResult> {
     const runtimeConfig = await this.readRuntimeConfig();
-    const localpart = this.sanitizeHumanMatrixLocalpart(req.username);
-    this.assertHumanMatrixLocalpartIsNotReserved(runtimeConfig, localpart);
+    const onboardingUrl = this.assertMatrixOnboardingAvailable(runtimeConfig);
+    const normalized = this.normalizeMatrixUserIdentifier(req.username, runtimeConfig);
+    this.assertHumanMatrixUserTarget(runtimeConfig, normalized, "invite");
 
     const operatorTokenSecretRef = runtimeConfig.matrix.operator.accessTokenSecretRef;
     if (operatorTokenSecretRef === undefined || operatorTokenSecretRef.length === 0) {
       throw {
-        code: "MATRIX_HUMAN_USER_DELETE_FAILED",
-        message: "Operator Matrix access token is required to remove human users",
+        code: "MATRIX_USER_INVITE_FAILED",
+        message: "Operator Matrix access token is required to invite local Matrix users",
         retryable: false,
       };
     }
-
-    const userId = this.buildMatrixUserId(runtimeConfig, localpart);
     const operatorAccessToken = await this.resolveSecretRef(operatorTokenSecretRef);
-    const existingUser = await this.getSynapseUserViaAdminApi({
+    const passwordSecretRef = await this.writeManagedSecretFile(
+      `matrix-user-${normalized.localpart}.password`,
+      generateAgentPassword(),
+    );
+    const password = await this.resolveSecretRef(passwordSecretRef);
+    const upsertedUserId = await this.ensureSynapseUserViaAdminApi({
       adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
       adminAccessToken: operatorAccessToken,
-      expectedUserId: userId,
+      expectedUserId: normalized.userId,
+      password,
     });
-    const deactivated =
-      existingUser === null
-        ? false
-        : await this.deactivateSynapseUserViaAdminApi({
-          adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
-          adminAccessToken: operatorAccessToken,
-          expectedUserId: existingUser,
-        });
-    const onboardingCleared = await this.clearMatrixOnboardingStateForUser(runtimeConfig, userId);
-    const passwordSecretRemoved = await this.removeManagedSecretFile(`matrix-human-${localpart}.password`);
-    const deleted = deactivated || onboardingCleared || passwordSecretRemoved;
+    const loginSession = await this.loginMatrixUser({
+      adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+      localpart: normalized.localpart,
+      password,
+      expectedUserId: upsertedUserId,
+    });
+    await this.ensureMatrixUserInAlertRoom({
+      adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+      roomId: runtimeConfig.matrix.alertRoom.roomId,
+      inviterAccessToken: operatorAccessToken,
+      inviteeUserId: loginSession.userId,
+      inviteeAccessToken: loginSession.accessToken,
+    });
 
+    const issued = issueMatrixOnboardingState({
+      passwordSecretRef,
+      username: loginSession.userId,
+      homeserverUrl: runtimeConfig.matrix.publicBaseUrl,
+      ttlMinutes: req.ttlMinutes ?? DEFAULT_MATRIX_USER_INVITE_TTL_MINUTES,
+    });
+    await this.writeMatrixOnboardingState(runtimeConfig, issued.state);
     return {
-      localpart,
-      userId,
-      deleted,
-      deactivated,
-      onboardingCleared,
+      code: issued.code,
+      expiresAt: issued.state.expiresAt,
+      onboardingUrl,
+      onboardingLink: buildMatrixOnboardingLink(onboardingUrl, issued.code),
+      username: loginSession.userId,
+    };
+  }
+
+  async removeMatrixUser(req: { username: string }): Promise<MatrixUserRemoveResult> {
+    const runtimeConfig = await this.readRuntimeConfig();
+    const normalized = this.normalizeMatrixUserIdentifier(req.username, runtimeConfig);
+    this.assertHumanMatrixUserTarget(runtimeConfig, normalized, "remove");
+
+    const operatorTokenSecretRef = runtimeConfig.matrix.operator.accessTokenSecretRef;
+    if (operatorTokenSecretRef === undefined || operatorTokenSecretRef.length === 0) {
+      throw {
+        code: "MATRIX_USER_REMOVE_FAILED",
+        message: "Operator Matrix access token is required to remove local Matrix users",
+        retryable: false,
+      };
+    }
+    const operatorAccessToken = await this.resolveSecretRef(operatorTokenSecretRef);
+    const removed = await this.deactivateSynapseUserViaAdminApi({
+      adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+      adminAccessToken: operatorAccessToken,
+      expectedUserId: normalized.userId,
+    });
+    await rm(join(this.paths.secretsDir, `matrix-user-${normalized.localpart}.password`), {
+      force: true,
+    });
+    return {
+      localpart: normalized.localpart,
+      userId: normalized.userId,
+      removed,
     };
   }
 
@@ -1820,6 +1815,45 @@ export class RealInstallerService implements InstallerService {
     return [resolvedExecutable, ...rest].filter((part) => part.length > 0).join(" ");
   }
 
+  private listDocumentedSovereignToolCommands(
+    toolInstanceId: string,
+    manifest: ToolTemplateManifest,
+  ): string[] {
+    const commands = manifest.allowedCommands.map((command) =>
+      this.renderSovereignToolCommand(toolInstanceId, command));
+    if (manifest.id === "node-cli-ops") {
+      commands.push(
+        this.renderSovereignToolCommand(
+          toolInstanceId,
+          "sovereign-node onboarding issue --ttl-minutes <minutes> --json",
+        ),
+        this.renderSovereignToolCommand(toolInstanceId, "sovereign-node users invite <username> --json"),
+        this.renderSovereignToolCommand(
+          toolInstanceId,
+          "sovereign-node users invite <username> --ttl-minutes <minutes> --json",
+        ),
+        this.renderSovereignToolCommand(toolInstanceId, "sovereign-node users remove <username> --json"),
+      );
+    }
+    return Array.from(new Set(commands));
+  }
+
+  private listDocumentedSovereignToolNotes(manifest: ToolTemplateManifest): string[] {
+    if (manifest.id === "imap-readonly") {
+      return [
+        "  note: searches already run inside the configured mailbox",
+        "  note: use `--query ALL` for the whole mailbox and do not prefix the query with `INBOX`",
+      ];
+    }
+    if (manifest.id === "node-cli-ops") {
+      return [
+        "  note: use `sovereign-node onboarding issue` when the operator wants to sign into an existing account on another device",
+        `  note: use bare localparts like \`satoshi\`; \`users invite\` defaults to ${String(DEFAULT_MATRIX_USER_INVITE_TTL_MINUTES)} minutes`,
+      ];
+    }
+    return [];
+  }
+
   private listAgentExecAllowlistPatterns(
     runtimeConfig: RuntimeConfig,
     toolInstanceIds: string[],
@@ -2526,44 +2560,6 @@ export class RealInstallerService implements InstallerService {
     return input.expectedUserId;
   }
 
-  private async deactivateSynapseUserViaAdminApi(input: {
-    adminBaseUrl: string;
-    adminAccessToken: string;
-    expectedUserId: string;
-  }): Promise<boolean> {
-    const endpoint = new URL(
-      `/_synapse/admin/v1/deactivate/${encodeURIComponent(input.expectedUserId)}`,
-      ensureTrailingSlash(input.adminBaseUrl),
-    ).toString();
-    const response = await this.fetchImpl(endpoint, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${input.adminAccessToken}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({ erase: false }),
-    });
-    const bodyText = await response.text();
-    const parsed = parseJsonSafely(bodyText);
-    if (response.status === 404) {
-      return false;
-    }
-    if (!response.ok) {
-      throw {
-        code: "MATRIX_HUMAN_USER_DELETE_FAILED",
-        message: `Failed to deactivate Matrix account ${input.expectedUserId}`,
-        retryable: true,
-        details: {
-          endpoint,
-          status: response.status,
-          body: summarizeUnknown(parsed),
-        },
-      };
-    }
-    return true;
-  }
-
   private async loginMatrixUser(input: {
     adminBaseUrl: string;
     localpart: string;
@@ -2715,6 +2711,140 @@ export class RealInstallerService implements InstallerService {
     }
   }
 
+  private async deactivateSynapseUserViaAdminApi(input: {
+    adminBaseUrl: string;
+    adminAccessToken: string;
+    expectedUserId: string;
+  }): Promise<boolean> {
+    const endpoint = new URL(
+      `/_synapse/admin/v1/deactivate/${encodeURIComponent(input.expectedUserId)}`,
+      ensureTrailingSlash(input.adminBaseUrl),
+    ).toString();
+    const response = await this.fetchImpl(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${input.adminAccessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+    const bodyText = await response.text();
+    const parsed = parseJsonSafely(bodyText);
+    if (response.ok) {
+      return true;
+    }
+    if (response.status === 404) {
+      return false;
+    }
+    throw {
+      code: "MATRIX_USER_REMOVE_FAILED",
+      message: `Failed to deactivate Matrix account ${input.expectedUserId}`,
+      retryable: true,
+      details: {
+        endpoint,
+        status: response.status,
+        body: summarizeUnknown(parsed),
+      },
+    };
+  }
+
+  private normalizeMatrixUserIdentifier(
+    rawUsername: string,
+    runtimeConfig: RuntimeConfig,
+  ): { localpart: string; userId: string } {
+    const candidate = rawUsername.trim();
+    if (candidate.length === 0) {
+      throw {
+        code: "MATRIX_USER_INVALID",
+        message: "Provide a local Matrix username or same-server Matrix user ID",
+        retryable: false,
+      };
+    }
+
+    const withoutAt = candidate.startsWith("@") ? candidate.slice(1) : candidate;
+    const separatorIndex = withoutAt.indexOf(":");
+    const localpartInput = separatorIndex >= 0 ? withoutAt.slice(0, separatorIndex) : withoutAt;
+    const homeserverInput = separatorIndex >= 0 ? withoutAt.slice(separatorIndex + 1) : "";
+    if (
+      homeserverInput.length > 0
+      && homeserverInput !== runtimeConfig.matrix.homeserverDomain
+    ) {
+      throw {
+        code: "MATRIX_USER_INVALID",
+        message: "Only local Matrix users on this node can be invited or removed",
+        retryable: false,
+        details: {
+          requestedDomain: homeserverInput,
+          expectedDomain: runtimeConfig.matrix.homeserverDomain,
+        },
+      };
+    }
+
+    const localpart = sanitizeExpectedMatrixLocalpart(localpartInput, "");
+    if (localpart.length === 0) {
+      throw {
+        code: "MATRIX_USER_INVALID",
+        message: "Provide a valid Matrix username/localpart",
+        retryable: false,
+        details: {
+          input: rawUsername,
+        },
+      };
+    }
+
+    return {
+      localpart,
+      userId: `@${localpart}:${runtimeConfig.matrix.homeserverDomain}`,
+    };
+  }
+
+  private assertHumanMatrixUserTarget(
+    runtimeConfig: RuntimeConfig,
+    target: { localpart: string; userId: string },
+    action: "invite" | "remove",
+  ): void {
+    const reservedUserIds = new Set<string>([
+      runtimeConfig.matrix.operator.userId,
+      runtimeConfig.matrix.bot.userId,
+      ...runtimeConfig.openclawProfile.agents.flatMap((entry) =>
+        entry.matrix?.userId === undefined ? [] : [entry.matrix.userId]),
+    ]);
+    const reservedLocalparts = new Set<string>([
+      runtimeConfig.matrix.operator.localpart ?? "",
+      runtimeConfig.matrix.bot.localpart ?? "",
+      ...runtimeConfig.openclawProfile.agents.flatMap((entry) =>
+        entry.matrix?.localpart === undefined ? [] : [entry.matrix.localpart]),
+    ].filter((value) => value.length > 0));
+    if (!reservedUserIds.has(target.userId) && !reservedLocalparts.has(target.localpart)) {
+      return;
+    }
+    if (
+      target.userId === runtimeConfig.matrix.operator.userId
+      || target.localpart === runtimeConfig.matrix.operator.localpart
+    ) {
+      throw {
+        code: action === "invite" ? "MATRIX_USER_REQUIRES_ONBOARDING" : "MATRIX_USER_PROTECTED",
+        message:
+          action === "invite"
+            ? "The operator account already exists; use 'sovereign-node onboarding issue' for another operator device"
+            : "The operator account cannot be removed with 'sovereign-node users remove'",
+        retryable: false,
+        details: {
+          userId: target.userId,
+        },
+      };
+    }
+    throw {
+      code: "MATRIX_USER_PROTECTED",
+      message: "Reserved Matrix service accounts cannot be managed with the human-user commands",
+      retryable: false,
+      details: {
+        userId: target.userId,
+      },
+    };
+  }
+
   private async writeTemplateWorkspaceFiles(input: {
     workspaceDir: string;
     runtimeConfig: RuntimeConfig;
@@ -2734,21 +2864,9 @@ export class RealInstallerService implements InstallerService {
               `- \`${tool.id}\``,
               `  template: \`${tool.templateRef}\``,
               `  capabilities: ${manifest.capabilities.join(", ")}`,
-              ...manifest.allowedCommands.map((command) =>
-                `  command: \`${this.renderSovereignToolCommand(tool.id, command)}\``),
-              ...(manifest.id === "node-cli-ops"
-                ? [
-                    `  command: \`${this.renderSovereignToolCommand(tool.id, "sovereign-node users invite <username> --ttl-minutes <minutes> --json")}\``,
-                    `  command: \`${this.renderSovereignToolCommand(tool.id, "sovereign-node users remove <username> --json")}\``,
-                    "  note: user invite/remove commands are restricted to direct messages from the configured operator",
-                  ]
-                : []),
-              ...(manifest.id === "imap-readonly"
-                ? [
-                    "  note: searches already run inside the configured mailbox",
-                    "  note: use `--query ALL` for the whole mailbox and do not prefix the query with `INBOX`",
-                  ]
-                : []),
+              ...this.listDocumentedSovereignToolCommands(tool.id, manifest).map((command) =>
+                `  command: \`${command}\``),
+              ...this.listDocumentedSovereignToolNotes(manifest),
             ];
           }),
         ];
@@ -4962,7 +5080,7 @@ export class RealInstallerService implements InstallerService {
     };
   }
 
-  private assertMatrixOnboardingAvailable(runtimeConfig: RuntimeConfig): void {
+  private assertMatrixOnboardingAvailable(runtimeConfig: RuntimeConfig): string {
     if (
       runtimeConfig.matrix.accessMode !== "relay"
       && !runtimeConfig.matrix.publicBaseUrl.startsWith("https://")
@@ -4978,116 +5096,14 @@ export class RealInstallerService implements InstallerService {
         },
       };
     }
+    return buildMatrixOnboardingUrl(runtimeConfig.matrix.publicBaseUrl);
   }
 
-  private buildMatrixUserId(runtimeConfig: RuntimeConfig, localpart: string): string {
-    return `@${localpart}:${runtimeConfig.matrix.homeserverDomain}`;
-  }
-
-  private sanitizeHumanMatrixLocalpart(value: string): string {
-    const trimmed = value.trim();
-    const withoutSigil = trimmed.startsWith("@") ? trimmed.slice(1) : trimmed;
-    const [localpartCandidate = ""] = withoutSigil.split(":");
-    const localpart = sanitizeExpectedMatrixLocalpart(localpartCandidate, "");
-    if (localpart.length > 0) {
-      return localpart;
-    }
-    throw {
-      code: "MATRIX_HUMAN_USER_INVALID",
-      message: "Matrix username must include at least one valid localpart character",
-      retryable: false,
-      details: {
-        input: value,
-      },
-    };
-  }
-
-  private assertHumanMatrixLocalpartIsNotReserved(
+  private async writeMatrixOnboardingState(
     runtimeConfig: RuntimeConfig,
-    localpart: string,
-  ): void {
-    const reservedByLocalpart = new Map<string, string>([
-      ...(
-        runtimeConfig.matrix.operator.localpart === undefined
-          ? []
-          : [[runtimeConfig.matrix.operator.localpart, runtimeConfig.matrix.operator.userId] satisfies [string, string]]
-      ),
-      ...(
-        runtimeConfig.matrix.bot.localpart === undefined
-          ? []
-          : [[runtimeConfig.matrix.bot.localpart, runtimeConfig.matrix.bot.userId] satisfies [string, string]]
-      ),
-      ...runtimeConfig.openclawProfile.agents.flatMap((agent) =>
-        agent.matrix?.localpart === undefined || agent.matrix.userId === undefined
-          ? []
-          : [[agent.matrix.localpart, agent.matrix.userId] satisfies [string, string]]),
-    ]);
-    const reservedUserId = reservedByLocalpart.get(localpart);
-    if (reservedUserId === undefined) {
-      return;
-    }
-    throw {
-      code: "MATRIX_HUMAN_USER_RESERVED",
-      message: `Matrix user '${reservedUserId}' is reserved for node operations and cannot be managed as a human account`,
-      retryable: false,
-      details: {
-        localpart,
-        userId: reservedUserId,
-      },
-    };
-  }
-
-  private async issueMatrixOnboardingForUser(input: {
-    runtimeConfig: RuntimeConfig;
-    userId: string;
-    passwordSecretRef: string;
-    ttlMinutes?: number;
-  }): Promise<MatrixOnboardingIssueResult> {
-    const statePath = this.getMatrixOnboardingStatePath(input.runtimeConfig);
-    const issued = issueMatrixOnboardingState({
-      passwordSecretRef: input.passwordSecretRef,
-      username: input.userId,
-      homeserverUrl: input.runtimeConfig.matrix.publicBaseUrl,
-      ...(input.ttlMinutes === undefined ? {} : { ttlMinutes: input.ttlMinutes }),
-    });
-    await this.writeInstallerJsonFile(statePath, issued.state, 0o600);
-    return {
-      code: issued.code,
-      expiresAt: issued.state.expiresAt,
-      onboardingUrl: buildMatrixOnboardingUrl(input.runtimeConfig.matrix.publicBaseUrl),
-      username: input.userId,
-    };
-  }
-
-  private async clearMatrixOnboardingStateForUser(
-    runtimeConfig: RuntimeConfig,
-    userId: string,
-  ): Promise<boolean> {
-    const statePath = this.getMatrixOnboardingStatePath(runtimeConfig);
-    let raw = "";
-    try {
-      raw = await readFile(statePath, "utf8");
-    } catch (error) {
-      if (isNodeError(error) && error.code === "ENOENT") {
-        return false;
-      }
-      throw {
-        code: "MATRIX_HUMAN_USER_DELETE_FAILED",
-        message: "Failed to read Matrix onboarding state",
-        retryable: false,
-        details: {
-          statePath,
-          error: describeError(error),
-        },
-      };
-    }
-
-    const parsed = parseMatrixOnboardingState(parseJsonSafely(raw));
-    if (parsed === null || parsed.username !== userId) {
-      return false;
-    }
-    await rm(statePath, { force: true });
-    return true;
+    state: unknown,
+  ): Promise<void> {
+    await this.writeInstallerJsonFile(this.getMatrixOnboardingStatePath(runtimeConfig), state, 0o600);
   }
 
   private getInstallRequestPath(): string {

@@ -114,21 +114,10 @@ export type SovereignToolInstanceDeleteResult = {
   deleted: boolean;
 };
 
-export type MatrixHumanUserInviteResult = {
+export type MatrixUserRemoveResult = {
   localpart: string;
   userId: string;
-  code: string;
-  expiresAt: string;
-  onboardingUrl: string;
-  invitedToAlertRoom: boolean;
-};
-
-export type MatrixHumanUserDeleteResult = {
-  localpart: string;
-  userId: string;
-  deleted: boolean;
-  deactivated: boolean;
-  onboardingCleared: boolean;
+  removed: boolean;
 };
 
 export interface InstallerService {
@@ -144,13 +133,11 @@ export interface InstallerService {
   reconfigureMatrix(req: ReconfigureMatrixRequest): Promise<ReconfigureResult>;
   reconfigureOpenrouter(req: ReconfigureOpenrouterRequest): Promise<ReconfigureResult>;
   issueMatrixOnboardingCode(req?: { ttlMinutes?: number }): Promise<MatrixOnboardingIssueResult>;
-  inviteHumanMatrixUser(req: {
+  inviteMatrixUser(req: {
     username: string;
     ttlMinutes?: number;
-  }): Promise<MatrixHumanUserInviteResult>;
-  deleteHumanMatrixUser(req: {
-    username: string;
-  }): Promise<MatrixHumanUserDeleteResult>;
+  }): Promise<MatrixOnboardingIssueResult>;
+  removeMatrixUser(req: { username: string }): Promise<MatrixUserRemoveResult>;
   listManagedAgents(): Promise<ManagedAgentListResult>;
   createManagedAgent(req: {
     id: string;

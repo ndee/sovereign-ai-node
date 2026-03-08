@@ -29,6 +29,7 @@ import type {
   ManagedAgentDeleteResult,
   ManagedAgentListResult,
   ManagedAgentUpsertResult,
+  MatrixUserRemoveResult,
   SovereignBotInstantiateResult,
   SovereignBotListResult,
   SovereignTemplateInstallResult,
@@ -269,48 +270,30 @@ export class StubInstallerService implements InstallerService {
       code: "SCFD-0000-0000",
       expiresAt: now(),
       onboardingUrl: "https://matrix.example.org/onboard",
+      onboardingLink: "https://matrix.example.org/onboard#code=SCFD-0000-0000",
       username: "@operator:matrix.example.org",
     };
   }
 
-  async inviteHumanMatrixUser(req: {
+  async inviteMatrixUser(req: {
     username: string;
     ttlMinutes?: number;
-  }): Promise<{
-    localpart: string;
-    userId: string;
-    code: string;
-    expiresAt: string;
-    onboardingUrl: string;
-    invitedToAlertRoom: boolean;
-  }> {
-    const localpart = req.username.trim().replace(/^@/, "").split(":")[0] ?? "user";
+  }): Promise<MatrixOnboardingIssueResult> {
     return {
-      localpart,
-      userId: `@${localpart}:matrix.example.org`,
-      code: "SCFD-0000-0000",
+      code: "SCFD-1111-2222",
       expiresAt: now(),
       onboardingUrl: "https://matrix.example.org/onboard",
-      invitedToAlertRoom: true,
+      onboardingLink: "https://matrix.example.org/onboard#code=SCFD-1111-2222",
+      username: req.username.startsWith("@") ? req.username : `@${req.username}:matrix.example.org`,
     };
   }
 
-  async deleteHumanMatrixUser(req: {
-    username: string;
-  }): Promise<{
-    localpart: string;
-    userId: string;
-    deleted: boolean;
-    deactivated: boolean;
-    onboardingCleared: boolean;
-  }> {
-    const localpart = req.username.trim().replace(/^@/, "").split(":")[0] ?? "user";
+  async removeMatrixUser(req: { username: string }): Promise<MatrixUserRemoveResult> {
+    const localpart = req.username.replace(/^@/, "").split(":")[0] ?? req.username;
     return {
       localpart,
       userId: `@${localpart}:matrix.example.org`,
-      deleted: true,
-      deactivated: true,
-      onboardingCleared: true,
+      removed: true,
     };
   }
 
