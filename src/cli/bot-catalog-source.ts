@@ -1,3 +1,5 @@
+import { DEFAULT_BOT_REPO_URL } from "../bots/catalog.js";
+
 export type BotCatalogSourceOptions = {
   botsRepoUrl?: string;
   botsRepoRef?: string;
@@ -16,8 +18,8 @@ export const applyBotCatalogSourceOptions = (options: BotCatalogSourceOptions): 
   if (botsRepoUrl !== undefined && botsSourceDir !== undefined) {
     throw new Error("Use either --bots-repo-url or --bots-source-dir, not both.");
   }
-  if (botsRepoRef !== undefined && botsRepoUrl === undefined) {
-    throw new Error("--bots-repo-ref requires --bots-repo-url.");
+  if (botsRepoRef !== undefined && botsSourceDir !== undefined) {
+    throw new Error("--bots-repo-ref cannot be combined with --bots-source-dir.");
   }
 
   if (botsSourceDir !== undefined) {
@@ -27,8 +29,8 @@ export const applyBotCatalogSourceOptions = (options: BotCatalogSourceOptions): 
     return;
   }
 
-  if (botsRepoUrl !== undefined) {
-    process.env[BOT_REPO_URL_ENV] = botsRepoUrl;
+  if (botsRepoUrl !== undefined || botsRepoRef !== undefined) {
+    process.env[BOT_REPO_URL_ENV] = botsRepoUrl ?? DEFAULT_BOT_REPO_URL;
     delete process.env[BOT_REPO_DIR_ENV];
     if (botsRepoRef === undefined) {
       delete process.env[BOT_REPO_REF_ENV];

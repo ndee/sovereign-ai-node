@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 
+import { DEFAULT_BOT_REPO_URL } from "../bots/catalog.js";
 import { applyBotCatalogSourceOptions } from "./bot-catalog-source.js";
 
 const priorRepoDir = process.env.SOVEREIGN_BOTS_REPO_DIR;
@@ -53,10 +54,20 @@ describe("applyBotCatalogSourceOptions", () => {
     expect(process.env.SOVEREIGN_BOTS_REPO_REF).toBe("feature/custom-bots");
   });
 
-  it("rejects a repo ref without a repo url", () => {
+  it("uses the default bot repo URL when only a ref override is provided", () => {
+    applyBotCatalogSourceOptions({
+      botsRepoRef: "feature/test-bots",
+    });
+
+    expect(process.env.SOVEREIGN_BOTS_REPO_URL).toBe(DEFAULT_BOT_REPO_URL);
+    expect(process.env.SOVEREIGN_BOTS_REPO_REF).toBe("feature/test-bots");
+  });
+
+  it("rejects combining a repo ref with a local source directory", () => {
     expect(() =>
       applyBotCatalogSourceOptions({
         botsRepoRef: "main",
-      })).toThrow("--bots-repo-ref requires --bots-repo-url.");
+        botsSourceDir: "/tmp/sovereign-ai-bots",
+      })).toThrow("--bots-repo-ref cannot be combined with --bots-source-dir.");
   });
 });

@@ -17,6 +17,7 @@ const BOT_MANIFEST_FILE = "sovereign-bot.json";
 const BOT_REPO_DIR_ENV = "SOVEREIGN_BOTS_REPO_DIR";
 const BOT_REPO_URL_ENV = "SOVEREIGN_BOTS_REPO_URL";
 const BOT_REPO_REF_ENV = "SOVEREIGN_BOTS_REPO_REF";
+export const DEFAULT_BOT_REPO_URL = "https://github.com/ndee/sovereign-ai-bots";
 
 const botConfigValueSchema = z.union([z.string(), z.number().finite(), z.boolean()]);
 
@@ -301,17 +302,19 @@ export class FilesystemBotCatalog implements BotCatalog {
       };
     }
 
-    if (repoRef !== undefined && repoUrl === undefined) {
+    if (repoRef !== undefined && repoDir !== undefined) {
       throw {
         code: "BOT_REPO_REF_REQUIRES_URL",
-        message: `${BOT_REPO_REF_ENV} requires ${BOT_REPO_URL_ENV} to be set as well.`,
+        message: `${BOT_REPO_REF_ENV} cannot be combined with ${BOT_REPO_DIR_ENV}.`,
         retryable: false,
       };
     }
 
     return {
       ...(repoDir === undefined ? {} : { repoDir }),
-      ...(repoUrl === undefined ? {} : { repoUrl }),
+      ...(repoDir === undefined
+        ? { repoUrl: repoUrl ?? DEFAULT_BOT_REPO_URL }
+        : (repoUrl === undefined ? {} : { repoUrl })),
       ...(repoRef === undefined ? {} : { repoRef }),
     };
   }

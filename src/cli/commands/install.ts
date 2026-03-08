@@ -3,6 +3,7 @@ import { access, readFile } from "node:fs/promises";
 import type { Command } from "commander";
 
 import type { AppContainer } from "../../app/create-app.js";
+import { DEFAULT_BOT_REPO_URL } from "../../bots/catalog.js";
 import { applyBotCatalogSourceOptions, type BotCatalogSourceOptions } from "../bot-catalog-source.js";
 import {
   installRequestSchema,
@@ -124,7 +125,10 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
       "Path to an InstallRequest JSON file (overrides scaffold defaults)",
     )
     .option("--bots-source-dir <path>", "Use a local sovereign-ai-bots checkout")
-    .option("--bots-repo-url <url>", "Clone bot packages from a Git repository URL")
+    .option(
+      "--bots-repo-url <url>",
+      `Clone bot packages from a Git repository URL (default: ${DEFAULT_BOT_REPO_URL})`,
+    )
     .option("--bots-repo-ref <ref>", "Git branch, tag, or commit for --bots-repo-url")
     .action(async (opts: InstallOptions) => {
       const command = "install";

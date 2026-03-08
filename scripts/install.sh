@@ -411,14 +411,14 @@ resolve_source_mode() {
     return
   fi
 
+  if [[ -n "$BOTS_REPO_URL" ]]; then
+    return
+  fi
+
   detected_bots_source="$(find_local_bots_source_dir)"
   if [[ -n "$detected_bots_source" ]]; then
     BOTS_SOURCE_DIR="$detected_bots_source"
     log "Using local bots source directory: $BOTS_SOURCE_DIR"
-    return
-  fi
-
-  if [[ -n "$BOTS_REPO_URL" ]]; then
     return
   fi
 
