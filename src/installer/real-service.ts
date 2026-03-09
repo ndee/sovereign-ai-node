@@ -4640,13 +4640,6 @@ export class RealInstallerService implements InstallerService {
             ],
         allowAlreadyExists: true,
       });
-      if (agent.matrix.userId === runtimeConfig.matrix.bot.userId) {
-        await this.runOpenClawCommandAlternatives({
-          label: `${agent.id}-matrix-default-bind`,
-          commands: [["agents", "bind", "--agent", agent.id, "--bind", "matrix:default"]],
-          allowAlreadyExists: true,
-        });
-      }
       for (const pattern of this.listAgentExecAllowlistPatterns(
         runtimeConfig,
         agent.toolInstanceIds ?? [],

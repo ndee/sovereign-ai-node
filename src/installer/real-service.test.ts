@@ -2369,6 +2369,15 @@ describe("RealInstallerService", () => {
   });
 
   it("binds the shared default Matrix account to the matching managed agent", async () => {
+    const botPackage = buildTestLoadedBotPackage({
+      id: "bitcoin-skill-match",
+      displayName: "Bitcoin Skill Match",
+      description: "Matrix-based community matchmaker for a local Bitcoin community.",
+      matrixMode: "service-account",
+      matrixRouting: {
+        defaultAccount: true,
+      },
+    });
     const paths: SovereignPaths = {
       configPath: "/tmp/sovereign-node.json5",
       secretsDir: "/tmp/sovereign-secrets",
@@ -2395,6 +2404,17 @@ describe("RealInstallerService", () => {
         install: async () => {},
         start: async () => {},
         restart: async () => {},
+      },
+      botCatalog: {
+        listPackages: async () => [botPackage],
+        getPackage: async (id) => {
+          if (id !== "bitcoin-skill-match") {
+            throw new Error(`unexpected bot package lookup: ${id}`);
+          }
+          return botPackage;
+        },
+        getDefaultSelectedIds: async () => [],
+        findPackageByTemplateRef: async (ref) => ref === botPackage.templateRef ? botPackage : null,
       },
       preflightChecker: {
         run: async () => ({
@@ -2466,6 +2486,7 @@ describe("RealInstallerService", () => {
         agents: [
           {
             id: "bitcoin-skill-match",
+            templateRef: botPackage.templateRef,
             workspace: "/tmp/bitcoin-skill-match",
             matrix: {
               localpart: "bitcoin-skill-match",
@@ -2535,15 +2556,25 @@ describe("RealInstallerService", () => {
       commandCalls.includes(
         "openclaw agents bind --agent bitcoin-skill-match --bind matrix:bitcoin-skill-match",
       ),
+    ).toBe(false);
+    expect(
+      commandCalls.includes(
+        "openclaw agents bind --agent bitcoin-skill-match --bind matrix",
+      ),
     ).toBe(true);
     expect(
       commandCalls.includes(
-        "openclaw agents bind --agent bitcoin-skill-match --bind matrix:default",
+        "openclaw agents bind --agent node-operator --bind matrix:node-operator",
       ),
     ).toBe(true);
     expect(
       commandCalls.includes(
         "openclaw agents bind --agent node-operator --bind matrix:default",
+      ),
+    ).toBe(false);
+    expect(
+      commandCalls.includes(
+        "openclaw agents bind --agent bitcoin-skill-match --bind matrix:default",
       ),
     ).toBe(false);
   });
@@ -4230,6 +4261,9 @@ describe("RealInstallerService", () => {
       expect(commandCalls).toContain("openclaw agents bind --agent bitcoin-skill-match --bind matrix");
       expect(commandCalls).not.toContain(
         "openclaw agents bind --agent bitcoin-skill-match --bind matrix:bitcoin-skill-match",
+      );
+      expect(commandCalls).not.toContain(
+        "openclaw agents bind --agent bitcoin-skill-match --bind matrix:default",
       );
       expect((await stat(join(paths.stateDir, "bitcoin-skill-match", "workspace", ".openclaw"))).isDirectory()).toBe(true);
       expect(sentMessageBody).toContain("Hello from Bitcoin Skill Match");
