@@ -1536,6 +1536,9 @@ describe("RealInstallerService", () => {
         source?: string;
         profileRef?: string;
         matrix?: unknown;
+        session?: {
+          dmScope?: string;
+        };
         cron?: { enabled?: boolean; jobs?: unknown };
         agents?: {
           list?: Array<{
@@ -1577,6 +1580,7 @@ describe("RealInstallerService", () => {
       expect(openclawConfig.source).toBeUndefined();
       expect(openclawConfig.profileRef).toBeUndefined();
       expect(openclawConfig.matrix).toBeUndefined();
+      expect(openclawConfig.session?.dmScope).toBe("per-channel-peer");
       expect(openclawConfig.cron?.enabled).toBe(true);
       expect(openclawConfig.cron?.jobs).toBeUndefined();
       expect(openclawConfig.plugins?.entries?.matrix?.enabled).toBe(true);
@@ -1638,6 +1642,16 @@ describe("RealInstallerService", () => {
       expect(openclawConfig.agents?.defaults?.model).toBe(
         "openrouter/openai/gpt-5-nano",
       );
+
+      const runtimeConfigRaw = await readFile(paths.configPath, "utf8");
+      const runtimeConfig = JSON.parse(runtimeConfigRaw) as {
+        openclawProfile?: {
+          session?: {
+            dmScope?: string;
+          };
+        };
+      };
+      expect(runtimeConfig.openclawProfile?.session?.dmScope).toBe("per-channel-peer");
 
       const mailSentinelToolsRaw = await readFile(
         join(paths.stateDir, "mail-sentinel", "workspace", "TOOLS.md"),
