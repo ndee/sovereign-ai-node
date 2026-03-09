@@ -19,6 +19,7 @@ import type {
 } from "../system/matrix.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
 import type { ExecResult } from "../system/exec.js";
+import type { RuntimeConfig } from "./real-service-shared.js";
 import { RealInstallerService } from "./real-service.js";
 
 const buildInstallRequest = (): InstallRequest => ({
@@ -1726,6 +1727,186 @@ describe("RealInstallerService", () => {
       }
       await rm(tempRoot, { recursive: true, force: true });
     }
+  });
+
+  it("binds the shared default Matrix account to the matching managed agent", async () => {
+    const paths: SovereignPaths = {
+      configPath: "/tmp/sovereign-node.json5",
+      secretsDir: "/tmp/sovereign-secrets",
+      stateDir: "/tmp/sovereign-state",
+      logsDir: "/tmp/sovereign-logs",
+      installJobsDir: "/tmp/sovereign-install-jobs",
+      openclawServiceHome: "/tmp/sovereign-openclaw-home",
+    };
+
+    const commandCalls: string[] = [];
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async (opts) => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: opts.version,
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+          capabilities: ["IMAP4rev1"],
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async ({ command, args }) => {
+          const serialized = [command, ...(args ?? [])].join(" ");
+          commandCalls.push(serialized);
+          return {
+            command: serialized,
+            exitCode: 0,
+            stdout: "ok",
+            stderr: "",
+          };
+        },
+      },
+    });
+
+    const runtimeConfig: RuntimeConfig = {
+      openrouter: {
+        model: "openai/gpt-5-nano",
+        apiKeySecretRef: "env:OPENROUTER_API_KEY",
+      },
+      openclaw: {
+        managedInstallation: true,
+        installMethod: "install_sh",
+        requestedVersion: "0.2.0",
+        openclawHome: "/tmp/sovereign-openclaw-home/.openclaw",
+        runtimeConfigPath: "/tmp/sovereign-openclaw-home/.openclaw/openclaw.json5",
+        runtimeProfilePath: "/tmp/sovereign-openclaw-home/profiles/runtime.json5",
+        gatewayEnvPath: "/tmp/sovereign-openclaw-home/gateway.env",
+      },
+      openclawProfile: {
+        plugins: {
+          allow: ["matrix"],
+        },
+        agents: [
+          {
+            id: "bitcoin-skill-match",
+            workspace: "/tmp/bitcoin-skill-match",
+            matrix: {
+              localpart: "bitcoin-skill-match",
+              userId: "@bitcoin-skill-match:matrix.example.org",
+              accessTokenSecretRef: "file:/tmp/bitcoin-skill-match.token",
+            },
+          },
+          {
+            id: "node-operator",
+            workspace: "/tmp/node-operator",
+            matrix: {
+              localpart: "node-operator",
+              userId: "@node-operator:matrix.example.org",
+              accessTokenSecretRef: "file:/tmp/node-operator.token",
+            },
+          },
+        ],
+        crons: [],
+      },
+      imap: {
+        status: "configured",
+        host: "imap.example.org",
+        port: 993,
+        tls: true,
+        username: "operator@example.org",
+        mailbox: "INBOX",
+        secretRef: "file:/tmp/imap-secret",
+      },
+      bots: {
+        config: {},
+      },
+      matrix: {
+        accessMode: "direct",
+        homeserverDomain: "matrix.example.org",
+        federationEnabled: false,
+        publicBaseUrl: "https://matrix.example.org",
+        adminBaseUrl: "http://127.0.0.1:8008",
+        operator: {
+          userId: "@operator:matrix.example.org",
+        },
+        bot: {
+          localpart: "bitcoin-skill-match",
+          userId: "@bitcoin-skill-match:matrix.example.org",
+          accessTokenSecretRef: "file:/tmp/bitcoin-skill-match.token",
+        },
+        alertRoom: {
+          roomId: "!alerts:matrix.example.org",
+          roomName: "Sovereign Alerts",
+        },
+      },
+      templates: {
+        installed: [],
+      },
+      sovereignTools: {
+        instances: [],
+      },
+    };
+
+    const bindingsInvoker = service as unknown as {
+      ensureManagedAgentOpenClawBindings(config: RuntimeConfig): Promise<void>;
+    };
+
+    await bindingsInvoker.ensureManagedAgentOpenClawBindings(runtimeConfig);
+
+    expect(commandCalls.includes("openclaw plugins enable matrix")).toBe(true);
+    expect(
+      commandCalls.includes(
+        "openclaw agents bind --agent bitcoin-skill-match --bind matrix:bitcoin-skill-match",
+      ),
+    ).toBe(true);
+    expect(
+      commandCalls.includes(
+        "openclaw agents bind --agent bitcoin-skill-match --bind matrix:default",
+      ),
+    ).toBe(true);
+    expect(
+      commandCalls.includes(
+        "openclaw agents bind --agent node-operator --bind matrix:default",
+      ),
+    ).toBe(false);
   });
 
   it("builds status from runtime config and OpenClaw probes", async () => {
