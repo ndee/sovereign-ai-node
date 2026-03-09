@@ -547,6 +547,79 @@ const writeRuntimeArtifacts = async (paths: SovereignPaths): Promise<void> => {
   );
 };
 
+const writeDedicatedBotRuntimeArtifacts = async (paths: SovereignPaths): Promise<void> => {
+  await writeRuntimeArtifacts(paths);
+
+  const bitcoinWorkspace = join(paths.stateDir, "bitcoin-skill-match", "workspace");
+  const nodeOperatorWorkspace = join(paths.stateDir, "node-operator", "workspace");
+  const bitcoinTokenPath = join(paths.secretsDir, "matrix-agent-bitcoin-skill-match-access-token");
+  const bitcoinPasswordPath = join(paths.secretsDir, "matrix-agent-bitcoin-skill-match-password");
+  const nodeOperatorTokenPath = join(paths.secretsDir, "matrix-agent-node-operator-access-token");
+  const nodeOperatorPasswordPath = join(paths.secretsDir, "matrix-agent-node-operator-password");
+
+  await mkdir(bitcoinWorkspace, { recursive: true });
+  await mkdir(nodeOperatorWorkspace, { recursive: true });
+  await writeFile(bitcoinTokenPath, "bitcoin-skill-match-token\n", "utf8");
+  await writeFile(bitcoinPasswordPath, "bitcoin-skill-match-password\n", "utf8");
+  await writeFile(nodeOperatorTokenPath, "node-operator-token\n", "utf8");
+  await writeFile(nodeOperatorPasswordPath, "node-operator-password\n", "utf8");
+
+  const raw = await readFile(paths.configPath, "utf8");
+  const parsed = JSON.parse(raw) as {
+    openclawProfile?: {
+      agents?: Array<Record<string, unknown>>;
+      crons?: Array<Record<string, unknown>>;
+    };
+    matrix?: {
+      bot?: Record<string, unknown>;
+    };
+  };
+
+  parsed.openclawProfile = {
+    ...(parsed.openclawProfile ?? {}),
+    agents: [
+      {
+        id: "bitcoin-skill-match",
+        workspace: bitcoinWorkspace,
+        templateRef: "bitcoin-skill-match@1.0.0",
+        botId: "bitcoin-skill-match",
+        matrix: {
+          localpart: "bitcoin-skill-match",
+          userId: "@bitcoin-skill-match:matrix.example.org",
+          passwordSecretRef: `file:${bitcoinPasswordPath}`,
+          accessTokenSecretRef: `file:${bitcoinTokenPath}`,
+        },
+      },
+      {
+        id: "node-operator",
+        workspace: nodeOperatorWorkspace,
+        templateRef: "node-operator@1.0.0",
+        botId: "node-operator",
+        toolInstanceIds: ["node-operator-cli"],
+        default: true,
+        matrix: {
+          localpart: "node-operator",
+          userId: "@node-operator:matrix.example.org",
+          passwordSecretRef: `file:${nodeOperatorPasswordPath}`,
+          accessTokenSecretRef: `file:${nodeOperatorTokenPath}`,
+        },
+      },
+    ],
+    crons: [],
+  };
+  parsed.matrix = {
+    ...(parsed.matrix ?? {}),
+    bot: {
+      localpart: "bitcoin-skill-match",
+      userId: "@bitcoin-skill-match:matrix.example.org",
+      passwordSecretRef: `file:${bitcoinPasswordPath}`,
+      accessTokenSecretRef: `file:${bitcoinTokenPath}`,
+    },
+  };
+
+  await writeFile(paths.configPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+};
+
 const writeLegacyCorePinnedMailSentinelTemplate = async (
   paths: SovereignPaths,
 ): Promise<void> => {
@@ -3002,6 +3075,8 @@ describe("RealInstallerService", () => {
       openclawServiceHome: join(tempRoot, "openclaw-home"),
     };
     await writeRuntimeArtifacts(paths);
+    const priorOpenrouterApiKey = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "sk-or-test";
     const fetchCalls: string[] = [];
 
     const service = new RealInstallerService(createLogger(), paths, {
@@ -3124,11 +3199,16 @@ describe("RealInstallerService", () => {
       expect(fetchCalls.some((url) => url.endsWith("/invite"))).toBe(true);
       expect(fetchCalls.some((url) => url.endsWith("/join"))).toBe(true);
     } finally {
+      if (priorOpenrouterApiKey === undefined) {
+        delete process.env.OPENROUTER_API_KEY;
+      } else {
+        process.env.OPENROUTER_API_KEY = priorOpenrouterApiKey;
+      }
       await rm(tempRoot, { recursive: true, force: true });
     }
   });
 
-  it("deactivates a local Matrix user and removes the managed invite secret", async () => {
+  it("refreshes Matrix DM and room allowlists for all managed bots when inviting a local user", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {
       configPath: join(tempRoot, "etc", "sovereign-node.json5"),
@@ -3138,9 +3218,10 @@ describe("RealInstallerService", () => {
       installJobsDir: join(tempRoot, "install-jobs"),
       openclawServiceHome: join(tempRoot, "openclaw-home"),
     };
-    await writeRuntimeArtifacts(paths);
-    await writeFile(join(paths.secretsDir, "matrix-user-satoshi.password"), "secret\n", "utf8");
-    const fetchCalls: string[] = [];
+    await writeDedicatedBotRuntimeArtifacts(paths);
+    const priorOpenrouterApiKey = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "sk-or-test";
+    let gatewayRestartCalls = 0;
 
     const service = new RealInstallerService(createLogger(), paths, {
       openclawBootstrapper: {
@@ -3154,7 +3235,199 @@ describe("RealInstallerService", () => {
       openclawGatewayServiceManager: {
         install: async () => {},
         start: async () => {},
-        restart: async () => {},
+        restart: async () => {
+          gatewayRestartCalls += 1;
+        },
+      },
+      mailSentinelRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert",
+          cronCommand: "openclaw cron add",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      fetchImpl: async (input, init) => {
+        const url = String(input);
+        if (url.includes("/_synapse/admin/v2/users/")) {
+          return new Response(JSON.stringify({
+            name: "@satoshi:matrix.example.org",
+          }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (url.endsWith("/_matrix/client/v3/login")) {
+          return new Response(JSON.stringify({
+            user_id: "@satoshi:matrix.example.org",
+            access_token: "satoshi-access-token",
+          }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (url.endsWith("/invite") || url.endsWith("/join")) {
+          return new Response("{}", {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            method: init?.method ?? "GET",
+            url,
+          }),
+          {
+            status: 404,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      },
+    });
+
+    try {
+      const issued = await service.inviteMatrixUser({ username: "satoshi" });
+      expect(issued.username).toBe("@satoshi:matrix.example.org");
+      expect(gatewayRestartCalls).toBe(1);
+
+      const openclawConfigRaw = await readFile(
+        join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
+        "utf8",
+      );
+      const openclawConfig = JSON.parse(openclawConfigRaw) as {
+        channels?: {
+          matrix?: {
+            defaultAccount?: string;
+            dm?: { allowFrom?: string[] };
+            groupAllowFrom?: string[];
+            groups?: Record<string, { users?: string[] }>;
+            accounts?: Record<string, {
+              dm?: { allowFrom?: string[] };
+              groupAllowFrom?: string[];
+              groups?: Record<string, { users?: string[] }>;
+            }>;
+          };
+        };
+      };
+
+      expect(openclawConfig.channels?.matrix?.defaultAccount).toBe("bitcoin-skill-match");
+      expect(openclawConfig.channels?.matrix?.dm?.allowFrom).toEqual([
+        "@operator:matrix.example.org",
+        "@satoshi:matrix.example.org",
+      ]);
+      expect(openclawConfig.channels?.matrix?.groupAllowFrom).toEqual([
+        "@operator:matrix.example.org",
+        "@satoshi:matrix.example.org",
+      ]);
+      expect(openclawConfig.channels?.matrix?.groups?.["!alerts:matrix.example.org"]?.users).toEqual([
+        "@operator:matrix.example.org",
+        "@satoshi:matrix.example.org",
+      ]);
+      expect(openclawConfig.channels?.matrix?.accounts?.["bitcoin-skill-match"]?.dm?.allowFrom).toEqual([
+        "@operator:matrix.example.org",
+        "@satoshi:matrix.example.org",
+      ]);
+      expect(openclawConfig.channels?.matrix?.accounts?.["bitcoin-skill-match"]?.groupAllowFrom).toEqual([
+        "@operator:matrix.example.org",
+        "@satoshi:matrix.example.org",
+      ]);
+      expect(
+        openclawConfig.channels?.matrix?.accounts?.["bitcoin-skill-match"]?.groups?.["!alerts:matrix.example.org"]?.users,
+      ).toEqual([
+        "@operator:matrix.example.org",
+        "@satoshi:matrix.example.org",
+      ]);
+      expect(openclawConfig.channels?.matrix?.accounts?.["node-operator"]?.dm?.allowFrom).toEqual([
+        "@operator:matrix.example.org",
+        "@satoshi:matrix.example.org",
+      ]);
+      expect(openclawConfig.channels?.matrix?.accounts?.["node-operator"]?.groupAllowFrom).toEqual([
+        "@operator:matrix.example.org",
+        "@satoshi:matrix.example.org",
+      ]);
+      expect(
+        openclawConfig.channels?.matrix?.accounts?.["node-operator"]?.groups?.["!alerts:matrix.example.org"]?.users,
+      ).toEqual([
+        "@operator:matrix.example.org",
+        "@satoshi:matrix.example.org",
+      ]);
+    } finally {
+      if (priorOpenrouterApiKey === undefined) {
+        delete process.env.OPENROUTER_API_KEY;
+      } else {
+        process.env.OPENROUTER_API_KEY = priorOpenrouterApiKey;
+      }
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("deactivates a local Matrix user, removes the managed invite secret, and refreshes bot allowlists", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+    await writeDedicatedBotRuntimeArtifacts(paths);
+    await writeFile(join(paths.secretsDir, "matrix-user-satoshi.password"), "secret\n", "utf8");
+    const priorOpenrouterApiKey = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "sk-or-test";
+    const fetchCalls: string[] = [];
+    let gatewayRestartCalls = 0;
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {
+          gatewayRestartCalls += 1;
+        },
       },
       mailSentinelRegistrar: {
         register: async () => ({
@@ -3219,11 +3492,68 @@ describe("RealInstallerService", () => {
         userId: "@satoshi:matrix.example.org",
         removed: true,
       });
+      expect(gatewayRestartCalls).toBe(1);
       await expect(stat(join(paths.secretsDir, "matrix-user-satoshi.password"))).rejects.toMatchObject({
         code: "ENOENT",
       });
       expect(fetchCalls.some((url) => url.includes("/_synapse/admin/v1/deactivate/"))).toBe(true);
+
+      const openclawConfigRaw = await readFile(
+        join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
+        "utf8",
+      );
+      const openclawConfig = JSON.parse(openclawConfigRaw) as {
+        channels?: {
+          matrix?: {
+            dm?: { allowFrom?: string[] };
+            groupAllowFrom?: string[];
+            groups?: Record<string, { users?: string[] }>;
+            accounts?: Record<string, {
+              dm?: { allowFrom?: string[] };
+              groupAllowFrom?: string[];
+              groups?: Record<string, { users?: string[] }>;
+            }>;
+          };
+        };
+      };
+
+      expect(openclawConfig.channels?.matrix?.dm?.allowFrom).toEqual([
+        "@operator:matrix.example.org",
+      ]);
+      expect(openclawConfig.channels?.matrix?.groupAllowFrom).toEqual([
+        "@operator:matrix.example.org",
+      ]);
+      expect(openclawConfig.channels?.matrix?.groups?.["!alerts:matrix.example.org"]?.users).toEqual([
+        "@operator:matrix.example.org",
+      ]);
+      expect(openclawConfig.channels?.matrix?.accounts?.["bitcoin-skill-match"]?.dm?.allowFrom).toEqual([
+        "@operator:matrix.example.org",
+      ]);
+      expect(openclawConfig.channels?.matrix?.accounts?.["bitcoin-skill-match"]?.groupAllowFrom).toEqual([
+        "@operator:matrix.example.org",
+      ]);
+      expect(
+        openclawConfig.channels?.matrix?.accounts?.["bitcoin-skill-match"]?.groups?.["!alerts:matrix.example.org"]?.users,
+      ).toEqual([
+        "@operator:matrix.example.org",
+      ]);
+      expect(openclawConfig.channels?.matrix?.accounts?.["node-operator"]?.dm?.allowFrom).toEqual([
+        "@operator:matrix.example.org",
+      ]);
+      expect(openclawConfig.channels?.matrix?.accounts?.["node-operator"]?.groupAllowFrom).toEqual([
+        "@operator:matrix.example.org",
+      ]);
+      expect(
+        openclawConfig.channels?.matrix?.accounts?.["node-operator"]?.groups?.["!alerts:matrix.example.org"]?.users,
+      ).toEqual([
+        "@operator:matrix.example.org",
+      ]);
     } finally {
+      if (priorOpenrouterApiKey === undefined) {
+        delete process.env.OPENROUTER_API_KEY;
+      } else {
+        process.env.OPENROUTER_API_KEY = priorOpenrouterApiKey;
+      }
       await rm(tempRoot, { recursive: true, force: true });
     }
   });

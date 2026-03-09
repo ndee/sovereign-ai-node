@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, chmod, chown, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { access, chmod, chown, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 import { FilesystemBotCatalog } from "../bots/catalog.js";
@@ -383,6 +383,58 @@ export class RealInstallerService implements InstallerService {
           ?? (autoReply ? false : true),
       },
     };
+  }
+
+  private async listInvitedHumanMatrixUserIds(runtimeConfig: RuntimeConfig): Promise<string[]> {
+    let entries;
+    try {
+      entries = await readdir(this.paths.secretsDir, { withFileTypes: true });
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return [];
+      }
+      throw error;
+    }
+
+    const reservedUserIds = new Set<string>([
+      runtimeConfig.matrix.operator.userId,
+      runtimeConfig.matrix.bot.userId,
+      ...runtimeConfig.openclawProfile.agents.flatMap((entry) =>
+        entry.matrix?.userId === undefined ? [] : [entry.matrix.userId]),
+    ]);
+    const reservedLocalparts = new Set<string>([
+      runtimeConfig.matrix.operator.localpart ?? "",
+      runtimeConfig.matrix.bot.localpart ?? "",
+      ...runtimeConfig.openclawProfile.agents.flatMap((entry) =>
+        entry.matrix?.localpart === undefined ? [] : [entry.matrix.localpart]),
+    ].filter((value) => value.length > 0));
+
+    return dedupeStrings(
+      entries.flatMap((entry) => {
+        if (!entry.isFile()) {
+          return [];
+        }
+        const match = /^matrix-user-(.+)\.password$/.exec(entry.name);
+        if (match === null) {
+          return [];
+        }
+        const localpart = sanitizeExpectedMatrixLocalpart(match[1] ?? "", "");
+        if (localpart.length === 0 || reservedLocalparts.has(localpart)) {
+          return [];
+        }
+        const userId = `@${localpart}:${runtimeConfig.matrix.homeserverDomain}`;
+        if (reservedUserIds.has(userId)) {
+          return [];
+        }
+        return [userId];
+      }),
+    );
+  }
+
+  private async refreshManagedMatrixRouting(runtimeConfig: RuntimeConfig): Promise<void> {
+    await this.writeOpenClawRuntimeArtifacts(runtimeConfig);
+    this.setManagedOpenClawEnv(runtimeConfig);
+    await this.refreshGatewayAfterRuntimeConfig(runtimeConfig);
   }
 
   private syncPrimaryDedicatedMatrixBotIdentity(
@@ -1059,6 +1111,7 @@ export class RealInstallerService implements InstallerService {
       ttlMinutes: req.ttlMinutes ?? DEFAULT_MATRIX_USER_INVITE_TTL_MINUTES,
     });
     await this.writeMatrixOnboardingState(runtimeConfig, issued.state);
+    await this.refreshManagedMatrixRouting(runtimeConfig);
     return {
       code: issued.code,
       expiresAt: issued.state.expiresAt,
@@ -1090,6 +1143,7 @@ export class RealInstallerService implements InstallerService {
     await rm(join(this.paths.secretsDir, `matrix-user-${normalized.localpart}.password`), {
       force: true,
     });
+    await this.refreshManagedMatrixRouting(runtimeConfig);
     return {
       localpart: normalized.localpart,
       userId: normalized.userId,
@@ -5740,11 +5794,14 @@ export class RealInstallerService implements InstallerService {
       const botPackage = managedAgentPackages.get(agent.id);
       return botPackage?.manifest.matrixIdentity.mode === "service-account";
     });
+    const dedicatedBotPackages = Array.from(managedAgentPackages.values())
+      .filter((entry): entry is LoadedBotPackage => entry !== null);
     const preferredDefaultAccountId =
-      this.resolvePreferredDedicatedMatrixBot(
-        Array.from(managedAgentPackages.values())
-          .filter((entry): entry is LoadedBotPackage => entry !== null),
-      )?.manifest.id;
+      this.resolvePreferredDedicatedMatrixBot(dedicatedBotPackages)?.manifest.id;
+    const matrixParticipantAllowlist = dedupeStrings([
+      ...operatorAllowlist,
+      ...(await this.listInvitedHumanMatrixUserIds(runtimeConfig)),
+    ]);
     const pluginEntries: Record<string, unknown> = {
       matrix: {
         enabled: true,
@@ -5794,17 +5851,17 @@ export class RealInstallerService implements InstallerService {
         dm: {
           enabled: routing.dmEnabled,
           policy: "allowlist",
-          allowFrom: operatorAllowlist,
+          allowFrom: matrixParticipantAllowlist,
         },
         groupPolicy: "allowlist",
-        groupAllowFrom: operatorAllowlist,
+        groupAllowFrom: matrixParticipantAllowlist,
         groups: {
           [runtimeConfig.matrix.alertRoom.roomId]: {
             enabled: true,
             allow: true,
             autoReply: routing.alertRoom.autoReply,
             requireMention: routing.alertRoom.requireMention,
-            users: operatorAllowlist,
+            users: matrixParticipantAllowlist,
           },
         },
       };
@@ -5817,16 +5874,16 @@ export class RealInstallerService implements InstallerService {
         dm: {
           enabled: true,
           policy: "allowlist",
-          allowFrom: operatorAllowlist,
+          allowFrom: matrixParticipantAllowlist,
         },
         groupPolicy: "allowlist",
-        groupAllowFrom: operatorAllowlist,
+        groupAllowFrom: matrixParticipantAllowlist,
         groups: {
           [runtimeConfig.matrix.alertRoom.roomId]: {
             enabled: true,
             allow: true,
             autoReply: true,
-            users: operatorAllowlist,
+            users: matrixParticipantAllowlist,
           },
         },
       };
@@ -5858,16 +5915,16 @@ export class RealInstallerService implements InstallerService {
               }),
           dm: {
             policy: "allowlist" as const,
-            allowFrom: operatorAllowlist,
+            allowFrom: matrixParticipantAllowlist,
           },
           groupPolicy: "allowlist" as const,
-          groupAllowFrom: operatorAllowlist,
+          groupAllowFrom: matrixParticipantAllowlist,
           groups: {
             [runtimeConfig.matrix.alertRoom.roomId]: {
               enabled: true,
               allow: true,
               autoReply: true,
-              users: operatorAllowlist,
+              users: matrixParticipantAllowlist,
             },
           },
         },
