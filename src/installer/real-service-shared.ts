@@ -63,6 +63,9 @@ export type RuntimeConfig = {
     plugins: {
       allow: string[];
     };
+    session?: {
+      dmScope: "main" | "per-peer" | "per-channel-peer" | "per-account-channel-peer";
+    };
     agents: Array<{
       id: string;
       workspace: string;
@@ -176,6 +179,7 @@ export const MAIL_SENTINEL_TOOL_INSTANCE_ID = "mail-sentinel-imap";
 export const INSTALLER_EXEC_TIMEOUT_MS = 60_000;
 export const SOVEREIGN_GATEWAY_SYSTEMD_UNIT = "sovereign-openclaw-gateway.service";
 export const DEFAULT_OPENROUTER_MODEL = "openai/gpt-5-nano";
+export const MANAGED_OPENCLAW_DM_SCOPE = "per-channel-peer";
 export const DEFAULT_INSTALL_REQUEST_FILE = "/etc/sovereign-node/install-request.json";
 export const DEFAULT_SERVICE_USER = "root";
 export const DEFAULT_SERVICE_GROUP = "root";
@@ -279,6 +283,14 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
       : undefined;
   const openclawProfile = isRecord(parsed.openclawProfile) ? parsed.openclawProfile : {};
   const openclawPlugins = isRecord(openclawProfile.plugins) ? openclawProfile.plugins : {};
+  const openclawSession = isRecord(openclawProfile.session) ? openclawProfile.session : {};
+  const openclawDmScope =
+    openclawSession.dmScope === "main"
+    || openclawSession.dmScope === "per-peer"
+    || openclawSession.dmScope === "per-channel-peer"
+    || openclawSession.dmScope === "per-account-channel-peer"
+      ? openclawSession.dmScope
+      : MANAGED_OPENCLAW_DM_SCOPE;
   const openclawAgents = Array.isArray(openclawProfile.agents)
     ? openclawProfile.agents
         .flatMap((agent): RuntimeAgentEntry[] => {
@@ -603,6 +615,9 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
               (entry): entry is string => typeof entry === "string" && entry.length > 0,
             )
           : ["matrix"],
+      },
+      session: {
+        dmScope: openclawDmScope,
       },
       agents: openclawAgents,
       crons: openclawCrons,

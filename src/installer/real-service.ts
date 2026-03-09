@@ -104,6 +104,7 @@ import {
   DEFAULT_SERVICE_GROUP,
   DEFAULT_SERVICE_USER,
   INSTALLER_EXEC_TIMEOUT_MS,
+  MANAGED_OPENCLAW_DM_SCOPE,
   MAIL_SENTINEL_AGENT_ID,
   RELAY_LOCAL_EDGE_PORT,
   RELAY_TUNNEL_DEFAULT_IMAGE,
@@ -2332,6 +2333,9 @@ export class RealInstallerService implements InstallerService {
     parsed["openclawProfile"] = {
       plugins: {
         allow: runtimeConfig.openclawProfile.plugins.allow,
+      },
+      session: {
+        dmScope: runtimeConfig.openclawProfile.session?.dmScope ?? MANAGED_OPENCLAW_DM_SCOPE,
       },
       channels: {
         matrix: {
@@ -5502,6 +5506,9 @@ export class RealInstallerService implements InstallerService {
         plugins: {
           allow: ["matrix"],
         },
+        session: {
+          dmScope: MANAGED_OPENCLAW_DM_SCOPE,
+        },
         agents: [],
         crons: [],
       },
@@ -5607,6 +5614,9 @@ export class RealInstallerService implements InstallerService {
         plugins: {
           allow: ["matrix"],
         },
+        session: {
+          dmScope: provisionalRuntimeConfig.openclawProfile.session?.dmScope ?? MANAGED_OPENCLAW_DM_SCOPE,
+        },
         agents: managedAgents,
         crons: selectedBotPackages.flatMap((botPackage) => {
           const cron = botPackage.manifest.openclaw.cron;
@@ -5681,6 +5691,9 @@ export class RealInstallerService implements InstallerService {
       openclawProfile: {
         plugins: {
           allow: runtimeConfig.openclawProfile.plugins.allow,
+        },
+        session: {
+          dmScope: runtimeConfig.openclawProfile.session?.dmScope ?? MANAGED_OPENCLAW_DM_SCOPE,
         },
         channels: {
           matrix: {
@@ -5937,6 +5950,9 @@ export class RealInstallerService implements InstallerService {
     const runtimePayload = {
       gateway: {
         bind: "loopback" as const,
+      },
+      session: {
+        dmScope: runtimeConfig.openclawProfile.session?.dmScope ?? MANAGED_OPENCLAW_DM_SCOPE,
       },
       plugins: {
         allow: runtimeConfig.openclawProfile.plugins.allow,
