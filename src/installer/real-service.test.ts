@@ -3330,6 +3330,13 @@ describe("RealInstallerService", () => {
         "utf8",
       );
       const openclawConfig = JSON.parse(openclawConfigRaw) as {
+        bindings?: Array<{
+          agentId?: string;
+          match?: {
+            channel?: string;
+            accountId?: string;
+          };
+        }>;
         channels?: {
           matrix?: {
             defaultAccount?: string;
@@ -3346,6 +3353,28 @@ describe("RealInstallerService", () => {
       };
 
       expect(openclawConfig.channels?.matrix?.defaultAccount).toBe("bitcoin-skill-match");
+      expect(openclawConfig.bindings).toEqual([
+        {
+          agentId: "bitcoin-skill-match",
+          match: {
+            channel: "matrix",
+            accountId: "bitcoin-skill-match",
+          },
+        },
+        {
+          agentId: "bitcoin-skill-match",
+          match: {
+            channel: "matrix",
+          },
+        },
+        {
+          agentId: "node-operator",
+          match: {
+            channel: "matrix",
+            accountId: "node-operator",
+          },
+        },
+      ]);
       expect(openclawConfig.channels?.matrix?.dm?.allowFrom).toEqual([
         "@operator:matrix.example.org",
         "@satoshi:matrix.example.org",
@@ -4406,6 +4435,7 @@ describe("RealInstallerService", () => {
     process.env.OPENROUTER_API_KEY = "sk-or-test";
 
     let bootstrapBotLocalpart = "";
+    const commandCalls: string[] = [];
     const sentBodies: string[] = [];
     const joinedMemberAuthorizations: string[] = [];
     const service = new RealInstallerService(createLogger(), paths, {
@@ -4490,6 +4520,59 @@ describe("RealInstallerService", () => {
           checks: [],
         }),
       },
+      execRunner: {
+        run: async (input): Promise<ExecResult> => {
+          const serialized = [input.command, ...(input.args ?? [])].join(" ");
+          commandCalls.push(serialized);
+
+          if (serialized === "openclaw health") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw gateway status") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "Service: systemd\nState: running",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw agents list") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "bitcoin-skill-match\nnode-operator",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw cron list") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+            };
+          }
+          if (serialized.startsWith("openclaw ")) {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+          return {
+            command: serialized,
+            exitCode: 1,
+            stdout: "",
+            stderr: "unexpected command",
+          };
+        },
+      },
       fetchImpl: async (url, init) => {
         const provisionResponse = buildManagedAgentMatrixProvisionResponse(url, init);
         if (provisionResponse !== null) {
@@ -4554,6 +4637,18 @@ describe("RealInstallerService", () => {
       expect(config.matrix?.bot?.accessTokenSecretRef).toBe(
         `file:${join(paths.secretsDir, "matrix-agent-bitcoin-skill-match-access-token")}`,
       );
+      expect(commandCalls).toContain(
+        "openclaw agents bind --agent bitcoin-skill-match --bind matrix:bitcoin-skill-match",
+      );
+      expect(commandCalls).toContain(
+        "openclaw agents bind --agent bitcoin-skill-match --bind matrix",
+      );
+      expect(commandCalls).toContain(
+        "openclaw agents bind --agent node-operator --bind matrix:node-operator",
+      );
+      expect(commandCalls).not.toContain(
+        "openclaw agents bind --agent node-operator --bind matrix",
+      );
       expect(joinedMemberAuthorizations).toContain("Bearer bitcoin-skill-match-token");
       expect(joinedMemberAuthorizations).not.toContain("Bearer bitcoin-skill-match-bootstrap-token");
 
@@ -4566,6 +4661,13 @@ describe("RealInstallerService", () => {
         agents?: {
           list?: Array<{ id?: string; default?: boolean }>;
         };
+        bindings?: Array<{
+          agentId?: string;
+          match?: {
+            channel?: string;
+            accountId?: string;
+          };
+        }>;
         channels?: {
           matrix?: {
             userId?: string;
@@ -4582,6 +4684,28 @@ describe("RealInstallerService", () => {
       };
       expect(openclawConfig.channels?.matrix?.userId).toBe("@bitcoin-skill-match:matrix.example.org");
       expect(openclawConfig.channels?.matrix?.defaultAccount).toBe("bitcoin-skill-match");
+      expect(openclawConfig.bindings).toEqual([
+        {
+          agentId: "bitcoin-skill-match",
+          match: {
+            channel: "matrix",
+            accountId: "bitcoin-skill-match",
+          },
+        },
+        {
+          agentId: "bitcoin-skill-match",
+          match: {
+            channel: "matrix",
+          },
+        },
+        {
+          agentId: "node-operator",
+          match: {
+            channel: "matrix",
+            accountId: "node-operator",
+          },
+        },
+      ]);
       expect(openclawConfig.agents?.list).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
