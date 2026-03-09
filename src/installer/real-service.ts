@@ -4651,6 +4651,9 @@ export class RealInstallerService implements InstallerService {
       const usesSharedServiceIdentity =
         agent.matrix.userId === runtimeConfig.matrix.bot.userId
         && botPackage?.manifest.matrixIdentity.mode === "service-account";
+      const usesPrimaryDedicatedIdentity =
+        !usesSharedServiceIdentity
+        && agent.matrix.userId === runtimeConfig.matrix.bot.userId;
       await this.runOpenClawCommandAlternatives({
         label: `${agent.id}-agent`,
         commands: [
@@ -4689,11 +4692,25 @@ export class RealInstallerService implements InstallerService {
                 "--agent",
                 agent.id,
                 "--bind",
-                "matrix",
-              ],
+              "matrix",
             ],
+          ],
         allowAlreadyExists: true,
       });
+      if (usesPrimaryDedicatedIdentity) {
+        await this.runOpenClawCommandAlternatives({
+          label: `${agent.id}-matrix-default-bind`,
+          commands: [[
+            "agents",
+            "bind",
+            "--agent",
+            agent.id,
+            "--bind",
+            "matrix",
+          ]],
+          allowAlreadyExists: true,
+        });
+      }
       for (const pattern of this.listAgentExecAllowlistPatterns(
         runtimeConfig,
         agent.toolInstanceIds ?? [],
@@ -5832,6 +5849,13 @@ export class RealInstallerService implements InstallerService {
         >;
       }
     > = {};
+    const matrixBindings: Array<{
+      agentId: string;
+      match: {
+        channel: "matrix";
+        accountId?: string;
+      };
+    }> = [];
     for (const agent of managedAgents) {
       if (agent.matrix === undefined || agent.matrix.accessTokenSecretRef === undefined) {
         continue;
@@ -5841,7 +5865,28 @@ export class RealInstallerService implements InstallerService {
         agent.matrix.userId === runtimeConfig.matrix.bot.userId
         && botPackage?.manifest.matrixIdentity.mode === "service-account";
       if (usesSharedServiceIdentity) {
+        matrixBindings.push({
+          agentId: agent.id,
+          match: {
+            channel: "matrix",
+          },
+        });
         continue;
+      }
+      matrixBindings.push({
+        agentId: agent.id,
+        match: {
+          channel: "matrix",
+          accountId: agent.id,
+        },
+      });
+      if (agent.matrix.userId === runtimeConfig.matrix.bot.userId) {
+        matrixBindings.push({
+          agentId: agent.id,
+          match: {
+            channel: "matrix",
+          },
+        });
       }
       const routing = this.resolveBotMatrixRouting(botPackage?.manifest);
       matrixAccounts[agent.id] = {
@@ -5897,6 +5942,7 @@ export class RealInstallerService implements InstallerService {
         allow: runtimeConfig.openclawProfile.plugins.allow,
         entries: pluginEntries,
       },
+      ...(matrixBindings[0] === undefined ? {} : { bindings: matrixBindings }),
       channels: {
         matrix: {
           enabled: true,
