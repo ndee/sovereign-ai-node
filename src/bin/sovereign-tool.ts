@@ -4,11 +4,21 @@ import { Command, InvalidArgumentError } from "commander";
 
 import { writeCliError, writeCliSuccess } from "../cli/output.js";
 import {
+  type GuardedJsonStateListResult,
+  type GuardedJsonStateMutationResult,
+  type GuardedJsonStateShowResult,
   type ImapReadMailResult,
   type ImapSearchMailResult,
+  guardedJsonStateListResultSchema,
+  guardedJsonStateMutationResultSchema,
+  guardedJsonStateShowResultSchema,
   imapReadMailResultSchema,
   imapSearchMailResultSchema,
 } from "../contracts/tool.js";
+import {
+  GuardedJsonStateToolService,
+  resolveMatrixActorFromSessionStatus,
+} from "../tooling/guarded-json-state.js";
 import { ImapReadonlyToolService } from "../tooling/imap-readonly.js";
 
 const parsePositiveInteger = (value: string): number => {
@@ -72,8 +82,126 @@ const formatReadResult = (result: ImapReadMailResult): string => {
   return lines.join("\n");
 };
 
+const formatGuardedStateShowResult = (result: GuardedJsonStateShowResult): string =>
+  `State ${result.statePath} loaded via ${result.instanceId}.`;
+
+const formatGuardedStateListResult = (result: GuardedJsonStateListResult): string =>
+  `${result.entity}: ${String(result.count)} item(s)`;
+
+const formatGuardedStateMutationResult = (result: GuardedJsonStateMutationResult): string => {
+  if (result.action === "delete-self") {
+    return `${result.entity} ${result.id}: ${result.deleted === true ? "deleted" : "not found"}`;
+  }
+  return `${result.entity} ${result.id}: ${result.created === true ? "created" : "updated"}`;
+};
+
+const collectOption = (value: string, previous: string[] = []): string[] => [...previous, value];
+
+const parseFieldAssignments = (values: string[] | undefined): Record<string, string> => {
+  const entries = (values ?? []).map((entry) => {
+    const separatorIndex = entry.indexOf("=");
+    if (separatorIndex <= 0 || separatorIndex === entry.length - 1) {
+      throw new InvalidArgumentError("Expected key=value");
+    }
+    return [entry.slice(0, separatorIndex), entry.slice(separatorIndex + 1)] as const;
+  });
+  return Object.fromEntries(entries);
+};
+
+const parseArrayFieldAssignments = (values: string[] | undefined): Record<string, string[]> => {
+  const grouped = new Map<string, string[]>();
+  for (const entry of values ?? []) {
+    const separatorIndex = entry.indexOf("=");
+    if (separatorIndex <= 0 || separatorIndex === entry.length - 1) {
+      throw new InvalidArgumentError("Expected key=value");
+    }
+    const key = entry.slice(0, separatorIndex);
+    const value = entry.slice(separatorIndex + 1);
+    const existing = grouped.get(key) ?? [];
+    existing.push(value);
+    grouped.set(key, existing);
+  }
+  return Object.fromEntries(grouped.entries());
+};
+
+const parseInputJsonAssignments = (
+  value: string | undefined,
+): {
+  fields: Record<string, string>;
+  arrayFields: Record<string, string[]>;
+} => {
+  if (value === undefined) {
+    return {
+      fields: {},
+      arrayFields: {},
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new InvalidArgumentError("Expected --input-json to be a valid JSON object");
+  }
+
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new InvalidArgumentError("Expected --input-json to be a JSON object");
+  }
+
+  const fields: Record<string, string> = {};
+  const arrayFields: Record<string, string[]> = {};
+  for (const [key, entry] of Object.entries(parsed)) {
+    if (typeof entry === "string") {
+      fields[key] = entry;
+      continue;
+    }
+    if (Array.isArray(entry) && entry.every((item) => typeof item === "string")) {
+      arrayFields[key] = [...entry];
+      continue;
+    }
+    throw new InvalidArgumentError(
+      `Expected --input-json.${key} to be a string or an array of strings`,
+    );
+  }
+
+  return {
+    fields,
+    arrayFields,
+  };
+};
+
+const resolveActorFromSessionStatusOptions = (opts: {
+  sessionKey?: string;
+  originFrom?: string;
+}): string =>
+  resolveMatrixActorFromSessionStatus({
+    ...(opts.sessionKey === undefined ? {} : { sessionKey: opts.sessionKey }),
+    ...(opts.originFrom === undefined ? {} : { originFrom: opts.originFrom }),
+  });
+
+const resolveMutationInput = (opts: {
+  inputJson?: string;
+  field?: string[];
+  arrayItem?: string[];
+}): {
+  fields: Record<string, string>;
+  arrayFields: Record<string, string[]>;
+} => {
+  if (opts.inputJson !== undefined && ((opts.field?.length ?? 0) > 0 || (opts.arrayItem?.length ?? 0) > 0)) {
+    throw new InvalidArgumentError("Use either --input-json or --field/--array-item, not both");
+  }
+  if (opts.inputJson !== undefined) {
+    return parseInputJsonAssignments(opts.inputJson);
+  }
+  return {
+    fields: parseFieldAssignments(opts.field),
+    arrayFields: parseArrayFieldAssignments(opts.arrayItem),
+  };
+};
+
 const main = async (): Promise<void> => {
   const toolService = new ImapReadonlyToolService();
+  const guardedStateService = new GuardedJsonStateToolService();
   const program = new Command()
     .name("sovereign-tool")
     .description("Execute trusted Sovereign tool instances");
@@ -135,6 +263,161 @@ const main = async (): Promise<void> => {
           return;
         }
         process.stdout.write(`${formatReadResult(result)}\n`);
+      } catch (error) {
+        writeCliError(command, error, Boolean(opts.json));
+        process.exitCode = 1;
+      }
+    });
+
+  const guardedState = program
+    .command("json-state")
+    .description("Operate on guarded JSON state through a trusted tool instance");
+
+  guardedState
+    .command("show")
+    .requiredOption("--instance <id>", "Tool instance ID")
+    .option("--config-path <path>", "Override Sovereign runtime config path")
+    .option("--json", "Emit JSON output")
+    .action(async (opts: {
+      instance: string;
+      configPath?: string;
+      json?: boolean;
+    }) => {
+      const command = "json-state show";
+      try {
+        const result = await guardedStateService.showState({
+          instanceId: opts.instance,
+          ...(opts.configPath === undefined ? {} : { configPath: opts.configPath }),
+        });
+        if (opts.json) {
+          writeCliSuccess(command, result, guardedJsonStateShowResultSchema, true);
+          return;
+        }
+        process.stdout.write(`${formatGuardedStateShowResult(result)}\n`);
+      } catch (error) {
+        writeCliError(command, error, Boolean(opts.json));
+        process.exitCode = 1;
+      }
+    });
+
+  guardedState
+    .command("list")
+    .requiredOption("--instance <id>", "Tool instance ID")
+    .requiredOption("--entity <id>", "Policy entity ID")
+    .option("--config-path <path>", "Override Sovereign runtime config path")
+    .option("--json", "Emit JSON output")
+    .action(async (opts: {
+      instance: string;
+      entity: string;
+      configPath?: string;
+      json?: boolean;
+    }) => {
+      const command = "json-state list";
+      try {
+        const result = await guardedStateService.listEntity({
+          instanceId: opts.instance,
+          entityId: opts.entity,
+          ...(opts.configPath === undefined ? {} : { configPath: opts.configPath }),
+        });
+        if (opts.json) {
+          writeCliSuccess(command, result, guardedJsonStateListResultSchema, true);
+          return;
+        }
+        process.stdout.write(`${formatGuardedStateListResult(result)}\n`);
+      } catch (error) {
+        writeCliError(command, error, Boolean(opts.json));
+        process.exitCode = 1;
+      }
+    });
+
+  guardedState
+    .command("upsert-self")
+    .requiredOption("--instance <id>", "Tool instance ID")
+    .requiredOption("--entity <id>", "Policy entity ID")
+    .option("--session-key <value>", "Current session_status.sessionKey value")
+    .option("--origin-from <value>", "Current session_status.origin.from value")
+    .option("--input-json <json>", "JSON object with scalar and string-array fields")
+    .option("--field <key=value>", "Set a scalar field", collectOption)
+    .option("--array-item <key=value>", "Append an array item", collectOption)
+    .option("--config-path <path>", "Override Sovereign runtime config path")
+    .option("--json", "Emit JSON output")
+    .action(async (opts: {
+      instance: string;
+      entity: string;
+      sessionKey?: string;
+      originFrom?: string;
+      inputJson?: string;
+      field?: string[];
+      arrayItem?: string[];
+      configPath?: string;
+      json?: boolean;
+    }) => {
+      const command = "json-state upsert-self";
+      try {
+        const actor = resolveActorFromSessionStatusOptions(opts);
+        const mutationInput = resolveMutationInput(opts);
+        const result = await guardedStateService.upsertSelf({
+          instanceId: opts.instance,
+          entityId: opts.entity,
+          actor,
+          fields: mutationInput.fields,
+          arrayFields: mutationInput.arrayFields,
+          ...(opts.configPath === undefined ? {} : { configPath: opts.configPath }),
+        });
+        if (opts.json) {
+          writeCliSuccess<GuardedJsonStateMutationResult>(
+            command,
+            result,
+            guardedJsonStateMutationResultSchema,
+            true,
+          );
+          return;
+        }
+        process.stdout.write(`${formatGuardedStateMutationResult(result)}\n`);
+      } catch (error) {
+        writeCliError(command, error, Boolean(opts.json));
+        process.exitCode = 1;
+      }
+    });
+
+  guardedState
+    .command("delete-self")
+    .requiredOption("--instance <id>", "Tool instance ID")
+    .requiredOption("--entity <id>", "Policy entity ID")
+    .option("--session-key <value>", "Current session_status.sessionKey value")
+    .option("--origin-from <value>", "Current session_status.origin.from value")
+    .requiredOption("--id <value>", "Entity key value")
+    .option("--config-path <path>", "Override Sovereign runtime config path")
+    .option("--json", "Emit JSON output")
+    .action(async (opts: {
+      instance: string;
+      entity: string;
+      sessionKey?: string;
+      originFrom?: string;
+      id: string;
+      configPath?: string;
+      json?: boolean;
+    }) => {
+      const command = "json-state delete-self";
+      try {
+        const actor = resolveActorFromSessionStatusOptions(opts);
+        const result = await guardedStateService.deleteSelf({
+          instanceId: opts.instance,
+          entityId: opts.entity,
+          actor,
+          id: opts.id,
+          ...(opts.configPath === undefined ? {} : { configPath: opts.configPath }),
+        });
+        if (opts.json) {
+          writeCliSuccess<GuardedJsonStateMutationResult>(
+            command,
+            result,
+            guardedJsonStateMutationResultSchema,
+            true,
+          );
+          return;
+        }
+        process.stdout.write(`${formatGuardedStateMutationResult(result)}\n`);
       } catch (error) {
         writeCliError(command, error, Boolean(opts.json));
         process.exitCode = 1;

@@ -70,6 +70,7 @@ export type RuntimeConfig = {
       id: string;
       workspace: string;
       default?: boolean;
+      model?: string;
       templateRef?: string;
       toolInstanceIds?: string[];
       botId?: string;
@@ -331,6 +332,10 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
               )
             : undefined;
           const isDefault = agent.default === true;
+          const model =
+            typeof agent.model === "string" && agent.model.length > 0
+              ? agent.model
+              : undefined;
           const botId =
             typeof agent.botId === "string" && agent.botId.length > 0
               ? agent.botId
@@ -340,6 +345,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
               id: agent.id,
               workspace: agent.workspace,
               ...(isDefault ? { default: true } : {}),
+              ...(model === undefined ? {} : { model }),
               ...(templateRef === undefined ? {} : { templateRef }),
               ...(botId === undefined ? {} : { botId }),
               ...(toolInstanceIds === undefined || toolInstanceIds.length === 0
@@ -905,6 +911,7 @@ const ensureCoreManagedAgents = (
       id: entry.id,
       workspace: entry.workspace,
       ...(entry.default === true ? { default: true } : {}),
+      ...(entry.model === undefined ? {} : { model: entry.model }),
       ...(entry.templateRef === undefined ? {} : { templateRef: entry.templateRef }),
       ...(entry.botId === undefined ? {} : { botId: entry.botId }),
       ...(entry.toolInstanceIds === undefined || entry.toolInstanceIds.length === 0

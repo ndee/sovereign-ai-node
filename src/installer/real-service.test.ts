@@ -92,6 +92,7 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
       };
     };
     configDefaults?: Record<string, string | boolean | number>;
+    toolTemplates?: unknown[];
     toolInstances?: unknown[];
     openclaw?: Record<string, unknown>;
     requiredToolTemplates?: Array<{ id: string; version: string }>;
@@ -127,6 +128,7 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
         },
         ...(input.matrixRouting === undefined ? {} : { matrixRouting: input.matrixRouting }),
         configDefaults: input.configDefaults ?? {},
+        toolTemplates: input.toolTemplates ?? [],
         toolInstances: input.toolInstances ?? [],
         openclaw: input.openclaw ?? {},
         agentTemplate: {
@@ -179,6 +181,56 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
         requireMention: false,
       },
     },
+    configDefaults: {
+      statePath: "data/community-state.json",
+      statePolicyPath: "data/community-state.policy.json",
+      stateAuditPath: "data/community-state.audit.jsonl",
+    },
+    toolTemplates: [
+      {
+        kind: "sovereign-tool-template",
+        id: "guarded-json-state",
+        version: "1.0.0",
+        description: "Guarded JSON state access for self-owned records with auditable mutations.",
+        capabilities: ["json-state.read", "json-state.self-upsert", "json-state.self-delete"],
+        requiredSecretRefs: [],
+        requiredConfigKeys: ["statePath", "policyPath"],
+        allowedCommands: [
+          "sovereign-tool json-state show --instance <tool-instance-id> --json",
+          "sovereign-tool json-state list --instance <tool-instance-id> --entity <id> --json",
+          "sovereign-tool json-state upsert-self --instance <tool-instance-id> --entity <id> --session-key <session_status.sessionKey> --input-json <json-object> --json",
+          "sovereign-tool json-state upsert-self --instance <tool-instance-id> --entity <id> --origin-from <session_status.origin.from> --input-json <json-object> --json",
+          "sovereign-tool json-state upsert-self --instance <tool-instance-id> --entity <id> --session-key <session_status.sessionKey> --origin-from <session_status.origin.from> --input-json <json-object> --json",
+          "sovereign-tool json-state delete-self --instance <tool-instance-id> --entity <id> --session-key <session_status.sessionKey> --id <value> --json",
+          "sovereign-tool json-state delete-self --instance <tool-instance-id> --entity <id> --origin-from <session_status.origin.from> --id <value> --json",
+          "sovereign-tool json-state delete-self --instance <tool-instance-id> --entity <id> --session-key <session_status.sessionKey> --origin-from <session_status.origin.from> --id <value> --json",
+        ],
+      },
+    ],
+    toolInstances: [
+      {
+        id: "bitcoin-skill-match-state",
+        templateRef: "guarded-json-state@1.0.0",
+        config: {
+          statePath: {
+            from: "bots.config.bitcoin-skill-match.statePath",
+          },
+          policyPath: {
+            from: "bots.config.bitcoin-skill-match.statePolicyPath",
+          },
+          auditPath: {
+            from: "bots.config.bitcoin-skill-match.stateAuditPath",
+          },
+        },
+        secretRefs: {},
+      },
+    ],
+    requiredToolTemplates: [
+      {
+        id: "guarded-json-state",
+        version: "1.0.0",
+      },
+    ],
   });
 
   await writeBotPackage({
@@ -324,6 +376,7 @@ const buildTestLoadedBotPackage = (input: {
     },
     ...(input.matrixRouting === undefined ? {} : { matrixRouting: input.matrixRouting }),
     configDefaults: {},
+    toolTemplates: [],
     toolInstances: [],
     openclaw: {},
     agentTemplate: {
@@ -389,6 +442,7 @@ const buildTestLoadedBotPackage = (input: {
       value: "filesystem-trust",
     },
   },
+  toolTemplates: [],
   templateRef: `${input.id}@1.0.0`,
   keyId: "repo:sovereign-ai-bots",
   manifestSha256: `test-sha-${input.id}`,
@@ -1598,6 +1652,12 @@ describe("RealInstallerService", () => {
           users: ["@operator:matrix.example.org"],
         }),
       );
+      expect(openclawConfig.channels?.matrix?.groups?.["*"]).toEqual(
+        expect.objectContaining({
+          allow: true,
+          users: ["@operator:matrix.example.org"],
+        }),
+      );
       expect(openclawConfig.channels?.matrix?.defaultAccount).toBe("mail-sentinel");
       expect(Object.keys(openclawConfig.channels?.matrix?.accounts ?? {}).sort()).toEqual([
         "mail-sentinel",
@@ -1623,6 +1683,14 @@ describe("RealInstallerService", () => {
         }),
       );
       expect(
+        openclawConfig.channels?.matrix?.accounts?.["mail-sentinel"]?.groups?.["*"],
+      ).toEqual(
+        expect.objectContaining({
+          autoReply: false,
+          requireMention: true,
+        }),
+      );
+      expect(
         openclawConfig.agents?.list?.every((entry) => Object.hasOwn(entry, "matrix") === false),
       ).toBe(true);
       expect(openclawConfig.agents?.list).toEqual(
@@ -1630,7 +1698,7 @@ describe("RealInstallerService", () => {
           expect.objectContaining({
             id: "mail-sentinel",
             tools: {
-              allow: ["exec"],
+              allow: ["exec", "session_status"],
               exec: {
                 host: "gateway",
                 security: "allowlist",
@@ -1665,6 +1733,219 @@ describe("RealInstallerService", () => {
       expect(mailSentinelToolsRaw).toContain(
         "/usr/local/bin/sovereign-tool imap-read-mail --instance mail-sentinel-imap --message-id <id>",
       );
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("renders bot-repo tool templates and per-bot model overrides for bitcoin-skill-match", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async (opts) => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: opts.version,
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async (input) => ({
+          agentId: input.agentId,
+          workspaceDir: input.workspaceDir,
+          agentCommand: `openclaw agents upsert --id ${input.agentId}`,
+          ...(input.cron === undefined
+            ? {}
+            : {
+                cronJobId: input.cron.id,
+                cronCommand: `openclaw cron add --name ${input.cron.id}`,
+              }),
+        }),
+      },
+      mailSentinelRegistrar: {
+        register: async () => {
+          throw new Error("unexpected mail-sentinel register call");
+        },
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+          capabilities: ["IMAP4rev1"],
+        }),
+      },
+      matrixProvisioner: {
+        provision: async (req) => ({
+          projectDir: join(tempRoot, "matrix"),
+          composeFilePath: join(tempRoot, "matrix", "compose.yaml"),
+          accessMode: "direct",
+          homeserverDomain: req.matrix.homeserverDomain,
+          publicBaseUrl: "http://matrix.example.org",
+          adminBaseUrl: "http://127.0.0.1:8008",
+          federationEnabled: req.matrix.federationEnabled ?? false,
+          tlsMode: "local-dev",
+        }),
+        bootstrapAccounts: async () => ({
+          operator: {
+            localpart: "operator",
+            userId: "@operator:matrix.example.org",
+            passwordSecretRef: "file:/tmp/operator-password",
+            accessToken: "operator-token",
+          },
+          bot: {
+            localpart: "bitcoin-skill-match",
+            userId: "@bitcoin-skill-match:matrix.example.org",
+            passwordSecretRef: "file:/tmp/bitcoin-password",
+            accessToken: "bitcoin-token",
+          },
+        }),
+        bootstrapRoom: async () => ({
+          roomId: "!alerts:matrix.example.org",
+          roomName: "Sovereign Alerts",
+        }),
+        test: async (req) => ({
+          ok: true,
+          homeserverUrl: req.publicBaseUrl,
+          checks: [],
+        }),
+      },
+      fetchImpl: async (url, init) => {
+        const provisionResponse = buildManagedAgentMatrixProvisionResponse(url, init);
+        if (provisionResponse !== null) {
+          return provisionResponse;
+        }
+        if (!url.includes("/_matrix/client/v3/rooms/")) {
+          return new Response("not found", { status: 404 });
+        }
+        return new Response(JSON.stringify({ event_id: "$evt-bitcoin" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+
+    try {
+      const req = buildInstallRequest();
+      req.bots = {
+        selected: ["bitcoin-skill-match"],
+        config: {
+          "bitcoin-skill-match": {
+            model: "openai/gpt-5-mini",
+            statePath: "data/community-state.json",
+            statePolicyPath: "data/community-state.policy.json",
+            stateAuditPath: "data/community-state.audit.jsonl",
+          },
+        },
+      };
+
+      const started = await service.startInstall(req);
+      expect(started.job.state).toBe("succeeded");
+
+      const openclawConfigRaw = await readFile(
+        join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
+        "utf8",
+      );
+      const openclawConfig = JSON.parse(openclawConfigRaw) as {
+        agents?: {
+          list?: Array<{
+            id?: string;
+            model?: string;
+            tools?: {
+              allow?: string[];
+            };
+          }>;
+        };
+      };
+      expect(openclawConfig.agents?.list).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: "bitcoin-skill-match",
+            model: "openrouter/openai/gpt-5-mini",
+            tools: expect.objectContaining({
+              allow: ["exec", "session_status"],
+            }),
+          }),
+        ]),
+      );
+
+      const runtimeConfigRaw = await readFile(paths.configPath, "utf8");
+      const runtimeConfig = JSON.parse(runtimeConfigRaw) as {
+        openclawProfile?: {
+          agents?: Array<{ id?: string; model?: string }>;
+        };
+        templates?: {
+          installed?: Array<{
+            kind?: string;
+            id?: string;
+            version?: string;
+            source?: string;
+          }>;
+        };
+      };
+      expect(runtimeConfig.openclawProfile?.agents).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: "bitcoin-skill-match",
+            model: "openai/gpt-5-mini",
+          }),
+        ]),
+      );
+      expect(runtimeConfig.templates?.installed).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: "tool",
+            id: "guarded-json-state",
+            version: "1.0.0",
+            source: "bot-repo",
+          }),
+        ]),
+      );
+
+      const toolsRaw = await readFile(
+        join(paths.stateDir, "bitcoin-skill-match", "workspace", "TOOLS.md"),
+        "utf8",
+      );
+      expect(toolsRaw).toContain("template: `guarded-json-state@1.0.0`");
+      expect(toolsRaw).toContain(
+        "/usr/local/bin/sovereign-tool json-state upsert-self --instance bitcoin-skill-match-state --entity <id> --session-key <session_status.sessionKey> --input-json <json-object> --json",
+      );
+      expect(toolsRaw).toContain(
+        "/usr/local/bin/sovereign-tool json-state upsert-self --instance bitcoin-skill-match-state --entity <id> --origin-from <session_status.origin.from> --input-json <json-object> --json",
+      );
+      expect(toolsRaw).toContain(
+        "/usr/local/bin/sovereign-tool json-state upsert-self --instance bitcoin-skill-match-state --entity <id> --session-key <session_status.sessionKey> --origin-from <session_status.origin.from> --input-json <json-object> --json",
+      );
+      expect(toolsRaw).toContain("call `session_status` first with `{}` only");
+      expect(toolsRaw).toContain("normalizes a single scalar into a one-item array");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -3613,6 +3894,10 @@ describe("RealInstallerService", () => {
         "@operator:matrix.example.org",
         "@satoshi:matrix.example.org",
       ]);
+      expect(openclawConfig.channels?.matrix?.groups?.["*"]?.users).toEqual([
+        "@operator:matrix.example.org",
+        "@satoshi:matrix.example.org",
+      ]);
       expect(openclawConfig.channels?.matrix?.accounts?.["bitcoin-skill-match"]?.dm?.allowFrom).toEqual([
         "@operator:matrix.example.org",
         "@satoshi:matrix.example.org",
@@ -3627,6 +3912,12 @@ describe("RealInstallerService", () => {
         "@operator:matrix.example.org",
         "@satoshi:matrix.example.org",
       ]);
+      expect(
+        openclawConfig.channels?.matrix?.accounts?.["bitcoin-skill-match"]?.groups?.["*"]?.users,
+      ).toEqual([
+        "@operator:matrix.example.org",
+        "@satoshi:matrix.example.org",
+      ]);
       expect(openclawConfig.channels?.matrix?.accounts?.["node-operator"]?.dm?.allowFrom).toEqual([
         "@operator:matrix.example.org",
         "@satoshi:matrix.example.org",
@@ -3637,6 +3928,12 @@ describe("RealInstallerService", () => {
       ]);
       expect(
         openclawConfig.channels?.matrix?.accounts?.["node-operator"]?.groups?.["!alerts:matrix.example.org"]?.users,
+      ).toEqual([
+        "@operator:matrix.example.org",
+        "@satoshi:matrix.example.org",
+      ]);
+      expect(
+        openclawConfig.channels?.matrix?.accounts?.["node-operator"]?.groups?.["*"]?.users,
       ).toEqual([
         "@operator:matrix.example.org",
         "@satoshi:matrix.example.org",
@@ -3781,6 +4078,9 @@ describe("RealInstallerService", () => {
       expect(openclawConfig.channels?.matrix?.groups?.["!alerts:matrix.example.org"]?.users).toEqual([
         "@operator:matrix.example.org",
       ]);
+      expect(openclawConfig.channels?.matrix?.groups?.["*"]?.users).toEqual([
+        "@operator:matrix.example.org",
+      ]);
       expect(openclawConfig.channels?.matrix?.accounts?.["bitcoin-skill-match"]?.dm?.allowFrom).toEqual([
         "@operator:matrix.example.org",
       ]);
@@ -3792,6 +4092,11 @@ describe("RealInstallerService", () => {
       ).toEqual([
         "@operator:matrix.example.org",
       ]);
+      expect(
+        openclawConfig.channels?.matrix?.accounts?.["bitcoin-skill-match"]?.groups?.["*"]?.users,
+      ).toEqual([
+        "@operator:matrix.example.org",
+      ]);
       expect(openclawConfig.channels?.matrix?.accounts?.["node-operator"]?.dm?.allowFrom).toEqual([
         "@operator:matrix.example.org",
       ]);
@@ -3800,6 +4105,11 @@ describe("RealInstallerService", () => {
       ]);
       expect(
         openclawConfig.channels?.matrix?.accounts?.["node-operator"]?.groups?.["!alerts:matrix.example.org"]?.users,
+      ).toEqual([
+        "@operator:matrix.example.org",
+      ]);
+      expect(
+        openclawConfig.channels?.matrix?.accounts?.["node-operator"]?.groups?.["*"]?.users,
       ).toEqual([
         "@operator:matrix.example.org",
       ]);
@@ -4970,6 +5280,14 @@ describe("RealInstallerService", () => {
           requireMention: false,
         }),
       );
+      expect(
+        openclawConfig.channels?.matrix?.accounts?.["bitcoin-skill-match"]?.groups?.["*"],
+      ).toEqual(
+        expect.objectContaining({
+          autoReply: true,
+          requireMention: false,
+        }),
+      );
       expect(openclawConfig.channels?.matrix?.accounts?.["node-operator"]).toEqual(
         expect.objectContaining({
           userId: "@node-operator:matrix.example.org",
@@ -4984,6 +5302,14 @@ describe("RealInstallerService", () => {
       );
       expect(
         openclawConfig.channels?.matrix?.accounts?.["node-operator"]?.groups?.["!alerts:matrix.example.org"],
+      ).toEqual(
+        expect.objectContaining({
+          autoReply: false,
+          requireMention: true,
+        }),
+      );
+      expect(
+        openclawConfig.channels?.matrix?.accounts?.["node-operator"]?.groups?.["*"],
       ).toEqual(
         expect.objectContaining({
           autoReply: false,

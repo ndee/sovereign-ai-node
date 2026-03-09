@@ -75,7 +75,7 @@ import {
   parseTemplateRef,
   type AgentTemplateManifest,
   type SovereignTemplateManifest,
-  type ToolTemplateManifest,
+  type ToolTemplateDefinition,
   verifySignedTemplateManifest,
 } from "../templates/catalog.js";
 import type {
@@ -184,6 +184,7 @@ type RelayEnrollmentResult = {
 };
 
 const OPENCLAW_EXEC_TOOL_ID = "exec";
+const OPENCLAW_SESSION_STATUS_TOOL_ID = "session_status";
 const OPENCLAW_STATUS_PROBE_TIMEOUT_MS = 5_000;
 const SOVEREIGN_EXECUTABLE_PATHS: Record<string, string> = {
   "sovereign-node": "/usr/local/bin/sovereign-node",
@@ -1198,7 +1199,7 @@ export class RealInstallerService implements InstallerService {
   }): Promise<SovereignBotInstantiateResult> {
     const runtimeConfig = await this.readRuntimeConfig();
     const botPackage = await this.getBotPackage(req.id);
-    const changedTemplate = await this.ensureBotTemplateInstalled(runtimeConfig, botPackage);
+    const changedTemplate = await this.ensureBotTemplatesInstalled(runtimeConfig, botPackage);
     if (changedTemplate) {
       await this.persistManagedAgentTopologyDocument(runtimeConfig);
     }
@@ -1234,6 +1235,7 @@ export class RealInstallerService implements InstallerService {
 
   async listSovereignTemplates(): Promise<SovereignTemplateListResult> {
     const runtimeConfig = await this.tryReadRuntimeConfig();
+    const botPackages = await this.listBotPackages();
     const installedByRef = new Map(
       (runtimeConfig?.templates.installed ?? []).map((entry) => [
         formatTemplateRef(entry.id, entry.version),
@@ -1256,7 +1258,7 @@ export class RealInstallerService implements InstallerService {
         manifestSha256: verified.manifestSha256,
       };
     });
-    const botTemplates: SovereignTemplateListResult["templates"] = (await this.listBotPackages()).map((botPackage) => {
+    const botAgentTemplates: SovereignTemplateListResult["templates"] = botPackages.map((botPackage) => {
       const installed = installedByRef.get(botPackage.templateRef);
       return {
         kind: "agent" as const,
@@ -1270,9 +1272,25 @@ export class RealInstallerService implements InstallerService {
         manifestSha256: botPackage.manifestSha256,
       };
     });
-    const templates = [...coreTemplates, ...botTemplates].sort((left, right) => `${left.kind}:${left.id}:${left.version}`.localeCompare(
-      `${right.kind}:${right.id}:${right.version}`,
-    ));
+    const botToolTemplates: SovereignTemplateListResult["templates"] = botPackages.flatMap((botPackage) =>
+      botPackage.toolTemplates.map((toolTemplate) => {
+        const installed = installedByRef.get(toolTemplate.templateRef);
+        return {
+          kind: "tool" as const,
+          id: toolTemplate.manifest.id,
+          version: toolTemplate.manifest.version,
+          description: toolTemplate.manifest.description,
+          trusted: true,
+          installed: installed !== undefined,
+          pinned: installed?.pinned ?? false,
+          keyId: toolTemplate.keyId,
+          manifestSha256: toolTemplate.manifestSha256,
+        };
+      }));
+    const templates = [...coreTemplates, ...botAgentTemplates, ...botToolTemplates]
+      .sort((left, right) => `${left.kind}:${left.id}:${left.version}`.localeCompare(
+        `${right.kind}:${right.id}:${right.version}`,
+      ));
     return { templates };
   }
 
@@ -1323,29 +1341,58 @@ export class RealInstallerService implements InstallerService {
       };
     }
 
-    const botPackage = await this.botCatalog.findPackageByTemplateRef(req.ref);
-    if (botPackage === null) {
+    const botPackages = await this.listBotPackages();
+    const botPackage = botPackages.find((entry) => entry.templateRef === req.ref) ?? null;
+    if (botPackage !== null) {
+      const changed = await this.ensureBotTemplatesInstalled(runtimeConfig, botPackage);
+      if (changed) {
+        await this.persistManagedAgentTopologyDocument(runtimeConfig);
+      }
+      return {
+        template: {
+          kind: "agent",
+          id: botPackage.template.id,
+          version: botPackage.template.version,
+          description: botPackage.template.description,
+          trusted: true,
+          installed: true,
+          pinned: true,
+          keyId: botPackage.keyId,
+          manifestSha256: botPackage.manifestSha256,
+        },
+        changed,
+      };
+    }
+
+    const botToolTemplate = this.findBotToolTemplate(botPackages, req.ref);
+    if (botToolTemplate === null) {
       throw {
         code: "TEMPLATE_NOT_FOUND",
         message: `Template '${req.ref}' was not found in the trusted catalog`,
         retryable: false,
       };
     }
-    const changed = await this.ensureBotTemplateInstalled(runtimeConfig, botPackage);
+    const updated = this.upsertInstalledTemplateEntry(
+      runtimeConfig.templates.installed,
+      botToolTemplate.templateRef,
+      this.buildInstalledToolTemplateEntryFromBot(botToolTemplate),
+    );
+    const changed = updated.changed;
     if (changed) {
+      runtimeConfig.templates.installed = updated.installed;
       await this.persistManagedAgentTopologyDocument(runtimeConfig);
     }
     return {
       template: {
-        kind: "agent",
-        id: botPackage.template.id,
-        version: botPackage.template.version,
-        description: botPackage.template.description,
+        kind: "tool",
+        id: botToolTemplate.manifest.id,
+        version: botToolTemplate.manifest.version,
+        description: botToolTemplate.manifest.description,
         trusted: true,
         installed: true,
         pinned: true,
-        keyId: botPackage.keyId,
-        manifestSha256: botPackage.manifestSha256,
+        keyId: botToolTemplate.keyId,
+        manifestSha256: botToolTemplate.manifestSha256,
       },
       changed,
     };
@@ -1386,18 +1433,35 @@ export class RealInstallerService implements InstallerService {
     };
   }
 
-  private upsertInstalledBotTemplateEntry(
+  private buildInstalledToolTemplateEntryFromBot(
+    toolTemplate: LoadedBotPackage["toolTemplates"][number],
+  ): RuntimeConfig["templates"]["installed"][number] {
+    return {
+      kind: "tool",
+      id: toolTemplate.manifest.id,
+      version: toolTemplate.manifest.version,
+      description: toolTemplate.manifest.description,
+      trusted: true,
+      pinned: true,
+      keyId: toolTemplate.keyId,
+      manifestSha256: toolTemplate.manifestSha256,
+      installedAt: now(),
+      source: "bot-repo",
+    };
+  }
+
+  private upsertInstalledTemplateEntry(
     existing: RuntimeConfig["templates"]["installed"],
-    botPackage: LoadedBotPackage,
+    ref: string,
+    next: RuntimeConfig["templates"]["installed"][number],
   ): {
     installed: RuntimeConfig["templates"]["installed"];
     changed: boolean;
   } {
-    const ref = botPackage.templateRef;
     const current = existing.find((entry) => formatTemplateRef(entry.id, entry.version) === ref);
-    const next = this.buildInstalledTemplateEntryFromBot(botPackage);
     if (
       current !== undefined
+      && current.kind === next.kind
       && current.description === next.description
       && current.trusted === next.trusted
       && current.pinned === next.pinned
@@ -1425,15 +1489,51 @@ export class RealInstallerService implements InstallerService {
     };
   }
 
-  private async ensureBotTemplateInstalled(
+  private upsertInstalledBotTemplateEntry(
+    existing: RuntimeConfig["templates"]["installed"],
+    botPackage: LoadedBotPackage,
+  ): {
+    installed: RuntimeConfig["templates"]["installed"];
+    changed: boolean;
+  } {
+    return this.upsertInstalledTemplateEntry(
+      existing,
+      botPackage.templateRef,
+      this.buildInstalledTemplateEntryFromBot(botPackage),
+    );
+  }
+
+  private upsertInstalledBotToolTemplateEntries(
+    existing: RuntimeConfig["templates"]["installed"],
+    botPackage: LoadedBotPackage,
+  ): {
+    installed: RuntimeConfig["templates"]["installed"];
+    changed: boolean;
+  } {
+    let installed = existing;
+    let changed = false;
+    for (const toolTemplate of botPackage.toolTemplates) {
+      const updated = this.upsertInstalledTemplateEntry(
+        installed,
+        toolTemplate.templateRef,
+        this.buildInstalledToolTemplateEntryFromBot(toolTemplate),
+      );
+      installed = updated.installed;
+      changed = changed || updated.changed;
+    }
+    return { installed, changed };
+  }
+
+  private async ensureBotTemplatesInstalled(
     runtimeConfig: RuntimeConfig,
     botPackage: LoadedBotPackage,
   ): Promise<boolean> {
-    const updated = this.upsertInstalledBotTemplateEntry(runtimeConfig.templates.installed, botPackage);
-    if (!updated.changed) {
+    const updatedAgent = this.upsertInstalledBotTemplateEntry(runtimeConfig.templates.installed, botPackage);
+    const updatedTools = this.upsertInstalledBotToolTemplateEntries(updatedAgent.installed, botPackage);
+    if (!updatedAgent.changed && !updatedTools.changed) {
       return false;
     }
-    runtimeConfig.templates.installed = updated.installed;
+    runtimeConfig.templates.installed = updatedTools.installed;
     return true;
   }
 
@@ -1459,6 +1559,38 @@ export class RealInstallerService implements InstallerService {
       byRef.set(ref, this.buildInstalledTemplateEntryFromCore(manifest));
     }
     return sortInstalledTemplates(Array.from(byRef.values()));
+  }
+
+  private findBotToolTemplate(
+    botPackages: LoadedBotPackage[],
+    ref: string,
+  ): LoadedBotPackage["toolTemplates"][number] | null {
+    for (const botPackage of botPackages) {
+      const matched = botPackage.toolTemplates.find((entry) => entry.templateRef === ref);
+      if (matched !== undefined) {
+        return matched;
+      }
+    }
+    return null;
+  }
+
+  private resolveKnownToolTemplateManifest(
+    ref: string,
+    botPackages: LoadedBotPackage[],
+  ): ToolTemplateDefinition {
+    const coreTemplate = findCoreTemplateManifest(ref);
+    if (coreTemplate !== undefined && coreTemplate.kind === "sovereign-tool-template") {
+      return coreTemplate;
+    }
+    const botTemplate = this.findBotToolTemplate(botPackages, ref);
+    if (botTemplate !== null) {
+      return botTemplate.manifest;
+    }
+    throw {
+      code: "TEMPLATE_NOT_FOUND",
+      message: `Tool template '${ref}' was not found in the trusted catalog`,
+      retryable: false,
+    };
   }
 
   private async ensureBotToolInstances(
@@ -1497,10 +1629,11 @@ export class RealInstallerService implements InstallerService {
 
   private buildManagedBotToolInstance(input: {
     runtimeConfig: RuntimeConfig;
+    availableBotPackages: LoadedBotPackage[];
     tool: LoadedBotPackage["manifest"]["toolInstances"][number];
     existing: RuntimeConfig["sovereignTools"]["instances"][number] | undefined;
   }): RuntimeConfig["sovereignTools"]["instances"][number] {
-    const template = this.resolveToolTemplateManifest(input.tool.templateRef);
+    const template = this.resolveKnownToolTemplateManifest(input.tool.templateRef, input.availableBotPackages);
     const bindings = this.resolveBotToolBindings(input.runtimeConfig, input.tool);
     return {
       id: input.tool.id,
@@ -1581,18 +1714,6 @@ export class RealInstallerService implements InstallerService {
       return String(value);
     }
     return "";
-  }
-
-  private resolveToolTemplateManifest(ref: string): ToolTemplateManifest {
-    const manifest = findCoreTemplateManifest(ref);
-    if (manifest === undefined || manifest.kind !== "sovereign-tool-template") {
-      throw {
-        code: "TEMPLATE_NOT_FOUND",
-        message: `Tool template '${ref}' was not found in the trusted core catalog`,
-        retryable: false,
-      };
-    }
-    return manifest;
   }
 
   async listSovereignToolInstances(): Promise<SovereignToolInstanceListResult> {
@@ -1690,7 +1811,7 @@ export class RealInstallerService implements InstallerService {
         retryable: false,
       };
     }
-    const toolTemplate = this.resolveInstalledToolTemplate(runtimeConfig, nextTemplateRef);
+    const toolTemplate = await this.resolveInstalledToolTemplate(runtimeConfig, nextTemplateRef);
     const nextConfig = normalizeStringRecord(req.config ?? existing?.config ?? {});
     const nextSecretRefs = normalizeStringRecord(req.secretRefs ?? existing?.secretRefs ?? {});
     this.validateToolInstanceBindings({
@@ -1755,10 +1876,10 @@ export class RealInstallerService implements InstallerService {
     };
   }
 
-  private resolveInstalledToolTemplate(
+  private async resolveInstalledToolTemplate(
     runtimeConfig: RuntimeConfig,
     ref: string,
-  ): ToolTemplateManifest {
+  ): Promise<ToolTemplateDefinition> {
     const parsed = parseTemplateRef(ref);
     const installed = runtimeConfig.templates.installed.find(
       (entry) => entry.id === parsed.id && entry.version === parsed.version,
@@ -1784,23 +1905,38 @@ export class RealInstallerService implements InstallerService {
         retryable: false,
       };
     }
-    const manifest = findCoreTemplateManifest(ref);
-    if (manifest === undefined || manifest.kind !== "sovereign-tool-template") {
+    const coreManifest = findCoreTemplateManifest(ref);
+    if (coreManifest !== undefined && coreManifest.kind === "sovereign-tool-template") {
+      const verified = verifySignedTemplateManifest(coreManifest, CORE_TRUSTED_TEMPLATE_KEYS);
+      if (verified.manifestSha256 !== installed.manifestSha256 || verified.keyId !== installed.keyId) {
+        throw {
+          code: "TEMPLATE_PIN_MISMATCH",
+          message: `Pinned metadata does not match trusted manifest for '${ref}'`,
+          retryable: false,
+        };
+      }
+      return coreManifest;
+    }
+
+    const botTemplate = this.findBotToolTemplate(await this.listBotPackages(), ref);
+    if (botTemplate === null) {
       throw {
         code: "TEMPLATE_MANIFEST_UNAVAILABLE",
         message: `Trusted manifest for '${ref}' is unavailable`,
         retryable: false,
       };
     }
-    const verified = verifySignedTemplateManifest(manifest, CORE_TRUSTED_TEMPLATE_KEYS);
-    if (verified.manifestSha256 !== installed.manifestSha256 || verified.keyId !== installed.keyId) {
+    if (
+      botTemplate.manifestSha256 !== installed.manifestSha256
+      || botTemplate.keyId !== installed.keyId
+    ) {
       throw {
         code: "TEMPLATE_PIN_MISMATCH",
         message: `Pinned metadata does not match trusted manifest for '${ref}'`,
         retryable: false,
       };
     }
-    return manifest;
+    return botTemplate.manifest;
   }
 
   private async resolveInstalledAgentTemplate(
@@ -1872,7 +2008,7 @@ export class RealInstallerService implements InstallerService {
 
   private listDocumentedSovereignToolCommands(
     toolInstanceId: string,
-    manifest: ToolTemplateManifest,
+    manifest: ToolTemplateDefinition,
   ): string[] {
     const commands = manifest.allowedCommands.map((command) =>
       this.renderSovereignToolCommand(toolInstanceId, command));
@@ -1893,11 +2029,20 @@ export class RealInstallerService implements InstallerService {
     return Array.from(new Set(commands));
   }
 
-  private listDocumentedSovereignToolNotes(manifest: ToolTemplateManifest): string[] {
+  private listDocumentedSovereignToolNotes(manifest: ToolTemplateDefinition): string[] {
     if (manifest.id === "imap-readonly") {
       return [
         "  note: searches already run inside the configured mailbox",
         "  note: use `--query ALL` for the whole mailbox and do not prefix the query with `INBOX`",
+      ];
+    }
+    if (manifest.id === "guarded-json-state") {
+      return [
+        "  note: in Matrix conversations, call `session_status` first with `{}` only and pass whichever of `session_status.sessionKey` / `session_status.origin.from` are present; in DMs, `session_status.sessionKey` alone is sufficient",
+        "  note: for upserts, pass mutation fields via `--input-json <json-object>` and never as a raw trailing JSON argument or a shell pipe",
+        "  note: never use shell substitution, jq, cat, env vars, temp files, or guessed paths to recover session fields; use the literal values returned by the current `session_status` call",
+        "  note: for string-array fields, prefer JSON arrays; the CLI also normalizes a single scalar into a one-item array",
+        "  note: use `show` or `list` for reads and reserve `upsert-self` / `delete-self` for creator-owned mutations",
       ];
     }
     if (manifest.id === "node-cli-ops") {
@@ -1909,13 +2054,13 @@ export class RealInstallerService implements InstallerService {
     return [];
   }
 
-  private listAgentExecAllowlistPatterns(
+  private async listAgentExecAllowlistPatterns(
     runtimeConfig: RuntimeConfig,
     toolInstanceIds: string[],
-  ): string[] {
+  ): Promise<string[]> {
     const patterns = new Set<string>();
     for (const tool of this.resolveBoundToolInstances(runtimeConfig, toolInstanceIds)) {
-      const manifest = this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef);
+      const manifest = await this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef);
       for (const command of manifest.allowedCommands) {
         const rendered = this.renderSovereignToolCommand(tool.id, command);
         const [executable] = rendered.split(" ");
@@ -1927,23 +2072,23 @@ export class RealInstallerService implements InstallerService {
     return Array.from(patterns);
   }
 
-  private buildOpenClawAgentToolPolicy(
+  private async buildOpenClawAgentToolPolicy(
     runtimeConfig: RuntimeConfig,
     toolInstanceIds: string[],
-  ): {
+  ): Promise<{
     allow: string[];
     exec: {
       host: "gateway";
       security: "allowlist";
       ask: "off";
     };
-  } | null {
-    const execPatterns = this.listAgentExecAllowlistPatterns(runtimeConfig, toolInstanceIds);
+  } | null> {
+    const execPatterns = await this.listAgentExecAllowlistPatterns(runtimeConfig, toolInstanceIds);
     if (execPatterns.length === 0) {
       return null;
     }
     return {
-      allow: [OPENCLAW_EXEC_TOOL_ID],
+      allow: [OPENCLAW_EXEC_TOOL_ID, OPENCLAW_SESSION_STATUS_TOOL_ID],
       exec: {
         host: "gateway",
         security: "allowlist",
@@ -1953,7 +2098,7 @@ export class RealInstallerService implements InstallerService {
   }
 
   private validateToolInstanceBindings(input: {
-    template: ToolTemplateManifest;
+    template: ToolTemplateDefinition;
     config: Record<string, string>;
     secretRefs: Record<string, string>;
   }): void {
@@ -2911,23 +3056,21 @@ export class RealInstallerService implements InstallerService {
     toolInstanceIds: string[];
   }): Promise<void> {
     const boundTools = this.resolveBoundToolInstances(input.runtimeConfig, input.toolInstanceIds);
-    const toolLines = boundTools.length === 0
-      ? ["No bound tool instances."]
-      : [
-          "Run the listed commands with the OpenClaw `exec` tool.",
-          "",
-          ...boundTools.flatMap((tool) => {
-            const manifest = this.resolveInstalledToolTemplate(input.runtimeConfig, tool.templateRef);
-            return [
-              `- \`${tool.id}\``,
-              `  template: \`${tool.templateRef}\``,
-              `  capabilities: ${manifest.capabilities.join(", ")}`,
-              ...this.listDocumentedSovereignToolCommands(tool.id, manifest).map((command) =>
-                `  command: \`${command}\``),
-              ...this.listDocumentedSovereignToolNotes(manifest),
-            ];
-          }),
-        ];
+    const toolLines =
+      boundTools.length === 0
+        ? ["No bound tool instances."]
+        : ["Run the listed commands with the OpenClaw `exec` tool.", ""];
+    for (const tool of boundTools) {
+      const manifest = await this.resolveInstalledToolTemplate(input.runtimeConfig, tool.templateRef);
+      toolLines.push(
+        `- \`${tool.id}\``,
+        `  template: \`${tool.templateRef}\``,
+        `  capabilities: ${manifest.capabilities.join(", ")}`,
+        ...this.listDocumentedSovereignToolCommands(tool.id, manifest).map((command) =>
+          `  command: \`${command}\``),
+        ...this.listDocumentedSovereignToolNotes(manifest),
+      );
+    }
     for (const file of input.template.workspaceFiles) {
       const targetPath = join(input.workspaceDir, file.path);
       await mkdir(dirname(targetPath), { recursive: true });
@@ -4715,7 +4858,7 @@ export class RealInstallerService implements InstallerService {
           allowAlreadyExists: true,
         });
       }
-      for (const pattern of this.listAgentExecAllowlistPatterns(
+      for (const pattern of await this.listAgentExecAllowlistPatterns(
         runtimeConfig,
         agent.toolInstanceIds ?? [],
       )) {
@@ -5455,10 +5598,8 @@ export class RealInstallerService implements InstallerService {
       requiredCoreTemplateRefs,
     );
     for (const botPackage of selectedBotPackages) {
-      installedTemplates = this.upsertInstalledBotTemplateEntry(
-        installedTemplates,
-        botPackage,
-      ).installed;
+      installedTemplates = this.upsertInstalledBotTemplateEntry(installedTemplates, botPackage).installed;
+      installedTemplates = this.upsertInstalledBotToolTemplateEntries(installedTemplates, botPackage).installed;
     }
 
     const baseMatrixConfig = {
@@ -5567,6 +5708,7 @@ export class RealInstallerService implements InstallerService {
           ? [
               this.buildManagedBotToolInstance({
                 runtimeConfig: provisionalRuntimeConfig,
+                availableBotPackages: selectedBotPackages,
                 tool,
                 existing: preservedToolInstances.find((entry) => entry.id === tool.id),
               }),
@@ -5584,9 +5726,13 @@ export class RealInstallerService implements InstallerService {
             (definition: LoadedBotPackage["manifest"]["toolInstances"][number]) => definition.id === tool.id,
           ))
         .map((tool: RuntimeConfig["sovereignTools"]["instances"][number]) => tool.id);
+      const configuredModel = selectedBotConfig[botPackage.manifest.id]?.model;
       return {
         id: botPackage.manifest.id,
         workspace: join(this.paths.stateDir, botPackage.manifest.id, "workspace"),
+        ...(typeof configuredModel === "string" && configuredModel.trim().length > 0
+          ? { model: configuredModel.trim() }
+          : {}),
         templateRef: botPackage.templateRef,
         botId: botPackage.manifest.id,
         ...(toolInstanceIds.length === 0 ? {} : { toolInstanceIds }),
@@ -5862,6 +6008,26 @@ export class RealInstallerService implements InstallerService {
         >;
       }
     > = {};
+    const buildMatrixGroupEntries = (input: {
+      users: string[];
+      autoReply: boolean;
+      requireMention: boolean;
+    }): Record<string, { enabled: boolean; allow: boolean; autoReply?: boolean; requireMention?: boolean; users: string[] }> => ({
+      "*": {
+        enabled: true,
+        allow: true,
+        autoReply: input.autoReply,
+        requireMention: input.requireMention,
+        users: input.users,
+      },
+      [runtimeConfig.matrix.alertRoom.roomId]: {
+        enabled: true,
+        allow: true,
+        autoReply: input.autoReply,
+        requireMention: input.requireMention,
+        users: input.users,
+      },
+    });
     const matrixBindings: Array<{
       agentId: string;
       match: {
@@ -5913,15 +6079,11 @@ export class RealInstallerService implements InstallerService {
         },
         groupPolicy: "allowlist",
         groupAllowFrom: matrixParticipantAllowlist,
-        groups: {
-          [runtimeConfig.matrix.alertRoom.roomId]: {
-            enabled: true,
-            allow: true,
-            autoReply: routing.alertRoom.autoReply,
-            requireMention: routing.alertRoom.requireMention,
-            users: matrixParticipantAllowlist,
-          },
-        },
+        groups: buildMatrixGroupEntries({
+          users: matrixParticipantAllowlist,
+          autoReply: routing.alertRoom.autoReply,
+          requireMention: routing.alertRoom.requireMention,
+        }),
       };
     }
     if (hasSharedServiceBot || Object.keys(matrixAccounts).length === 0) {
@@ -5936,14 +6098,11 @@ export class RealInstallerService implements InstallerService {
         },
         groupPolicy: "allowlist",
         groupAllowFrom: matrixParticipantAllowlist,
-        groups: {
-          [runtimeConfig.matrix.alertRoom.roomId]: {
-            enabled: true,
-            allow: true,
-            autoReply: true,
-            users: matrixParticipantAllowlist,
-          },
-        },
+        groups: buildMatrixGroupEntries({
+          users: matrixParticipantAllowlist,
+          autoReply: true,
+          requireMention: false,
+        }),
       };
     }
 
@@ -5981,22 +6140,19 @@ export class RealInstallerService implements InstallerService {
           },
           groupPolicy: "allowlist" as const,
           groupAllowFrom: matrixParticipantAllowlist,
-          groups: {
-            [runtimeConfig.matrix.alertRoom.roomId]: {
-              enabled: true,
-              allow: true,
-              autoReply: true,
-              users: matrixParticipantAllowlist,
-            },
-          },
+          groups: buildMatrixGroupEntries({
+            users: matrixParticipantAllowlist,
+            autoReply: true,
+            requireMention: false,
+          }),
         },
       },
       agents: {
         defaults: {
           model: normalizeOpenClawAgentModel(runtimeConfig.openrouter.model),
         },
-        list: managedAgents.map((entry) => {
-          const tools = this.buildOpenClawAgentToolPolicy(
+        list: await Promise.all(managedAgents.map(async (entry) => {
+          const tools = await this.buildOpenClawAgentToolPolicy(
             runtimeConfig,
             entry.toolInstanceIds ?? [],
           );
@@ -6004,9 +6160,12 @@ export class RealInstallerService implements InstallerService {
             id: entry.id,
             workspace: entry.workspace,
             ...(entry.default === true ? { default: true } : {}),
+            ...(entry.model === undefined
+              ? {}
+              : { model: normalizeOpenClawAgentModel(entry.model) }),
             ...(tools === null ? {} : { tools }),
           };
-        }),
+        })),
       },
       cron: {
         enabled: true,

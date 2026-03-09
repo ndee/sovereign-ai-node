@@ -19,6 +19,8 @@ export type ToolTemplateManifest = {
   signature: TemplateSignature;
 };
 
+export type ToolTemplateDefinition = Omit<ToolTemplateManifest, "signature">;
+
 export type AgentTemplateManifest = {
   kind: "sovereign-agent-template";
   id: string;

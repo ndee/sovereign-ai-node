@@ -7,7 +7,11 @@ import { fileURLToPath } from "node:url";
 import { execa } from "execa";
 import { z } from "zod";
 
-import { formatTemplateRef, type AgentTemplateManifest } from "../templates/catalog.js";
+import {
+  formatTemplateRef,
+  type AgentTemplateManifest,
+  type ToolTemplateDefinition,
+} from "../templates/catalog.js";
 
 export type BotConfigValue = string | number | boolean;
 export type BotConfigRecord = Record<string, BotConfigValue>;
@@ -63,6 +67,17 @@ const workspaceFileSchema = z.object({
   source: z.string().min(1),
 });
 
+const toolTemplateSchema = z.object({
+  kind: z.literal("sovereign-tool-template"),
+  id: z.string().min(1),
+  version: z.string().min(1),
+  description: z.string().min(1),
+  capabilities: z.array(z.string().min(1)).min(1),
+  requiredSecretRefs: z.array(z.string().min(1)).default([]),
+  requiredConfigKeys: z.array(z.string().min(1)).default([]),
+  allowedCommands: z.array(z.string().min(1)).min(1),
+});
+
 const agentTemplateSchema = z.object({
   id: z.string().min(1),
   version: z.string().min(1),
@@ -99,6 +114,7 @@ const botPackageSchema = z.object({
   }),
   matrixRouting: matrixRoutingSchema.optional(),
   configDefaults: z.record(z.string(), botConfigValueSchema).default({}),
+  toolTemplates: z.array(toolTemplateSchema).default([]),
   toolInstances: z.array(toolInstanceSchema).default([]),
   openclaw: z.object({
     cron: botCronSchema.optional(),
@@ -111,6 +127,12 @@ export type SovereignBotPackageManifest = z.infer<typeof botPackageSchema>;
 export type LoadedBotPackage = {
   manifest: SovereignBotPackageManifest;
   template: AgentTemplateManifest;
+  toolTemplates: Array<{
+    manifest: ToolTemplateDefinition;
+    templateRef: string;
+    keyId: string;
+    manifestSha256: string;
+  }>;
   templateRef: string;
   keyId: string;
   manifestSha256: string;
@@ -241,10 +263,31 @@ export class FilesystemBotCatalog implements BotCatalog {
         template,
       }))
       .digest("hex");
+    const toolTemplates = manifest.toolTemplates.map((entry) => {
+      const templateRef = formatTemplateRef(entry.id, entry.version);
+      return {
+        manifest: {
+          kind: "sovereign-tool-template" as const,
+          id: entry.id,
+          version: entry.version,
+          description: entry.description,
+          capabilities: [...entry.capabilities],
+          requiredSecretRefs: [...entry.requiredSecretRefs],
+          requiredConfigKeys: [...entry.requiredConfigKeys],
+          allowedCommands: [...entry.allowedCommands],
+        },
+        templateRef,
+        keyId: BOT_PACKAGE_KEY_ID,
+        manifestSha256: createHash("sha256")
+          .update(stableSerialize(entry))
+          .digest("hex"),
+      };
+    });
 
     return {
       manifest,
       template,
+      toolTemplates,
       templateRef: formatTemplateRef(template.id, template.version),
       keyId: BOT_PACKAGE_KEY_ID,
       manifestSha256,
