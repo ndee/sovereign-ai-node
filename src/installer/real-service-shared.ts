@@ -6,6 +6,7 @@ import JSON5 from "json5";
 import type { BotConfigValue } from "../bots/catalog.js";
 import type { CheckResult, ComponentHealth } from "../contracts/common.js";
 import type { DoctorReport } from "../contracts/index.js";
+import { resolveRequestedOpenClawVersion } from "../openclaw/bootstrap.js";
 import { formatTemplateRef, parseTemplateRef } from "../templates/catalog.js";
 import type { SovereignTemplateKind } from "./service.js";
 
@@ -65,6 +66,7 @@ export type RuntimeConfig = {
     agents: Array<{
       id: string;
       workspace: string;
+      default?: boolean;
       templateRef?: string;
       toolInstanceIds?: string[];
       botId?: string;
@@ -316,6 +318,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
                 (entry): entry is string => typeof entry === "string" && entry.length > 0,
               )
             : undefined;
+          const isDefault = agent.default === true;
           const botId =
             typeof agent.botId === "string" && agent.botId.length > 0
               ? agent.botId
@@ -324,6 +327,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
             {
               id: agent.id,
               workspace: agent.workspace,
+              ...(isDefault ? { default: true } : {}),
               ...(templateRef === undefined ? {} : { templateRef }),
               ...(botId === undefined ? {} : { botId }),
               ...(toolInstanceIds === undefined || toolInstanceIds.length === 0
@@ -572,9 +576,9 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
       installMethod:
         openclaw.installMethod === "install_sh" ? openclaw.installMethod : "install_sh",
       requestedVersion:
-        typeof openclaw.requestedVersion === "string" && openclaw.requestedVersion.length > 0
-          ? openclaw.requestedVersion
-          : "pinned-by-sovereign",
+        resolveRequestedOpenClawVersion(
+          typeof openclaw.requestedVersion === "string" ? openclaw.requestedVersion : undefined,
+        ),
       openclawHome,
       runtimeConfigPath,
       runtimeProfilePath,
@@ -885,6 +889,7 @@ const ensureCoreManagedAgents = (
     byId.set(entry.id, {
       id: entry.id,
       workspace: entry.workspace,
+      ...(entry.default === true ? { default: true } : {}),
       ...(entry.templateRef === undefined ? {} : { templateRef: entry.templateRef }),
       ...(entry.botId === undefined ? {} : { botId: entry.botId }),
       ...(entry.toolInstanceIds === undefined || entry.toolInstanceIds.length === 0
@@ -893,8 +898,21 @@ const ensureCoreManagedAgents = (
       ...(entry.matrix === undefined ? {} : { matrix: entry.matrix }),
     });
   }
-  return Array.from(byId.keys()).sort((left, right) => left.localeCompare(right))
-    .map((id) => byId.get(id))
+  const orderedIds = Array.from(byId.keys()).sort((left, right) => left.localeCompare(right));
+  const resolvedDefaultAgentId =
+    Array.from(byId.values()).find((entry) => entry.default === true)?.id
+    ?? (byId.has(NODE_OPERATOR_AGENT_ID) ? NODE_OPERATOR_AGENT_ID : orderedIds[0]);
+  return orderedIds
+    .map((id) => {
+      const entry = byId.get(id);
+      if (entry === undefined) {
+        return undefined;
+      }
+      return {
+        ...entry,
+        ...(id === resolvedDefaultAgentId ? { default: true } : {}),
+      };
+    })
     .filter((entry): entry is RuntimeAgentEntry => entry !== undefined);
 };
 
@@ -1130,7 +1148,7 @@ const isCoreAgentBindingBestEffortSkippable = (error: unknown): boolean => {
     }
   }
   const combined = messages.join("\n").toLowerCase();
-  return /unknown command|unknown option|unexpected command|not implemented|plugins enable|unknown channel "matrix"|failed to load from .*extensions\/matrix|cannot find module .*plugin-sdk\/index\.js\/keyed-async-queue/.test(
+  return /unknown command|unknown option|unexpected command|not implemented|plugins enable/.test(
     combined,
   );
 };
@@ -1160,10 +1178,7 @@ const resolveVersionPinStatus = (
     return "warn";
   }
 
-  const expected = runtimeConfig.openclaw.requestedVersion;
-  if (expected === "pinned-by-sovereign") {
-    return "warn";
-  }
+  const expected = resolveRequestedOpenClawVersion(runtimeConfig.openclaw.requestedVersion);
   return normalizeVersionToken(expected) === normalizeVersionToken(detectedOpenClaw.version)
     ? "pass"
     : "fail";
@@ -1180,10 +1195,7 @@ const describeVersionPin = (
     return "Sovereign runtime config is missing, so version pin cannot be validated";
   }
 
-  const expected = runtimeConfig.openclaw.requestedVersion;
-  if (expected === "pinned-by-sovereign") {
-    return "Configured OpenClaw version is abstract (pinned-by-sovereign); exact pin comparison skipped";
-  }
+  const expected = resolveRequestedOpenClawVersion(runtimeConfig.openclaw.requestedVersion);
 
   if (normalizeVersionToken(expected) === normalizeVersionToken(detectedOpenClaw.version)) {
     return "OpenClaw version matches configured pin";

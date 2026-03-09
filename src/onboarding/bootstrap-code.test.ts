@@ -9,7 +9,7 @@ import {
 describe("Matrix onboarding bootstrap code", () => {
   it("issues a state file without storing the plaintext code", () => {
     const issued = issueMatrixOnboardingState({
-      operatorPasswordSecretRef: "file:/etc/sovereign-node/secrets/matrix-operator.password",
+      passwordSecretRef: "file:/etc/sovereign-node/secrets/matrix-operator.password",
       username: "@operator:matrix.example.org",
       homeserverUrl: "https://matrix.example.org",
       now: new Date("2026-03-06T10:00:00.000Z"),
@@ -23,7 +23,7 @@ describe("Matrix onboarding bootstrap code", () => {
 
   it("redeems a valid code once and then marks it consumed", () => {
     const issued = issueMatrixOnboardingState({
-      operatorPasswordSecretRef: "file:/etc/sovereign-node/secrets/matrix-operator.password",
+      passwordSecretRef: "file:/etc/sovereign-node/secrets/matrix-operator.password",
       username: "@operator:matrix.example.org",
       homeserverUrl: "https://matrix.example.org",
       now: new Date("2026-03-06T10:00:00.000Z"),
@@ -53,7 +53,7 @@ describe("Matrix onboarding bootstrap code", () => {
 
   it("rejects expired codes", () => {
     const issued = issueMatrixOnboardingState({
-      operatorPasswordSecretRef: "file:/etc/sovereign-node/secrets/matrix-operator.password",
+      passwordSecretRef: "file:/etc/sovereign-node/secrets/matrix-operator.password",
       username: "@operator:matrix.example.org",
       homeserverUrl: "https://matrix.example.org",
       now: new Date("2026-03-06T10:00:00.000Z"),
@@ -73,7 +73,7 @@ describe("Matrix onboarding bootstrap code", () => {
 
   it("increments failed attempts and locks after too many invalid codes", () => {
     const issued = issueMatrixOnboardingState({
-      operatorPasswordSecretRef: "file:/etc/sovereign-node/secrets/matrix-operator.password",
+      passwordSecretRef: "file:/etc/sovereign-node/secrets/matrix-operator.password",
       username: "@operator:matrix.example.org",
       homeserverUrl: "https://matrix.example.org",
       now: new Date("2026-03-06T10:00:00.000Z"),
@@ -106,7 +106,7 @@ describe("Matrix onboarding bootstrap code", () => {
 
   it("parses valid serialized state and rejects invalid shapes", () => {
     const issued = issueMatrixOnboardingState({
-      operatorPasswordSecretRef: "file:/etc/sovereign-node/secrets/matrix-operator.password",
+      passwordSecretRef: "file:/etc/sovereign-node/secrets/matrix-operator.password",
       username: "@operator:matrix.example.org",
       homeserverUrl: "https://matrix.example.org",
     });
@@ -114,6 +114,11 @@ describe("Matrix onboarding bootstrap code", () => {
     expect(parseMatrixOnboardingState(JSON.parse(JSON.stringify(issued.state)))).toEqual(
       issued.state,
     );
+    expect(parseMatrixOnboardingState({
+      ...issued.state,
+      operatorPasswordSecretRef: issued.state.passwordSecretRef,
+      passwordSecretRef: undefined,
+    })).toEqual(issued.state);
     expect(parseMatrixOnboardingState({ foo: "bar" })).toBeNull();
   });
 });

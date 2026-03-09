@@ -3,12 +3,15 @@ import { access, readFile } from "node:fs/promises";
 import type { Command } from "commander";
 
 import type { AppContainer } from "../../app/create-app.js";
+import { DEFAULT_BOT_REPO_URL } from "../../bots/catalog.js";
+import { applyBotCatalogSourceOptions, type BotCatalogSourceOptions } from "../bot-catalog-source.js";
 import {
   installRequestSchema,
   startInstallResultSchema,
   type InstallRequest,
 } from "../../contracts/index.js";
 import { DEFAULT_INSTALL_REQUEST_FILE } from "../../installer/real-service-shared.js";
+import { SOVEREIGN_PINNED_OPENCLAW_VERSION } from "../../openclaw/bootstrap.js";
 import { writeCliError, writeCliSuccess } from "../output.js";
 
 type InstallOptions = {
@@ -23,7 +26,7 @@ type InstallOptions = {
   relayEnrollmentToken?: string;
   matrixTlsMode?: "auto" | "internal" | "manual" | "local-dev";
   requestFile?: string;
-};
+} & BotCatalogSourceOptions;
 
 const DEFAULT_MANAGED_RELAY_CONTROL_URL = "https://relay.sovereign-ai-node.com";
 
@@ -50,7 +53,7 @@ const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => {
     openclaw: {
       manageInstallation: !opts.skipOpenclawInstall,
       installMethod: "install_sh",
-      version: opts.openclawVersion ?? "pinned-by-sovereign",
+      version: opts.openclawVersion ?? SOVEREIGN_PINNED_OPENCLAW_VERSION,
       skipIfCompatibleInstalled: true,
       forceReinstall: opts.forceOpenclawReinstall ?? false,
       runOnboard: false,
@@ -90,7 +93,10 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
     .description("Run the Sovereign Node installer flow (scaffold)")
     .option("--json", "Emit JSON output")
     .option("--non-interactive", "Run without interactive prompts")
-    .option("--openclaw-version <ver>", "Override pinned OpenClaw version (advanced)")
+    .option(
+      "--openclaw-version <ver>",
+      `Override pinned OpenClaw version (advanced; default ${SOVEREIGN_PINNED_OPENCLAW_VERSION})`,
+    )
     .option("--skip-openclaw-install", "Reuse existing OpenClaw install only (advanced)")
     .option("--force-openclaw-reinstall", "Force OpenClaw reinstall (repair path)")
     .option(
@@ -118,9 +124,16 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
       "--request-file <path>",
       "Path to an InstallRequest JSON file (overrides scaffold defaults)",
     )
+    .option("--bots-source-dir <path>", "Use a local sovereign-ai-bots checkout")
+    .option(
+      "--bots-repo-url <url>",
+      `Clone bot packages from a Git repository URL (default: ${DEFAULT_BOT_REPO_URL})`,
+    )
+    .option("--bots-repo-ref <ref>", "Git branch, tag, or commit for --bots-repo-url")
     .action(async (opts: InstallOptions) => {
       const command = "install";
       try {
+        applyBotCatalogSourceOptions(opts);
         const req = await resolveInstallRequest(opts);
         const result = await app.installerService.startInstall(req);
         writeCliSuccess(command, result, startInstallResultSchema, Boolean(opts.json));

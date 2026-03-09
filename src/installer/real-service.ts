@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, chmod, chown, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { access, chmod, chown, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 import { FilesystemBotCatalog } from "../bots/catalog.js";
@@ -38,10 +38,15 @@ import type {
 import type { Logger } from "../logging/logger.js";
 import type { SovereignPaths } from "../config/paths.js";
 import {
+  buildMatrixOnboardingLink,
   buildMatrixOnboardingUrl,
   issueMatrixOnboardingState,
+  parseMatrixOnboardingState,
 } from "../onboarding/bootstrap-code.js";
-import type { OpenClawBootstrapper } from "../openclaw/bootstrap.js";
+import {
+  resolveRequestedOpenClawVersion,
+  type OpenClawBootstrapper,
+} from "../openclaw/bootstrap.js";
 import type { OpenClawGatewayServiceManager } from "../openclaw/gateway-service.js";
 import type {
   ManagedAgentRegistrationResult,
@@ -79,6 +84,7 @@ import type {
   ManagedAgentDeleteResult,
   ManagedAgentListResult,
   ManagedAgentUpsertResult,
+  MatrixUserRemoveResult,
   SovereignBotInstantiateResult,
   SovereignBotListResult,
   SovereignTemplateInstallResult,
@@ -186,6 +192,7 @@ const SOVEREIGN_EXECUTABLE_PATHS: Record<string, string> = {
 };
 
 const DEFAULT_MANAGED_RELAY_CONTROL_URL = "https://relay.sovereign-ai-node.com";
+const DEFAULT_MATRIX_USER_INVITE_TTL_MINUTES = 1_440;
 
 const RELAY_NAME_THEMES = [
   "satoshi",
@@ -339,6 +346,75 @@ export class RealInstallerService implements InstallerService {
   private resolveSharedServiceBotLocalpart(packages: LoadedBotPackage[]): string | undefined {
     return packages.find((entry) => entry.manifest.matrixIdentity.mode === "service-account")
       ?.manifest.matrixIdentity.localpartPrefix;
+  }
+
+  private resolvePreferredDedicatedMatrixBot(packages: LoadedBotPackage[]): LoadedBotPackage | undefined {
+    return packages.find((entry) =>
+      entry.manifest.matrixIdentity.mode === "dedicated-account"
+      && entry.manifest.matrixRouting?.defaultAccount === true)
+      ?? packages.find((entry) => entry.manifest.matrixIdentity.mode === "dedicated-account");
+  }
+
+  private resolveBootstrapMatrixBotLocalpart(packages: LoadedBotPackage[]): string | undefined {
+    return this.resolveSharedServiceBotLocalpart(packages)
+      ?? this.resolvePreferredDedicatedMatrixBot(packages)?.manifest.matrixIdentity.localpartPrefix;
+  }
+
+  private resolveBotMatrixRouting(manifest: LoadedBotPackage["manifest"] | undefined): {
+    defaultAccount: boolean;
+    dmEnabled: boolean;
+    alertRoom: {
+      autoReply: boolean;
+      requireMention: boolean;
+    };
+  } {
+    const defaultAutoReply = true;
+    const configuredAutoReply = manifest?.matrixRouting?.alertRoom?.autoReply;
+    const autoReply = configuredAutoReply ?? defaultAutoReply;
+    const configuredRequireMention = manifest?.matrixRouting?.alertRoom?.requireMention;
+
+    return {
+      defaultAccount: manifest?.matrixRouting?.defaultAccount === true,
+      dmEnabled: manifest?.matrixRouting?.dm?.enabled ?? true,
+      alertRoom: {
+        autoReply,
+        requireMention:
+          configuredRequireMention
+          ?? (autoReply ? false : true),
+      },
+    };
+  }
+
+  private syncPrimaryDedicatedMatrixBotIdentity(
+    runtimeConfig: RuntimeConfig,
+    identity: {
+      localpart: string;
+      userId: string;
+      passwordSecretRef?: string;
+      accessTokenSecretRef: string;
+    },
+  ): boolean {
+    const current = runtimeConfig.matrix.bot;
+    if (current.localpart !== identity.localpart && current.userId !== identity.userId) {
+      return false;
+    }
+    if (
+      current.localpart === identity.localpart
+      && current.userId === identity.userId
+      && current.passwordSecretRef === identity.passwordSecretRef
+      && current.accessTokenSecretRef === identity.accessTokenSecretRef
+    ) {
+      return false;
+    }
+    runtimeConfig.matrix.bot = {
+      localpart: identity.localpart,
+      userId: identity.userId,
+      ...(identity.passwordSecretRef === undefined
+        ? {}
+        : { passwordSecretRef: identity.passwordSecretRef }),
+      accessTokenSecretRef: identity.accessTokenSecretRef,
+    };
+    return true;
   }
 
   private resolveRequestedBotIds(req: InstallRequest, defaultBotIds: string[]): string[] {
@@ -908,22 +984,6 @@ export class RealInstallerService implements InstallerService {
     ttlMinutes?: number;
   }): Promise<MatrixOnboardingIssueResult> {
     const runtimeConfig = await this.readRuntimeConfig();
-    if (
-      runtimeConfig.matrix.accessMode !== "relay"
-      && !runtimeConfig.matrix.publicBaseUrl.startsWith("https://")
-    ) {
-      throw {
-        code: "MATRIX_ONBOARDING_UNAVAILABLE",
-        message:
-          "Matrix onboarding is unavailable because this installation does not expose the HTTPS onboarding page",
-        retryable: false,
-        details: {
-          publicBaseUrl: runtimeConfig.matrix.publicBaseUrl,
-          accessMode: runtimeConfig.matrix.accessMode,
-        },
-      };
-    }
-    const statePath = this.getMatrixOnboardingStatePath(runtimeConfig);
     const operatorPasswordSecretRef = runtimeConfig.matrix.operator.passwordSecretRef;
     if (operatorPasswordSecretRef === undefined || operatorPasswordSecretRef.length === 0) {
       throw {
@@ -932,19 +992,108 @@ export class RealInstallerService implements InstallerService {
         retryable: false,
       };
     }
-
+    const onboardingUrl = this.assertMatrixOnboardingAvailable(runtimeConfig);
     const issued = issueMatrixOnboardingState({
-      operatorPasswordSecretRef,
+      passwordSecretRef: operatorPasswordSecretRef,
       username: runtimeConfig.matrix.operator.userId,
       homeserverUrl: runtimeConfig.matrix.publicBaseUrl,
       ...(req?.ttlMinutes === undefined ? {} : { ttlMinutes: req.ttlMinutes }),
     });
-    await this.writeInstallerJsonFile(statePath, issued.state, 0o600);
+    await this.writeMatrixOnboardingState(runtimeConfig, issued.state);
     return {
       code: issued.code,
       expiresAt: issued.state.expiresAt,
-      onboardingUrl: buildMatrixOnboardingUrl(runtimeConfig.matrix.publicBaseUrl),
+      onboardingUrl,
+      onboardingLink: buildMatrixOnboardingLink(onboardingUrl, issued.code),
       username: runtimeConfig.matrix.operator.userId,
+    };
+  }
+
+  async inviteMatrixUser(req: {
+    username: string;
+    ttlMinutes?: number;
+  }): Promise<MatrixOnboardingIssueResult> {
+    const runtimeConfig = await this.readRuntimeConfig();
+    const onboardingUrl = this.assertMatrixOnboardingAvailable(runtimeConfig);
+    const normalized = this.normalizeMatrixUserIdentifier(req.username, runtimeConfig);
+    this.assertHumanMatrixUserTarget(runtimeConfig, normalized, "invite");
+
+    const operatorTokenSecretRef = runtimeConfig.matrix.operator.accessTokenSecretRef;
+    if (operatorTokenSecretRef === undefined || operatorTokenSecretRef.length === 0) {
+      throw {
+        code: "MATRIX_USER_INVITE_FAILED",
+        message: "Operator Matrix access token is required to invite local Matrix users",
+        retryable: false,
+      };
+    }
+    const operatorAccessToken = await this.resolveSecretRef(operatorTokenSecretRef);
+    const passwordSecretRef = await this.writeManagedSecretFile(
+      `matrix-user-${normalized.localpart}.password`,
+      generateAgentPassword(),
+    );
+    const password = await this.resolveSecretRef(passwordSecretRef);
+    const upsertedUserId = await this.ensureSynapseUserViaAdminApi({
+      adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+      adminAccessToken: operatorAccessToken,
+      expectedUserId: normalized.userId,
+      password,
+    });
+    const loginSession = await this.loginMatrixUser({
+      adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+      localpart: normalized.localpart,
+      password,
+      expectedUserId: upsertedUserId,
+    });
+    await this.ensureMatrixUserInAlertRoom({
+      adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+      roomId: runtimeConfig.matrix.alertRoom.roomId,
+      inviterAccessToken: operatorAccessToken,
+      inviteeUserId: loginSession.userId,
+      inviteeAccessToken: loginSession.accessToken,
+    });
+
+    const issued = issueMatrixOnboardingState({
+      passwordSecretRef,
+      username: loginSession.userId,
+      homeserverUrl: runtimeConfig.matrix.publicBaseUrl,
+      ttlMinutes: req.ttlMinutes ?? DEFAULT_MATRIX_USER_INVITE_TTL_MINUTES,
+    });
+    await this.writeMatrixOnboardingState(runtimeConfig, issued.state);
+    return {
+      code: issued.code,
+      expiresAt: issued.state.expiresAt,
+      onboardingUrl,
+      onboardingLink: buildMatrixOnboardingLink(onboardingUrl, issued.code),
+      username: loginSession.userId,
+    };
+  }
+
+  async removeMatrixUser(req: { username: string }): Promise<MatrixUserRemoveResult> {
+    const runtimeConfig = await this.readRuntimeConfig();
+    const normalized = this.normalizeMatrixUserIdentifier(req.username, runtimeConfig);
+    this.assertHumanMatrixUserTarget(runtimeConfig, normalized, "remove");
+
+    const operatorTokenSecretRef = runtimeConfig.matrix.operator.accessTokenSecretRef;
+    if (operatorTokenSecretRef === undefined || operatorTokenSecretRef.length === 0) {
+      throw {
+        code: "MATRIX_USER_REMOVE_FAILED",
+        message: "Operator Matrix access token is required to remove local Matrix users",
+        retryable: false,
+      };
+    }
+    const operatorAccessToken = await this.resolveSecretRef(operatorTokenSecretRef);
+    const removed = await this.deactivateSynapseUserViaAdminApi({
+      adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+      adminAccessToken: operatorAccessToken,
+      expectedUserId: normalized.userId,
+    });
+    await rm(join(this.paths.secretsDir, `matrix-user-${normalized.localpart}.password`), {
+      force: true,
+    });
+    return {
+      localpart: normalized.localpart,
+      userId: normalized.userId,
+      removed,
     };
   }
 
@@ -1666,6 +1815,45 @@ export class RealInstallerService implements InstallerService {
     return [resolvedExecutable, ...rest].filter((part) => part.length > 0).join(" ");
   }
 
+  private listDocumentedSovereignToolCommands(
+    toolInstanceId: string,
+    manifest: ToolTemplateManifest,
+  ): string[] {
+    const commands = manifest.allowedCommands.map((command) =>
+      this.renderSovereignToolCommand(toolInstanceId, command));
+    if (manifest.id === "node-cli-ops") {
+      commands.push(
+        this.renderSovereignToolCommand(
+          toolInstanceId,
+          "sovereign-node onboarding issue --ttl-minutes <minutes> --json",
+        ),
+        this.renderSovereignToolCommand(toolInstanceId, "sovereign-node users invite <username> --json"),
+        this.renderSovereignToolCommand(
+          toolInstanceId,
+          "sovereign-node users invite <username> --ttl-minutes <minutes> --json",
+        ),
+        this.renderSovereignToolCommand(toolInstanceId, "sovereign-node users remove <username> --json"),
+      );
+    }
+    return Array.from(new Set(commands));
+  }
+
+  private listDocumentedSovereignToolNotes(manifest: ToolTemplateManifest): string[] {
+    if (manifest.id === "imap-readonly") {
+      return [
+        "  note: searches already run inside the configured mailbox",
+        "  note: use `--query ALL` for the whole mailbox and do not prefix the query with `INBOX`",
+      ];
+    }
+    if (manifest.id === "node-cli-ops") {
+      return [
+        "  note: use `sovereign-node onboarding issue` when the operator wants to sign into an existing account on another device",
+        `  note: use bare localparts like \`satoshi\`; \`users invite\` defaults to ${String(DEFAULT_MATRIX_USER_INVITE_TTL_MINUTES)} minutes`,
+      ];
+    }
+    return [];
+  }
+
   private listAgentExecAllowlistPatterns(
     runtimeConfig: RuntimeConfig,
     toolInstanceIds: string[],
@@ -2112,6 +2300,18 @@ export class RealInstallerService implements InstallerService {
     parsed["bots"] = runtimeConfig.bots;
     parsed["templates"] = runtimeConfig.templates;
     parsed["sovereignTools"] = runtimeConfig.sovereignTools;
+    parsed["matrix"] = {
+      ...(isRecord(parsed["matrix"]) ? parsed["matrix"] : {}),
+      bot: {
+        localpart: runtimeConfig.matrix.bot.localpart,
+        userId: runtimeConfig.matrix.bot.userId,
+        ...(runtimeConfig.matrix.bot.passwordSecretRef === undefined
+          ? {}
+          : { passwordSecretRef: runtimeConfig.matrix.bot.passwordSecretRef }),
+        accessTokenSecretRef: runtimeConfig.matrix.bot.accessTokenSecretRef,
+      },
+      alertRoom: runtimeConfig.matrix.alertRoom,
+    };
 
     await this.writeInstallerJsonFile(this.paths.configPath, parsed, 0o644);
   }
@@ -2122,6 +2322,8 @@ export class RealInstallerService implements InstallerService {
     runtimeConfig: RuntimeConfig;
   }): Promise<void> {
     await mkdir(input.workspace, { recursive: true });
+    const openclawWorkspaceStateDir = join(input.workspace, ".openclaw");
+    await mkdir(openclawWorkspaceStateDir, { recursive: true });
     const agent = input.runtimeConfig.openclawProfile.agents.find((entry) => entry.id === input.id);
     if (agent?.templateRef !== undefined) {
       const template = await this.resolveInstalledAgentTemplate(input.runtimeConfig, agent.templateRef);
@@ -2136,7 +2338,45 @@ export class RealInstallerService implements InstallerService {
       const readme = buildManagedAgentWorkspaceReadme(input.id);
       await writeFile(join(input.workspace, "README.md"), `${readme}\n`, "utf8");
     }
+    await this.applyRuntimeOwnership(openclawWorkspaceStateDir);
     await this.applyRuntimeOwnership(input.workspace);
+  }
+
+  private resolveManagedAgentSessionsDir(runtimeConfig: RuntimeConfig, agentId: string): string {
+    return join(runtimeConfig.openclaw.openclawHome, ".openclaw", "agents", agentId, "sessions");
+  }
+
+  private async resetManagedAgentSessions(
+    runtimeConfig: RuntimeConfig,
+    agentId: string,
+  ): Promise<void> {
+    const sessionsDir = this.resolveManagedAgentSessionsDir(runtimeConfig, agentId);
+    let sessionsStat;
+    try {
+      sessionsStat = await stat(sessionsDir);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return;
+      }
+      throw error;
+    }
+    if (!sessionsStat.isDirectory()) {
+      return;
+    }
+
+    const resetSuffix = now().replaceAll(":", "-").replaceAll(".", "-");
+    const resetPath = `${sessionsDir}.reset.${resetSuffix}`;
+    await rename(sessionsDir, resetPath);
+    await mkdir(sessionsDir, { recursive: true });
+    await this.applyRuntimeOwnership(sessionsDir);
+    this.logger.info(
+      {
+        agentId,
+        sessionsDir,
+        resetPath,
+      },
+      "Reset managed agent sessions to apply refreshed workspace instructions",
+    );
   }
 
   private async ensureManagedAgentMatrixIdentity(
@@ -2230,9 +2470,10 @@ export class RealInstallerService implements InstallerService {
     };
     const changed = !areMatrixIdentitiesEqual(entry.matrix, nextIdentity);
     entry.matrix = nextIdentity;
+    const primaryBotChanged = this.syncPrimaryDedicatedMatrixBotIdentity(runtimeConfig, nextIdentity);
     return {
       runtimeConfig,
-      changed,
+      changed: changed || primaryBotChanged,
     };
   }
 
@@ -2241,6 +2482,7 @@ export class RealInstallerService implements InstallerService {
     adminAccessToken: string;
     expectedUserId: string;
     password: string;
+    failureCode?: string;
   }): Promise<string> {
     const endpoint = new URL(
       `/_synapse/admin/v2/users/${encodeURIComponent(input.expectedUserId)}`,
@@ -2263,8 +2505,47 @@ export class RealInstallerService implements InstallerService {
     const parsed = parseJsonSafely(bodyText);
     if (!response.ok) {
       throw {
-        code: "MATRIX_AGENT_IDENTITY_FAILED",
+        code: input.failureCode ?? "MATRIX_AGENT_IDENTITY_FAILED",
         message: `Failed to upsert Matrix account ${input.expectedUserId}`,
+        retryable: true,
+        details: {
+          endpoint,
+          status: response.status,
+          body: summarizeUnknown(parsed),
+        },
+      };
+    }
+    if (isRecord(parsed) && typeof parsed.name === "string" && parsed.name.length > 0) {
+      return parsed.name;
+    }
+    return input.expectedUserId;
+  }
+
+  private async getSynapseUserViaAdminApi(input: {
+    adminBaseUrl: string;
+    adminAccessToken: string;
+    expectedUserId: string;
+  }): Promise<string | null> {
+    const endpoint = new URL(
+      `/_synapse/admin/v2/users/${encodeURIComponent(input.expectedUserId)}`,
+      ensureTrailingSlash(input.adminBaseUrl),
+    ).toString();
+    const response = await this.fetchImpl(endpoint, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${input.adminAccessToken}`,
+        Accept: "application/json",
+      },
+    });
+    const bodyText = await response.text();
+    const parsed = parseJsonSafely(bodyText);
+    if (response.status === 404) {
+      return null;
+    }
+    if (!response.ok) {
+      throw {
+        code: "MATRIX_HUMAN_USER_DELETE_FAILED",
+        message: `Failed to query Matrix account ${input.expectedUserId}`,
         retryable: true,
         details: {
           endpoint,
@@ -2357,33 +2638,12 @@ export class RealInstallerService implements InstallerService {
     inviteeUserId: string;
     inviteeAccessToken: string;
   }): Promise<void> {
-    const inviteEndpoint = new URL(
-      `/_matrix/client/v3/rooms/${encodeURIComponent(input.roomId)}/invite`,
-      ensureTrailingSlash(input.adminBaseUrl),
-    ).toString();
-    const inviteResponse = await this.fetchImpl(inviteEndpoint, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${input.inviterAccessToken}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({ user_id: input.inviteeUserId }),
+    await this.inviteMatrixUserToRoom({
+      adminBaseUrl: input.adminBaseUrl,
+      roomId: input.roomId,
+      inviterAccessToken: input.inviterAccessToken,
+      inviteeUserId: input.inviteeUserId,
     });
-    const inviteText = await inviteResponse.text();
-    const inviteParsed = parseJsonSafely(inviteText);
-    if (!inviteResponse.ok && !isAlreadyJoinedOrInvitedRoomError(inviteResponse.status, inviteParsed)) {
-      throw {
-        code: "MATRIX_AGENT_IDENTITY_FAILED",
-        message: `Failed to invite ${input.inviteeUserId} to alert room`,
-        retryable: true,
-        details: {
-          endpoint: inviteEndpoint,
-          status: inviteResponse.status,
-          body: summarizeUnknown(inviteParsed),
-        },
-      };
-    }
 
     const joinEndpoint = new URL(
       `/_matrix/client/v3/rooms/${encodeURIComponent(input.roomId)}/join`,
@@ -2414,6 +2674,177 @@ export class RealInstallerService implements InstallerService {
     }
   }
 
+  private async inviteMatrixUserToRoom(input: {
+    adminBaseUrl: string;
+    roomId: string;
+    inviterAccessToken: string;
+    inviteeUserId: string;
+    failureCode?: string;
+    failureMessage?: string;
+  }): Promise<void> {
+    const inviteEndpoint = new URL(
+      `/_matrix/client/v3/rooms/${encodeURIComponent(input.roomId)}/invite`,
+      ensureTrailingSlash(input.adminBaseUrl),
+    ).toString();
+    const inviteResponse = await this.fetchImpl(inviteEndpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${input.inviterAccessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({ user_id: input.inviteeUserId }),
+    });
+    const inviteText = await inviteResponse.text();
+    const inviteParsed = parseJsonSafely(inviteText);
+    if (!inviteResponse.ok && !isAlreadyJoinedOrInvitedRoomError(inviteResponse.status, inviteParsed)) {
+      throw {
+        code: input.failureCode ?? "MATRIX_AGENT_IDENTITY_FAILED",
+        message: input.failureMessage ?? `Failed to invite ${input.inviteeUserId} to alert room`,
+        retryable: true,
+        details: {
+          endpoint: inviteEndpoint,
+          status: inviteResponse.status,
+          body: summarizeUnknown(inviteParsed),
+        },
+      };
+    }
+  }
+
+  private async deactivateSynapseUserViaAdminApi(input: {
+    adminBaseUrl: string;
+    adminAccessToken: string;
+    expectedUserId: string;
+  }): Promise<boolean> {
+    const endpoint = new URL(
+      `/_synapse/admin/v1/deactivate/${encodeURIComponent(input.expectedUserId)}`,
+      ensureTrailingSlash(input.adminBaseUrl),
+    ).toString();
+    const response = await this.fetchImpl(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${input.adminAccessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+    const bodyText = await response.text();
+    const parsed = parseJsonSafely(bodyText);
+    if (response.ok) {
+      return true;
+    }
+    if (response.status === 404) {
+      return false;
+    }
+    throw {
+      code: "MATRIX_USER_REMOVE_FAILED",
+      message: `Failed to deactivate Matrix account ${input.expectedUserId}`,
+      retryable: true,
+      details: {
+        endpoint,
+        status: response.status,
+        body: summarizeUnknown(parsed),
+      },
+    };
+  }
+
+  private normalizeMatrixUserIdentifier(
+    rawUsername: string,
+    runtimeConfig: RuntimeConfig,
+  ): { localpart: string; userId: string } {
+    const candidate = rawUsername.trim();
+    if (candidate.length === 0) {
+      throw {
+        code: "MATRIX_USER_INVALID",
+        message: "Provide a local Matrix username or same-server Matrix user ID",
+        retryable: false,
+      };
+    }
+
+    const withoutAt = candidate.startsWith("@") ? candidate.slice(1) : candidate;
+    const separatorIndex = withoutAt.indexOf(":");
+    const localpartInput = separatorIndex >= 0 ? withoutAt.slice(0, separatorIndex) : withoutAt;
+    const homeserverInput = separatorIndex >= 0 ? withoutAt.slice(separatorIndex + 1) : "";
+    if (
+      homeserverInput.length > 0
+      && homeserverInput !== runtimeConfig.matrix.homeserverDomain
+    ) {
+      throw {
+        code: "MATRIX_USER_INVALID",
+        message: "Only local Matrix users on this node can be invited or removed",
+        retryable: false,
+        details: {
+          requestedDomain: homeserverInput,
+          expectedDomain: runtimeConfig.matrix.homeserverDomain,
+        },
+      };
+    }
+
+    const localpart = sanitizeExpectedMatrixLocalpart(localpartInput, "");
+    if (localpart.length === 0) {
+      throw {
+        code: "MATRIX_USER_INVALID",
+        message: "Provide a valid Matrix username/localpart",
+        retryable: false,
+        details: {
+          input: rawUsername,
+        },
+      };
+    }
+
+    return {
+      localpart,
+      userId: `@${localpart}:${runtimeConfig.matrix.homeserverDomain}`,
+    };
+  }
+
+  private assertHumanMatrixUserTarget(
+    runtimeConfig: RuntimeConfig,
+    target: { localpart: string; userId: string },
+    action: "invite" | "remove",
+  ): void {
+    const reservedUserIds = new Set<string>([
+      runtimeConfig.matrix.operator.userId,
+      runtimeConfig.matrix.bot.userId,
+      ...runtimeConfig.openclawProfile.agents.flatMap((entry) =>
+        entry.matrix?.userId === undefined ? [] : [entry.matrix.userId]),
+    ]);
+    const reservedLocalparts = new Set<string>([
+      runtimeConfig.matrix.operator.localpart ?? "",
+      runtimeConfig.matrix.bot.localpart ?? "",
+      ...runtimeConfig.openclawProfile.agents.flatMap((entry) =>
+        entry.matrix?.localpart === undefined ? [] : [entry.matrix.localpart]),
+    ].filter((value) => value.length > 0));
+    if (!reservedUserIds.has(target.userId) && !reservedLocalparts.has(target.localpart)) {
+      return;
+    }
+    if (
+      target.userId === runtimeConfig.matrix.operator.userId
+      || target.localpart === runtimeConfig.matrix.operator.localpart
+    ) {
+      throw {
+        code: action === "invite" ? "MATRIX_USER_REQUIRES_ONBOARDING" : "MATRIX_USER_PROTECTED",
+        message:
+          action === "invite"
+            ? "The operator account already exists; use 'sovereign-node onboarding issue' for another operator device"
+            : "The operator account cannot be removed with 'sovereign-node users remove'",
+        retryable: false,
+        details: {
+          userId: target.userId,
+        },
+      };
+    }
+    throw {
+      code: "MATRIX_USER_PROTECTED",
+      message: "Reserved Matrix service accounts cannot be managed with the human-user commands",
+      retryable: false,
+      details: {
+        userId: target.userId,
+      },
+    };
+  }
+
   private async writeTemplateWorkspaceFiles(input: {
     workspaceDir: string;
     runtimeConfig: RuntimeConfig;
@@ -2433,14 +2864,9 @@ export class RealInstallerService implements InstallerService {
               `- \`${tool.id}\``,
               `  template: \`${tool.templateRef}\``,
               `  capabilities: ${manifest.capabilities.join(", ")}`,
-              ...manifest.allowedCommands.map((command) =>
-                `  command: \`${this.renderSovereignToolCommand(tool.id, command)}\``),
-              ...(manifest.id === "imap-readonly"
-                ? [
-                    "  note: searches already run inside the configured mailbox",
-                    "  note: use `--query ALL` for the whole mailbox and do not prefix the query with `INBOX`",
-                  ]
-                : []),
+              ...this.listDocumentedSovereignToolCommands(tool.id, manifest).map((command) =>
+                `  command: \`${command}\``),
+              ...this.listDocumentedSovereignToolNotes(manifest),
             ];
           }),
         ];
@@ -2452,6 +2878,7 @@ export class RealInstallerService implements InstallerService {
         agentId: input.agentId,
         matrixHomeserver: input.runtimeConfig.matrix.publicBaseUrl,
         matrixAlertRoomId: input.runtimeConfig.matrix.alertRoom.roomId,
+        matrixOperatorUserId: input.runtimeConfig.matrix.operator.userId,
         toolSection: toolLines.join("\n"),
       });
       await writeFile(targetPath, `${rendered}\n`, "utf8");
@@ -2953,7 +3380,7 @@ export class RealInstallerService implements InstallerService {
       ? [
           "-u",
           openclawServiceUser,
-          "--preserve-env=OPENCLAW_HOME,OPENCLAW_CONFIG,OPENCLAW_CONFIG_PATH,SOVEREIGN_NODE_CONFIG,CI",
+          "--preserve-env=OPENCLAW_HOME,OPENCLAW_CONFIG,OPENCLAW_CONFIG_PATH,SOVEREIGN_NODE_CONFIG,CI,TMPDIR,TMP,TEMP",
           "--",
           command,
           ...args,
@@ -3013,18 +3440,31 @@ export class RealInstallerService implements InstallerService {
   }
 
   private buildManagedOpenClawEnv(runtimeConfig: RuntimeConfig): Record<string, string> {
+    const tempDir = this.getManagedOpenClawTempDir(runtimeConfig);
     return {
       OPENCLAW_HOME: runtimeConfig.openclaw.openclawHome,
       OPENCLAW_CONFIG: runtimeConfig.openclaw.runtimeConfigPath,
       OPENCLAW_CONFIG_PATH: runtimeConfig.openclaw.runtimeConfigPath,
       SOVEREIGN_NODE_CONFIG: this.paths.configPath,
+      TMPDIR: tempDir,
+      TMP: tempDir,
+      TEMP: tempDir,
     };
+  }
+
+  private getManagedOpenClawTempDir(runtimeConfig?: RuntimeConfig): string {
+    const gatewayEnvPath =
+      runtimeConfig?.openclaw.gatewayEnvPath ?? join(this.paths.openclawServiceHome, "gateway.env");
+    return join(dirname(gatewayEnvPath), "tmp");
   }
 
   private setManagedOpenClawEnv(runtimeConfig: RuntimeConfig): void {
     const env = this.buildManagedOpenClawEnv(runtimeConfig);
     this.managedOpenClawEnv = env;
     for (const [key, value] of Object.entries(env)) {
+      if (key === "TMPDIR" || key === "TMP" || key === "TEMP") {
+        continue;
+      }
       process.env[key] = value;
     }
   }
@@ -3111,7 +3551,7 @@ export class RealInstallerService implements InstallerService {
           }
 
           await this.openclawBootstrapper.ensureInstalled({
-            version: openclaw?.version ?? "pinned-by-sovereign",
+            version: resolveRequestedOpenClawVersion(openclaw?.version),
             noOnboard: true,
             noPrompt: true,
             forceReinstall: openclaw?.forceReinstall ?? false,
@@ -3178,20 +3618,17 @@ export class RealInstallerService implements InstallerService {
             stepState.selectedBots = (await this.resolveRequestedBots(stepState.effectiveRequest ?? req))
               .packages;
           }
-          const sharedServiceBotLocalpart = this.resolveSharedServiceBotLocalpart(
+          const bootstrapBotLocalpart = this.resolveBootstrapMatrixBotLocalpart(
             stepState.selectedBots,
           );
-          if (sharedServiceBotLocalpart !== undefined) {
-            stepState.sharedServiceBotLocalpart = sharedServiceBotLocalpart;
-          }
           try {
             stepState.matrixAccounts = await this.matrixProvisioner.bootstrapAccounts(
               stepState.effectiveRequest ?? req,
               stepState.matrixProvision,
               {
-                ...(sharedServiceBotLocalpart === undefined
+                ...(bootstrapBotLocalpart === undefined
                   ? {}
-                  : { botLocalpart: sharedServiceBotLocalpart }),
+                  : { botLocalpart: bootstrapBotLocalpart }),
               },
             );
           } catch (error) {
@@ -3199,9 +3636,9 @@ export class RealInstallerService implements InstallerService {
               req: stepState.effectiveRequest ?? req,
               provision: stepState.matrixProvision,
               error,
-              ...(sharedServiceBotLocalpart === undefined
+              ...(bootstrapBotLocalpart === undefined
                 ? {}
-                : { botLocalpart: sharedServiceBotLocalpart }),
+                : { botLocalpart: bootstrapBotLocalpart }),
             });
             if (reusedAccounts !== null) {
               stepState.matrixAccounts = reusedAccounts;
@@ -3212,9 +3649,9 @@ export class RealInstallerService implements InstallerService {
               req: stepState.effectiveRequest ?? req,
               provision: stepState.matrixProvision,
               error,
-              ...(sharedServiceBotLocalpart === undefined
+              ...(bootstrapBotLocalpart === undefined
                 ? {}
-                : { botLocalpart: sharedServiceBotLocalpart }),
+                : { botLocalpart: bootstrapBotLocalpart }),
             });
             if (resetAccounts !== null) {
               stepState.matrixAccounts = resetAccounts;
@@ -3337,6 +3774,7 @@ export class RealInstallerService implements InstallerService {
               workspace: agent.workspace,
               runtimeConfig,
             });
+            await this.resetManagedAgentSessions(runtimeConfig, agent.id);
           }
           let topologyChanged = false;
           for (const agent of runtimeConfig.openclawProfile.agents) {
@@ -4155,6 +4593,10 @@ export class RealInstallerService implements InstallerService {
         );
         continue;
       }
+      const botPackage = await this.findBotPackageByTemplateRef(agent.templateRef);
+      const usesSharedServiceIdentity =
+        agent.matrix.userId === runtimeConfig.matrix.bot.userId
+        && botPackage?.manifest.matrixIdentity.mode === "service-account";
       await this.runOpenClawCommandAlternatives({
         label: `${agent.id}-agent`,
         commands: [
@@ -4169,24 +4611,33 @@ export class RealInstallerService implements InstallerService {
       });
       await this.runOpenClawCommandAlternatives({
         label: `${agent.id}-matrix-bind`,
-        commands: [
-          [
-            "agents",
-            "bind",
-            "--agent",
-            agent.id,
-            "--bind",
-            `matrix:${agent.id}`,
-          ],
-          [
-            "agents",
-            "bind",
-            "--agent",
-            agent.id,
-            "--bind",
-            "matrix",
-          ],
-        ],
+        commands: usesSharedServiceIdentity
+          ? [[
+              "agents",
+              "bind",
+              "--agent",
+              agent.id,
+              "--bind",
+              "matrix",
+            ]]
+          : [
+              [
+                "agents",
+                "bind",
+                "--agent",
+                agent.id,
+                "--bind",
+                `matrix:${agent.id}`,
+              ],
+              [
+                "agents",
+                "bind",
+                "--agent",
+                agent.id,
+                "--bind",
+                "matrix",
+              ],
+            ],
         allowAlreadyExists: true,
       });
       if (agent.matrix.userId === runtimeConfig.matrix.bot.userId) {
@@ -4336,6 +4787,7 @@ export class RealInstallerService implements InstallerService {
     }
 
     const serviceIdentity = this.getConfiguredServiceIdentity(runtimeConfig);
+    const managedTempDir = this.getManagedOpenClawTempDir(runtimeConfig);
     const unitName = SOVEREIGN_GATEWAY_SYSTEMD_UNIT;
     const unitPath =
       process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH?.trim()
@@ -4352,6 +4804,9 @@ export class RealInstallerService implements InstallerService {
       `Group=${serviceIdentity.group}`,
       `WorkingDirectory=${this.paths.openclawServiceHome}`,
       `Environment=HOME=${this.paths.openclawServiceHome}`,
+      `Environment=TMPDIR=${managedTempDir}`,
+      `Environment=TMP=${managedTempDir}`,
+      `Environment=TEMP=${managedTempDir}`,
       `EnvironmentFile=-${runtimeConfig.openclaw.gatewayEnvPath}`,
       "ExecStart=/usr/bin/env openclaw gateway run --allow-unconfigured --bind loopback",
       "Restart=always",
@@ -4364,7 +4819,10 @@ export class RealInstallerService implements InstallerService {
 
     try {
       await mkdir(this.paths.openclawServiceHome, { recursive: true });
+      await mkdir(managedTempDir, { recursive: true });
+      await chmod(managedTempDir, 0o700);
       await this.applyRuntimeOwnership(this.paths.openclawServiceHome);
+      await this.applyRuntimeOwnership(managedTempDir);
       await mkdir(dirname(unitPath), { recursive: true });
       await writeFile(unitPath, unitContents, "utf8");
     } catch (error) {
@@ -4627,6 +5085,32 @@ export class RealInstallerService implements InstallerService {
         reason: "missing_project_dir",
       },
     };
+  }
+
+  private assertMatrixOnboardingAvailable(runtimeConfig: RuntimeConfig): string {
+    if (
+      runtimeConfig.matrix.accessMode !== "relay"
+      && !runtimeConfig.matrix.publicBaseUrl.startsWith("https://")
+    ) {
+      throw {
+        code: "MATRIX_ONBOARDING_UNAVAILABLE",
+        message:
+          "Matrix onboarding is unavailable because this installation does not expose the HTTPS onboarding page",
+        retryable: false,
+        details: {
+          publicBaseUrl: runtimeConfig.matrix.publicBaseUrl,
+          accessMode: runtimeConfig.matrix.accessMode,
+        },
+      };
+    }
+    return buildMatrixOnboardingUrl(runtimeConfig.matrix.publicBaseUrl);
+  }
+
+  private async writeMatrixOnboardingState(
+    runtimeConfig: RuntimeConfig,
+    state: unknown,
+  ): Promise<void> {
+    await this.writeInstallerJsonFile(this.getMatrixOnboardingStatePath(runtimeConfig), state, 0o600);
   }
 
   private getInstallRequestPath(): string {
@@ -4938,7 +5422,7 @@ export class RealInstallerService implements InstallerService {
       openclaw: {
         managedInstallation: input.req.openclaw?.manageInstallation ?? true,
         installMethod: input.req.openclaw?.installMethod ?? "install_sh",
-        requestedVersion: input.req.openclaw?.version ?? "pinned-by-sovereign",
+        requestedVersion: resolveRequestedOpenClawVersion(input.req.openclaw?.version),
         openclawHome: openclawPaths.openclawHome,
         runtimeConfigPath: openclawPaths.runtimeConfigPath,
         runtimeProfilePath: openclawPaths.runtimeProfilePath,
@@ -5250,6 +5734,24 @@ export class RealInstallerService implements InstallerService {
     const managedAgents = ensureCoreManagedAgents(
       runtimeConfig.openclawProfile.agents,
     );
+    const operatorAllowlist = [runtimeConfig.matrix.operator.userId];
+    const managedAgentPackages = new Map(
+      await Promise.all(
+        managedAgents.map(async (agent) => [
+          agent.id,
+          await this.findBotPackageByTemplateRef(agent.templateRef),
+        ] as const),
+      ),
+    );
+    const hasSharedServiceBot = managedAgents.some((agent) => {
+      const botPackage = managedAgentPackages.get(agent.id);
+      return botPackage?.manifest.matrixIdentity.mode === "service-account";
+    });
+    const preferredDefaultAccountId =
+      this.resolvePreferredDedicatedMatrixBot(
+        Array.from(managedAgentPackages.values())
+          .filter((entry): entry is LoadedBotPackage => entry !== null),
+      )?.manifest.id;
     const pluginEntries: Record<string, unknown> = {
       matrix: {
         enabled: true,
@@ -5261,23 +5763,81 @@ export class RealInstallerService implements InstallerService {
         homeserver: string;
         userId: string;
         accessToken: string;
+        dm?: {
+          enabled: boolean;
+          policy: "allowlist";
+          allowFrom: string[];
+        };
+        groupPolicy?: "allowlist";
+        groupAllowFrom?: string[];
+        groups?: Record<
+          string,
+          {
+            enabled: boolean;
+            allow: boolean;
+            autoReply?: boolean;
+            requireMention?: boolean;
+            users: string[];
+          }
+        >;
       }
     > = {};
     for (const agent of managedAgents) {
       if (agent.matrix === undefined || agent.matrix.accessTokenSecretRef === undefined) {
         continue;
       }
+      const botPackage = managedAgentPackages.get(agent.id);
+      const usesSharedServiceIdentity =
+        agent.matrix.userId === runtimeConfig.matrix.bot.userId
+        && botPackage?.manifest.matrixIdentity.mode === "service-account";
+      if (usesSharedServiceIdentity) {
+        continue;
+      }
+      const routing = this.resolveBotMatrixRouting(botPackage?.manifest);
       matrixAccounts[agent.id] = {
         homeserver: runtimeConfig.matrix.adminBaseUrl,
         userId: agent.matrix.userId,
         accessToken: await this.resolveSecretRef(agent.matrix.accessTokenSecretRef),
+        dm: {
+          enabled: routing.dmEnabled,
+          policy: "allowlist",
+          allowFrom: operatorAllowlist,
+        },
+        groupPolicy: "allowlist",
+        groupAllowFrom: operatorAllowlist,
+        groups: {
+          [runtimeConfig.matrix.alertRoom.roomId]: {
+            enabled: true,
+            allow: true,
+            autoReply: routing.alertRoom.autoReply,
+            requireMention: routing.alertRoom.requireMention,
+            users: operatorAllowlist,
+          },
+        },
       };
     }
-    matrixAccounts["default"] = {
-      homeserver: runtimeConfig.matrix.adminBaseUrl,
-      userId: runtimeConfig.matrix.bot.userId,
-      accessToken: await this.resolveSecretRef(runtimeConfig.matrix.bot.accessTokenSecretRef),
-    };
+    if (hasSharedServiceBot || Object.keys(matrixAccounts).length === 0) {
+      matrixAccounts["default"] = {
+        homeserver: runtimeConfig.matrix.adminBaseUrl,
+        userId: runtimeConfig.matrix.bot.userId,
+        accessToken: await this.resolveSecretRef(runtimeConfig.matrix.bot.accessTokenSecretRef),
+        dm: {
+          enabled: true,
+          policy: "allowlist",
+          allowFrom: operatorAllowlist,
+        },
+        groupPolicy: "allowlist",
+        groupAllowFrom: operatorAllowlist,
+        groups: {
+          [runtimeConfig.matrix.alertRoom.roomId]: {
+            enabled: true,
+            allow: true,
+            autoReply: true,
+            users: operatorAllowlist,
+          },
+        },
+      };
+    }
 
     const runtimePayload = {
       gateway: {
@@ -5292,6 +5852,12 @@ export class RealInstallerService implements InstallerService {
           enabled: true,
           homeserver: runtimeConfig.matrix.adminBaseUrl,
           userId: runtimeConfig.matrix.bot.userId,
+          ...(
+            !hasSharedServiceBot
+            && preferredDefaultAccountId !== undefined
+              ? { defaultAccount: preferredDefaultAccountId }
+              : {}
+          ),
           ...(Object.keys(matrixAccounts).length === 0
             ? {}
             : {
@@ -5299,14 +5865,16 @@ export class RealInstallerService implements InstallerService {
               }),
           dm: {
             policy: "allowlist" as const,
-            allowFrom: [runtimeConfig.matrix.operator.userId],
+            allowFrom: operatorAllowlist,
           },
           groupPolicy: "allowlist" as const,
+          groupAllowFrom: operatorAllowlist,
           groups: {
             [runtimeConfig.matrix.alertRoom.roomId]: {
               enabled: true,
+              allow: true,
               autoReply: true,
-              users: [runtimeConfig.matrix.operator.userId],
+              users: operatorAllowlist,
             },
           },
         },
@@ -5323,6 +5891,7 @@ export class RealInstallerService implements InstallerService {
           return {
             id: entry.id,
             workspace: entry.workspace,
+            ...(entry.default === true ? { default: true } : {}),
             ...(tools === null ? {} : { tools }),
           };
         }),
@@ -5349,14 +5918,18 @@ export class RealInstallerService implements InstallerService {
       },
       openrouter: runtimeConfig.openrouter,
     };
+    const managedTempDir = this.getManagedOpenClawTempDir(runtimeConfig);
 
     try {
       await mkdir(this.paths.openclawServiceHome, { recursive: true });
       await mkdir(runtimeConfig.openclaw.openclawHome, { recursive: true });
       await mkdir(dirname(runtimeConfig.openclaw.runtimeProfilePath), { recursive: true });
+      await mkdir(managedTempDir, { recursive: true });
+      await chmod(managedTempDir, 0o700);
       await this.applyRuntimeOwnership(this.paths.openclawServiceHome);
       await this.applyRuntimeOwnership(runtimeConfig.openclaw.openclawHome);
       await this.applyRuntimeOwnership(dirname(runtimeConfig.openclaw.runtimeProfilePath));
+      await this.applyRuntimeOwnership(managedTempDir);
       await this.writeProtectedJsonFile(
         runtimeConfig.openclaw.runtimeConfigPath,
         runtimePayload,
@@ -5371,6 +5944,9 @@ export class RealInstallerService implements InstallerService {
         `OPENCLAW_CONFIG=${runtimeConfig.openclaw.runtimeConfigPath}`,
         `OPENCLAW_CONFIG_PATH=${runtimeConfig.openclaw.runtimeConfigPath}`,
         `SOVEREIGN_NODE_CONFIG=${this.paths.configPath}`,
+        `TMPDIR=${managedTempDir}`,
+        `TMP=${managedTempDir}`,
+        `TEMP=${managedTempDir}`,
         `OPENROUTER_API_KEY=${openrouterApiKey}`,
         `MATRIX_HOMESERVER=${runtimeConfig.matrix.adminBaseUrl}`,
         `MATRIX_USER_ID=${runtimeConfig.matrix.bot.userId}`,
@@ -5516,6 +6092,40 @@ export class RealInstallerService implements InstallerService {
     await rename(tempPath, filePath);
     await this.applyRuntimeOwnership(filePath);
     return `file:${filePath}`;
+  }
+
+  private async removeManagedSecretFile(fileName: string): Promise<boolean> {
+    const filePath = join(this.paths.secretsDir, fileName);
+    try {
+      await access(filePath, fsConstants.F_OK);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return false;
+      }
+      throw {
+        code: "SECRET_WRITE_FAILED",
+        message: "Failed to access managed secret file",
+        retryable: false,
+        details: {
+          filePath,
+          error: describeError(error),
+        },
+      };
+    }
+    try {
+      await rm(filePath);
+      return true;
+    } catch (error) {
+      throw {
+        code: "SECRET_WRITE_FAILED",
+        message: "Failed to remove managed secret file",
+        retryable: false,
+        details: {
+          filePath,
+          error: describeError(error),
+        },
+      };
+    }
   }
 
   private async ensureSecretsDir(): Promise<string> {

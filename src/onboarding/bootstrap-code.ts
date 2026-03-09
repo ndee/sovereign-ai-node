@@ -13,7 +13,7 @@ export type MatrixOnboardingState = {
   maxAttempts: number;
   codeSalt: string;
   codeHash: string;
-  operatorPasswordSecretRef: string;
+  passwordSecretRef: string;
   username: string;
   homeserverUrl: string;
 };
@@ -22,6 +22,7 @@ export type MatrixOnboardingIssueResult = {
   code: string;
   expiresAt: string;
   onboardingUrl: string;
+  onboardingLink: string;
   username: string;
 };
 
@@ -40,6 +41,11 @@ const nowIso = (): string => new Date().toISOString();
 
 export const buildMatrixOnboardingUrl = (homeserverUrl: string): string =>
   `${homeserverUrl.replace(/\/+$/, "")}/onboard`;
+
+export const buildMatrixOnboardingLink = (
+  onboardingUrl: string,
+  code: string,
+): string => `${onboardingUrl}#code=${encodeURIComponent(code)}`;
 
 export const normalizeMatrixOnboardingCode = (value: string): string =>
   value
@@ -65,7 +71,7 @@ export const hashMatrixOnboardingCode = (code: string, salt: string): string =>
     .digest("hex");
 
 export const issueMatrixOnboardingState = (input: {
-  operatorPasswordSecretRef: string;
+  passwordSecretRef: string;
   username: string;
   homeserverUrl: string;
   ttlMinutes?: number;
@@ -86,7 +92,7 @@ export const issueMatrixOnboardingState = (input: {
       maxAttempts: MAX_MATRIX_ONBOARDING_FAILED_ATTEMPTS,
       codeSalt: salt,
       codeHash: hashMatrixOnboardingCode(code, salt),
-      operatorPasswordSecretRef: input.operatorPasswordSecretRef,
+      passwordSecretRef: input.passwordSecretRef,
       username: input.username,
       homeserverUrl: input.homeserverUrl,
     },
@@ -98,6 +104,10 @@ export const parseMatrixOnboardingState = (value: unknown): MatrixOnboardingStat
     return null;
   }
   const candidate = value as Record<string, unknown>;
+  const legacyPasswordSecretRef =
+    typeof candidate.operatorPasswordSecretRef === "string"
+      ? candidate.operatorPasswordSecretRef
+      : "";
   if (
     candidate.version !== 1
     || typeof candidate.issuedAt !== "string"
@@ -106,7 +116,10 @@ export const parseMatrixOnboardingState = (value: unknown): MatrixOnboardingStat
     || typeof candidate.maxAttempts !== "number"
     || typeof candidate.codeSalt !== "string"
     || typeof candidate.codeHash !== "string"
-    || typeof candidate.operatorPasswordSecretRef !== "string"
+    || (
+      typeof candidate.passwordSecretRef !== "string"
+      && typeof candidate.operatorPasswordSecretRef !== "string"
+    )
     || typeof candidate.username !== "string"
     || typeof candidate.homeserverUrl !== "string"
   ) {
@@ -121,7 +134,10 @@ export const parseMatrixOnboardingState = (value: unknown): MatrixOnboardingStat
     maxAttempts: Math.max(1, Math.trunc(candidate.maxAttempts)),
     codeSalt: candidate.codeSalt,
     codeHash: candidate.codeHash,
-    operatorPasswordSecretRef: candidate.operatorPasswordSecretRef,
+    passwordSecretRef:
+      typeof candidate.passwordSecretRef === "string"
+        ? candidate.passwordSecretRef
+        : legacyPasswordSecretRef,
     username: candidate.username,
     homeserverUrl: candidate.homeserverUrl,
   };

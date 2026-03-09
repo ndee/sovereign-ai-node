@@ -29,6 +29,7 @@ import type {
   ManagedAgentDeleteResult,
   ManagedAgentListResult,
   ManagedAgentUpsertResult,
+  MatrixUserRemoveResult,
   SovereignBotInstantiateResult,
   SovereignBotListResult,
   SovereignTemplateInstallResult,
@@ -269,7 +270,30 @@ export class StubInstallerService implements InstallerService {
       code: "SCFD-0000-0000",
       expiresAt: now(),
       onboardingUrl: "https://matrix.example.org/onboard",
+      onboardingLink: "https://matrix.example.org/onboard#code=SCFD-0000-0000",
       username: "@operator:matrix.example.org",
+    };
+  }
+
+  async inviteMatrixUser(req: {
+    username: string;
+    ttlMinutes?: number;
+  }): Promise<MatrixOnboardingIssueResult> {
+    return {
+      code: "SCFD-1111-2222",
+      expiresAt: now(),
+      onboardingUrl: "https://matrix.example.org/onboard",
+      onboardingLink: "https://matrix.example.org/onboard#code=SCFD-1111-2222",
+      username: req.username.startsWith("@") ? req.username : `@${req.username}:matrix.example.org`,
+    };
+  }
+
+  async removeMatrixUser(req: { username: string }): Promise<MatrixUserRemoveResult> {
+    const localpart = req.username.replace(/^@/, "").split(":")[0] ?? req.username;
+    return {
+      localpart,
+      userId: `@${localpart}:matrix.example.org`,
+      removed: true,
     };
   }
 

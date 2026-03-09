@@ -249,7 +249,6 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         projectDir,
         publicBaseUrl,
         homeserverDomain,
-        operatorLocalpart,
         tlsMode: resolveOnboardingMode(accessMode, tlsMode),
       });
     }
@@ -516,7 +515,6 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         projectDir: provision.projectDir,
         publicBaseUrl: provision.publicBaseUrl,
         homeserverDomain: provision.homeserverDomain,
-        operatorLocalpart: accounts.operator.localpart,
         tlsMode: resolveOnboardingMode(provision.accessMode, provision.tlsMode),
         alertRoomId: roomId,
       });
@@ -1224,7 +1222,6 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     projectDir: string;
     publicBaseUrl: string;
     homeserverDomain: string;
-    operatorLocalpart: string;
     tlsMode: BundledMatrixOnboardingMode;
     alertRoomId?: string;
   }): Promise<void> {
@@ -1233,7 +1230,6 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     const onboardingPage = renderOnboardingPage({
       publicBaseUrl: input.publicBaseUrl,
       homeserverDomain: input.homeserverDomain,
-      operatorLocalpart: input.operatorLocalpart,
       tlsMode: input.tlsMode,
       onboardingPageUrl,
       onboardingQrSvg,
@@ -1648,15 +1644,13 @@ const renderCaddyfile = (
 const renderOnboardingPage = (input: {
   publicBaseUrl: string;
   homeserverDomain: string;
-  operatorLocalpart: string;
   tlsMode: BundledMatrixOnboardingMode;
   onboardingPageUrl: string;
   onboardingQrSvg: string;
   alertRoomId?: string;
 }): string => {
-  const username = `@${input.operatorLocalpart}:${input.homeserverDomain}`;
-  const elementWebLink = buildElementWebLoginLink(input.publicBaseUrl, username);
-  const elementAndroidLink = buildElementAndroidIntentLink(input.publicBaseUrl, username);
+  const elementWebLink = buildElementWebLoginLink(input.publicBaseUrl);
+  const elementAndroidLink = buildElementAndroidIntentLink(input.publicBaseUrl);
   const roomLink = input.alertRoomId ? buildElementWebRoomLink(input.alertRoomId) : "";
   const caSection = input.tlsMode === "internal"
     ? [
@@ -1727,19 +1721,20 @@ const renderOnboardingPage = (input: {
     "    <section class=\"hero\">",
     "      <p class=\"eyebrow\">Sovereign Node</p>",
     "      <h1>Connect your phone to Matrix</h1>",
-    "      <p>Use this page on your phone to finish Matrix setup with the least manual typing.</p>",
+    "      <p>Use this page on your phone to unlock a local Matrix invitation with the least manual typing.</p>",
     "      <code>Homeserver URL: " + escapeHtml(input.publicBaseUrl) + "</code>",
-    "      <code>Sign in as: " + escapeHtml(username) + "</code>",
+    "      <p class=\"meta\">Local usernames on this node end with <code>:" + escapeHtml(input.homeserverDomain) + "</code>.</p>",
     "    </section>",
     "    <div class=\"stack\">",
     caSection,
     "      <section class=\"card\">",
     "        <h2>" + String(copyStep) + ". Quick copy and unlock</h2>",
-    "        <p>Copy the homeserver and username here. Unlock the password with a one-time code printed by the installer or generated later with <code>sudo sovereign-node onboarding issue</code>.</p>",
+    "        <p>Copy the homeserver here. Unlock the username and password with a one-time code printed by the installer or generated later with <code>sudo sovereign-node onboarding issue</code>.</p>",
     "        <div class=\"button-row\">",
     "          <button class=\"button button-secondary\" type=\"button\" onclick=\"copyHomeserverUrl(this)\">Copy Server URL</button>",
-    "          <button class=\"button button-secondary\" type=\"button\" onclick=\"copyUsername(this)\">Copy Username</button>",
+    "          <button class=\"button button-secondary hidden\" id=\"copyUsernameButton\" type=\"button\" onclick=\"copyUsername(this)\">Copy Username</button>",
     "        </div>",
+    "        <code id=\"revealedUsername\" class=\"hidden\"></code>",
     "        <label class=\"field\" for=\"bootstrapCode\">",
     "          <span>One-time onboarding code</span>",
     "          <input id=\"bootstrapCode\" name=\"bootstrapCode\" autocomplete=\"one-time-code\" autocapitalize=\"characters\" spellcheck=\"false\" placeholder=\"ABCD-EFGH-IJKL\">",
@@ -1748,20 +1743,21 @@ const renderOnboardingPage = (input: {
     "          <button class=\"button\" id=\"redeemButton\" type=\"button\" onclick=\"redeemCode(this)\">Unlock Password</button>",
     "          <button class=\"button button-secondary hidden\" id=\"copyPasswordButton\" type=\"button\" onclick=\"copyPassword(this)\">Copy Password</button>",
     "        </div>",
-    "        <p class=\"meta\" id=\"passwordStatus\">The password is not embedded in this page. The code works once, expires after 10 minutes, and must be reissued for later device onboarding.</p>",
+    "        <p class=\"meta\" id=\"passwordStatus\">The username and password are not embedded in this page. The code works once, expires after the configured TTL, and must be reissued for later onboarding.</p>",
     "      </section>",
     "      <section class=\"card\">",
     "        <h2>" + String(webStep) + ". Continue with Element Web</h2>",
     "        <p>The button opens Element Web with your homeserver prefilled. Browser restrictions still prevent safe password injection into app.element.io, so you may still need to paste the password manually.</p>",
-    "        <a class=\"button\" href=\"" + escapeHtml(elementWebLink) + "\" rel=\"noreferrer\">Connect via Element Web</a>",
-    "        <a class=\"button button-secondary\" href=\"" + escapeHtml(elementAndroidLink) + "\" rel=\"noreferrer\">Open in Element Android App</a>",
+    "        <a class=\"button\" id=\"elementWebLink\" href=\"" + escapeHtml(elementWebLink) + "\" rel=\"noreferrer\">Connect via Element Web</a>",
+    "        <a class=\"button button-secondary\" id=\"elementAndroidLink\" href=\"" + escapeHtml(elementAndroidLink) + "\" rel=\"noreferrer\">Open in Element Android App</a>",
     "        <p class=\"meta\">If Element still shows the generic login screen, tap <strong>Edit</strong> in the homeserver field and paste the full URL exactly as shown above. Do not type only " + escapeHtml(new URL(input.publicBaseUrl).host) + ".</p>",
     "        <p class=\"meta\">The Android button uses Element Classic&apos;s documented <code>hs_url</code> deep link and explicitly targets the F-Droid package <code>im.vector.app</code>. It can prefill the homeserver, but not securely inject the password.</p>",
+    "        <p class=\"meta\" id=\"usernameHint\">Unlock the invitation first if you need the exact username.</p>",
     "        <p class=\"meta\">" + nativeAppHint + "</p>",
     "      </section>",
     "      <section class=\"card\">",
     "        <h2>" + String(qrStep) + ". Open this setup page on another device</h2>",
-    "        <p>Open this page on a laptop, then scan the QR code from your phone if you want to hand off setup between devices.</p>",
+    "        <p>Open this page on a laptop, then scan the QR code from your phone if you want to hand off setup between devices. If you already have a link with a <code>#code=...</code> fragment, opening it on your phone can fill the code automatically.</p>",
     "        <div class=\"qr-shell\">",
     input.onboardingQrSvg,
     "        </div>",
@@ -1770,8 +1766,8 @@ const renderOnboardingPage = (input: {
     "      <section class=\"card\">",
     "        <h2>" + String(signInStep) + ". Sign in</h2>",
     "        <ol>",
-    "          <li>Use the username shown above.</li>",
-    "          <li>Unlock the password from this page with your one-time code, then copy it into Element.</li>",
+    "          <li>Unlock the invitation from this page to reveal the exact username and password.</li>",
+    "          <li>Copy the username and password into Element.</li>",
     "          <li>If Element asks for a homeserver again, paste the exact <code>https://</code> URL shown at the top of this page.</li>",
     "        </ol>",
     "      </section>",
@@ -1788,18 +1784,27 @@ const renderOnboardingPage = (input: {
     "  </main>",
     "  <script>",
     "    const homeserverUrl = " + JSON.stringify(input.publicBaseUrl) + ";",
-    "    const username = " + JSON.stringify(username) + ";",
+    "    let revealedUsername = '';",
     "    let revealedPassword = '';",
     "    async function copyHomeserverUrl(button) {",
     "      await copyValue(button, homeserverUrl);",
     "    }",
     "    async function copyUsername(button) {",
-    "      await copyValue(button, username);",
+    "      if (!revealedUsername) {",
+    "        const oldText = button.textContent;",
+    "        button.textContent = 'Not available';",
+    "        setTimeout(() => { button.textContent = oldText; }, 1800);",
+    "        return;",
+    "      }",
+    "      await copyValue(button, revealedUsername);",
     "    }",
     "    async function redeemCode(button) {",
     "      const codeInput = document.getElementById('bootstrapCode');",
     "      const status = document.getElementById('passwordStatus');",
     "      const copyButton = document.getElementById('copyPasswordButton');",
+    "      const copyUsernameButton = document.getElementById('copyUsernameButton');",
+    "      const revealedUsernameCode = document.getElementById('revealedUsername');",
+    "      const usernameHint = document.getElementById('usernameHint');",
     "      const code = typeof codeInput?.value === 'string' ? codeInput.value.trim() : '';",
     "      if (!code) {",
     "        status.textContent = 'Enter the one-time onboarding code from the installer output.';",
@@ -1817,22 +1822,38 @@ const renderOnboardingPage = (input: {
     "        });",
     "        const payload = await response.json().catch(() => ({}));",
     "        if (!response.ok) {",
+    "          revealedUsername = '';",
     "          revealedPassword = '';",
     "          copyButton.classList.add('hidden');",
+    "          copyUsernameButton.classList.add('hidden');",
+    "          revealedUsernameCode.classList.add('hidden');",
+    "          revealedUsernameCode.textContent = '';",
+    "          usernameHint.textContent = 'Unlock the invitation first if you need the exact username.';",
     "          status.textContent = typeof payload.message === 'string' && payload.message.length > 0",
-    "            ? payload.message + ' Run sudo sovereign-node onboarding issue to get a fresh code.'",
-    "            : 'The one-time code could not be redeemed. Run sudo sovereign-node onboarding issue to get a fresh code.';",
+    "            ? payload.message + ' Ask the operator for a fresh code.'",
+    "            : 'The one-time code could not be redeemed. Ask the operator for a fresh code.';",
     "          return;",
     "        }",
+    "        revealedUsername = typeof payload.username === 'string' ? payload.username : '';",
     "        revealedPassword = typeof payload.password === 'string' ? payload.password : '';",
-    "        if (!revealedPassword) {",
-    "          throw new Error('Password was missing from the onboarding response');",
+    "        if (!revealedUsername || !revealedPassword) {",
+    "          throw new Error('Invitation details were missing from the onboarding response');",
     "        }",
+    "        revealedUsernameCode.textContent = 'Username: ' + revealedUsername;",
+    "        revealedUsernameCode.classList.remove('hidden');",
+    "        copyUsernameButton.classList.remove('hidden');",
     "        copyButton.classList.remove('hidden');",
-    "        status.textContent = 'Password unlocked for this page session. Copy it now. After one successful copy it is cleared from this page.';",
+    "        usernameHint.textContent = 'The invitation username is now unlocked and can be copied below.';",
+    "        updateLoginLinks(revealedUsername);",
+    "        status.textContent = 'Username and password unlocked for this page session. Copy them now. After one successful password copy it is cleared from this page.';",
     "      } catch (error) {",
+    "        revealedUsername = '';",
     "        revealedPassword = '';",
     "        copyButton.classList.add('hidden');",
+    "        copyUsernameButton.classList.add('hidden');",
+    "        revealedUsernameCode.classList.add('hidden');",
+    "        revealedUsernameCode.textContent = '';",
+    "        usernameHint.textContent = 'Unlock the invitation first if you need the exact username.';",
     "        status.textContent = error instanceof Error ? error.message : 'Unlock failed';",
     "      } finally {",
     "        button.disabled = false;",
@@ -1851,7 +1872,37 @@ const renderOnboardingPage = (input: {
     "      await copyValue(button, revealedPassword);",
     "      revealedPassword = '';",
     "      copyButton.classList.add('hidden');",
-    "      status.textContent = 'Password copied. It has been cleared from this page. Run sudo sovereign-node onboarding issue if you need a fresh one-time code.';",
+    "      status.textContent = 'Password copied. It has been cleared from this page. Ask the operator for a fresh code if you need to unlock it again.';",
+    "    }",
+    "    function updateLoginLinks(username) {",
+    "      const webLink = document.getElementById('elementWebLink');",
+    "      const androidLink = document.getElementById('elementAndroidLink');",
+    "      if (webLink) {",
+    "        webLink.href = buildElementWebLink(username);",
+    "      }",
+    "      if (androidLink) {",
+    "        androidLink.href = buildElementAndroidLink(username);",
+    "      }",
+    "    }",
+    "    function buildElementWebLink(username) {",
+    "      const suffix = username ? '&login_hint=' + encodeURIComponent(username) : '';",
+    "      return 'https://app.element.io/#/login?hs_url=' + encodeURIComponent(homeserverUrl) + suffix;",
+    "    }",
+    "    function buildElementAndroidLink(username) {",
+    "      const suffix = username ? '&login_hint=' + encodeURIComponent(username) : '';",
+    "      const fallbackUrl = 'https://mobile.element.io/?hs_url=' + encodeURIComponent(homeserverUrl) + suffix;",
+    "      return 'intent://mobile.element.io/?hs_url=' + encodeURIComponent(homeserverUrl) + suffix",
+    "        + '#Intent;scheme=https;package=im.vector.app;S.browser_fallback_url=' + encodeURIComponent(fallbackUrl) + ';end';",
+    "    }",
+    "    function readCodeFromLocation() {",
+    "      const hash = window.location.hash.startsWith('#') ? window.location.hash.slice(1) : '';",
+    "      const hashParams = new URLSearchParams(hash);",
+    "      const queryParams = new URLSearchParams(window.location.search);",
+    "      const fromHash = hashParams.get('code');",
+    "      const fromQuery = queryParams.get('code');",
+    "      return typeof fromHash === 'string' && fromHash.length > 0 ? fromHash",
+    "        : typeof fromQuery === 'string' && fromQuery.length > 0 ? fromQuery",
+    "          : '';",
     "    }",
     "    async function copyValue(button, value) {",
     "      try {",
@@ -1874,7 +1925,22 @@ const renderOnboardingPage = (input: {
     "        setTimeout(() => { button.textContent = oldText; }, 1800);",
     "      }",
     "    }",
+    "    const codeFromLocation = readCodeFromLocation();",
+    "    if (codeFromLocation) {",
+    "      const codeInput = document.getElementById('bootstrapCode');",
+    "      const redeemButton = document.getElementById('redeemButton');",
+    "      if (codeInput && typeof codeInput.value === 'string') {",
+    "        codeInput.value = codeFromLocation;",
+    "      }",
+    "      if (window.location.hash.length > 0 && window.history?.replaceState) {",
+    "        window.history.replaceState(null, '', window.location.pathname + window.location.search);",
+    "      }",
+    "      if (redeemButton) {",
+    "        void redeemCode(redeemButton);",
+    "      }",
+    "    }",
     "    window.addEventListener('pagehide', () => {",
+    "      revealedUsername = '';",
     "      revealedPassword = '';",
     "    });",
     "  </script>",
@@ -1888,17 +1954,21 @@ const renderOnboardingPage = (input: {
 const buildOnboardingPageUrl = (publicBaseUrl: string): string =>
   buildMatrixOnboardingUrl(publicBaseUrl);
 
-const buildElementWebLoginLink = (publicBaseUrl: string, username: string): string =>
-  `https://app.element.io/#/login?hs_url=${encodeURIComponent(publicBaseUrl)}&login_hint=${encodeURIComponent(username)}`;
+const buildElementWebLoginLink = (publicBaseUrl: string, username?: string): string =>
+  `https://app.element.io/#/login?hs_url=${encodeURIComponent(publicBaseUrl)}${
+    username === undefined ? "" : `&login_hint=${encodeURIComponent(username)}`
+  }`;
 
-const buildElementAndroidDeepLink = (publicBaseUrl: string, username: string): string =>
-  `https://mobile.element.io/?hs_url=${encodeURIComponent(publicBaseUrl)}&login_hint=${encodeURIComponent(username)}`;
+const buildElementAndroidDeepLink = (publicBaseUrl: string, username?: string): string =>
+  `https://mobile.element.io/?hs_url=${encodeURIComponent(publicBaseUrl)}${
+    username === undefined ? "" : `&login_hint=${encodeURIComponent(username)}`
+  }`;
 
-const buildElementAndroidIntentLink = (publicBaseUrl: string, username: string): string => {
+const buildElementAndroidIntentLink = (publicBaseUrl: string, username?: string): string => {
   const fallbackUrl = buildElementAndroidDeepLink(publicBaseUrl, username);
   return "intent://mobile.element.io/"
     + `?hs_url=${encodeURIComponent(publicBaseUrl)}`
-    + `&login_hint=${encodeURIComponent(username)}`
+    + (username === undefined ? "" : `&login_hint=${encodeURIComponent(username)}`)
     + "#Intent;scheme=https;package=im.vector.app"
     + `;S.browser_fallback_url=${encodeURIComponent(fallbackUrl)}`
     + ";end";

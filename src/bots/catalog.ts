@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
-import { access, readFile, readdir } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { execa } from "execa";
 import { z } from "zod";
 
 import { formatTemplateRef, type AgentTemplateManifest } from "../templates/catalog.js";
@@ -12,6 +14,10 @@ export type BotConfigRecord = Record<string, BotConfigValue>;
 
 const BOT_PACKAGE_KEY_ID = "repo:sovereign-ai-bots";
 const BOT_MANIFEST_FILE = "sovereign-bot.json";
+const BOT_REPO_DIR_ENV = "SOVEREIGN_BOTS_REPO_DIR";
+const BOT_REPO_URL_ENV = "SOVEREIGN_BOTS_REPO_URL";
+const BOT_REPO_REF_ENV = "SOVEREIGN_BOTS_REPO_REF";
+export const DEFAULT_BOT_REPO_URL = "https://github.com/ndee/sovereign-ai-bots";
 
 const botConfigValueSchema = z.union([z.string(), z.number().finite(), z.boolean()]);
 
@@ -39,6 +45,17 @@ const botCronSchema = z.object({
   defaultEvery: z.string().min(1).optional(),
   session: z.enum(["isolated"]).optional(),
   message: z.string().min(1),
+});
+
+const matrixRoutingSchema = z.object({
+  defaultAccount: z.boolean().optional(),
+  dm: z.object({
+    enabled: z.boolean().optional(),
+  }).optional(),
+  alertRoom: z.object({
+    autoReply: z.boolean().optional(),
+    requireMention: z.boolean().optional(),
+  }).optional(),
 });
 
 const workspaceFileSchema = z.object({
@@ -80,6 +97,7 @@ const botPackageSchema = z.object({
     mode: z.enum(["service-account", "dedicated-account"]),
     localpartPrefix: z.string().min(1),
   }),
+  matrixRouting: matrixRoutingSchema.optional(),
   configDefaults: z.record(z.string(), botConfigValueSchema).default({}),
   toolInstances: z.array(toolInstanceSchema).default([]),
   openclaw: z.object({
@@ -106,10 +124,27 @@ export interface BotCatalog {
   findPackageByTemplateRef(ref: string): Promise<LoadedBotPackage | null>;
 }
 
+export type FilesystemBotCatalogOptions = {
+  repoDir?: string;
+  repoUrl?: string;
+  repoRef?: string;
+};
+
 export class FilesystemBotCatalog implements BotCatalog {
   private packageCache: Promise<LoadedBotPackage[]> | null = null;
+  private readonly repoDir: string | undefined;
+  private readonly repoUrl: string | undefined;
+  private readonly repoRef: string | undefined;
 
-  constructor(private readonly repoDir?: string) {}
+  constructor(options?: string | FilesystemBotCatalogOptions) {
+    if (typeof options === "string") {
+      this.repoDir = options;
+      return;
+    }
+    this.repoDir = options?.repoDir;
+    this.repoUrl = options?.repoUrl;
+    this.repoRef = options?.repoRef;
+  }
 
   async listPackages(): Promise<LoadedBotPackage[]> {
     if (this.packageCache === null) {
@@ -218,14 +253,13 @@ export class FilesystemBotCatalog implements BotCatalog {
   }
 
   private async resolveRepoDir(): Promise<string> {
-    if (this.repoDir !== undefined && this.repoDir.trim().length > 0) {
-      await ensureDirectory(join(this.repoDir, "bots"));
-      return this.repoDir;
+    const configuredSource = this.resolveConfiguredSource();
+    if (configuredSource.repoDir !== undefined) {
+      await ensureDirectory(join(configuredSource.repoDir, "bots"));
+      return configuredSource.repoDir;
     }
-    const envRepo = process.env.SOVEREIGN_BOTS_REPO_DIR;
-    if (envRepo !== undefined && envRepo.trim().length > 0) {
-      await ensureDirectory(join(envRepo, "bots"));
-      return envRepo;
+    if (configuredSource.repoUrl !== undefined) {
+      return await this.cloneRepo(configuredSource.repoUrl, configuredSource.repoRef);
     }
 
     const currentRepoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -256,7 +290,7 @@ export class FilesystemBotCatalog implements BotCatalog {
     throw {
       code: "BOT_REPO_NOT_FOUND",
       message:
-        "The Sovereign bot repository was not found. Set SOVEREIGN_BOTS_REPO_DIR or place sovereign-ai-bots beside sovereign-ai-node.",
+        "The Sovereign bot repository was not found. Set SOVEREIGN_BOTS_REPO_DIR, set SOVEREIGN_BOTS_REPO_URL, or place sovereign-ai-bots beside sovereign-ai-node.",
       retryable: false,
       details: {
         currentRepoRoot,
@@ -264,6 +298,109 @@ export class FilesystemBotCatalog implements BotCatalog {
         searched: preferred,
       },
     };
+  }
+
+  private resolveConfiguredSource(): FilesystemBotCatalogOptions {
+    const repoDir = trimString(this.repoDir) ?? trimString(process.env[BOT_REPO_DIR_ENV]);
+    const repoUrl = trimString(this.repoUrl) ?? trimString(process.env[BOT_REPO_URL_ENV]);
+    const repoRef = trimString(this.repoRef) ?? trimString(process.env[BOT_REPO_REF_ENV]);
+
+    if (repoDir !== undefined && repoUrl !== undefined) {
+      throw {
+        code: "BOT_REPO_SOURCE_CONFLICT",
+        message:
+          `Configure either ${BOT_REPO_DIR_ENV} or ${BOT_REPO_URL_ENV}, but not both at the same time.`,
+        retryable: false,
+      };
+    }
+
+    if (repoRef !== undefined && repoDir !== undefined) {
+      throw {
+        code: "BOT_REPO_REF_REQUIRES_URL",
+        message: `${BOT_REPO_REF_ENV} cannot be combined with ${BOT_REPO_DIR_ENV}.`,
+        retryable: false,
+      };
+    }
+
+    return {
+      ...(repoDir === undefined ? {} : { repoDir }),
+      ...(repoDir === undefined
+        ? { repoUrl: repoUrl ?? DEFAULT_BOT_REPO_URL }
+        : (repoUrl === undefined ? {} : { repoUrl })),
+      ...(repoRef === undefined ? {} : { repoRef }),
+    };
+  }
+
+  private async cloneRepo(repoUrl: string, repoRef?: string): Promise<string> {
+    const tempPrefix = join(tmpdir(), "sovereign-bot-catalog-");
+
+    if (repoRef !== undefined) {
+      const shallowDir = await mkdtemp(tempPrefix);
+      const shallowClone = await execa(
+        "git",
+        ["clone", "--depth", "1", "--branch", repoRef, repoUrl, shallowDir],
+        { reject: false },
+      );
+      if (shallowClone.exitCode === 0) {
+        await ensureDirectory(join(shallowDir, "bots"));
+        return shallowDir;
+      }
+
+      const fullDir = await mkdtemp(tempPrefix);
+      const fullClone = await execa("git", ["clone", repoUrl, fullDir], {
+        reject: false,
+      });
+      const checkout = fullClone.exitCode === 0
+        ? await execa("git", ["-C", fullDir, "checkout", repoRef], {
+            reject: false,
+          })
+        : null;
+
+      if (fullClone.exitCode === 0 && checkout?.exitCode === 0) {
+        await ensureDirectory(join(fullDir, "bots"));
+        return fullDir;
+      }
+
+      throw {
+        code: "BOT_REPO_CLONE_FAILED",
+        message: `Failed to clone bot repository '${repoUrl}' at ref '${repoRef}'.`,
+        retryable: false,
+        details: {
+          shallowClone: {
+            exitCode: shallowClone.exitCode,
+            stderr: shallowClone.stderr,
+          },
+          fullClone: {
+            exitCode: fullClone.exitCode,
+            stderr: fullClone.stderr,
+          },
+          checkout: checkout === null
+            ? null
+            : {
+                exitCode: checkout.exitCode,
+                stderr: checkout.stderr,
+              },
+        },
+      };
+    }
+
+    const repoDir = await mkdtemp(tempPrefix);
+    const clone = await execa("git", ["clone", "--depth", "1", repoUrl, repoDir], {
+      reject: false,
+    });
+    if (clone.exitCode !== 0) {
+      throw {
+        code: "BOT_REPO_CLONE_FAILED",
+        message: `Failed to clone bot repository '${repoUrl}'.`,
+        retryable: false,
+        details: {
+          exitCode: clone.exitCode,
+          stderr: clone.stderr,
+        },
+      };
+    }
+    await ensureDirectory(join(repoDir, "bots"));
+    return repoDir;
   }
 }
 
@@ -278,6 +415,14 @@ const pathExists = async (value: string): Promise<boolean> => {
 
 const ensureDirectory = async (value: string): Promise<void> => {
   await access(value);
+};
+
+const trimString = (value: string | undefined): string | undefined => {
+  if (value === undefined) {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? undefined : trimmed;
 };
 
 const stableSerialize = (value: unknown): string => {
