@@ -16,8 +16,12 @@ export type ToolTemplateManifest = {
   requiredSecretRefs: string[];
   requiredConfigKeys: string[];
   allowedCommands: string[];
+  openclawPlugins?: string[];
+  openclawToolNames?: string[];
   signature: TemplateSignature;
 };
+
+export type ToolTemplateDefinition = Omit<ToolTemplateManifest, "signature">;
 
 export type AgentTemplateManifest = {
   kind: "sovereign-agent-template";
