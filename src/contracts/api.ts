@@ -1,10 +1,6 @@
 import { z } from "zod";
 
-import {
-  baseErrorEnvelopeSchema,
-  baseSuccessEnvelopeSchema,
-  idSchema,
-} from "./common.js";
+import { baseErrorEnvelopeSchema, baseSuccessEnvelopeSchema, idSchema } from "./common.js";
 import {
   botsInstallInputSchema,
   doctorReportSchema,
@@ -63,7 +59,8 @@ export const reconfigureOpenrouterRequestSchema = z.object({
       (value) =>
         value.model !== undefined || value.apiKey !== undefined || value.secretRef !== undefined,
       {
-        message: "Provide at least one of openrouter.model, openrouter.apiKey, or openrouter.secretRef",
+        message:
+          "Provide at least one of openrouter.model, openrouter.apiKey, or openrouter.secretRef",
         path: ["model"],
       },
     )
@@ -81,9 +78,7 @@ export const preflightApiSuccessSchema = baseSuccessEnvelopeSchema(preflightResu
 export const testImapApiSuccessSchema = baseSuccessEnvelopeSchema(testImapResultSchema);
 export const testMatrixApiSuccessSchema = baseSuccessEnvelopeSchema(testMatrixResultSchema);
 export const startInstallApiSuccessSchema = baseSuccessEnvelopeSchema(startInstallResultSchema);
-export const installJobApiSuccessSchema = baseSuccessEnvelopeSchema(
-  installJobStatusResponseSchema,
-);
+export const installJobApiSuccessSchema = baseSuccessEnvelopeSchema(installJobStatusResponseSchema);
 export const testAlertApiSuccessSchema = baseSuccessEnvelopeSchema(testAlertResultSchema);
 export const statusApiSuccessSchema = baseSuccessEnvelopeSchema(sovereignStatusSchema);
 export const doctorApiSuccessSchema = baseSuccessEnvelopeSchema(doctorReportSchema);

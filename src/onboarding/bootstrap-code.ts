@@ -42,15 +42,11 @@ const nowIso = (): string => new Date().toISOString();
 export const buildMatrixOnboardingUrl = (homeserverUrl: string): string =>
   `${homeserverUrl.replace(/\/+$/, "")}/onboard`;
 
-export const buildMatrixOnboardingLink = (
-  onboardingUrl: string,
-  code: string,
-): string => `${onboardingUrl}#code=${encodeURIComponent(code)}`;
+export const buildMatrixOnboardingLink = (onboardingUrl: string, code: string): string =>
+  `${onboardingUrl}#code=${encodeURIComponent(code)}`;
 
 export const normalizeMatrixOnboardingCode = (value: string): string =>
-  value
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, "");
+  value.toUpperCase().replace(/[^A-Z0-9]/g, "");
 
 export const generateMatrixOnboardingCode = (): string => {
   const bytes = randomBytes(12);
@@ -78,7 +74,10 @@ export const issueMatrixOnboardingState = (input: {
   now?: Date;
 }): { state: MatrixOnboardingState; code: string } => {
   const issuedAt = input.now ?? new Date();
-  const ttlMinutes = Math.max(1, Math.trunc(input.ttlMinutes ?? DEFAULT_MATRIX_ONBOARDING_TTL_MINUTES));
+  const ttlMinutes = Math.max(
+    1,
+    Math.trunc(input.ttlMinutes ?? DEFAULT_MATRIX_ONBOARDING_TTL_MINUTES),
+  );
   const expiresAt = new Date(issuedAt.getTime() + ttlMinutes * 60_000);
   const code = generateMatrixOnboardingCode();
   const salt = randomBytes(16).toString("hex");
@@ -109,19 +108,17 @@ export const parseMatrixOnboardingState = (value: unknown): MatrixOnboardingStat
       ? candidate.operatorPasswordSecretRef
       : "";
   if (
-    candidate.version !== 1
-    || typeof candidate.issuedAt !== "string"
-    || typeof candidate.expiresAt !== "string"
-    || typeof candidate.failedAttempts !== "number"
-    || typeof candidate.maxAttempts !== "number"
-    || typeof candidate.codeSalt !== "string"
-    || typeof candidate.codeHash !== "string"
-    || (
-      typeof candidate.passwordSecretRef !== "string"
-      && typeof candidate.operatorPasswordSecretRef !== "string"
-    )
-    || typeof candidate.username !== "string"
-    || typeof candidate.homeserverUrl !== "string"
+    candidate.version !== 1 ||
+    typeof candidate.issuedAt !== "string" ||
+    typeof candidate.expiresAt !== "string" ||
+    typeof candidate.failedAttempts !== "number" ||
+    typeof candidate.maxAttempts !== "number" ||
+    typeof candidate.codeSalt !== "string" ||
+    typeof candidate.codeHash !== "string" ||
+    (typeof candidate.passwordSecretRef !== "string" &&
+      typeof candidate.operatorPasswordSecretRef !== "string") ||
+    typeof candidate.username !== "string" ||
+    typeof candidate.homeserverUrl !== "string"
   ) {
     return null;
   }
@@ -163,8 +160,8 @@ export const redeemMatrixOnboardingCode = (input: {
 
   const actualHash = Buffer.from(hashMatrixOnboardingCode(input.code, current.codeSalt), "hex");
   const expectedHash = Buffer.from(current.codeHash, "hex");
-  const hashMatches = actualHash.length === expectedHash.length
-    && timingSafeEqual(actualHash, expectedHash);
+  const hashMatches =
+    actualHash.length === expectedHash.length && timingSafeEqual(actualHash, expectedHash);
 
   if (!hashMatches) {
     return {

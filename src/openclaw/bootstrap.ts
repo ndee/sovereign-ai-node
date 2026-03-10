@@ -1,5 +1,5 @@
-import { access, readFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
+import { access, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 
@@ -86,10 +86,10 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
     const installVersion = resolveInstallVersion(desiredVersion);
     const detected = await this.detectInstalled();
     if (
-      detected !== null
-      && !Boolean(opts.forceReinstall)
-      && (opts.skipIfCompatibleInstalled ?? true)
-      && versionsMatch(detected.version, desiredVersion)
+      detected !== null &&
+      !opts.forceReinstall &&
+      (opts.skipIfCompatibleInstalled ?? true) &&
+      versionsMatch(detected.version, desiredVersion)
     ) {
       await this.repairBundledExtensionRuntimeDependencies();
       this.logger.info(
@@ -194,9 +194,7 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
         {
           extension: repairPlan.packageName,
           extensionDir,
-          missingDependencies: repairPlan.missingDependencies.map(
-            (dependency) => dependency.name,
-          ),
+          missingDependencies: repairPlan.missingDependencies.map((dependency) => dependency.name),
         },
         "Repairing missing bundled OpenClaw extension runtime dependencies",
       );
@@ -256,9 +254,7 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
         {
           extension: repairPlan.packageName,
           extensionDir,
-          repairedDependencies: repairPlan.missingDependencies.map(
-            (dependency) => dependency.name,
-          ),
+          repairedDependencies: repairPlan.missingDependencies.map((dependency) => dependency.name),
         },
         "Bundled OpenClaw extension runtime dependencies repaired successfully",
       );
@@ -306,7 +302,7 @@ const buildInstallShellScript = (args: InstallShellArgs): string => {
   ].join("\n");
 };
 
-const shellQuote = (value: string): string => `'${value.replaceAll("'", `'\"'\"'`)}'`;
+const shellQuote = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
 
 const parseVersionToken = (value: string): string | null => {
   const trimmed = value.trim();
@@ -346,9 +342,7 @@ const resolveInstalledOpenClawPackageRoot = async (
     try {
       await access(join(candidate, "package.json"), fsConstants.R_OK);
       return candidate;
-    } catch {
-      continue;
-    }
+    } catch {}
   }
 
   return null;
@@ -406,7 +400,11 @@ const findMissingExtensionDependencies = async (
 
 const isInstallableDependencySpec = (spec: string): boolean => {
   const trimmed = spec.trim();
-  return !trimmed.startsWith("file:") && !trimmed.startsWith("link:") && !trimmed.startsWith("workspace:");
+  return (
+    !trimmed.startsWith("file:") &&
+    !trimmed.startsWith("link:") &&
+    !trimmed.startsWith("workspace:")
+  );
 };
 
 const versionsMatch = (detectedVersion: string, requestedVersion: string): boolean => {

@@ -32,4 +32,3 @@ export const registerTestAlertCommand = (program: Command, app: AppContainer): v
       }
     });
 };
-

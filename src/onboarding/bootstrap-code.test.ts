@@ -114,11 +114,13 @@ describe("Matrix onboarding bootstrap code", () => {
     expect(parseMatrixOnboardingState(JSON.parse(JSON.stringify(issued.state)))).toEqual(
       issued.state,
     );
-    expect(parseMatrixOnboardingState({
-      ...issued.state,
-      operatorPasswordSecretRef: issued.state.passwordSecretRef,
-      passwordSecretRef: undefined,
-    })).toEqual(issued.state);
+    expect(
+      parseMatrixOnboardingState({
+        ...issued.state,
+        operatorPasswordSecretRef: issued.state.passwordSecretRef,
+        passwordSecretRef: undefined,
+      }),
+    ).toEqual(issued.state);
     expect(parseMatrixOnboardingState({ foo: "bar" })).toBeNull();
   });
 });

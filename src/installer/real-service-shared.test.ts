@@ -11,7 +11,7 @@ describe("isCoreAgentBindingBestEffortSkippable", () => {
       details: {
         failures: [
           {
-            stderr: "unknown command \"plugins enable\"",
+            stderr: 'unknown command "plugins enable"',
             stdout: "",
           },
         ],

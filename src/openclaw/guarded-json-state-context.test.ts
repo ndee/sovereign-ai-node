@@ -24,11 +24,15 @@ describe("guarded-json-state OpenClaw context helpers", () => {
         [
           "Conversation info (untrusted metadata):",
           "```json",
-          JSON.stringify({
-            sender_id: "@ndee:example.org",
-            sender: "@ndee:example.org",
-            is_group_chat: true,
-          }, null, 2),
+          JSON.stringify(
+            {
+              sender_id: "@ndee:example.org",
+              sender: "@ndee:example.org",
+              is_group_chat: true,
+            },
+            null,
+            2,
+          ),
           "```",
           "",
           "ndee: Ich suche Hilfe mit Lightning.",
@@ -59,11 +63,15 @@ describe("guarded-json-state OpenClaw context helpers", () => {
                 text: [
                   "Conversation info (untrusted metadata):",
                   "```json",
-                  JSON.stringify({
-                    sender_id: "@satoshi:example.org",
-                    sender: "@satoshi:example.org",
-                    is_group_chat: true,
-                  }, null, 2),
+                  JSON.stringify(
+                    {
+                      sender_id: "@satoshi:example.org",
+                      sender: "@satoshi:example.org",
+                      is_group_chat: true,
+                    },
+                    null,
+                    2,
+                  ),
                   "```",
                 ].join("\n"),
               },
@@ -103,10 +111,14 @@ describe("guarded-json-state OpenClaw context helpers", () => {
                   text: [
                     "Conversation info (untrusted metadata):",
                     "```json",
-                    JSON.stringify({
-                      sender_id: "@satoshi:example.org",
-                      sender: "@satoshi:example.org",
-                    }, null, 2),
+                    JSON.stringify(
+                      {
+                        sender_id: "@satoshi:example.org",
+                        sender: "@satoshi:example.org",
+                      },
+                      null,
+                      2,
+                    ),
                     "```",
                   ].join("\n"),
                 },
@@ -114,7 +126,8 @@ describe("guarded-json-state OpenClaw context helpers", () => {
             },
           },
         ],
-      })).toThrow(/sender mismatch/i);
+      }),
+    ).toThrow(/sender mismatch/i);
   });
 
   it("uses the latest user message when older branches mention another sender", () => {
@@ -130,9 +143,13 @@ describe("guarded-json-state OpenClaw context helpers", () => {
                 text: [
                   "Conversation info (untrusted metadata):",
                   "```json",
-                  JSON.stringify({
-                    sender_id: "@old:example.org",
-                  }, null, 2),
+                  JSON.stringify(
+                    {
+                      sender_id: "@old:example.org",
+                    },
+                    null,
+                    2,
+                  ),
                   "```",
                 ].join("\n"),
               },
@@ -156,9 +173,13 @@ describe("guarded-json-state OpenClaw context helpers", () => {
                 text: [
                   "Conversation info (untrusted metadata):",
                   "```json",
-                  JSON.stringify({
-                    sender_id: "@new:example.org",
-                  }, null, 2),
+                  JSON.stringify(
+                    {
+                      sender_id: "@new:example.org",
+                    },
+                    null,
+                    2,
+                  ),
                   "```",
                 ].join("\n"),
               },
@@ -190,7 +211,8 @@ describe("guarded-json-state OpenClaw context helpers", () => {
         workspaceDir: "/var/lib/sovereign-node/bitcoin-skill-match/workspace",
         requesterSenderId: "@ndee:example.org",
         sessionKey: "agent:bitcoin-skill-match:matrix:direct:@satoshi:example.org",
-      })).toThrow(/sender mismatch/i);
+      }),
+    ).toThrow(/sender mismatch/i);
   });
 
   it("requires a workspace directory from the tool context", () => {

@@ -9,13 +9,8 @@ type OnboardingIssueOptions = {
   json?: boolean;
 };
 
-export const registerOnboardingCommand = (
-  program: Command,
-  app: AppContainer,
-): void => {
-  const onboarding = program
-    .command("onboarding")
-    .description("Manage Matrix onboarding access");
+export const registerOnboardingCommand = (program: Command, app: AppContainer): void => {
+  const onboarding = program.command("onboarding").description("Manage Matrix onboarding access");
 
   onboarding
     .command("issue")

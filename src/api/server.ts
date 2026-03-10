@@ -18,4 +18,3 @@ export const buildApiServer = (app: AppContainer): FastifyInstance => {
 
   return server;
 };
-

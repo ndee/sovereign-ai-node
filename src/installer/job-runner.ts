@@ -1,9 +1,4 @@
-import type {
-  ErrorDetail,
-  InstallJobSummary,
-  JobStep,
-  JobStepId,
-} from "../contracts/index.js";
+import type { ErrorDetail, InstallJobSummary, JobStep, JobStepId } from "../contracts/index.js";
 
 export type InstallContext = {
   jobId: string;
@@ -33,11 +28,13 @@ export class JobRunner {
       jobId: ctx.jobId,
       state: "pending",
       createdAt: now(),
-      steps: steps.map((step): JobStep => ({
-        id: step.id,
-        label: step.label,
-        state: "pending",
-      })),
+      steps: steps.map(
+        (step): JobStep => ({
+          id: step.id,
+          label: step.label,
+          state: "pending",
+        }),
+      ),
     };
 
     await notify(observer, { job });
@@ -49,9 +46,7 @@ export class JobRunner {
     for (const step of steps) {
       const current = job.steps.find((candidate) => candidate.id === step.id);
       if (current === undefined) {
-        const error = normalizeInstallError(
-          new Error(`Unknown job step definition: ${step.id}`),
-        );
+        const error = normalizeInstallError(new Error(`Unknown job step definition: ${step.id}`));
         job.state = "failed";
         job.endedAt = now();
         delete job.currentStepId;
@@ -147,8 +142,8 @@ const isErrorDetailLike = (value: unknown): value is ErrorDetailLike => {
 
   const candidate = value as Partial<ErrorDetailLike>;
   return (
-    typeof candidate.code === "string"
-    && typeof candidate.message === "string"
-    && typeof candidate.retryable === "boolean"
+    typeof candidate.code === "string" &&
+    typeof candidate.message === "string" &&
+    typeof candidate.retryable === "boolean"
   );
 };

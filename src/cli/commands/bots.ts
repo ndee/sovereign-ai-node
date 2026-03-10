@@ -3,7 +3,10 @@ import { z } from "zod";
 
 import type { AppContainer } from "../../app/create-app.js";
 import { DEFAULT_BOT_REPO_URL } from "../../bots/catalog.js";
-import { applyBotCatalogSourceOptions, type BotCatalogSourceOptions } from "../bot-catalog-source.js";
+import {
+  applyBotCatalogSourceOptions,
+  type BotCatalogSourceOptions,
+} from "../bot-catalog-source.js";
 import { writeCliError, writeCliSuccess } from "../output.js";
 
 const botSchema = z.object({
@@ -41,32 +44,33 @@ export const registerBotsCommand = (program: Command, app: AppContainer): void =
     .command("bots")
     .description("List and instantiate installable Sovereign bot packages");
 
-  addBotCatalogSourceOptions(bots
-    .command("list")
-    .description("List bot packages from the configured bot repository")
-    .option("--json", "Emit JSON output")
-  )
-    .action(async (opts: BotCatalogSourceOptions & { json?: boolean }) => {
-      const command = "bots list";
-      try {
-        applyBotCatalogSourceOptions(opts);
-        const result = await app.installerService.listSovereignBots();
-        writeCliSuccess(command, result, listBotsResultSchema, Boolean(opts.json));
-      } catch (error) {
-        writeCliError(command, error, Boolean(opts.json));
-        process.exitCode = 1;
-      }
-    });
+  addBotCatalogSourceOptions(
+    bots
+      .command("list")
+      .description("List bot packages from the configured bot repository")
+      .option("--json", "Emit JSON output"),
+  ).action(async (opts: BotCatalogSourceOptions & { json?: boolean }) => {
+    const command = "bots list";
+    try {
+      applyBotCatalogSourceOptions(opts);
+      const result = await app.installerService.listSovereignBots();
+      writeCliSuccess(command, result, listBotsResultSchema, Boolean(opts.json));
+    } catch (error) {
+      writeCliError(command, error, Boolean(opts.json));
+      process.exitCode = 1;
+    }
+  });
 
-  addBotCatalogSourceOptions(bots
-    .command("install")
-    .alias("instantiate")
-    .description("Install a managed bot from the configured bot repository")
-    .argument("<id>", "Bot package ID")
-    .option("--workspace <dir>", "Workspace directory override")
-    .option("--json", "Emit JSON output")
-  )
-    .action(async (id: string, opts: BotCatalogSourceOptions & { workspace?: string; json?: boolean }) => {
+  addBotCatalogSourceOptions(
+    bots
+      .command("install")
+      .alias("instantiate")
+      .description("Install a managed bot from the configured bot repository")
+      .argument("<id>", "Bot package ID")
+      .option("--workspace <dir>", "Workspace directory override")
+      .option("--json", "Emit JSON output"),
+  ).action(
+    async (id: string, opts: BotCatalogSourceOptions & { workspace?: string; json?: boolean }) => {
       const command = "bots install";
       try {
         applyBotCatalogSourceOptions(opts);
@@ -79,7 +83,8 @@ export const registerBotsCommand = (program: Command, app: AppContainer): void =
         writeCliError(command, error, Boolean(opts.json));
         process.exitCode = 1;
       }
-    });
+    },
+  );
 };
 
 const addBotCatalogSourceOptions = <T extends Command>(command: T): T =>

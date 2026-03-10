@@ -6,8 +6,8 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import type { RuntimeConfig } from "../installer/real-service-shared.js";
 import {
-  GuardedJsonStateToolService,
   GuardedJsonStateToolError,
+  GuardedJsonStateToolService,
   normalizeMatrixActorUserId,
   resolveMatrixActorFromSessionStatus,
 } from "./guarded-json-state.js";
@@ -37,13 +37,16 @@ const buildRuntimeConfig = (input: {
     plugins: {
       allow: ["matrix"],
     },
-    agents: input.workspace === undefined
-      ? []
-      : [{
-          id: "bitcoin-skill-match",
-          workspace: input.workspace,
-          toolInstanceIds: ["bitcoin-state"],
-        }],
+    agents:
+      input.workspace === undefined
+        ? []
+        : [
+            {
+              id: "bitcoin-skill-match",
+              workspace: input.workspace,
+              toolInstanceIds: ["bitcoin-state"],
+            },
+          ],
     crons: [],
     cron: {
       id: "poll",
@@ -174,51 +177,69 @@ const buildPolicy = () => ({
 });
 
 afterEach(async () => {
-  await Promise.all(tempRoots.splice(0).map(async (path) => await rm(path, { recursive: true, force: true })));
+  await Promise.all(
+    tempRoots.splice(0).map(async (path) => await rm(path, { recursive: true, force: true })),
+  );
 });
 
 describe("guarded-json-state tool service", () => {
   it("resolves the actor from a direct-message session key before origin metadata", () => {
-    expect(resolveMatrixActorFromSessionStatus({
-      sessionKey: "agent:bitcoin-skill-match:matrix:direct:@satoshi:matrix.example.org",
-      originFrom: "matrix:@satoshi:matrix.example.org",
-    })).toBe("@satoshi:matrix.example.org");
+    expect(
+      resolveMatrixActorFromSessionStatus({
+        sessionKey: "agent:bitcoin-skill-match:matrix:direct:@satoshi:matrix.example.org",
+        originFrom: "matrix:@satoshi:matrix.example.org",
+      }),
+    ).toBe("@satoshi:matrix.example.org");
   });
 
   it("falls back to origin.from when the current session is not a direct-message scope", () => {
-    expect(resolveMatrixActorFromSessionStatus({
-      sessionKey: "agent:bitcoin-skill-match:matrix:room:!marktplatz:matrix.example.org",
-      originFrom: "@ndee:matrix.example.org",
-    })).toBe("@ndee:matrix.example.org");
+    expect(
+      resolveMatrixActorFromSessionStatus({
+        sessionKey: "agent:bitcoin-skill-match:matrix:room:!marktplatz:matrix.example.org",
+        originFrom: "@ndee:matrix.example.org",
+      }),
+    ).toBe("@ndee:matrix.example.org");
   });
 
   it("accepts session keys that include OpenClaw's session: prefix", () => {
-    expect(resolveMatrixActorFromSessionStatus({
-      sessionKey: "session:agent:bitcoin-skill-match:matrix:direct:@satoshi:matrix.example.org",
-    })).toBe("@satoshi:matrix.example.org");
+    expect(
+      resolveMatrixActorFromSessionStatus({
+        sessionKey: "session:agent:bitcoin-skill-match:matrix:direct:@satoshi:matrix.example.org",
+      }),
+    ).toBe("@satoshi:matrix.example.org");
   });
 
   it("accepts actor values with or without the matrix: prefix", () => {
-    expect(normalizeMatrixActorUserId("@satoshi:matrix.example.org")).toBe("@satoshi:matrix.example.org");
-    expect(normalizeMatrixActorUserId("matrix:@satoshi:matrix.example.org")).toBe("@satoshi:matrix.example.org");
+    expect(normalizeMatrixActorUserId("@satoshi:matrix.example.org")).toBe(
+      "@satoshi:matrix.example.org",
+    );
+    expect(normalizeMatrixActorUserId("matrix:@satoshi:matrix.example.org")).toBe(
+      "@satoshi:matrix.example.org",
+    );
   });
 
   it("fails closed when session_status fields disagree about the current Matrix sender", () => {
-    expect(() => resolveMatrixActorFromSessionStatus({
-      sessionKey: "agent:bitcoin-skill-match:matrix:direct:@satoshi:matrix.example.org",
-      originFrom: "matrix:@ndee:matrix.example.org",
-    })).toThrowError(/conflicting Matrix senders/);
+    expect(() =>
+      resolveMatrixActorFromSessionStatus({
+        sessionKey: "agent:bitcoin-skill-match:matrix:direct:@satoshi:matrix.example.org",
+        originFrom: "matrix:@ndee:matrix.example.org",
+      }),
+    ).toThrowError(/conflicting Matrix senders/);
   });
 
   it("fails closed when session_status does not expose a Matrix actor", () => {
-    expect(() => resolveMatrixActorFromSessionStatus({
-      sessionKey: "agent:bitcoin-skill-match:shell:default",
-      originFrom: "email:alice@example.org",
-    })).toThrowError(GuardedJsonStateToolError);
-    expect(() => resolveMatrixActorFromSessionStatus({
-      sessionKey: "agent:bitcoin-skill-match:shell:default",
-      originFrom: "email:alice@example.org",
-    })).toThrowError(/Could not resolve the current Matrix sender/);
+    expect(() =>
+      resolveMatrixActorFromSessionStatus({
+        sessionKey: "agent:bitcoin-skill-match:shell:default",
+        originFrom: "email:alice@example.org",
+      }),
+    ).toThrowError(GuardedJsonStateToolError);
+    expect(() =>
+      resolveMatrixActorFromSessionStatus({
+        sessionKey: "agent:bitcoin-skill-match:shell:default",
+        originFrom: "email:alice@example.org",
+      }),
+    ).toThrowError(/Could not resolve the current Matrix sender/);
   });
 
   it("creates a self-owned parent record automatically for child upserts", async () => {
@@ -372,7 +393,7 @@ describe("guarded-json-state tool service", () => {
     const configPath = join(tempRoot, "etc", "sovereign-node.json5");
     const statePath = join(dataDir, "community-state.json");
     const policyPath = join(dataDir, "community-state.policy.json");
-    const auditPath = join(dataDir, "community-state.audit.jsonl");
+    const _auditPath = join(dataDir, "community-state.audit.jsonl");
     await mkdir(dataDir, { recursive: true });
     await writeFile(
       statePath,
@@ -382,12 +403,13 @@ describe("guarded-json-state tool service", () => {
     await writeFile(policyPath, `${JSON.stringify(buildPolicy(), null, 2)}\n`, "utf8");
 
     const service = new GuardedJsonStateToolService({
-      configLoader: async () => buildRuntimeConfig({
-        statePath: "data/community-state.json",
-        policyPath: "data/community-state.policy.json",
-        auditPath: "data/community-state.audit.jsonl",
-        workspace,
-      }),
+      configLoader: async () =>
+        buildRuntimeConfig({
+          statePath: "data/community-state.json",
+          policyPath: "data/community-state.policy.json",
+          auditPath: "data/community-state.audit.jsonl",
+          workspace,
+        }),
     });
 
     const result = await service.upsertSelf({
@@ -419,21 +441,25 @@ describe("guarded-json-state tool service", () => {
     const auditPath = join(tempRoot, "community-state.audit.jsonl");
     await writeFile(
       statePath,
-      `${JSON.stringify({
-        community: { lastUpdated: "2026-03-09T00:00:00.000Z" },
-        members: [
-          {
-            memberId: "member:@satoshi:matrix.example.org",
-            createdByMatrixUserId: "@satoshi:matrix.example.org",
-            offers: [{ marker: "SAT_1", summary: "Node operations" }],
-          },
-          {
-            memberId: "member:@ndee:matrix.example.org",
-            createdByMatrixUserId: "@ndee:matrix.example.org",
-            offers: [{ marker: "NDEE_1", summary: "Lightning training" }],
-          },
-        ],
-      }, null, 2)}\n`,
+      `${JSON.stringify(
+        {
+          community: { lastUpdated: "2026-03-09T00:00:00.000Z" },
+          members: [
+            {
+              memberId: "member:@satoshi:matrix.example.org",
+              createdByMatrixUserId: "@satoshi:matrix.example.org",
+              offers: [{ marker: "SAT_1", summary: "Node operations" }],
+            },
+            {
+              memberId: "member:@ndee:matrix.example.org",
+              createdByMatrixUserId: "@ndee:matrix.example.org",
+              offers: [{ marker: "NDEE_1", summary: "Lightning training" }],
+            },
+          ],
+        },
+        null,
+        2,
+      )}\n`,
       "utf8",
     );
     await writeFile(policyPath, `${JSON.stringify(buildPolicy(), null, 2)}\n`, "utf8");
@@ -470,16 +496,20 @@ describe("guarded-json-state tool service", () => {
     const auditPath = join(tempRoot, "community-state.audit.jsonl");
     await writeFile(
       statePath,
-      `${JSON.stringify({
-        community: { lastUpdated: "2026-03-09T00:00:00.000Z" },
-        members: [
-          {
-            memberId: "member:@satoshi:matrix.example.org",
-            createdByMatrixUserId: "@satoshi:matrix.example.org",
-            offers: [{ marker: "SAT_1", summary: "Node operations" }],
-          },
-        ],
-      }, null, 2)}\n`,
+      `${JSON.stringify(
+        {
+          community: { lastUpdated: "2026-03-09T00:00:00.000Z" },
+          members: [
+            {
+              memberId: "member:@satoshi:matrix.example.org",
+              createdByMatrixUserId: "@satoshi:matrix.example.org",
+              offers: [{ marker: "SAT_1", summary: "Node operations" }],
+            },
+          ],
+        },
+        null,
+        2,
+      )}\n`,
       "utf8",
     );
     await writeFile(policyPath, `${JSON.stringify(buildPolicy(), null, 2)}\n`, "utf8");
@@ -488,12 +518,14 @@ describe("guarded-json-state tool service", () => {
       configLoader: async () => buildRuntimeConfig({ statePath, policyPath, auditPath }),
     });
 
-    await expect(service.deleteSelf({
-      instanceId: "bitcoin-state",
-      entityId: "offers",
-      actor: "@ndee:matrix.example.org",
-      id: "SAT_1",
-    })).rejects.toMatchObject({
+    await expect(
+      service.deleteSelf({
+        instanceId: "bitcoin-state",
+        entityId: "offers",
+        actor: "@ndee:matrix.example.org",
+        id: "SAT_1",
+      }),
+    ).rejects.toMatchObject({
       code: "STATE_MUTATION_FORBIDDEN",
     });
   });

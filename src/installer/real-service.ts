@@ -1,31 +1,26 @@
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, chmod, chown, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  chown,
+  mkdir,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-
-import { FilesystemBotCatalog } from "../bots/catalog.js";
 import type {
   BotCatalog,
   BotConfigRecord,
   BotConfigValue,
   LoadedBotPackage,
 } from "../bots/catalog.js";
-import { CONTRACT_VERSION, type CheckResult, type ComponentHealth } from "../contracts/common.js";
-import {
-  installJobStatusResponseSchema,
-  installRequestSchema,
-  type DoctorReport,
-  type InstallJobStatusResponse,
-  type InstallRequest,
-  type MatrixOnboardingIssueResult,
-  type PreflightResult,
-  type ReconfigureResult,
-  type SovereignStatus,
-  type StartInstallResult,
-  type TestAlertResult,
-  type TestImapResult,
-  type TestMatrixResult,
-} from "../contracts/index.js";
+import { FilesystemBotCatalog } from "../bots/catalog.js";
+import type { SovereignPaths } from "../config/paths.js";
 import type {
   PreflightRequest,
   ReconfigureImapRequest,
@@ -35,62 +30,144 @@ import type {
   TestImapRequest,
   TestMatrixRequest,
 } from "../contracts/api.js";
+import { type CheckResult, CONTRACT_VERSION, type ComponentHealth } from "../contracts/common.js";
+import {
+  type DoctorReport,
+  type InstallJobStatusResponse,
+  type InstallRequest,
+  installJobStatusResponseSchema,
+  installRequestSchema,
+  type MatrixOnboardingIssueResult,
+  type PreflightResult,
+  type ReconfigureResult,
+  type SovereignStatus,
+  type StartInstallResult,
+  type TestAlertResult,
+  type TestImapResult,
+  type TestMatrixResult,
+} from "../contracts/index.js";
 import type { Logger } from "../logging/logger.js";
-import type { SovereignPaths } from "../config/paths.js";
 import {
   buildMatrixOnboardingLink,
   buildMatrixOnboardingUrl,
   issueMatrixOnboardingState,
-  parseMatrixOnboardingState,
 } from "../onboarding/bootstrap-code.js";
 import {
-  resolveRequestedOpenClawVersion,
   type OpenClawBootstrapper,
+  resolveRequestedOpenClawVersion,
 } from "../openclaw/bootstrap.js";
 import type { OpenClawGatewayServiceManager } from "../openclaw/gateway-service.js";
-import type {
-  ManagedAgentRegistrationResult,
-  OpenClawManagedAgentRegistrar,
-} from "../openclaw/managed-agent.js";
 import {
-  GUARDED_JSON_STATE_OPENCLAW_PLUGIN_ID,
-  GUARDED_JSON_STATE_OPENCLAW_TOOL_NAME,
   extractGuardedJsonStateActorFromConversationInfoText,
   extractGuardedJsonStateActorFromDirectSessionKey,
   extractGuardedJsonStateActorFromUserContent,
   extractLatestGuardedJsonStateActorFromBranch,
+  GUARDED_JSON_STATE_OPENCLAW_PLUGIN_ID,
+  GUARDED_JSON_STATE_OPENCLAW_TOOL_NAME,
   isGuardedJsonStateRecord,
   normalizeGuardedJsonStateMatrixActorUserId,
   resolveGuardedJsonStateSessionContext,
   resolveGuardedJsonStateToolContext,
   resolveGuardedJsonStateWorkspaceDir,
 } from "../openclaw/guarded-json-state-context.js";
+import type {
+  ManagedAgentRegistrationResult,
+  OpenClawManagedAgentRegistrar,
+} from "../openclaw/managed-agent.js";
+import type { ExecResult, ExecRunner } from "../system/exec.js";
 import type { ImapTester } from "../system/imap.js";
 import type {
   BundledMatrixAccountsResult,
-  BundledMatrixProvisionResult,
   BundledMatrixProvisioner,
+  BundledMatrixProvisionResult,
   BundledMatrixRoomBootstrapResult,
 } from "../system/matrix.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
-import type { ExecResult, ExecRunner } from "../system/exec.js";
 import {
-  JobRunner,
-  type InstallContext,
-  type InstallStep,
-  type JobRunnerSnapshot,
-} from "./job-runner.js";
-import {
+  type AgentTemplateManifest,
   CORE_TEMPLATE_MANIFESTS,
   CORE_TRUSTED_TEMPLATE_KEYS,
   findCoreTemplateManifest,
   formatTemplateRef,
   parseTemplateRef,
-  type AgentTemplateManifest,
   type SovereignTemplateManifest,
   type ToolTemplateDefinition,
   verifySignedTemplateManifest,
 } from "../templates/catalog.js";
+import {
+  type InstallContext,
+  type InstallStep,
+  JobRunner,
+  type JobRunnerSnapshot,
+} from "./job-runner.js";
+import {
+  areMatrixIdentitiesEqual,
+  areStringListsEqual,
+  areStringRecordsEqual,
+  buildSuggestedCommands,
+  check,
+  DEFAULT_INSTALL_REQUEST_FILE,
+  DEFAULT_OPENROUTER_MODEL,
+  DEFAULT_SERVICE_GROUP,
+  DEFAULT_SERVICE_USER,
+  defaultFetch,
+  delay,
+  deriveOpenClawHealth,
+  describeError,
+  describeVersionPin,
+  ensureCoreManagedAgents,
+  ensureTrailingSlash,
+  type FetchLike,
+  type GatewayState,
+  generateAgentPassword,
+  INSTALLER_EXEC_TIMEOUT_MS,
+  isAlreadyExistsOutput,
+  isAlreadyJoinedOrInvitedRoomError,
+  isCoreAgentBindingBestEffortSkippable,
+  isGatewayUserSystemdUnavailableError,
+  isMailSentinelGatewayUnavailableError,
+  isMissingBinaryError,
+  isNodeError,
+  isRateLimitedMatrixLoginFailure,
+  isRecord,
+  looksLikeMissingGateway,
+  MAIL_SENTINEL_AGENT_ID,
+  MANAGED_OPENCLAW_DM_SCOPE,
+  mapHealthToServiceState,
+  normalizeOpenClawAgentModel,
+  normalizeStringRecord,
+  normalizeTestAlertError,
+  now,
+  parseEnvFile,
+  parseGatewayState,
+  parseJsonDocument,
+  parseJsonSafely,
+  parseRuntimeConfigDocument,
+  RELAY_LOCAL_EDGE_PORT,
+  RELAY_TUNNEL_DEFAULT_IMAGE,
+  RELAY_TUNNEL_SYSTEMD_UNIT,
+  RESERVED_AGENT_IDS,
+  type RelayRuntimeConfig,
+  type RelayTunnelConfig,
+  type RuntimeAgentEntry,
+  type RuntimeConfig,
+  resolveVersionPinStatus,
+  SOVEREIGN_GATEWAY_SYSTEMD_UNIT,
+  sanitizeExpectedMatrixLocalpart,
+  sanitizeManagedAgentId,
+  sanitizeManagedAgentLocalpart,
+  sanitizeManagedWorkspace,
+  sanitizeMatrixLocalpartFromAgentId,
+  sanitizeOptionalTemplateRef,
+  sanitizeOptionalToolInstanceIds,
+  sanitizeToolInstanceId,
+  stripSingleTrailingNewline,
+  summarizeChecksOverall,
+  summarizeText,
+  summarizeUnknown,
+  textContainsId,
+  truncateText,
+} from "./real-service-shared.js";
 import type {
   InstallerService,
   ManagedAgent,
@@ -111,75 +188,6 @@ import {
   buildManagedAgentWorkspaceReadme,
   renderTemplateWorkspaceContent,
 } from "./workspace-documents.js";
-import {
-  DEFAULT_INSTALL_REQUEST_FILE,
-  DEFAULT_OPENROUTER_MODEL,
-  DEFAULT_SERVICE_GROUP,
-  DEFAULT_SERVICE_USER,
-  INSTALLER_EXEC_TIMEOUT_MS,
-  MANAGED_OPENCLAW_DM_SCOPE,
-  MAIL_SENTINEL_AGENT_ID,
-  RELAY_LOCAL_EDGE_PORT,
-  RELAY_TUNNEL_DEFAULT_IMAGE,
-  RELAY_TUNNEL_SYSTEMD_UNIT,
-  RESERVED_AGENT_IDS,
-  SOVEREIGN_GATEWAY_SYSTEMD_UNIT,
-  areMatrixIdentitiesEqual,
-  areStringListsEqual,
-  areStringRecordsEqual,
-  buildSuggestedCommands,
-  check,
-  defaultFetch,
-  delay,
-  deriveOpenClawHealth,
-  describeError,
-  describeVersionPin,
-  generateAgentPassword,
-  ensureCoreManagedAgents,
-  ensureTrailingSlash,
-  isAlreadyExistsOutput,
-  isAlreadyJoinedOrInvitedRoomError,
-  isCoreAgentBindingBestEffortSkippable,
-  isGatewayUserSystemdUnavailableError,
-  isMailSentinelGatewayUnavailableError,
-  isMissingBinaryError,
-  isNodeError,
-  isRateLimitedMatrixLoginFailure,
-  isRecord,
-  isStructuredError,
-  looksLikeMissingGateway,
-  mapHealthToServiceState,
-  normalizeOpenClawAgentModel,
-  normalizeStringRecord,
-  normalizeTestAlertError,
-  now,
-  parseEnvFile,
-  parseGatewayState,
-  parseJsonDocument,
-  parseJsonSafely,
-  parseRuntimeConfigDocument,
-  resolveVersionPinStatus,
-  sanitizeExpectedMatrixLocalpart,
-  sanitizeManagedAgentId,
-  sanitizeManagedAgentLocalpart,
-  sanitizeManagedWorkspace,
-  sanitizeMatrixLocalpartFromAgentId,
-  sanitizeOptionalTemplateRef,
-  sanitizeOptionalToolInstanceIds,
-  sanitizeToolInstanceId,
-  stripSingleTrailingNewline,
-  summarizeChecksOverall,
-  summarizeText,
-  summarizeUnknown,
-  textContainsId,
-  truncateText,
-  type FetchLike,
-  type GatewayState,
-  type RelayRuntimeConfig,
-  type RelayTunnelConfig,
-  type RuntimeAgentEntry,
-  type RuntimeConfig,
-} from "./real-service-shared.js";
 
 type PersistedInstallJobRecord = {
   version: 1;
@@ -326,21 +334,24 @@ export class RealInstallerService implements InstallerService {
   }> {
     const defaultBotIds = await this.botCatalog.getDefaultSelectedIds();
     const selectedBotIds = this.resolveRequestedBotIds(req, defaultBotIds);
-    const packages = await Promise.all(selectedBotIds.map(async (id) => await this.getBotPackage(id)));
+    const packages = await Promise.all(
+      selectedBotIds.map(async (id) => await this.getBotPackage(id)),
+    );
     const defaultsById = Object.fromEntries(
       packages.map((entry) => [entry.manifest.id, { ...entry.manifest.configDefaults }] as const),
     );
-    const configuredByRequest = isBotConfigRecordMap(req.bots?.config)
-      ? req.bots.config
-      : {};
+    const configuredByRequest = isBotConfigRecordMap(req.bots?.config) ? req.bots.config : {};
     const mergedById = Object.fromEntries(
-      packages.map((entry) => [
-        entry.manifest.id,
-        {
-          ...defaultsById[entry.manifest.id],
-          ...(configuredByRequest[entry.manifest.id] ?? {}),
-        },
-      ] satisfies [string, BotConfigRecord]),
+      packages.map(
+        (entry) =>
+          [
+            entry.manifest.id,
+            {
+              ...defaultsById[entry.manifest.id],
+              ...(configuredByRequest[entry.manifest.id] ?? {}),
+            },
+          ] satisfies [string, BotConfigRecord],
+      ),
     );
     if (req.mailSentinel !== undefined && mergedById["mail-sentinel"] !== undefined) {
       mergedById["mail-sentinel"] = {
@@ -363,16 +374,23 @@ export class RealInstallerService implements InstallerService {
       ?.manifest.matrixIdentity.localpartPrefix;
   }
 
-  private resolvePreferredDedicatedMatrixBot(packages: LoadedBotPackage[]): LoadedBotPackage | undefined {
-    return packages.find((entry) =>
-      entry.manifest.matrixIdentity.mode === "dedicated-account"
-      && entry.manifest.matrixRouting?.defaultAccount === true)
-      ?? packages.find((entry) => entry.manifest.matrixIdentity.mode === "dedicated-account");
+  private resolvePreferredDedicatedMatrixBot(
+    packages: LoadedBotPackage[],
+  ): LoadedBotPackage | undefined {
+    return (
+      packages.find(
+        (entry) =>
+          entry.manifest.matrixIdentity.mode === "dedicated-account" &&
+          entry.manifest.matrixRouting?.defaultAccount === true,
+      ) ?? packages.find((entry) => entry.manifest.matrixIdentity.mode === "dedicated-account")
+    );
   }
 
   private resolveBootstrapMatrixBotLocalpart(packages: LoadedBotPackage[]): string | undefined {
-    return this.resolveSharedServiceBotLocalpart(packages)
-      ?? this.resolvePreferredDedicatedMatrixBot(packages)?.manifest.matrixIdentity.localpartPrefix;
+    return (
+      this.resolveSharedServiceBotLocalpart(packages) ??
+      this.resolvePreferredDedicatedMatrixBot(packages)?.manifest.matrixIdentity.localpartPrefix
+    );
   }
 
   private resolveBotMatrixRouting(manifest: LoadedBotPackage["manifest"] | undefined): {
@@ -393,9 +411,7 @@ export class RealInstallerService implements InstallerService {
       dmEnabled: manifest?.matrixRouting?.dm?.enabled ?? true,
       alertRoom: {
         autoReply,
-        requireMention:
-          configuredRequireMention
-          ?? (autoReply ? false : true),
+        requireMention: configuredRequireMention ?? !autoReply,
       },
     };
   }
@@ -415,14 +431,18 @@ export class RealInstallerService implements InstallerService {
       runtimeConfig.matrix.operator.userId,
       runtimeConfig.matrix.bot.userId,
       ...runtimeConfig.openclawProfile.agents.flatMap((entry) =>
-        entry.matrix?.userId === undefined ? [] : [entry.matrix.userId]),
+        entry.matrix?.userId === undefined ? [] : [entry.matrix.userId],
+      ),
     ]);
-    const reservedLocalparts = new Set<string>([
-      runtimeConfig.matrix.operator.localpart ?? "",
-      runtimeConfig.matrix.bot.localpart ?? "",
-      ...runtimeConfig.openclawProfile.agents.flatMap((entry) =>
-        entry.matrix?.localpart === undefined ? [] : [entry.matrix.localpart]),
-    ].filter((value) => value.length > 0));
+    const reservedLocalparts = new Set<string>(
+      [
+        runtimeConfig.matrix.operator.localpart ?? "",
+        runtimeConfig.matrix.bot.localpart ?? "",
+        ...runtimeConfig.openclawProfile.agents.flatMap((entry) =>
+          entry.matrix?.localpart === undefined ? [] : [entry.matrix.localpart],
+        ),
+      ].filter((value) => value.length > 0),
+    );
 
     return dedupeStrings(
       entries.flatMap((entry) => {
@@ -466,10 +486,10 @@ export class RealInstallerService implements InstallerService {
       return false;
     }
     if (
-      current.localpart === identity.localpart
-      && current.userId === identity.userId
-      && current.passwordSecretRef === identity.passwordSecretRef
-      && current.accessTokenSecretRef === identity.accessTokenSecretRef
+      current.localpart === identity.localpart &&
+      current.userId === identity.userId &&
+      current.passwordSecretRef === identity.passwordSecretRef &&
+      current.accessTokenSecretRef === identity.accessTokenSecretRef
     ) {
       return false;
     }
@@ -485,10 +505,10 @@ export class RealInstallerService implements InstallerService {
   }
 
   private resolveRequestedBotIds(req: InstallRequest, defaultBotIds: string[]): string[] {
-    const selected = req.bots?.selected
-      ?.map((entry: string) => entry.trim())
-      .filter((entry: string) => entry.length > 0)
-      ?? [];
+    const selected =
+      req.bots?.selected
+        ?.map((entry: string) => entry.trim())
+        .filter((entry: string) => entry.length > 0) ?? [];
     if (selected.length > 0) {
       return dedupeStrings(selected);
     }
@@ -640,19 +660,24 @@ export class RealInstallerService implements InstallerService {
     const expectedCronIds = runtimeConfig?.openclawProfile.crons.map((entry) => entry.id) ?? [];
 
     const gateway = await this.inspectGatewayService();
-    const relay = runtimeConfig?.relay?.enabled === true
-      ? await this.inspectRelayTunnelService()
-      : {
-          installed: false,
-          state: "unknown" as GatewayState,
-          message: undefined,
-        };
+    const relay =
+      runtimeConfig?.relay?.enabled === true
+        ? await this.inspectRelayTunnelService()
+        : {
+            installed: false,
+            state: "unknown" as GatewayState,
+            message: undefined,
+          };
     const healthProbe = await this.probeOpenClawHealth();
     const agentProbes = await Promise.all(
-      expectedAgentIds.map(async (id) => await this.inspectOpenClawListContains(["agents", "list"], id)),
+      expectedAgentIds.map(
+        async (id) => await this.inspectOpenClawListContains(["agents", "list"], id),
+      ),
     );
     const cronProbes = await Promise.all(
-      expectedCronIds.map(async (id) => await this.inspectOpenClawListContains(["cron", "list"], id)),
+      expectedCronIds.map(
+        async (id) => await this.inspectOpenClawListContains(["cron", "list"], id),
+      ),
     );
     const matrixStatus = await this.inspectMatrixStatus(runtimeConfig);
 
@@ -674,8 +699,7 @@ export class RealInstallerService implements InstallerService {
         : relay.installed
           ? "degraded"
           : "unhealthy";
-    const sovereignHealth: ComponentHealth =
-      runtimeConfig === null ? "degraded" : "healthy";
+    const sovereignHealth: ComponentHealth = runtimeConfig === null ? "degraded" : "healthy";
 
     return {
       mode: "bundled_matrix",
@@ -789,17 +813,20 @@ export class RealInstallerService implements InstallerService {
     const runtimeConfig = await this.tryReadRuntimeConfig();
     const detectedOpenClaw = await this.safeDetectOpenClaw();
     const gateway = await this.inspectGatewayService();
-    const relay = runtimeConfig?.relay?.enabled === true
-      ? await this.inspectRelayTunnelService()
-      : null;
+    const relay =
+      runtimeConfig?.relay?.enabled === true ? await this.inspectRelayTunnelService() : null;
     const healthProbe = await this.probeOpenClawHealth();
     const expectedAgentIds = runtimeConfig?.openclawProfile.agents.map((entry) => entry.id) ?? [];
     const expectedCronIds = runtimeConfig?.openclawProfile.crons.map((entry) => entry.id) ?? [];
     const agentProbes = await Promise.all(
-      expectedAgentIds.map(async (id) => await this.inspectOpenClawListContains(["agents", "list"], id)),
+      expectedAgentIds.map(
+        async (id) => await this.inspectOpenClawListContains(["agents", "list"], id),
+      ),
     );
     const cronProbes = await Promise.all(
-      expectedCronIds.map(async (id) => await this.inspectOpenClawListContains(["cron", "list"], id)),
+      expectedCronIds.map(
+        async (id) => await this.inspectOpenClawListContains(["cron", "list"], id),
+      ),
     );
     const agentPresent = agentProbes.every((probe) => !probe.verified || probe.present);
     const cronPresent = cronProbes.every((probe) => !probe.verified || probe.present);
@@ -867,11 +894,7 @@ export class RealInstallerService implements InstallerService {
         check(
           "relay-tunnel-service",
           "Managed relay tunnel service",
-          relay.installed && relay.state === "running"
-            ? "pass"
-            : relay.installed
-              ? "warn"
-              : "fail",
+          relay.installed && relay.state === "running" ? "pass" : relay.installed ? "warn" : "fail",
           relay.installed && relay.state === "running"
             ? "Managed relay tunnel service is connected"
             : "Managed relay tunnel service is not running",
@@ -916,7 +939,7 @@ export class RealInstallerService implements InstallerService {
             : "fail",
         matrixStatus.health === "healthy"
           ? "Matrix homeserver probe succeeded"
-          : matrixStatus.message ?? "Matrix homeserver probe failed",
+          : (matrixStatus.message ?? "Matrix homeserver probe failed"),
       ),
     );
 
@@ -990,12 +1013,12 @@ export class RealInstallerService implements InstallerService {
     let gatewayRestarted = false;
     if (runtimeChanged) {
       const openrouterConfig = isRecord(parsed.openrouter) ? parsed.openrouter : {};
-      openrouterConfig["provider"] = "openrouter";
-      openrouterConfig["model"] = nextModel;
-      openrouterConfig["apiKeySecretRef"] = nextSecretRef;
-      delete openrouterConfig["apiKey"];
-      parsed["openrouter"] = openrouterConfig;
-      parsed["generatedAt"] = now();
+      openrouterConfig.provider = "openrouter";
+      openrouterConfig.model = nextModel;
+      openrouterConfig.apiKeySecretRef = nextSecretRef;
+      delete openrouterConfig.apiKey;
+      parsed.openrouter = openrouterConfig;
+      parsed.generatedAt = now();
       await this.writeInstallerJsonFile(this.paths.configPath, parsed, 0o644);
 
       const nextRuntimeConfig: RuntimeConfig = {
@@ -1169,38 +1192,45 @@ export class RealInstallerService implements InstallerService {
   async listManagedAgents(): Promise<ManagedAgentListResult> {
     const runtimeConfig = await this.readRuntimeConfig();
     return {
-      agents: runtimeConfig.openclawProfile.agents.map((entry) =>
-        this.toManagedAgentOutput(entry)),
+      agents: runtimeConfig.openclawProfile.agents.map((entry) => this.toManagedAgentOutput(entry)),
     };
   }
 
   async listSovereignBots(): Promise<SovereignBotListResult> {
     const runtimeConfig = await this.tryReadRuntimeConfig();
     const installedTemplateRefs = new Set(
-      runtimeConfig?.templates.installed.map((entry) => formatTemplateRef(entry.id, entry.version)) ?? [],
+      runtimeConfig?.templates.installed.map((entry) =>
+        formatTemplateRef(entry.id, entry.version),
+      ) ?? [],
     );
     const botPackages = await this.listBotPackages();
-    const bots = await Promise.all(botPackages.map(async (botPackage) => {
-      const agent = runtimeConfig?.openclawProfile.agents.find(
-        (entry) => entry.templateRef === botPackage.templateRef || entry.botId === botPackage.manifest.id,
-      );
-      const cronJobIds = runtimeConfig?.openclawProfile.crons
-        .filter((entry) => entry.botId === botPackage.manifest.id || entry.agentId === botPackage.manifest.id)
-        .map((entry) => entry.id)
-        .sort((left, right) => left.localeCompare(right));
-      return {
-        id: botPackage.manifest.id,
-        version: botPackage.manifest.version,
-        displayName: botPackage.manifest.displayName,
-        description: botPackage.manifest.description,
-        defaultInstall: botPackage.manifest.defaultInstall === true,
-        templateRef: botPackage.templateRef,
-        installed: installedTemplateRefs.has(botPackage.templateRef),
-        instantiated: agent !== undefined,
-        ...(agent === undefined ? {} : { agentId: agent.id }),
-        ...(cronJobIds === undefined || cronJobIds.length === 0 ? {} : { cronJobIds }),
-      };
-    }));
+    const bots = await Promise.all(
+      botPackages.map(async (botPackage) => {
+        const agent = runtimeConfig?.openclawProfile.agents.find(
+          (entry) =>
+            entry.templateRef === botPackage.templateRef || entry.botId === botPackage.manifest.id,
+        );
+        const cronJobIds = runtimeConfig?.openclawProfile.crons
+          .filter(
+            (entry) =>
+              entry.botId === botPackage.manifest.id || entry.agentId === botPackage.manifest.id,
+          )
+          .map((entry) => entry.id)
+          .sort((left, right) => left.localeCompare(right));
+        return {
+          id: botPackage.manifest.id,
+          version: botPackage.manifest.version,
+          displayName: botPackage.manifest.displayName,
+          description: botPackage.manifest.description,
+          defaultInstall: botPackage.manifest.defaultInstall === true,
+          templateRef: botPackage.templateRef,
+          installed: installedTemplateRefs.has(botPackage.templateRef),
+          instantiated: agent !== undefined,
+          ...(agent === undefined ? {} : { agentId: agent.id }),
+          ...(cronJobIds === undefined || cronJobIds.length === 0 ? {} : { cronJobIds }),
+        };
+      }),
+    );
     return {
       bots: bots.sort((left, right) => left.id.localeCompare(right.id)),
     };
@@ -1227,7 +1257,9 @@ export class RealInstallerService implements InstallerService {
       },
       "create",
     );
-    const bot = (await this.listSovereignBots()).bots.find((entry) => entry.id === botPackage.manifest.id);
+    const bot = (await this.listSovereignBots()).bots.find(
+      (entry) => entry.id === botPackage.manifest.id,
+    );
     return {
       bot: bot ?? {
         id: botPackage.manifest.id,
@@ -1255,61 +1287,67 @@ export class RealInstallerService implements InstallerService {
         entry,
       ]),
     );
-    const coreTemplates: SovereignTemplateListResult["templates"] = CORE_TEMPLATE_MANIFESTS.map((manifest) => {
-      const verified = verifySignedTemplateManifest(manifest, CORE_TRUSTED_TEMPLATE_KEYS);
-      const ref = formatTemplateRef(manifest.id, manifest.version);
-      const installed = installedByRef.get(ref);
-      return {
-        kind: "tool",
-        id: manifest.id,
-        version: manifest.version,
-        description: manifest.description,
-        trusted: verified.trusted,
-        installed: installed !== undefined,
-        pinned: installed?.pinned ?? false,
-        keyId: verified.keyId,
-        manifestSha256: verified.manifestSha256,
-      };
-    });
-    const botAgentTemplates: SovereignTemplateListResult["templates"] = botPackages.map((botPackage) => {
-      const installed = installedByRef.get(botPackage.templateRef);
-      return {
-        kind: "agent" as const,
-        id: botPackage.template.id,
-        version: botPackage.template.version,
-        description: botPackage.template.description,
-        trusted: true,
-        installed: installed !== undefined,
-        pinned: installed?.pinned ?? false,
-        keyId: botPackage.keyId,
-        manifestSha256: botPackage.manifestSha256,
-      };
-    });
-    const botToolTemplates: SovereignTemplateListResult["templates"] = botPackages.flatMap((botPackage) =>
-      botPackage.toolTemplates.map((toolTemplate) => {
-        const installed = installedByRef.get(toolTemplate.templateRef);
+    const coreTemplates: SovereignTemplateListResult["templates"] = CORE_TEMPLATE_MANIFESTS.map(
+      (manifest) => {
+        const verified = verifySignedTemplateManifest(manifest, CORE_TRUSTED_TEMPLATE_KEYS);
+        const ref = formatTemplateRef(manifest.id, manifest.version);
+        const installed = installedByRef.get(ref);
         return {
-          kind: "tool" as const,
-          id: toolTemplate.manifest.id,
-          version: toolTemplate.manifest.version,
-          description: toolTemplate.manifest.description,
+          kind: "tool",
+          id: manifest.id,
+          version: manifest.version,
+          description: manifest.description,
+          trusted: verified.trusted,
+          installed: installed !== undefined,
+          pinned: installed?.pinned ?? false,
+          keyId: verified.keyId,
+          manifestSha256: verified.manifestSha256,
+        };
+      },
+    );
+    const botAgentTemplates: SovereignTemplateListResult["templates"] = botPackages.map(
+      (botPackage) => {
+        const installed = installedByRef.get(botPackage.templateRef);
+        return {
+          kind: "agent" as const,
+          id: botPackage.template.id,
+          version: botPackage.template.version,
+          description: botPackage.template.description,
           trusted: true,
           installed: installed !== undefined,
           pinned: installed?.pinned ?? false,
-          keyId: toolTemplate.keyId,
-          manifestSha256: toolTemplate.manifestSha256,
+          keyId: botPackage.keyId,
+          manifestSha256: botPackage.manifestSha256,
         };
-      }));
-    const templates = [...coreTemplates, ...botAgentTemplates, ...botToolTemplates]
-      .sort((left, right) => `${left.kind}:${left.id}:${left.version}`.localeCompare(
-        `${right.kind}:${right.id}:${right.version}`,
-      ));
+      },
+    );
+    const botToolTemplates: SovereignTemplateListResult["templates"] = botPackages.flatMap(
+      (botPackage) =>
+        botPackage.toolTemplates.map((toolTemplate) => {
+          const installed = installedByRef.get(toolTemplate.templateRef);
+          return {
+            kind: "tool" as const,
+            id: toolTemplate.manifest.id,
+            version: toolTemplate.manifest.version,
+            description: toolTemplate.manifest.description,
+            trusted: true,
+            installed: installed !== undefined,
+            pinned: installed?.pinned ?? false,
+            keyId: toolTemplate.keyId,
+            manifestSha256: toolTemplate.manifestSha256,
+          };
+        }),
+    );
+    const templates = [...coreTemplates, ...botAgentTemplates, ...botToolTemplates].sort(
+      (left, right) =>
+        `${left.kind}:${left.id}:${left.version}`.localeCompare(
+          `${right.kind}:${right.id}:${right.version}`,
+        ),
+    );
     return { templates };
   }
 
-  async installSovereignTemplate(req: {
-    ref: string;
-  }): Promise<SovereignTemplateInstallResult> {
+  async installSovereignTemplate(req: { ref: string }): Promise<SovereignTemplateInstallResult> {
     const manifest = findCoreTemplateManifest(req.ref);
     const runtimeConfig = await this.readRuntimeConfig();
     if (manifest !== undefined) {
@@ -1473,14 +1511,14 @@ export class RealInstallerService implements InstallerService {
   } {
     const current = existing.find((entry) => formatTemplateRef(entry.id, entry.version) === ref);
     if (
-      current !== undefined
-      && current.kind === next.kind
-      && current.description === next.description
-      && current.trusted === next.trusted
-      && current.pinned === next.pinned
-      && current.keyId === next.keyId
-      && current.manifestSha256 === next.manifestSha256
-      && current.source === next.source
+      current !== undefined &&
+      current.kind === next.kind &&
+      current.description === next.description &&
+      current.trusted === next.trusted &&
+      current.pinned === next.pinned &&
+      current.keyId === next.keyId &&
+      current.manifestSha256 === next.manifestSha256 &&
+      current.source === next.source
     ) {
       return {
         installed: existing,
@@ -1541,8 +1579,14 @@ export class RealInstallerService implements InstallerService {
     runtimeConfig: RuntimeConfig,
     botPackage: LoadedBotPackage,
   ): Promise<boolean> {
-    const updatedAgent = this.upsertInstalledBotTemplateEntry(runtimeConfig.templates.installed, botPackage);
-    const updatedTools = this.upsertInstalledBotToolTemplateEntries(updatedAgent.installed, botPackage);
+    const updatedAgent = this.upsertInstalledBotTemplateEntry(
+      runtimeConfig.templates.installed,
+      botPackage,
+    );
+    const updatedTools = this.upsertInstalledBotToolTemplateEntries(
+      updatedAgent.installed,
+      botPackage,
+    );
     if (!updatedAgent.changed && !updatedTools.changed) {
       return false;
     }
@@ -1646,7 +1690,10 @@ export class RealInstallerService implements InstallerService {
     tool: LoadedBotPackage["manifest"]["toolInstances"][number];
     existing: RuntimeConfig["sovereignTools"]["instances"][number] | undefined;
   }): RuntimeConfig["sovereignTools"]["instances"][number] {
-    const template = this.resolveKnownToolTemplateManifest(input.tool.templateRef, input.availableBotPackages);
+    const template = this.resolveKnownToolTemplateManifest(
+      input.tool.templateRef,
+      input.availableBotPackages,
+    );
     const bindings = this.resolveBotToolBindings(input.runtimeConfig, input.tool);
     return {
       id: input.tool.id,
@@ -1678,19 +1725,26 @@ export class RealInstallerService implements InstallerService {
   } {
     return {
       config: Object.fromEntries(
-        (Object.entries(tool.config) as Array<[string, typeof tool.config[string]]>).map(([key, binding]) => [
-          key,
-          this.stringifyBotBindingValue(
-            this.resolveRequiredBotPathValue(runtimeConfig, binding.from),
-            binding.stringify === true,
-          ),
-        ]),
+        (Object.entries(tool.config) as Array<[string, (typeof tool.config)[string]]>).map(
+          ([key, binding]) => [
+            key,
+            this.stringifyBotBindingValue(
+              this.resolveRequiredBotPathValue(runtimeConfig, binding.from),
+              binding.stringify === true,
+            ),
+          ],
+        ),
       ),
       secretRefs: Object.fromEntries(
-        (Object.entries(tool.secretRefs) as Array<[string, typeof tool.secretRefs[string]]>).map(([key, binding]) => [
-          key,
-          this.stringifyBotBindingValue(this.resolveRequiredBotPathValue(runtimeConfig, binding.from), true),
-        ]),
+        (Object.entries(tool.secretRefs) as Array<[string, (typeof tool.secretRefs)[string]]>).map(
+          ([key, binding]) => [
+            key,
+            this.stringifyBotBindingValue(
+              this.resolveRequiredBotPathValue(runtimeConfig, binding.from),
+              true,
+            ),
+          ],
+        ),
       ),
     };
   }
@@ -1762,7 +1816,9 @@ export class RealInstallerService implements InstallerService {
     return this.upsertSovereignToolInstance(req, "update");
   }
 
-  async deleteSovereignToolInstance(req: { id: string }): Promise<SovereignToolInstanceDeleteResult> {
+  async deleteSovereignToolInstance(req: {
+    id: string;
+  }): Promise<SovereignToolInstanceDeleteResult> {
     const runtimeConfig = await this.readRuntimeConfig();
     const id = sanitizeToolInstanceId(req.id);
     const existing = runtimeConfig.sovereignTools.instances.find((entry) => entry.id === id);
@@ -1841,11 +1897,12 @@ export class RealInstallerService implements InstallerService {
       createdAt: existing?.createdAt ?? now(),
       updatedAt: now(),
     };
-    const changed = existing === undefined
-      || existing.templateRef !== nextTool.templateRef
-      || !areStringListsEqual(existing.capabilities, nextTool.capabilities)
-      || !areStringRecordsEqual(existing.config, nextTool.config)
-      || !areStringRecordsEqual(existing.secretRefs, nextTool.secretRefs);
+    const changed =
+      existing === undefined ||
+      existing.templateRef !== nextTool.templateRef ||
+      !areStringListsEqual(existing.capabilities, nextTool.capabilities) ||
+      !areStringRecordsEqual(existing.config, nextTool.config) ||
+      !areStringRecordsEqual(existing.secretRefs, nextTool.secretRefs);
     if (!changed) {
       return {
         tool: {
@@ -1921,7 +1978,10 @@ export class RealInstallerService implements InstallerService {
     const coreManifest = findCoreTemplateManifest(ref);
     if (coreManifest !== undefined && coreManifest.kind === "sovereign-tool-template") {
       const verified = verifySignedTemplateManifest(coreManifest, CORE_TRUSTED_TEMPLATE_KEYS);
-      if (verified.manifestSha256 !== installed.manifestSha256 || verified.keyId !== installed.keyId) {
+      if (
+        verified.manifestSha256 !== installed.manifestSha256 ||
+        verified.keyId !== installed.keyId
+      ) {
         throw {
           code: "TEMPLATE_PIN_MISMATCH",
           message: `Pinned metadata does not match trusted manifest for '${ref}'`,
@@ -1940,8 +2000,8 @@ export class RealInstallerService implements InstallerService {
       };
     }
     if (
-      botTemplate.manifestSha256 !== installed.manifestSha256
-      || botTemplate.keyId !== installed.keyId
+      botTemplate.manifestSha256 !== installed.manifestSha256 ||
+      botTemplate.keyId !== installed.keyId
     ) {
       throw {
         code: "TEMPLATE_PIN_MISMATCH",
@@ -1990,8 +2050,8 @@ export class RealInstallerService implements InstallerService {
       };
     }
     if (
-      botPackage.manifestSha256 !== installed.manifestSha256
-      || botPackage.keyId !== installed.keyId
+      botPackage.manifestSha256 !== installed.manifestSha256 ||
+      botPackage.keyId !== installed.keyId
     ) {
       throw {
         code: "TEMPLATE_PIN_MISMATCH",
@@ -2008,7 +2068,10 @@ export class RealInstallerService implements InstallerService {
   ): RuntimeConfig["sovereignTools"]["instances"] {
     return toolInstanceIds
       .map((id) => runtimeConfig.sovereignTools.instances.find((entry) => entry.id === id))
-      .filter((entry): entry is RuntimeConfig["sovereignTools"]["instances"][number] => entry !== undefined);
+      .filter(
+        (entry): entry is RuntimeConfig["sovereignTools"]["instances"][number] =>
+          entry !== undefined,
+      );
   }
 
   private renderSovereignToolCommand(toolInstanceId: string, command: string): string {
@@ -2024,19 +2087,26 @@ export class RealInstallerService implements InstallerService {
     manifest: ToolTemplateDefinition,
   ): string[] {
     const commands = manifest.allowedCommands.map((command) =>
-      this.renderSovereignToolCommand(toolInstanceId, command));
+      this.renderSovereignToolCommand(toolInstanceId, command),
+    );
     if (manifest.id === "node-cli-ops") {
       commands.push(
         this.renderSovereignToolCommand(
           toolInstanceId,
           "sovereign-node onboarding issue --ttl-minutes <minutes> --json",
         ),
-        this.renderSovereignToolCommand(toolInstanceId, "sovereign-node users invite <username> --json"),
+        this.renderSovereignToolCommand(
+          toolInstanceId,
+          "sovereign-node users invite <username> --json",
+        ),
         this.renderSovereignToolCommand(
           toolInstanceId,
           "sovereign-node users invite <username> --ttl-minutes <minutes> --json",
         ),
-        this.renderSovereignToolCommand(toolInstanceId, "sovereign-node users remove <username> --json"),
+        this.renderSovereignToolCommand(
+          toolInstanceId,
+          "sovereign-node users remove <username> --json",
+        ),
       );
     }
     return Array.from(new Set(commands));
@@ -2077,16 +2147,20 @@ export class RealInstallerService implements InstallerService {
     return dedupeStrings([
       "matrix",
       ...botPackages.flatMap((botPackage) =>
-        botPackage.toolTemplates.flatMap((toolTemplate) => toolTemplate.manifest.openclawPlugins ?? [])),
+        botPackage.toolTemplates.flatMap(
+          (toolTemplate) => toolTemplate.manifest.openclawPlugins ?? [],
+        ),
+      ),
     ]);
   }
 
-  private async listManagedOpenClawPluginIds(
-    runtimeConfig: RuntimeConfig,
-  ): Promise<string[]> {
+  private async listManagedOpenClawPluginIds(runtimeConfig: RuntimeConfig): Promise<string[]> {
     const pluginIds = new Set<string>();
     for (const agent of runtimeConfig.openclawProfile.agents) {
-      for (const tool of this.resolveBoundToolInstances(runtimeConfig, agent.toolInstanceIds ?? [])) {
+      for (const tool of this.resolveBoundToolInstances(
+        runtimeConfig,
+        agent.toolInstanceIds ?? [],
+      )) {
         const manifest = await this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef);
         for (const pluginId of manifest.openclawPlugins ?? []) {
           pluginIds.add(pluginId);
@@ -2101,7 +2175,8 @@ export class RealInstallerService implements InstallerService {
   ): Promise<string[]> {
     const pluginIds = await this.listManagedOpenClawPluginIds(runtimeConfig);
     return pluginIds.map((pluginId) =>
-      join(runtimeConfig.openclaw.openclawHome, "extensions", pluginId));
+      join(runtimeConfig.openclaw.openclawHome, "extensions", pluginId),
+    );
   }
 
   private renderGuardedJsonStateWorkspacePluginManifest(): string {
@@ -2129,7 +2204,10 @@ export class RealInstallerService implements InstallerService {
         runtimeConfigPath: input.runtimeConfigPath,
         workspaceBindings: Object.fromEntries(
           Object.entries(input.workspaceBindings)
-            .map(([workspace, toolInstanceIds]) => [workspace, dedupeStrings(toolInstanceIds)] as const)
+            .map(
+              ([workspace, toolInstanceIds]) =>
+                [workspace, dedupeStrings(toolInstanceIds)] as const,
+            )
             .sort(([left], [right]) => left.localeCompare(right)),
         ),
       },
@@ -2142,11 +2220,20 @@ export class RealInstallerService implements InstallerService {
     const exports = [
       ["isGuardedJsonStateRecord", isGuardedJsonStateRecord],
       ["normalizeGuardedJsonStateMatrixActorUserId", normalizeGuardedJsonStateMatrixActorUserId],
-      ["extractGuardedJsonStateActorFromDirectSessionKey", extractGuardedJsonStateActorFromDirectSessionKey],
+      [
+        "extractGuardedJsonStateActorFromDirectSessionKey",
+        extractGuardedJsonStateActorFromDirectSessionKey,
+      ],
       ["resolveGuardedJsonStateWorkspaceDir", resolveGuardedJsonStateWorkspaceDir],
-      ["extractGuardedJsonStateActorFromConversationInfoText", extractGuardedJsonStateActorFromConversationInfoText],
+      [
+        "extractGuardedJsonStateActorFromConversationInfoText",
+        extractGuardedJsonStateActorFromConversationInfoText,
+      ],
       ["extractGuardedJsonStateActorFromUserContent", extractGuardedJsonStateActorFromUserContent],
-      ["extractLatestGuardedJsonStateActorFromBranch", extractLatestGuardedJsonStateActorFromBranch],
+      [
+        "extractLatestGuardedJsonStateActorFromBranch",
+        extractLatestGuardedJsonStateActorFromBranch,
+      ],
       ["resolveGuardedJsonStateSessionContext", resolveGuardedJsonStateSessionContext],
       ["resolveGuardedJsonStateToolContext", resolveGuardedJsonStateToolContext],
     ] as const;
@@ -2371,10 +2458,13 @@ export default function (api) {
         continue;
       }
       for (const tool of this.resolveBoundToolInstances(input.runtimeConfig, toolInstanceIds)) {
-        const manifest = await this.resolveInstalledToolTemplate(input.runtimeConfig, tool.templateRef);
+        const manifest = await this.resolveInstalledToolTemplate(
+          input.runtimeConfig,
+          tool.templateRef,
+        );
         if (
-          !manifest.openclawPlugins?.includes(GUARDED_JSON_STATE_OPENCLAW_PLUGIN_ID)
-          && !manifest.openclawToolNames?.includes(GUARDED_JSON_STATE_OPENCLAW_TOOL_NAME)
+          !manifest.openclawPlugins?.includes(GUARDED_JSON_STATE_OPENCLAW_PLUGIN_ID) &&
+          !manifest.openclawToolNames?.includes(GUARDED_JSON_STATE_OPENCLAW_TOOL_NAME)
         ) {
           continue;
         }
@@ -2432,7 +2522,7 @@ export default function (api) {
       for (const command of manifest.allowedCommands) {
         const rendered = this.renderSovereignToolCommand(tool.id, command);
         const [executable] = rendered.split(" ");
-        if (executable !== undefined && executable.startsWith("/")) {
+        if (executable?.startsWith("/")) {
           patterns.add(executable);
         }
       }
@@ -2452,8 +2542,9 @@ export default function (api) {
     };
   } | null> {
     const boundToolManifests = await Promise.all(
-      this.resolveBoundToolInstances(runtimeConfig, toolInstanceIds).map(async (tool) =>
-        await this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef)),
+      this.resolveBoundToolInstances(runtimeConfig, toolInstanceIds).map(
+        async (tool) => await this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef),
+      ),
     );
     const openclawToolNames = dedupeStrings(
       boundToolManifests.flatMap((manifest) => manifest.openclawToolNames ?? []),
@@ -2533,7 +2624,10 @@ export default function (api) {
       };
     }
 
-    const template = await this.resolveInstalledAgentTemplate(input.runtimeConfig, input.templateRef);
+    const template = await this.resolveInstalledAgentTemplate(
+      input.runtimeConfig,
+      input.templateRef,
+    );
     const boundRefs = new Set(
       toolInstanceIds.flatMap((id) => {
         const tool = input.runtimeConfig.sovereignTools.instances.find((entry) => entry.id === id);
@@ -2541,14 +2635,13 @@ export default function (api) {
       }),
     );
     const requiredRefs = template.requiredToolTemplates.map((entry) =>
-      formatTemplateRef(entry.id, entry.version));
-    const missingRequiredRefs = requiredRefs.filter((ref) => !boundRefs.has(ref));
-    const allowedRefs = new Set(
-      [
-        ...requiredRefs,
-        ...template.optionalToolTemplates.map((entry) => formatTemplateRef(entry.id, entry.version)),
-      ],
+      formatTemplateRef(entry.id, entry.version),
     );
+    const missingRequiredRefs = requiredRefs.filter((ref) => !boundRefs.has(ref));
+    const allowedRefs = new Set([
+      ...requiredRefs,
+      ...template.optionalToolTemplates.map((entry) => formatTemplateRef(entry.id, entry.version)),
+    ]);
     const disallowedBindings = Array.from(boundRefs).filter((ref) => !allowedRefs.has(ref));
     if (missingRequiredRefs.length > 0 || disallowedBindings.length > 0) {
       throw {
@@ -2579,7 +2672,10 @@ export default function (api) {
     }
     try {
       const template = await this.resolveInstalledAgentTemplate(runtimeConfig, entry.templateRef);
-      const templatePrefix = sanitizeManagedAgentLocalpart(template.matrix.localpartPrefix, fallback);
+      const templatePrefix = sanitizeManagedAgentLocalpart(
+        template.matrix.localpartPrefix,
+        fallback,
+      );
       const agentLocalpart = sanitizeManagedAgentLocalpart(agentId, fallback);
       if (agentLocalpart === templatePrefix || agentLocalpart.startsWith(`${templatePrefix}-`)) {
         return agentLocalpart;
@@ -2677,10 +2773,11 @@ export default function (api) {
               toolInstanceIds: nextToolInstanceIds,
             },
       );
-      const changed = existing.workspace !== workspace
-        || existing.botId !== req.botId
-        || existing.templateRef !== nextTemplateRef
-        || !areStringListsEqual(existing.toolInstanceIds ?? [], validated.toolInstanceIds);
+      const changed =
+        existing.workspace !== workspace ||
+        existing.botId !== req.botId ||
+        existing.templateRef !== nextTemplateRef ||
+        !areStringListsEqual(existing.toolInstanceIds ?? [], validated.toolInstanceIds);
       if (changed) {
         existing.workspace = workspace;
         if (req.botId === undefined) {
@@ -2739,10 +2836,11 @@ export default function (api) {
               toolInstanceIds: nextToolInstanceIds,
             },
       );
-      const changed = existing.workspace !== workspace
-        || (req.botId !== undefined && existing.botId !== req.botId)
-        || existing.templateRef !== nextTemplateRef
-        || !areStringListsEqual(existing.toolInstanceIds ?? [], validated.toolInstanceIds);
+      const changed =
+        existing.workspace !== workspace ||
+        (req.botId !== undefined && existing.botId !== req.botId) ||
+        existing.templateRef !== nextTemplateRef ||
+        !areStringListsEqual(existing.toolInstanceIds ?? [], validated.toolInstanceIds);
       if (changed) {
         existing.workspace = workspace;
         if (req.botId !== undefined) {
@@ -2858,8 +2956,8 @@ export default function (api) {
       };
     }
 
-    parsed["generatedAt"] = now();
-    parsed["openclawProfile"] = {
+    parsed.generatedAt = now();
+    parsed.openclawProfile = {
       plugins: {
         allow: runtimeConfig.openclawProfile.plugins.allow,
       },
@@ -2884,11 +2982,11 @@ export default function (api) {
             },
           }),
     };
-    parsed["bots"] = runtimeConfig.bots;
-    parsed["templates"] = runtimeConfig.templates;
-    parsed["sovereignTools"] = runtimeConfig.sovereignTools;
-    parsed["matrix"] = {
-      ...(isRecord(parsed["matrix"]) ? parsed["matrix"] : {}),
+    parsed.bots = runtimeConfig.bots;
+    parsed.templates = runtimeConfig.templates;
+    parsed.sovereignTools = runtimeConfig.sovereignTools;
+    parsed.matrix = {
+      ...(isRecord(parsed.matrix) ? parsed.matrix : {}),
       bot: {
         localpart: runtimeConfig.matrix.bot.localpart,
         userId: runtimeConfig.matrix.bot.userId,
@@ -2913,7 +3011,10 @@ export default function (api) {
     await mkdir(openclawWorkspaceStateDir, { recursive: true });
     const agent = input.runtimeConfig.openclawProfile.agents.find((entry) => entry.id === input.id);
     if (agent?.templateRef !== undefined) {
-      const template = await this.resolveInstalledAgentTemplate(input.runtimeConfig, agent.templateRef);
+      const template = await this.resolveInstalledAgentTemplate(
+        input.runtimeConfig,
+        agent.templateRef,
+      );
       await this.writeTemplateWorkspaceFiles({
         workspaceDir: input.workspace,
         runtimeConfig: input.runtimeConfig,
@@ -2976,14 +3077,14 @@ export default function (api) {
     }
     const botPackage = await this.findBotPackageByTemplateRef(entry.templateRef);
     if (
-      botPackage?.manifest.matrixIdentity.mode === "service-account"
-      || (botPackage === null && agentId === MAIL_SENTINEL_AGENT_ID)
+      botPackage?.manifest.matrixIdentity.mode === "service-account" ||
+      (botPackage === null && agentId === MAIL_SENTINEL_AGENT_ID)
     ) {
       const mappedIdentity = {
         localpart:
-          runtimeConfig.matrix.bot.localpart
-          ?? botPackage?.manifest.matrixIdentity.localpartPrefix
-          ?? "service-bot",
+          runtimeConfig.matrix.bot.localpart ??
+          botPackage?.manifest.matrixIdentity.localpartPrefix ??
+          "service-bot",
         userId: runtimeConfig.matrix.bot.userId,
         ...(runtimeConfig.matrix.bot.passwordSecretRef === undefined
           ? {}
@@ -3057,7 +3158,10 @@ export default function (api) {
     };
     const changed = !areMatrixIdentitiesEqual(entry.matrix, nextIdentity);
     entry.matrix = nextIdentity;
-    const primaryBotChanged = this.syncPrimaryDedicatedMatrixBotIdentity(runtimeConfig, nextIdentity);
+    const primaryBotChanged = this.syncPrimaryDedicatedMatrixBotIdentity(
+      runtimeConfig,
+      nextIdentity,
+    );
     return {
       runtimeConfig,
       changed: changed || primaryBotChanged,
@@ -3108,52 +3212,16 @@ export default function (api) {
     return input.expectedUserId;
   }
 
-  private async getSynapseUserViaAdminApi(input: {
-    adminBaseUrl: string;
-    adminAccessToken: string;
-    expectedUserId: string;
-  }): Promise<string | null> {
-    const endpoint = new URL(
-      `/_synapse/admin/v2/users/${encodeURIComponent(input.expectedUserId)}`,
-      ensureTrailingSlash(input.adminBaseUrl),
-    ).toString();
-    const response = await this.fetchImpl(endpoint, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${input.adminAccessToken}`,
-        Accept: "application/json",
-      },
-    });
-    const bodyText = await response.text();
-    const parsed = parseJsonSafely(bodyText);
-    if (response.status === 404) {
-      return null;
-    }
-    if (!response.ok) {
-      throw {
-        code: "MATRIX_HUMAN_USER_DELETE_FAILED",
-        message: `Failed to query Matrix account ${input.expectedUserId}`,
-        retryable: true,
-        details: {
-          endpoint,
-          status: response.status,
-          body: summarizeUnknown(parsed),
-        },
-      };
-    }
-    if (isRecord(parsed) && typeof parsed.name === "string" && parsed.name.length > 0) {
-      return parsed.name;
-    }
-    return input.expectedUserId;
-  }
-
   private async loginMatrixUser(input: {
     adminBaseUrl: string;
     localpart: string;
     password: string;
     expectedUserId: string;
   }): Promise<{ userId: string; accessToken: string }> {
-    const endpoint = new URL("/_matrix/client/v3/login", ensureTrailingSlash(input.adminBaseUrl)).toString();
+    const endpoint = new URL(
+      "/_matrix/client/v3/login",
+      ensureTrailingSlash(input.adminBaseUrl),
+    ).toString();
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const response = await this.fetchImpl(endpoint, {
         method: "POST",
@@ -3173,12 +3241,12 @@ export default function (api) {
       const bodyText = await response.text();
       const parsed = parseJsonSafely(bodyText);
       if (response.ok) {
-        const userId = isRecord(parsed) && typeof parsed.user_id === "string"
-          ? parsed.user_id
-          : input.expectedUserId;
-        const accessToken = isRecord(parsed) && typeof parsed.access_token === "string"
-          ? parsed.access_token
-          : "";
+        const userId =
+          isRecord(parsed) && typeof parsed.user_id === "string"
+            ? parsed.user_id
+            : input.expectedUserId;
+        const accessToken =
+          isRecord(parsed) && typeof parsed.access_token === "string" ? parsed.access_token : "";
         if (accessToken.length === 0) {
           throw {
             code: "MATRIX_AGENT_IDENTITY_FAILED",
@@ -3190,10 +3258,10 @@ export default function (api) {
       }
 
       if (
-        response.status === 429
-        && isRecord(parsed)
-        && typeof parsed.retry_after_ms === "number"
-        && Number.isFinite(parsed.retry_after_ms)
+        response.status === 429 &&
+        isRecord(parsed) &&
+        typeof parsed.retry_after_ms === "number" &&
+        Number.isFinite(parsed.retry_after_ms)
       ) {
         await delay(Math.min(Math.max(Math.trunc(parsed.retry_after_ms), 100), 5_000));
         continue;
@@ -3284,7 +3352,10 @@ export default function (api) {
     });
     const inviteText = await inviteResponse.text();
     const inviteParsed = parseJsonSafely(inviteText);
-    if (!inviteResponse.ok && !isAlreadyJoinedOrInvitedRoomError(inviteResponse.status, inviteParsed)) {
+    if (
+      !inviteResponse.ok &&
+      !isAlreadyJoinedOrInvitedRoomError(inviteResponse.status, inviteParsed)
+    ) {
       throw {
         code: input.failureCode ?? "MATRIX_AGENT_IDENTITY_FAILED",
         message: input.failureMessage ?? `Failed to invite ${input.inviteeUserId} to alert room`,
@@ -3353,10 +3424,7 @@ export default function (api) {
     const separatorIndex = withoutAt.indexOf(":");
     const localpartInput = separatorIndex >= 0 ? withoutAt.slice(0, separatorIndex) : withoutAt;
     const homeserverInput = separatorIndex >= 0 ? withoutAt.slice(separatorIndex + 1) : "";
-    if (
-      homeserverInput.length > 0
-      && homeserverInput !== runtimeConfig.matrix.homeserverDomain
-    ) {
+    if (homeserverInput.length > 0 && homeserverInput !== runtimeConfig.matrix.homeserverDomain) {
       throw {
         code: "MATRIX_USER_INVALID",
         message: "Only local Matrix users on this node can be invited or removed",
@@ -3395,20 +3463,24 @@ export default function (api) {
       runtimeConfig.matrix.operator.userId,
       runtimeConfig.matrix.bot.userId,
       ...runtimeConfig.openclawProfile.agents.flatMap((entry) =>
-        entry.matrix?.userId === undefined ? [] : [entry.matrix.userId]),
+        entry.matrix?.userId === undefined ? [] : [entry.matrix.userId],
+      ),
     ]);
-    const reservedLocalparts = new Set<string>([
-      runtimeConfig.matrix.operator.localpart ?? "",
-      runtimeConfig.matrix.bot.localpart ?? "",
-      ...runtimeConfig.openclawProfile.agents.flatMap((entry) =>
-        entry.matrix?.localpart === undefined ? [] : [entry.matrix.localpart]),
-    ].filter((value) => value.length > 0));
+    const reservedLocalparts = new Set<string>(
+      [
+        runtimeConfig.matrix.operator.localpart ?? "",
+        runtimeConfig.matrix.bot.localpart ?? "",
+        ...runtimeConfig.openclawProfile.agents.flatMap((entry) =>
+          entry.matrix?.localpart === undefined ? [] : [entry.matrix.localpart],
+        ),
+      ].filter((value) => value.length > 0),
+    );
     if (!reservedUserIds.has(target.userId) && !reservedLocalparts.has(target.localpart)) {
       return;
     }
     if (
-      target.userId === runtimeConfig.matrix.operator.userId
-      || target.localpart === runtimeConfig.matrix.operator.localpart
+      target.userId === runtimeConfig.matrix.operator.userId ||
+      target.localpart === runtimeConfig.matrix.operator.localpart
     ) {
       throw {
         code: action === "invite" ? "MATRIX_USER_REQUIRES_ONBOARDING" : "MATRIX_USER_PROTECTED",
@@ -3445,15 +3517,20 @@ export default function (api) {
         ? ["No bound tool instances."]
         : ["Use only the documented OpenClaw tools or CLI commands listed below.", ""];
     for (const tool of boundTools) {
-      const manifest = await this.resolveInstalledToolTemplate(input.runtimeConfig, tool.templateRef);
+      const manifest = await this.resolveInstalledToolTemplate(
+        input.runtimeConfig,
+        tool.templateRef,
+      );
       toolLines.push(
         `- \`${tool.id}\``,
         `  template: \`${tool.templateRef}\``,
         `  capabilities: ${manifest.capabilities.join(", ")}`,
-        ...this.listDocumentedOpenClawToolNames(manifest).map((toolName) =>
-          `  openclaw-tool: \`${toolName}\``),
-        ...this.listDocumentedSovereignToolCommands(tool.id, manifest).map((command) =>
-          `  command: \`${command}\``),
+        ...this.listDocumentedOpenClawToolNames(manifest).map(
+          (toolName) => `  openclaw-tool: \`${toolName}\``,
+        ),
+        ...this.listDocumentedSovereignToolCommands(tool.id, manifest).map(
+          (command) => `  command: \`${command}\``,
+        ),
         ...this.listDocumentedSovereignToolNotes(manifest),
       );
     }
@@ -3524,11 +3601,11 @@ export default function (api) {
     const operator = runtimeConfig.matrix.operator;
     const bot = runtimeConfig.matrix.bot;
     if (
-      operator.localpart !== expectedOperatorLocalpart
-      || bot.localpart !== expectedBotLocalpart
-      || operator.passwordSecretRef === undefined
-      || operator.accessTokenSecretRef === undefined
-      || bot.passwordSecretRef === undefined
+      operator.localpart !== expectedOperatorLocalpart ||
+      bot.localpart !== expectedBotLocalpart ||
+      operator.passwordSecretRef === undefined ||
+      operator.accessTokenSecretRef === undefined ||
+      bot.passwordSecretRef === undefined
     ) {
       return null;
     }
@@ -3577,14 +3654,17 @@ export default function (api) {
     error: unknown;
     botLocalpart?: string;
   }): Promise<BundledMatrixAccountsResult | null> {
-    if (!isRateLimitedMatrixLoginFailure(input.error) || this.matrixProvisioner.resetState === undefined) {
+    if (
+      !isRateLimitedMatrixLoginFailure(input.error) ||
+      this.matrixProvisioner.resetState === undefined
+    ) {
       return null;
     }
 
     const runtimeConfig = await this.tryReadRuntimeConfig();
     if (
-      runtimeConfig === null
-      || runtimeConfig.matrix.homeserverDomain === input.provision.homeserverDomain
+      runtimeConfig === null ||
+      runtimeConfig.matrix.homeserverDomain === input.provision.homeserverDomain
     ) {
       return null;
     }
@@ -3604,53 +3684,10 @@ export default function (api) {
     });
   }
 
-  private async tryReadMailSentinelRegistration(): Promise<
-    | {
-        agentId: string;
-        cronJobId: string;
-      }
-    | null
-  > {
-    const registrationFile = join(
-      this.paths.stateDir,
-      "mail-sentinel",
-      "registration.json",
-    );
-    try {
-      const raw = await readFile(registrationFile, "utf8");
-      const parsed = parseJsonDocument(raw);
-      if (!isRecord(parsed)) {
-        return null;
-      }
-      if (typeof parsed.agentId !== "string" || typeof parsed.cronJobId !== "string") {
-        return null;
-      }
-      return {
-        agentId: parsed.agentId,
-        cronJobId: parsed.cronJobId,
-      };
-    } catch (error) {
-      if (isNodeError(error) && error.code === "ENOENT") {
-        return null;
-      }
-      this.logger.warn(
-        {
-          registrationFile,
-          error: error instanceof Error ? error.message : String(error),
-        },
-        "Failed to read Mail Sentinel registration file",
-      );
-      return null;
-    }
-  }
-
-  private async safeDetectOpenClaw(): Promise<
-    | {
-        binaryPath: string;
-        version: string;
-      }
-    | null
-  > {
+  private async safeDetectOpenClaw(): Promise<{
+    binaryPath: string;
+    version: string;
+  } | null> {
     try {
       return await this.openclawBootstrapper.detectInstalled();
     } catch (error) {
@@ -3681,9 +3718,9 @@ export default function (api) {
       const output = `${openclawGatewayStatus.result.stdout}\n${openclawGatewayStatus.result.stderr}`;
       const state = parseGatewayState(output);
       if (
-        openclawGatewayStatus.result.exitCode === 0
-        || state !== "unknown"
-        || !looksLikeMissingGateway(output)
+        openclawGatewayStatus.result.exitCode === 0 ||
+        state !== "unknown" ||
+        !looksLikeMissingGateway(output)
       ) {
         return {
           installed: !looksLikeMissingGateway(output),
@@ -3704,13 +3741,12 @@ export default function (api) {
     return {
       installed: false,
       state: "unknown",
-      message:
-        openclawGatewayStatus.ok
-          ? summarizeText(
-              `${openclawGatewayStatus.result.stdout}\n${openclawGatewayStatus.result.stderr}`,
-              220,
-            )
-          : openclawGatewayStatus.error,
+      message: openclawGatewayStatus.ok
+        ? summarizeText(
+            `${openclawGatewayStatus.result.stdout}\n${openclawGatewayStatus.result.stderr}`,
+            220,
+          )
+        : openclawGatewayStatus.error,
     };
   }
 
@@ -3810,9 +3846,7 @@ export default function (api) {
     };
   }
 
-  private async inspectMatrixStatus(
-    runtimeConfig: RuntimeConfig | null,
-  ): Promise<{
+  private async inspectMatrixStatus(runtimeConfig: RuntimeConfig | null): Promise<{
     health: ComponentHealth;
     roomReachable: boolean;
     message?: string;
@@ -3914,7 +3948,9 @@ export default function (api) {
 
   private async probeMatrixRoomReachable(runtimeConfig: RuntimeConfig): Promise<boolean> {
     try {
-      const accessToken = await this.resolveSecretRef(runtimeConfig.matrix.bot.accessTokenSecretRef);
+      const accessToken = await this.resolveSecretRef(
+        runtimeConfig.matrix.bot.accessTokenSecretRef,
+      );
       const endpoint = new URL(
         `/_matrix/client/v3/rooms/${encodeURIComponent(runtimeConfig.matrix.alertRoom.roomId)}/joined_members`,
         ensureTrailingSlash(runtimeConfig.matrix.adminBaseUrl),
@@ -3955,16 +3991,15 @@ export default function (api) {
       };
     }
 
-    const openclawEnv =
-      command === "openclaw" ? await this.resolveManagedOpenClawEnv() : null;
+    const openclawEnv = command === "openclaw" ? await this.resolveManagedOpenClawEnv() : null;
     const openclawServiceUser =
       command === "openclaw" ? await this.resolveManagedOpenClawServiceUser() : null;
     const shouldRunOpenClawAsServiceUser =
-      command === "openclaw"
-      && typeof process.getuid === "function"
-      && process.getuid() === 0
-      && openclawServiceUser !== null
-      && openclawServiceUser !== "root";
+      command === "openclaw" &&
+      typeof process.getuid === "function" &&
+      process.getuid() === 0 &&
+      openclawServiceUser !== null &&
+      openclawServiceUser !== "root";
     const effectiveCommand = shouldRunOpenClawAsServiceUser ? "sudo" : command;
     const effectiveArgs = shouldRunOpenClawAsServiceUser
       ? [
@@ -4024,7 +4059,11 @@ export default function (api) {
     return {
       openclawHome,
       runtimeConfigPath: join(openclawHome, "openclaw.json5"),
-      runtimeProfilePath: join(this.paths.openclawServiceHome, "profiles", "sovereign-runtime-profile.json5"),
+      runtimeProfilePath: join(
+        this.paths.openclawServiceHome,
+        "profiles",
+        "sovereign-runtime-profile.json5",
+      ),
       gatewayEnvPath: join(this.paths.openclawServiceHome, "gateway.env"),
     };
   }
@@ -4205,8 +4244,9 @@ export default function (api) {
             };
           }
           if (stepState.selectedBots === undefined) {
-            stepState.selectedBots = (await this.resolveRequestedBots(stepState.effectiveRequest ?? req))
-              .packages;
+            stepState.selectedBots = (
+              await this.resolveRequestedBots(stepState.effectiveRequest ?? req)
+            ).packages;
           }
           const bootstrapBotLocalpart = this.resolveBootstrapMatrixBotLocalpart(
             stepState.selectedBots,
@@ -4355,8 +4395,9 @@ export default function (api) {
               : { relayEnrollment: stepState.relayEnrollment }),
           });
           if (stepState.selectedBots === undefined) {
-            stepState.selectedBots = (await this.resolveRequestedBots(stepState.effectiveRequest ?? req))
-              .packages;
+            stepState.selectedBots = (
+              await this.resolveRequestedBots(stepState.effectiveRequest ?? req)
+            ).packages;
           }
           for (const agent of runtimeConfig.openclawProfile.agents) {
             await this.ensureManagedAgentWorkspace({
@@ -4392,9 +4433,8 @@ export default function (api) {
           stepState.runtimeConfig = runtimeConfig;
           this.setManagedOpenClawEnv(runtimeConfig);
           if (runtimeConfig.relay?.enabled === true) {
-            stepState.relayTunnelServiceInstalled = await this.ensureRelayTunnelService(
-              runtimeConfig,
-            );
+            stepState.relayTunnelServiceInstalled =
+              await this.ensureRelayTunnelService(runtimeConfig);
           }
 
           if (stepState.gatewayServiceSkipped === true) {
@@ -4480,7 +4520,7 @@ export default function (api) {
           }
           await this.runSmokeChecks(
             stepState.matrixProvision,
-            stepState.runtimeConfig ?? await this.readRuntimeConfig(),
+            stepState.runtimeConfig ?? (await this.readRuntimeConfig()),
             stepState.gatewayServiceSkipped ?? false,
             stepState.relayEnrollment !== undefined,
           );
@@ -4581,9 +4621,12 @@ export default function (api) {
 
     const enrollmentToken = relay.enrollmentToken?.trim();
     const usesManagedPublicEnroll =
-      this.isDefaultManagedRelayControlUrl(relay.controlUrl)
-      && (enrollmentToken === undefined || enrollmentToken.length === 0);
-    if (!usesManagedPublicEnroll && (enrollmentToken === undefined || enrollmentToken.length === 0)) {
+      this.isDefaultManagedRelayControlUrl(relay.controlUrl) &&
+      (enrollmentToken === undefined || enrollmentToken.length === 0);
+    if (
+      !usesManagedPublicEnroll &&
+      (enrollmentToken === undefined || enrollmentToken.length === 0)
+    ) {
       throw {
         code: "RELAY_CONFIG_MISSING",
         message: "Custom relay mode requires relay.enrollmentToken",
@@ -4630,16 +4673,12 @@ export default function (api) {
         };
         const responseTextLower = responseText.toLowerCase();
         const slugConflict =
-          response.status === 409
-          || (
-            (response.status === 400 || response.status === 422)
-            && responseTextLower.includes("slug")
-            && (
-              responseTextLower.includes("taken")
-              || responseTextLower.includes("already")
-              || responseTextLower.includes("exists")
-            )
-          );
+          response.status === 409 ||
+          ((response.status === 400 || response.status === 422) &&
+            responseTextLower.includes("slug") &&
+            (responseTextLower.includes("taken") ||
+              responseTextLower.includes("already") ||
+              responseTextLower.includes("exists")));
         if (slugConflict && attempt < 6) {
           this.logger.warn(
             {
@@ -4666,8 +4705,7 @@ export default function (api) {
 
       const parsed = parseJsonDocument(responseText);
       const payload =
-        isRecord(parsed)
-        && isRecord(parsed.result)
+        isRecord(parsed) && isRecord(parsed.result)
           ? parsed.result
           : isRecord(parsed)
             ? parsed
@@ -4690,7 +4728,9 @@ export default function (api) {
             ? tunnel.serverHost.trim()
             : "";
       const serverPort =
-        tunnel !== null && typeof tunnel.serverPort === "number" && Number.isFinite(tunnel.serverPort)
+        tunnel !== null &&
+        typeof tunnel.serverPort === "number" &&
+        Number.isFinite(tunnel.serverPort)
           ? Math.trunc(tunnel.serverPort)
           : 7000;
       const token =
@@ -4706,16 +4746,18 @@ export default function (api) {
             ? `relay-${hostname.replace(/[^a-zA-Z0-9-]/g, "-")}`
             : "";
       const subdomain =
-        tunnel !== null && typeof tunnel.subdomain === "string" && tunnel.subdomain.trim().length > 0
+        tunnel !== null &&
+        typeof tunnel.subdomain === "string" &&
+        tunnel.subdomain.trim().length > 0
           ? tunnel.subdomain.trim()
           : undefined;
 
       if (
-        hostname.length === 0
-        || publicBaseUrl.length === 0
-        || serverAddr.length === 0
-        || token.length === 0
-        || proxyName.length === 0
+        hostname.length === 0 ||
+        publicBaseUrl.length === 0 ||
+        serverAddr.length === 0 ||
+        token.length === 0 ||
+        proxyName.length === 0
       ) {
         throw {
           code: "RELAY_ENROLL_INVALID",
@@ -4780,13 +4822,16 @@ export default function (api) {
       return values[index] ?? values[0] ?? "node";
     };
     const suffix = entropy.slice(0, 4);
-    const raw = `${pick(RELAY_NAME_MOODS, 0)}-${pick(RELAY_NAME_THEMES, 2)}-${pick(RELAY_NAME_MASCOTS, 4)}-${suffix}`.toLowerCase();
+    const raw =
+      `${pick(RELAY_NAME_MOODS, 0)}-${pick(RELAY_NAME_THEMES, 2)}-${pick(RELAY_NAME_MASCOTS, 4)}-${suffix}`.toLowerCase();
     const normalized = raw
       .replace(/[^a-z0-9-]/g, "-")
       .replace(/-{2,}/g, "-")
       .replace(/^-+/, "")
       .replace(/-+$/, "");
-    return normalized.length === 0 ? `sovereign-node-${suffix}` : normalized.slice(0, 63).replace(/-+$/, "");
+    return normalized.length === 0
+      ? `sovereign-node-${suffix}`
+      : normalized.slice(0, 63).replace(/-+$/, "");
   }
 
   private buildRelayProvisionRequest(
@@ -5075,8 +5120,8 @@ export default function (api) {
         registrations.push(registration);
       } catch (error) {
         if (
-          options?.allowGatewayUnavailableFallback !== true
-          || !isMailSentinelGatewayUnavailableError(error)
+          options?.allowGatewayUnavailableFallback !== true ||
+          !isMailSentinelGatewayUnavailableError(error)
         ) {
           throw error;
         }
@@ -5133,8 +5178,8 @@ export default function (api) {
           agentId: registration.agentId,
           ...(registration.cronJobId === undefined ? {} : { cronJobId: registration.cronJobId }),
           deferred:
-            registration.agentCommand.startsWith("deferred:")
-            || registration.cronCommand?.startsWith("deferred:") === true,
+            registration.agentCommand.startsWith("deferred:") ||
+            registration.cronCommand?.startsWith("deferred:") === true,
         },
         0o600,
       );
@@ -5185,11 +5230,10 @@ export default function (api) {
       }
       const botPackage = await this.findBotPackageByTemplateRef(agent.templateRef);
       const usesSharedServiceIdentity =
-        agent.matrix.userId === runtimeConfig.matrix.bot.userId
-        && botPackage?.manifest.matrixIdentity.mode === "service-account";
+        agent.matrix.userId === runtimeConfig.matrix.bot.userId &&
+        botPackage?.manifest.matrixIdentity.mode === "service-account";
       const usesPrimaryDedicatedIdentity =
-        !usesSharedServiceIdentity
-        && agent.matrix.userId === runtimeConfig.matrix.bot.userId;
+        !usesSharedServiceIdentity && agent.matrix.userId === runtimeConfig.matrix.bot.userId;
       await this.runOpenClawCommandAlternatives({
         label: `${agent.id}-agent`,
         commands: [
@@ -5205,45 +5249,17 @@ export default function (api) {
       await this.runOpenClawCommandAlternatives({
         label: `${agent.id}-matrix-bind`,
         commands: usesSharedServiceIdentity
-          ? [[
-              "agents",
-              "bind",
-              "--agent",
-              agent.id,
-              "--bind",
-              "matrix",
-            ]]
+          ? [["agents", "bind", "--agent", agent.id, "--bind", "matrix"]]
           : [
-              [
-                "agents",
-                "bind",
-                "--agent",
-                agent.id,
-                "--bind",
-                `matrix:${agent.id}`,
-              ],
-              [
-                "agents",
-                "bind",
-                "--agent",
-                agent.id,
-                "--bind",
-              "matrix",
+              ["agents", "bind", "--agent", agent.id, "--bind", `matrix:${agent.id}`],
+              ["agents", "bind", "--agent", agent.id, "--bind", "matrix"],
             ],
-          ],
         allowAlreadyExists: true,
       });
       if (usesPrimaryDedicatedIdentity) {
         await this.runOpenClawCommandAlternatives({
           label: `${agent.id}-matrix-default-bind`,
-          commands: [[
-            "agents",
-            "bind",
-            "--agent",
-            agent.id,
-            "--bind",
-            "matrix",
-          ]],
+          commands: [["agents", "bind", "--agent", agent.id, "--bind", "matrix"]],
           allowAlreadyExists: true,
         });
       }
@@ -5390,8 +5406,8 @@ export default function (api) {
     const managedTempDir = this.getManagedOpenClawTempDir(runtimeConfig);
     const unitName = SOVEREIGN_GATEWAY_SYSTEMD_UNIT;
     const unitPath =
-      process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH?.trim()
-      || `/etc/systemd/system/${unitName}`;
+      process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH?.trim() ||
+      `/etc/systemd/system/${unitName}`;
     const unitContents = [
       "[Unit]",
       "Description=Sovereign OpenClaw Gateway",
@@ -5689,8 +5705,8 @@ export default function (api) {
 
   private assertMatrixOnboardingAvailable(runtimeConfig: RuntimeConfig): string {
     if (
-      runtimeConfig.matrix.accessMode !== "relay"
-      && !runtimeConfig.matrix.publicBaseUrl.startsWith("https://")
+      runtimeConfig.matrix.accessMode !== "relay" &&
+      !runtimeConfig.matrix.publicBaseUrl.startsWith("https://")
     ) {
       throw {
         code: "MATRIX_ONBOARDING_UNAVAILABLE",
@@ -5710,7 +5726,11 @@ export default function (api) {
     runtimeConfig: RuntimeConfig,
     state: unknown,
   ): Promise<void> {
-    await this.writeInstallerJsonFile(this.getMatrixOnboardingStatePath(runtimeConfig), state, 0o600);
+    await this.writeInstallerJsonFile(
+      this.getMatrixOnboardingStatePath(runtimeConfig),
+      state,
+      0o600,
+    );
   }
 
   private getInstallRequestPath(): string {
@@ -5725,11 +5745,7 @@ export default function (api) {
     return DEFAULT_INSTALL_REQUEST_FILE;
   }
 
-  private async writeInstallerJsonFile(
-    path: string,
-    value: unknown,
-    mode: number,
-  ): Promise<void> {
+  private async writeInstallerJsonFile(path: string, value: unknown, mode: number): Promise<void> {
     const tempPath = `${path}.${randomUUID()}.tmp`;
     await mkdir(dirname(path), { recursive: true });
     await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
@@ -5874,7 +5890,8 @@ export default function (api) {
       if (isGatewayUserSystemdUnavailableError(error)) {
         throw {
           code: "OPENCLAW_GATEWAY_RESTART_FAILED",
-          message: "OpenClaw gateway restart is unavailable because systemd user services are unavailable in this context",
+          message:
+            "OpenClaw gateway restart is unavailable because systemd user services are unavailable in this context",
           retryable: true,
           details: {
             error: describeError(error),
@@ -5963,23 +5980,30 @@ export default function (api) {
       allBotPackages.flatMap((entry) =>
         entry.manifest.toolInstances.map(
           (tool: LoadedBotPackage["manifest"]["toolInstances"][number]) => tool.id,
-        )),
+        ),
+      ),
     );
     const requiredCoreTemplateRefs = dedupeStrings(
-      selectedBotPackages.flatMap((entry) => [
-        ...entry.manifest.toolInstances.map(
-          (tool: LoadedBotPackage["manifest"]["toolInstances"][number]) => tool.templateRef,
-        ),
-        ...entry.template.requiredToolTemplates.map((tool) => formatTemplateRef(tool.id, tool.version)),
-        ...entry.template.optionalToolTemplates.map((tool) => formatTemplateRef(tool.id, tool.version)),
-      ]).filter((ref: string) => findCoreTemplateManifest(ref) !== undefined),
+      selectedBotPackages
+        .flatMap((entry) => [
+          ...entry.manifest.toolInstances.map(
+            (tool: LoadedBotPackage["manifest"]["toolInstances"][number]) => tool.templateRef,
+          ),
+          ...entry.template.requiredToolTemplates.map((tool) =>
+            formatTemplateRef(tool.id, tool.version),
+          ),
+          ...entry.template.optionalToolTemplates.map((tool) =>
+            formatTemplateRef(tool.id, tool.version),
+          ),
+        ])
+        .filter((ref: string) => findCoreTemplateManifest(ref) !== undefined),
     );
     const requiredPluginIds = this.listRequiredOpenClawPluginIds(selectedBotPackages);
     const preservedUserAgents =
       previousRuntimeConfig?.openclawProfile.agents.filter(
         (entry) =>
-          !allBotTemplateRefs.has(entry.templateRef ?? "")
-          && !selectedBotPackages.some((botPackage) => botPackage.manifest.id === entry.botId),
+          !allBotTemplateRefs.has(entry.templateRef ?? "") &&
+          !selectedBotPackages.some((botPackage) => botPackage.manifest.id === entry.botId),
       ) ?? [];
     const preservedInstalledTemplates = previousRuntimeConfig?.templates.installed ?? [];
     const preservedToolInstances = previousRuntimeConfig?.sovereignTools.instances ?? [];
@@ -5988,12 +6012,18 @@ export default function (api) {
       requiredCoreTemplateRefs,
     );
     for (const botPackage of selectedBotPackages) {
-      installedTemplates = this.upsertInstalledBotTemplateEntry(installedTemplates, botPackage).installed;
-      installedTemplates = this.upsertInstalledBotToolTemplateEntries(installedTemplates, botPackage).installed;
+      installedTemplates = this.upsertInstalledBotTemplateEntry(
+        installedTemplates,
+        botPackage,
+      ).installed;
+      installedTemplates = this.upsertInstalledBotToolTemplateEntries(
+        installedTemplates,
+        botPackage,
+      ).installed;
     }
 
     const baseMatrixConfig = {
-      accessMode: input.relayEnrollment === undefined ? "direct" as const : "relay" as const,
+      accessMode: input.relayEnrollment === undefined ? ("direct" as const) : ("relay" as const),
       homeserverDomain: input.matrixProvision.homeserverDomain,
       federationEnabled: input.matrixProvision.federationEnabled,
       publicBaseUrl: input.matrixProvision.publicBaseUrl,
@@ -6094,17 +6124,18 @@ export default function (api) {
     const managedBotToolInstances = selectedBotPackages.flatMap((botPackage) =>
       botPackage.manifest.toolInstances.flatMap(
         (tool: LoadedBotPackage["manifest"]["toolInstances"][number]) =>
-        this.isBotToolInstanceEnabled(provisionalRuntimeConfig, tool.enabledWhen)
-          ? [
-              this.buildManagedBotToolInstance({
-                runtimeConfig: provisionalRuntimeConfig,
-                availableBotPackages: selectedBotPackages,
-                tool,
-                existing: preservedToolInstances.find((entry) => entry.id === tool.id),
-              }),
-            ]
-          : [],
-      ));
+          this.isBotToolInstanceEnabled(provisionalRuntimeConfig, tool.enabledWhen)
+            ? [
+                this.buildManagedBotToolInstance({
+                  runtimeConfig: provisionalRuntimeConfig,
+                  availableBotPackages: selectedBotPackages,
+                  tool,
+                  existing: preservedToolInstances.find((entry) => entry.id === tool.id),
+                }),
+              ]
+            : [],
+      ),
+    );
     provisionalRuntimeConfig.sovereignTools.instances = sortToolInstances([
       ...preservedUserToolInstances,
       ...managedBotToolInstances,
@@ -6113,8 +6144,10 @@ export default function (api) {
       const toolInstanceIds = managedBotToolInstances
         .filter((tool: RuntimeConfig["sovereignTools"]["instances"][number]) =>
           botPackage.manifest.toolInstances.some(
-            (definition: LoadedBotPackage["manifest"]["toolInstances"][number]) => definition.id === tool.id,
-          ))
+            (definition: LoadedBotPackage["manifest"]["toolInstances"][number]) =>
+              definition.id === tool.id,
+          ),
+        )
         .map((tool: RuntimeConfig["sovereignTools"]["instances"][number]) => tool.id);
       const configuredModel = selectedBotConfig[botPackage.manifest.id]?.model;
       return {
@@ -6140,10 +6173,7 @@ export default function (api) {
             }),
       };
     });
-    const managedAgents = ensureCoreManagedAgents([
-      ...preservedUserAgents,
-      ...managedBotAgents,
-    ]);
+    const managedAgents = ensureCoreManagedAgents([...preservedUserAgents, ...managedBotAgents]);
     const runtimeConfig: RuntimeConfig = {
       ...provisionalRuntimeConfig,
       openclawProfile: {
@@ -6151,7 +6181,8 @@ export default function (api) {
           allow: requiredPluginIds,
         },
         session: {
-          dmScope: provisionalRuntimeConfig.openclawProfile.session?.dmScope ?? MANAGED_OPENCLAW_DM_SCOPE,
+          dmScope:
+            provisionalRuntimeConfig.openclawProfile.session?.dmScope ?? MANAGED_OPENCLAW_DM_SCOPE,
         },
         agents: managedAgents,
         crons: selectedBotPackages.flatMap((botPackage) => {
@@ -6159,28 +6190,32 @@ export default function (api) {
           if (cron === undefined) {
             return [];
           }
-          const configuredEvery = selectedBotConfig[botPackage.manifest.id]?.[cron.everyConfigKey ?? ""];
+          const configuredEvery =
+            selectedBotConfig[botPackage.manifest.id]?.[cron.everyConfigKey ?? ""];
           const every =
             typeof configuredEvery === "string" && configuredEvery.length > 0
               ? configuredEvery
-              : cron.defaultEvery ?? "5m";
-          return [{
-            id: cron.id,
-            every,
-            agentId: botPackage.manifest.id,
-            botId: botPackage.manifest.id,
-          }];
+              : (cron.defaultEvery ?? "5m");
+          return [
+            {
+              id: cron.id,
+              every,
+              agentId: botPackage.manifest.id,
+              botId: botPackage.manifest.id,
+            },
+          ];
         }),
         ...(selectedBotPackages.flatMap((botPackage) => {
           const cron = botPackage.manifest.openclaw.cron;
           if (cron === undefined) {
             return [];
           }
-          const configuredEvery = selectedBotConfig[botPackage.manifest.id]?.[cron.everyConfigKey ?? ""];
+          const configuredEvery =
+            selectedBotConfig[botPackage.manifest.id]?.[cron.everyConfigKey ?? ""];
           const every =
             typeof configuredEvery === "string" && configuredEvery.length > 0
               ? configuredEvery
-              : cron.defaultEvery ?? "5m";
+              : (cron.defaultEvery ?? "5m");
           return [{ id: cron.id, every }];
         })[0] === undefined
           ? {}
@@ -6195,7 +6230,7 @@ export default function (api) {
                 const every =
                   typeof configuredEvery === "string" && configuredEvery.length > 0
                     ? configuredEvery
-                    : cron.defaultEvery ?? "5m";
+                    : (cron.defaultEvery ?? "5m");
                 return [{ id: cron.id, every }];
               })[0],
             }),
@@ -6344,24 +6379,23 @@ export default function (api) {
 
   private async writeOpenClawRuntimeArtifacts(runtimeConfig: RuntimeConfig): Promise<void> {
     const openrouterApiKey = await this.resolveSecretRef(runtimeConfig.openrouter.apiKeySecretRef);
-    const managedAgents = ensureCoreManagedAgents(
-      runtimeConfig.openclawProfile.agents,
-    );
+    const managedAgents = ensureCoreManagedAgents(runtimeConfig.openclawProfile.agents);
     const operatorAllowlist = [runtimeConfig.matrix.operator.userId];
     const managedAgentPackages = new Map(
       await Promise.all(
-        managedAgents.map(async (agent) => [
-          agent.id,
-          await this.findBotPackageByTemplateRef(agent.templateRef),
-        ] as const),
+        managedAgents.map(
+          async (agent) =>
+            [agent.id, await this.findBotPackageByTemplateRef(agent.templateRef)] as const,
+        ),
       ),
     );
     const hasSharedServiceBot = managedAgents.some((agent) => {
       const botPackage = managedAgentPackages.get(agent.id);
       return botPackage?.manifest.matrixIdentity.mode === "service-account";
     });
-    const dedicatedBotPackages = Array.from(managedAgentPackages.values())
-      .filter((entry): entry is LoadedBotPackage => entry !== null);
+    const dedicatedBotPackages = Array.from(managedAgentPackages.values()).filter(
+      (entry): entry is LoadedBotPackage => entry !== null,
+    );
     const preferredDefaultAccountId =
       this.resolvePreferredDedicatedMatrixBot(dedicatedBotPackages)?.manifest.id;
     const matrixParticipantAllowlist = dedupeStrings([
@@ -6408,7 +6442,16 @@ export default function (api) {
       users: string[];
       autoReply: boolean;
       requireMention: boolean;
-    }): Record<string, { enabled: boolean; allow: boolean; autoReply?: boolean; requireMention?: boolean; users: string[] }> => ({
+    }): Record<
+      string,
+      {
+        enabled: boolean;
+        allow: boolean;
+        autoReply?: boolean;
+        requireMention?: boolean;
+        users: string[];
+      }
+    > => ({
       "*": {
         enabled: true,
         allow: true,
@@ -6437,8 +6480,8 @@ export default function (api) {
       }
       const botPackage = managedAgentPackages.get(agent.id);
       const usesSharedServiceIdentity =
-        agent.matrix.userId === runtimeConfig.matrix.bot.userId
-        && botPackage?.manifest.matrixIdentity.mode === "service-account";
+        agent.matrix.userId === runtimeConfig.matrix.bot.userId &&
+        botPackage?.manifest.matrixIdentity.mode === "service-account";
       if (usesSharedServiceIdentity) {
         matrixBindings.push({
           agentId: agent.id,
@@ -6483,7 +6526,7 @@ export default function (api) {
       };
     }
     if (hasSharedServiceBot || Object.keys(matrixAccounts).length === 0) {
-      matrixAccounts["default"] = {
+      matrixAccounts.default = {
         homeserver: runtimeConfig.matrix.adminBaseUrl,
         userId: runtimeConfig.matrix.bot.userId,
         accessToken: await this.resolveSecretRef(runtimeConfig.matrix.bot.accessTokenSecretRef),
@@ -6526,12 +6569,9 @@ export default function (api) {
           enabled: true,
           homeserver: runtimeConfig.matrix.adminBaseUrl,
           userId: runtimeConfig.matrix.bot.userId,
-          ...(
-            !hasSharedServiceBot
-            && preferredDefaultAccountId !== undefined
-              ? { defaultAccount: preferredDefaultAccountId }
-              : {}
-          ),
+          ...(!hasSharedServiceBot && preferredDefaultAccountId !== undefined
+            ? { defaultAccount: preferredDefaultAccountId }
+            : {}),
           ...(Object.keys(matrixAccounts).length === 0
             ? {}
             : {
@@ -6554,21 +6594,23 @@ export default function (api) {
         defaults: {
           model: normalizeOpenClawAgentModel(runtimeConfig.openrouter.model),
         },
-        list: await Promise.all(managedAgents.map(async (entry) => {
-          const tools = await this.buildOpenClawAgentToolPolicy(
-            runtimeConfig,
-            entry.toolInstanceIds ?? [],
-          );
-          return {
-            id: entry.id,
-            workspace: entry.workspace,
-            ...(entry.default === true ? { default: true } : {}),
-            ...(entry.model === undefined
-              ? {}
-              : { model: normalizeOpenClawAgentModel(entry.model) }),
-            ...(tools === null ? {} : { tools }),
-          };
-        })),
+        list: await Promise.all(
+          managedAgents.map(async (entry) => {
+            const tools = await this.buildOpenClawAgentToolPolicy(
+              runtimeConfig,
+              entry.toolInstanceIds ?? [],
+            );
+            return {
+              id: entry.id,
+              workspace: entry.workspace,
+              ...(entry.default === true ? { default: true } : {}),
+              ...(entry.model === undefined
+                ? {}
+                : { model: normalizeOpenClawAgentModel(entry.model) }),
+              ...(tools === null ? {} : { tools }),
+            };
+          }),
+        ),
       },
       cron: {
         enabled: true,
@@ -6604,14 +6646,8 @@ export default function (api) {
       await this.applyRuntimeOwnership(runtimeConfig.openclaw.openclawHome);
       await this.applyRuntimeOwnership(dirname(runtimeConfig.openclaw.runtimeProfilePath));
       await this.applyRuntimeOwnership(managedTempDir);
-      await this.writeProtectedJsonFile(
-        runtimeConfig.openclaw.runtimeConfigPath,
-        runtimePayload,
-      );
-      await this.writeProtectedJsonFile(
-        runtimeConfig.openclaw.runtimeProfilePath,
-        profilePayload,
-      );
+      await this.writeProtectedJsonFile(runtimeConfig.openclaw.runtimeConfigPath, runtimePayload);
+      await this.writeProtectedJsonFile(runtimeConfig.openclaw.runtimeProfilePath, profilePayload);
 
       const envFileLines = [
         `OPENCLAW_HOME=${runtimeConfig.openclaw.openclawHome}`,
@@ -6658,9 +6694,7 @@ export default function (api) {
     await this.applyRuntimeOwnership(path);
   }
 
-  private async resolveImapConfig(
-    imap: InstallRequest["imap"],
-  ): Promise<RuntimeConfig["imap"]> {
+  private async resolveImapConfig(imap: InstallRequest["imap"]): Promise<RuntimeConfig["imap"]> {
     if (imap === undefined) {
       return {
         status: "pending",
@@ -6725,7 +6759,8 @@ export default function (api) {
 
     throw {
       code: "OPENROUTER_SECRET_MISSING",
-      message: "OpenRouter credentials are missing (provide openrouter.apiKey or openrouter.secretRef)",
+      message:
+        "OpenRouter credentials are missing (provide openrouter.apiKey or openrouter.secretRef)",
       retryable: false,
     };
   }
@@ -6768,40 +6803,6 @@ export default function (api) {
     return `file:${filePath}`;
   }
 
-  private async removeManagedSecretFile(fileName: string): Promise<boolean> {
-    const filePath = join(this.paths.secretsDir, fileName);
-    try {
-      await access(filePath, fsConstants.F_OK);
-    } catch (error) {
-      if (isNodeError(error) && error.code === "ENOENT") {
-        return false;
-      }
-      throw {
-        code: "SECRET_WRITE_FAILED",
-        message: "Failed to access managed secret file",
-        retryable: false,
-        details: {
-          filePath,
-          error: describeError(error),
-        },
-      };
-    }
-    try {
-      await rm(filePath);
-      return true;
-    } catch (error) {
-      throw {
-        code: "SECRET_WRITE_FAILED",
-        message: "Failed to remove managed secret file",
-        retryable: false,
-        details: {
-          filePath,
-          error: describeError(error),
-        },
-      };
-    }
-  }
-
   private async ensureSecretsDir(): Promise<string> {
     if (this.resolvedSecretsDir !== null) {
       return this.resolvedSecretsDir;
@@ -6831,25 +6832,26 @@ export default function (api) {
     }
   }
 
-  private getConfiguredServiceIdentity(
-    runtimeConfig?: RuntimeConfig,
-  ): { user: string; group: string } {
+  private getConfiguredServiceIdentity(runtimeConfig?: RuntimeConfig): {
+    user: string;
+    group: string;
+  } {
     const envUser = process.env.SOVEREIGN_NODE_SERVICE_USER?.trim();
     const envGroup = process.env.SOVEREIGN_NODE_SERVICE_GROUP?.trim();
     const configUser = runtimeConfig?.openclaw.serviceUser?.trim();
     const configGroup = runtimeConfig?.openclaw.serviceGroup?.trim();
     const user =
-      (envUser !== undefined && envUser.length > 0
+      envUser !== undefined && envUser.length > 0
         ? envUser
         : configUser !== undefined && configUser.length > 0
           ? configUser
-          : DEFAULT_SERVICE_USER);
+          : DEFAULT_SERVICE_USER;
     const group =
-      (envGroup !== undefined && envGroup.length > 0
+      envGroup !== undefined && envGroup.length > 0
         ? envGroup
         : configGroup !== undefined && configGroup.length > 0
           ? configGroup
-          : user || DEFAULT_SERVICE_GROUP);
+          : user || DEFAULT_SERVICE_GROUP;
     return {
       user,
       group,
@@ -6889,11 +6891,7 @@ export default function (api) {
         };
         return this.resolvedRuntimeOwnership;
       } catch (error) {
-        if (
-          isNodeError(error)
-          && (error.code === "ENOENT" || error.code === "ENOTDIR")
-        ) {
-          continue;
+        if (isNodeError(error) && (error.code === "ENOENT" || error.code === "ENOTDIR")) {
         }
       }
     }
@@ -6912,8 +6910,8 @@ export default function (api) {
       await chown(path, ownership.uid, ownership.gid);
     } catch (error) {
       if (
-        isNodeError(error)
-        && (error.code === "ENOENT" || error.code === "EPERM" || error.code === "EACCES")
+        isNodeError(error) &&
+        (error.code === "ENOENT" || error.code === "EPERM" || error.code === "EACCES")
       ) {
         return;
       }
@@ -6936,8 +6934,8 @@ export default function (api) {
       await chown(path, 0, 0);
     } catch (error) {
       if (
-        isNodeError(error)
-        && (error.code === "ENOENT" || error.code === "EPERM" || error.code === "EACCES")
+        isNodeError(error) &&
+        (error.code === "ENOENT" || error.code === "EPERM" || error.code === "EACCES")
       ) {
         return;
       }
@@ -6972,21 +6970,24 @@ const compactBotConfigRecord = (
   Object.fromEntries(
     Object.entries(value).filter(
       (entry): entry is [string, BotConfigValue] =>
-        entry[1] !== undefined
-        && (typeof entry[1] === "string" || typeof entry[1] === "number" || typeof entry[1] === "boolean"),
+        entry[1] !== undefined &&
+        (typeof entry[1] === "string" ||
+          typeof entry[1] === "number" ||
+          typeof entry[1] === "boolean"),
     ),
   );
 
-const isBotConfigRecordMap = (
-  value: unknown,
-): value is Record<string, BotConfigRecord> => {
+const isBotConfigRecordMap = (value: unknown): value is Record<string, BotConfigRecord> => {
   if (!isRecord(value)) {
     return false;
   }
-  return Object.values(value).every((entry) =>
-    isRecord(entry)
-    && Object.values(entry).every((item) =>
-      typeof item === "string" || typeof item === "number" || typeof item === "boolean"));
+  return Object.values(value).every(
+    (entry) =>
+      isRecord(entry) &&
+      Object.values(entry).every(
+        (item) => typeof item === "string" || typeof item === "number" || typeof item === "boolean",
+      ),
+  );
 };
 
 const sortInstalledTemplates = (
@@ -6995,7 +6996,8 @@ const sortInstalledTemplates = (
   [...entries].sort((left, right) =>
     `${left.kind}:${left.id}:${left.version}`.localeCompare(
       `${right.kind}:${right.id}:${right.version}`,
-    ));
+    ),
+  );
 
 const sortToolInstances = (
   entries: RuntimeConfig["sovereignTools"]["instances"],

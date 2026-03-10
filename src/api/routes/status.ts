@@ -4,10 +4,7 @@ import type { AppContainer } from "../../app/create-app.js";
 import { sovereignStatusSchema } from "../../contracts/index.js";
 import { sendApiError, sendApiSuccess } from "../response.js";
 
-export const registerStatusRoutes = (
-  server: FastifyInstance,
-  app: AppContainer,
-): void => {
+export const registerStatusRoutes = (server: FastifyInstance, app: AppContainer): void => {
   server.get("/api/status", async (_request, reply) => {
     try {
       const result = await app.installerService.getStatus();
@@ -17,4 +14,3 @@ export const registerStatusRoutes = (
     }
   });
 };
-

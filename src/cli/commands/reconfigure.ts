@@ -1,4 +1,4 @@
-import { Command } from "commander";
+import type { Command } from "commander";
 
 import type { AppContainer } from "../../app/create-app.js";
 import { reconfigureResultSchema } from "../../contracts/index.js";
@@ -11,10 +11,7 @@ type ReconfigureOpenrouterOptions = {
   json?: boolean;
 };
 
-export const registerReconfigureCommand = (
-  program: Command,
-  app: AppContainer,
-): void => {
+export const registerReconfigureCommand = (program: Command, app: AppContainer): void => {
   const reconfigure = program
     .command("reconfigure")
     .description("Reconfigure installer-managed settings (scaffold)");
@@ -73,7 +70,10 @@ export const registerReconfigureCommand = (
     .command("openrouter")
     .description("Set the OpenRouter model and/or API key for the installed runtime")
     .option("--model <model>", "OpenRouter model id")
-    .option("--api-key <key>", "OpenRouter API key (writes /etc/sovereign-node/secrets/openrouter-api-key)")
+    .option(
+      "--api-key <key>",
+      "OpenRouter API key (writes /etc/sovereign-node/secrets/openrouter-api-key)",
+    )
     .option("--secret-ref <ref>", "Existing secret ref to use instead of writing a new key")
     .option("--json", "Emit JSON output")
     .action(async (opts: ReconfigureOpenrouterOptions) => {

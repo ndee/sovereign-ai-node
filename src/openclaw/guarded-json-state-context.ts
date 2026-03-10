@@ -31,7 +31,9 @@ export const normalizeGuardedJsonStateMatrixActorUserId = (value: string): strin
   return /^@[^:\s]+:[^\s]+$/.test(candidate) ? candidate : null;
 };
 
-export const extractGuardedJsonStateActorFromDirectSessionKey = (sessionKey: string): string | null => {
+export const extractGuardedJsonStateActorFromDirectSessionKey = (
+  sessionKey: string,
+): string | null => {
   if (!/(^|:)(session:)?agent:[^:\s]+:matrix:direct:@[^:\s]+:[^\s]+$/.test(sessionKey)) {
     return null;
   }
@@ -40,9 +42,7 @@ export const extractGuardedJsonStateActorFromDirectSessionKey = (sessionKey: str
   if (markerIndex < 0) {
     return null;
   }
-  return normalizeGuardedJsonStateMatrixActorUserId(
-    sessionKey.slice(markerIndex + marker.length),
-  );
+  return normalizeGuardedJsonStateMatrixActorUserId(sessionKey.slice(markerIndex + marker.length));
 };
 
 export const resolveGuardedJsonStateWorkspaceDir = (workspaceDir: unknown): string => {
@@ -57,7 +57,9 @@ const extractJsonCodeBlocks = (text: string): string[] => {
   return Array.from(matches, (match) => match[1]?.trim() ?? "").filter((value) => value.length > 0);
 };
 
-export const extractGuardedJsonStateActorFromConversationInfoText = (text: string): string | null => {
+export const extractGuardedJsonStateActorFromConversationInfoText = (
+  text: string,
+): string | null => {
   for (const block of extractJsonCodeBlocks(text)) {
     try {
       const parsed = JSON.parse(block);
@@ -71,9 +73,9 @@ export const extractGuardedJsonStateActorFromConversationInfoText = (text: strin
       const normalizedSender =
         sender === undefined ? null : normalizeGuardedJsonStateMatrixActorUserId(sender);
       if (
-        normalizedSenderId !== null
-        && normalizedSender !== null
-        && normalizedSenderId !== normalizedSender
+        normalizedSenderId !== null &&
+        normalizedSender !== null &&
+        normalizedSenderId !== normalizedSender
       ) {
         throw new Error("Conversation metadata exposed conflicting Matrix senders");
       }
@@ -85,8 +87,8 @@ export const extractGuardedJsonStateActorFromConversationInfoText = (text: strin
       }
     } catch (error) {
       if (
-        error instanceof Error
-        && error.message === "Conversation metadata exposed conflicting Matrix senders"
+        error instanceof Error &&
+        error.message === "Conversation metadata exposed conflicting Matrix senders"
       ) {
         throw error;
       }
@@ -103,7 +105,11 @@ export const extractGuardedJsonStateActorFromUserContent = (content: unknown): s
     return null;
   }
   for (const block of content) {
-    if (!isGuardedJsonStateRecord(block) || block.type !== "text" || typeof block.text !== "string") {
+    if (
+      !isGuardedJsonStateRecord(block) ||
+      block.type !== "text" ||
+      typeof block.text !== "string"
+    ) {
       continue;
     }
     const actor = extractGuardedJsonStateActorFromConversationInfoText(block.text);
@@ -120,9 +126,9 @@ export const extractLatestGuardedJsonStateActorFromBranch = (
   for (let index = branchEntries.length - 1; index >= 0; index -= 1) {
     const entry = branchEntries[index];
     if (
-      !isGuardedJsonStateRecord(entry)
-      || entry.type !== "message"
-      || !isGuardedJsonStateRecord(entry.message)
+      !isGuardedJsonStateRecord(entry) ||
+      entry.type !== "message" ||
+      !isGuardedJsonStateRecord(entry.message)
     ) {
       continue;
     }
@@ -171,7 +177,9 @@ export const resolveGuardedJsonStateSessionContext = (input: {
   const sessionKeyActor = extractGuardedJsonStateActorFromDirectSessionKey(matchedSessionKey);
   const branchActor = extractLatestGuardedJsonStateActorFromBranch(input.branchEntries);
   if (sessionKeyActor !== null && branchActor !== null && sessionKeyActor !== branchActor) {
-    throw new Error("Current Matrix sender mismatch between session registry and latest user message");
+    throw new Error(
+      "Current Matrix sender mismatch between session registry and latest user message",
+    );
   }
 
   const actor = branchActor ?? sessionKeyActor;
@@ -197,27 +205,30 @@ export const resolveGuardedJsonStateToolContext = (
   originFrom?: string;
 } => {
   const workspaceDir = resolveGuardedJsonStateWorkspaceDir(input.workspaceDir);
-  const requesterSenderId = typeof input.requesterSenderId === "string"
-    ? normalizeGuardedJsonStateMatrixActorUserId(input.requesterSenderId)
-    : null;
-  const sessionKey = typeof input.sessionKey === "string" && input.sessionKey.trim().length > 0
-    ? input.sessionKey.trim()
-    : undefined;
-  const sessionKeyActor = sessionKey === undefined
-    ? null
-    : extractGuardedJsonStateActorFromDirectSessionKey(sessionKey);
+  const requesterSenderId =
+    typeof input.requesterSenderId === "string"
+      ? normalizeGuardedJsonStateMatrixActorUserId(input.requesterSenderId)
+      : null;
+  const sessionKey =
+    typeof input.sessionKey === "string" && input.sessionKey.trim().length > 0
+      ? input.sessionKey.trim()
+      : undefined;
+  const sessionKeyActor =
+    sessionKey === undefined ? null : extractGuardedJsonStateActorFromDirectSessionKey(sessionKey);
 
   if (
-    requesterSenderId !== null
-    && sessionKeyActor !== null
-    && requesterSenderId !== sessionKeyActor
+    requesterSenderId !== null &&
+    sessionKeyActor !== null &&
+    requesterSenderId !== sessionKeyActor
   ) {
     throw new Error("Current Matrix sender mismatch between tool context sender and session key");
   }
 
   const actor = requesterSenderId ?? sessionKeyActor;
   if (actor === null) {
-    throw new Error("Could not resolve the current Matrix sender from the active OpenClaw tool context");
+    throw new Error(
+      "Could not resolve the current Matrix sender from the active OpenClaw tool context",
+    );
   }
 
   return {

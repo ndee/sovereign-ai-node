@@ -9,16 +9,15 @@ import type {
 import PostalMime from "postal-mime";
 
 import { DEFAULT_PATHS } from "../config/paths.js";
+import type { ImapReadMailResult, ImapSearchMailResult } from "../contracts/tool.js";
 import type { RuntimeConfig } from "../installer/real-service-shared.js";
 import { parseRuntimeConfigDocument } from "../installer/real-service-shared.js";
 import {
-  runWithImapClient,
   type ImapAccountCredentials,
   type ImapClientLike,
+  runWithImapClient,
 } from "../system/imap-client.js";
 import { parseTemplateRef } from "../templates/catalog.js";
-
-import type { ImapReadMailResult, ImapSearchMailResult } from "../contracts/tool.js";
 
 const DEFAULT_MAX_SEARCH_RESULTS = 10;
 const MAX_SEARCH_RESULTS = 50;
@@ -99,14 +98,9 @@ const resolveSecretRefValue = async (secretRef: string): Promise<string> => {
       if (value.length > 0) {
         return value;
       }
-      throw new SovereignToolError(
-        "SECRET_READ_FAILED",
-        "Secret file is empty",
-        false,
-        {
-          secretRef,
-        },
-      );
+      throw new SovereignToolError("SECRET_READ_FAILED", "Secret file is empty", false, {
+        secretRef,
+      });
     } catch (error) {
       if (error instanceof SovereignToolError) {
         throw error;
@@ -150,8 +144,7 @@ const resolveSecretRefValue = async (secretRef: string): Promise<string> => {
   );
 };
 
-const stripSingleTrailingNewline = (value: string): string =>
-  value.replace(/\r?\n$/, "");
+const stripSingleTrailingNewline = (value: string): string => value.replace(/\r?\n$/, "");
 
 const parseBooleanString = (value: string, key: string, instanceId: string): boolean => {
   const normalized = value.trim().toLowerCase();
@@ -237,7 +230,7 @@ const stripHtmlTags = (value: string): string =>
 const splitSearchTerms = (value: string): string[] => {
   const tokens: string[] = [];
   let current = "";
-  let quote: "'" | "\"" | null = null;
+  let quote: "'" | '"' | null = null;
 
   for (const char of value) {
     if (quote !== null) {
@@ -249,7 +242,7 @@ const splitSearchTerms = (value: string): string[] => {
       continue;
     }
 
-    if (char === "\"" || char === "'") {
+    if (char === '"' || char === "'") {
       quote = char;
       continue;
     }
@@ -286,10 +279,13 @@ const normalizeMessageIdSearchValue = (value: string): string => {
   return trimmed;
 };
 
-const applySearchTerm = (term: string, state: {
-  query: SearchObject;
-  textTerms: string[];
-}): void => {
+const applySearchTerm = (
+  term: string,
+  state: {
+    query: SearchObject;
+    textTerms: string[];
+  },
+): void => {
   const separator = term.indexOf(":");
   if (separator <= 0) {
     state.textTerms.push(term);
@@ -431,9 +427,7 @@ const resolveFetchSummary = (
 });
 
 const computeAttachmentSize = (content: ArrayBuffer | string): number =>
-  typeof content === "string"
-    ? Buffer.byteLength(content, "utf8")
-    : content.byteLength;
+  typeof content === "string" ? Buffer.byteLength(content, "utf8") : content.byteLength;
 
 const withMailboxLock = async <T>(
   client: ImapClientLike,
@@ -496,12 +490,14 @@ export class ImapReadonlyToolService {
 
   private readonly runner: ToolRunner;
 
-  constructor(private readonly options: {
-    configLoader?: RuntimeConfigLoader;
-    runner?: ToolRunner;
-    maxMessageBytes?: number;
-    maxTextChars?: number;
-  } = {}) {
+  constructor(
+    private readonly options: {
+      configLoader?: RuntimeConfigLoader;
+      runner?: ToolRunner;
+      maxMessageBytes?: number;
+      maxTextChars?: number;
+    } = {},
+  ) {
     this.loadRuntimeConfig = options.configLoader ?? defaultRuntimeConfigLoader;
     this.runner = options.runner ?? defaultRunner;
   }
@@ -517,43 +513,47 @@ export class ImapReadonlyToolService {
     const searchQuery = buildImapSearchQuery(normalizedQuery);
     const limit = clampSearchLimit(input.limit);
 
-    return await this.runner(instance.account, async (client) =>
-      await withMailboxLock(
-        client,
-        instance.account.mailbox,
-        `sovereign-tool:${instance.instanceId}:search`,
-        async () => {
-          const matches = await client.search(searchQuery, { uid: true });
-          const sortedUids = (matches === false ? [] : matches)
-            .slice()
-            .sort((left, right) => right - left);
-          const selectedUids = sortedUids.slice(0, limit);
-          const fetched = selectedUids.length === 0
-            ? []
-            : await client.fetchAll(
-                selectedUids,
-                {
-                  uid: true,
-                  envelope: true,
-                  flags: true,
-                  internalDate: true,
-                  size: true,
-                },
-                { uid: true },
-              );
-          const messages = fetched
-            .map((message) => resolveFetchSummary(message))
-            .sort((left, right) => right.uid - left.uid);
+    return await this.runner(
+      instance.account,
+      async (client) =>
+        await withMailboxLock(
+          client,
+          instance.account.mailbox,
+          `sovereign-tool:${instance.instanceId}:search`,
+          async () => {
+            const matches = await client.search(searchQuery, { uid: true });
+            const sortedUids = (matches === false ? [] : matches)
+              .slice()
+              .sort((left, right) => right - left);
+            const selectedUids = sortedUids.slice(0, limit);
+            const fetched =
+              selectedUids.length === 0
+                ? []
+                : await client.fetchAll(
+                    selectedUids,
+                    {
+                      uid: true,
+                      envelope: true,
+                      flags: true,
+                      internalDate: true,
+                      size: true,
+                    },
+                    { uid: true },
+                  );
+            const messages = fetched
+              .map((message) => resolveFetchSummary(message))
+              .sort((left, right) => right.uid - left.uid);
 
-          return {
-            instanceId: instance.instanceId,
-            mailbox: instance.account.mailbox,
-            query: input.query,
-            totalMatches: sortedUids.length,
-            messages,
-          };
-        },
-      ));
+            return {
+              instanceId: instance.instanceId,
+              mailbox: instance.account.mailbox,
+              query: input.query,
+              totalMatches: sortedUids.length,
+              messages,
+            };
+          },
+        ),
+    );
   }
 
   async readMail(input: {
@@ -565,90 +565,93 @@ export class ImapReadonlyToolService {
     const maxMessageBytes = this.options.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES;
     const maxTextChars = this.options.maxTextChars ?? DEFAULT_MAX_TEXT_CHARS;
 
-    return await this.runner(instance.account, async (client) =>
-      await withMailboxLock(
-        client,
-        instance.account.mailbox,
-        `sovereign-tool:${instance.instanceId}:read`,
-        async () => {
-          const selection = await resolveMessageSelection(client, input.messageId);
-          const message = await client.fetchOne(
-            selection.uid,
-            {
-              uid: true,
-              envelope: true,
-              flags: true,
-              internalDate: true,
-              size: true,
-              source: true,
-            },
-            { uid: true },
-          );
-
-          if (message === false || message.source === undefined) {
-            throw new SovereignToolError(
-              "IMAP_MESSAGE_NOT_FOUND",
-              `No message found for selector '${input.messageId}'`,
-              false,
+    return await this.runner(
+      instance.account,
+      async (client) =>
+        await withMailboxLock(
+          client,
+          instance.account.mailbox,
+          `sovereign-tool:${instance.instanceId}:read`,
+          async () => {
+            const selection = await resolveMessageSelection(client, input.messageId);
+            const message = await client.fetchOne(
+              selection.uid,
               {
-                selector: input.messageId,
+                uid: true,
+                envelope: true,
+                flags: true,
+                internalDate: true,
+                size: true,
+                source: true,
               },
+              { uid: true },
             );
-          }
 
-          if (typeof message.size === "number" && message.size > maxMessageBytes) {
-            throw new SovereignToolError(
-              "IMAP_MESSAGE_TOO_LARGE",
-              `Message ${selection.uid} exceeds the ${maxMessageBytes}-byte read limit`,
-              false,
-              {
-                uid: selection.uid,
-                size: message.size,
-                maxMessageBytes,
-              },
-            );
-          }
-
-          let parsedWarning: string | undefined;
-          let textBody = "";
-          let htmlAvailable = false;
-          let attachments: ImapReadMailResult["message"]["attachments"] = [];
-
-          try {
-            const parsed = await PostalMime.parse(message.source);
-            textBody = parsed.text ?? "";
-            if (textBody.trim().length === 0 && typeof parsed.html === "string") {
-              textBody = stripHtmlTags(parsed.html);
+            if (message === false || message.source === undefined) {
+              throw new SovereignToolError(
+                "IMAP_MESSAGE_NOT_FOUND",
+                `No message found for selector '${input.messageId}'`,
+                false,
+                {
+                  selector: input.messageId,
+                },
+              );
             }
-            htmlAvailable = typeof parsed.html === "string" && parsed.html.length > 0;
-            attachments = parsed.attachments.map((attachment) => ({
-              filename: attachment.filename,
-              mimeType: attachment.mimeType,
-              disposition: attachment.disposition,
-              related: attachment.related === true,
-              sizeBytes: computeAttachmentSize(attachment.content),
-            }));
-          } catch (error) {
-            parsedWarning = error instanceof Error ? error.message : String(error);
-          }
 
-          const truncated = truncateText(textBody, maxTextChars);
+            if (typeof message.size === "number" && message.size > maxMessageBytes) {
+              throw new SovereignToolError(
+                "IMAP_MESSAGE_TOO_LARGE",
+                `Message ${selection.uid} exceeds the ${maxMessageBytes}-byte read limit`,
+                false,
+                {
+                  uid: selection.uid,
+                  size: message.size,
+                  maxMessageBytes,
+                },
+              );
+            }
 
-          return {
-            instanceId: instance.instanceId,
-            mailbox: instance.account.mailbox,
-            selectedBy: selection.selectedBy,
-            message: {
-              ...resolveFetchSummary(message),
-              text: truncated.text,
-              textTruncated: truncated.truncated,
-              htmlAvailable,
-              attachments,
-              ...(parsedWarning === undefined ? {} : { bodyParseWarning: parsedWarning }),
-            },
-          };
-        },
-      ));
+            let parsedWarning: string | undefined;
+            let textBody = "";
+            let htmlAvailable = false;
+            let attachments: ImapReadMailResult["message"]["attachments"] = [];
+
+            try {
+              const parsed = await PostalMime.parse(message.source);
+              textBody = parsed.text ?? "";
+              if (textBody.trim().length === 0 && typeof parsed.html === "string") {
+                textBody = stripHtmlTags(parsed.html);
+              }
+              htmlAvailable = typeof parsed.html === "string" && parsed.html.length > 0;
+              attachments = parsed.attachments.map((attachment) => ({
+                filename: attachment.filename,
+                mimeType: attachment.mimeType,
+                disposition: attachment.disposition,
+                related: attachment.related === true,
+                sizeBytes: computeAttachmentSize(attachment.content),
+              }));
+            } catch (error) {
+              parsedWarning = error instanceof Error ? error.message : String(error);
+            }
+
+            const truncated = truncateText(textBody, maxTextChars);
+
+            return {
+              instanceId: instance.instanceId,
+              mailbox: instance.account.mailbox,
+              selectedBy: selection.selectedBy,
+              message: {
+                ...resolveFetchSummary(message),
+                text: truncated.text,
+                textTruncated: truncated.truncated,
+                htmlAvailable,
+                attachments,
+                ...(parsedWarning === undefined ? {} : { bodyParseWarning: parsedWarning }),
+              },
+            };
+          },
+        ),
+    );
   }
 
   private async resolveToolInstance(
@@ -690,12 +693,12 @@ export class ImapReadonlyToolService {
     const mailbox = tool.config.mailbox;
     const passwordRef = tool.secretRefs.password;
     if (
-      host === undefined
-      || port === undefined
-      || tls === undefined
-      || username === undefined
-      || mailbox === undefined
-      || passwordRef === undefined
+      host === undefined ||
+      port === undefined ||
+      tls === undefined ||
+      username === undefined ||
+      mailbox === undefined ||
+      passwordRef === undefined
     ) {
       throw new SovereignToolError(
         "TOOL_INSTANCE_INVALID",

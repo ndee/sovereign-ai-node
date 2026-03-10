@@ -7,11 +7,11 @@ import {
   type GuardedJsonStateListResult,
   type GuardedJsonStateMutationResult,
   type GuardedJsonStateShowResult,
-  type ImapReadMailResult,
-  type ImapSearchMailResult,
   guardedJsonStateListResultSchema,
   guardedJsonStateMutationResultSchema,
   guardedJsonStateShowResultSchema,
+  type ImapReadMailResult,
+  type ImapSearchMailResult,
   imapReadMailResultSchema,
   imapSearchMailResultSchema,
 } from "../contracts/tool.js";
@@ -179,12 +179,13 @@ const resolveActorFromMutationOptions = (opts: {
   originFrom?: string;
 }): string => {
   const fromActor = opts.actor === undefined ? null : normalizeMatrixActorUserId(opts.actor);
-  const fromSessionStatus = opts.sessionKey === undefined && opts.originFrom === undefined
-    ? null
-    : resolveMatrixActorFromSessionStatus({
-        ...(opts.sessionKey === undefined ? {} : { sessionKey: opts.sessionKey }),
-        ...(opts.originFrom === undefined ? {} : { originFrom: opts.originFrom }),
-      });
+  const fromSessionStatus =
+    opts.sessionKey === undefined && opts.originFrom === undefined
+      ? null
+      : resolveMatrixActorFromSessionStatus({
+          ...(opts.sessionKey === undefined ? {} : { sessionKey: opts.sessionKey }),
+          ...(opts.originFrom === undefined ? {} : { originFrom: opts.originFrom }),
+        });
 
   if (fromActor !== null && fromSessionStatus !== null && fromActor !== fromSessionStatus) {
     throw new InvalidArgumentError("Expected --actor to match the current session_status actor");
@@ -206,7 +207,10 @@ const resolveMutationInput = (opts: {
   fields: Record<string, string>;
   arrayFields: Record<string, string[]>;
 } => {
-  if (opts.inputJson !== undefined && ((opts.field?.length ?? 0) > 0 || (opts.arrayItem?.length ?? 0) > 0)) {
+  if (
+    opts.inputJson !== undefined &&
+    ((opts.field?.length ?? 0) > 0 || (opts.arrayItem?.length ?? 0) > 0)
+  ) {
     throw new InvalidArgumentError("Use either --input-json or --field/--array-item, not both");
   }
   if (opts.inputJson !== undefined) {
@@ -232,31 +236,33 @@ const main = async (): Promise<void> => {
     .option("--limit <count>", "Maximum messages to return", parsePositiveInteger)
     .option("--config-path <path>", "Override Sovereign runtime config path")
     .option("--json", "Emit JSON output")
-    .action(async (opts: {
-      instance: string;
-      query: string;
-      limit?: number;
-      configPath?: string;
-      json?: boolean;
-    }) => {
-      const command = "imap-search-mail";
-      try {
-        const result = await toolService.searchMail({
-          instanceId: opts.instance,
-          query: opts.query,
-          ...(opts.limit === undefined ? {} : { limit: opts.limit }),
-          ...(opts.configPath === undefined ? {} : { configPath: opts.configPath }),
-        });
-        if (opts.json) {
-          writeCliSuccess(command, result, imapSearchMailResultSchema, true);
-          return;
+    .action(
+      async (opts: {
+        instance: string;
+        query: string;
+        limit?: number;
+        configPath?: string;
+        json?: boolean;
+      }) => {
+        const command = "imap-search-mail";
+        try {
+          const result = await toolService.searchMail({
+            instanceId: opts.instance,
+            query: opts.query,
+            ...(opts.limit === undefined ? {} : { limit: opts.limit }),
+            ...(opts.configPath === undefined ? {} : { configPath: opts.configPath }),
+          });
+          if (opts.json) {
+            writeCliSuccess(command, result, imapSearchMailResultSchema, true);
+            return;
+          }
+          process.stdout.write(`${formatSearchResult(result)}\n`);
+        } catch (error) {
+          writeCliError(command, error, Boolean(opts.json));
+          process.exitCode = 1;
         }
-        process.stdout.write(`${formatSearchResult(result)}\n`);
-      } catch (error) {
-        writeCliError(command, error, Boolean(opts.json));
-        process.exitCode = 1;
-      }
-    });
+      },
+    );
 
   program
     .command("imap-read-mail")
@@ -264,29 +270,31 @@ const main = async (): Promise<void> => {
     .requiredOption("--message-id <selector>", "UID or RFC 5322 Message-ID")
     .option("--config-path <path>", "Override Sovereign runtime config path")
     .option("--json", "Emit JSON output")
-    .action(async (opts: {
-      instance: string;
-      messageId: string;
-      configPath?: string;
-      json?: boolean;
-    }) => {
-      const command = "imap-read-mail";
-      try {
-        const result = await toolService.readMail({
-          instanceId: opts.instance,
-          messageId: opts.messageId,
-          ...(opts.configPath === undefined ? {} : { configPath: opts.configPath }),
-        });
-        if (opts.json) {
-          writeCliSuccess(command, result, imapReadMailResultSchema, true);
-          return;
+    .action(
+      async (opts: {
+        instance: string;
+        messageId: string;
+        configPath?: string;
+        json?: boolean;
+      }) => {
+        const command = "imap-read-mail";
+        try {
+          const result = await toolService.readMail({
+            instanceId: opts.instance,
+            messageId: opts.messageId,
+            ...(opts.configPath === undefined ? {} : { configPath: opts.configPath }),
+          });
+          if (opts.json) {
+            writeCliSuccess(command, result, imapReadMailResultSchema, true);
+            return;
+          }
+          process.stdout.write(`${formatReadResult(result)}\n`);
+        } catch (error) {
+          writeCliError(command, error, Boolean(opts.json));
+          process.exitCode = 1;
         }
-        process.stdout.write(`${formatReadResult(result)}\n`);
-      } catch (error) {
-        writeCliError(command, error, Boolean(opts.json));
-        process.exitCode = 1;
-      }
-    });
+      },
+    );
 
   const guardedState = program
     .command("json-state")
@@ -297,11 +305,7 @@ const main = async (): Promise<void> => {
     .requiredOption("--instance <id>", "Tool instance ID")
     .option("--config-path <path>", "Override Sovereign runtime config path")
     .option("--json", "Emit JSON output")
-    .action(async (opts: {
-      instance: string;
-      configPath?: string;
-      json?: boolean;
-    }) => {
+    .action(async (opts: { instance: string; configPath?: string; json?: boolean }) => {
       const command = "json-state show";
       try {
         const result = await guardedStateService.showState({
@@ -325,29 +329,26 @@ const main = async (): Promise<void> => {
     .requiredOption("--entity <id>", "Policy entity ID")
     .option("--config-path <path>", "Override Sovereign runtime config path")
     .option("--json", "Emit JSON output")
-    .action(async (opts: {
-      instance: string;
-      entity: string;
-      configPath?: string;
-      json?: boolean;
-    }) => {
-      const command = "json-state list";
-      try {
-        const result = await guardedStateService.listEntity({
-          instanceId: opts.instance,
-          entityId: opts.entity,
-          ...(opts.configPath === undefined ? {} : { configPath: opts.configPath }),
-        });
-        if (opts.json) {
-          writeCliSuccess(command, result, guardedJsonStateListResultSchema, true);
-          return;
+    .action(
+      async (opts: { instance: string; entity: string; configPath?: string; json?: boolean }) => {
+        const command = "json-state list";
+        try {
+          const result = await guardedStateService.listEntity({
+            instanceId: opts.instance,
+            entityId: opts.entity,
+            ...(opts.configPath === undefined ? {} : { configPath: opts.configPath }),
+          });
+          if (opts.json) {
+            writeCliSuccess(command, result, guardedJsonStateListResultSchema, true);
+            return;
+          }
+          process.stdout.write(`${formatGuardedStateListResult(result)}\n`);
+        } catch (error) {
+          writeCliError(command, error, Boolean(opts.json));
+          process.exitCode = 1;
         }
-        process.stdout.write(`${formatGuardedStateListResult(result)}\n`);
-      } catch (error) {
-        writeCliError(command, error, Boolean(opts.json));
-        process.exitCode = 1;
-      }
-    });
+      },
+    );
 
   guardedState
     .command("upsert-self")
@@ -361,45 +362,47 @@ const main = async (): Promise<void> => {
     .option("--array-item <key=value>", "Append an array item", collectOption)
     .option("--config-path <path>", "Override Sovereign runtime config path")
     .option("--json", "Emit JSON output")
-    .action(async (opts: {
-      instance: string;
-      entity: string;
-      actor?: string;
-      sessionKey?: string;
-      originFrom?: string;
-      inputJson?: string;
-      field?: string[];
-      arrayItem?: string[];
-      configPath?: string;
-      json?: boolean;
-    }) => {
-      const command = "json-state upsert-self";
-      try {
-        const actor = resolveActorFromMutationOptions(opts);
-        const mutationInput = resolveMutationInput(opts);
-        const result = await guardedStateService.upsertSelf({
-          instanceId: opts.instance,
-          entityId: opts.entity,
-          actor,
-          fields: mutationInput.fields,
-          arrayFields: mutationInput.arrayFields,
-          ...(opts.configPath === undefined ? {} : { configPath: opts.configPath }),
-        });
-        if (opts.json) {
-          writeCliSuccess<GuardedJsonStateMutationResult>(
-            command,
-            result,
-            guardedJsonStateMutationResultSchema,
-            true,
-          );
-          return;
+    .action(
+      async (opts: {
+        instance: string;
+        entity: string;
+        actor?: string;
+        sessionKey?: string;
+        originFrom?: string;
+        inputJson?: string;
+        field?: string[];
+        arrayItem?: string[];
+        configPath?: string;
+        json?: boolean;
+      }) => {
+        const command = "json-state upsert-self";
+        try {
+          const actor = resolveActorFromMutationOptions(opts);
+          const mutationInput = resolveMutationInput(opts);
+          const result = await guardedStateService.upsertSelf({
+            instanceId: opts.instance,
+            entityId: opts.entity,
+            actor,
+            fields: mutationInput.fields,
+            arrayFields: mutationInput.arrayFields,
+            ...(opts.configPath === undefined ? {} : { configPath: opts.configPath }),
+          });
+          if (opts.json) {
+            writeCliSuccess<GuardedJsonStateMutationResult>(
+              command,
+              result,
+              guardedJsonStateMutationResultSchema,
+              true,
+            );
+            return;
+          }
+          process.stdout.write(`${formatGuardedStateMutationResult(result)}\n`);
+        } catch (error) {
+          writeCliError(command, error, Boolean(opts.json));
+          process.exitCode = 1;
         }
-        process.stdout.write(`${formatGuardedStateMutationResult(result)}\n`);
-      } catch (error) {
-        writeCliError(command, error, Boolean(opts.json));
-        process.exitCode = 1;
-      }
-    });
+      },
+    );
 
   guardedState
     .command("delete-self")
@@ -411,41 +414,43 @@ const main = async (): Promise<void> => {
     .requiredOption("--id <value>", "Entity key value")
     .option("--config-path <path>", "Override Sovereign runtime config path")
     .option("--json", "Emit JSON output")
-    .action(async (opts: {
-      instance: string;
-      entity: string;
-      actor?: string;
-      sessionKey?: string;
-      originFrom?: string;
-      id: string;
-      configPath?: string;
-      json?: boolean;
-    }) => {
-      const command = "json-state delete-self";
-      try {
-        const actor = resolveActorFromMutationOptions(opts);
-        const result = await guardedStateService.deleteSelf({
-          instanceId: opts.instance,
-          entityId: opts.entity,
-          actor,
-          id: opts.id,
-          ...(opts.configPath === undefined ? {} : { configPath: opts.configPath }),
-        });
-        if (opts.json) {
-          writeCliSuccess<GuardedJsonStateMutationResult>(
-            command,
-            result,
-            guardedJsonStateMutationResultSchema,
-            true,
-          );
-          return;
+    .action(
+      async (opts: {
+        instance: string;
+        entity: string;
+        actor?: string;
+        sessionKey?: string;
+        originFrom?: string;
+        id: string;
+        configPath?: string;
+        json?: boolean;
+      }) => {
+        const command = "json-state delete-self";
+        try {
+          const actor = resolveActorFromMutationOptions(opts);
+          const result = await guardedStateService.deleteSelf({
+            instanceId: opts.instance,
+            entityId: opts.entity,
+            actor,
+            id: opts.id,
+            ...(opts.configPath === undefined ? {} : { configPath: opts.configPath }),
+          });
+          if (opts.json) {
+            writeCliSuccess<GuardedJsonStateMutationResult>(
+              command,
+              result,
+              guardedJsonStateMutationResultSchema,
+              true,
+            );
+            return;
+          }
+          process.stdout.write(`${formatGuardedStateMutationResult(result)}\n`);
+        } catch (error) {
+          writeCliError(command, error, Boolean(opts.json));
+          process.exitCode = 1;
         }
-        process.stdout.write(`${formatGuardedStateMutationResult(result)}\n`);
-      } catch (error) {
-        writeCliError(command, error, Boolean(opts.json));
-        process.exitCode = 1;
-      }
-    });
+      },
+    );
 
   await program.parseAsync(process.argv);
 };

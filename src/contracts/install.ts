@@ -8,13 +8,7 @@ import {
   isoTimestampSchema,
 } from "./common.js";
 
-export const jobStateSchema = z.enum([
-  "pending",
-  "running",
-  "succeeded",
-  "failed",
-  "canceled",
-]);
+export const jobStateSchema = z.enum(["pending", "running", "succeeded", "failed", "canceled"]);
 
 export const stepStateSchema = z.enum([
   "pending",
@@ -91,8 +85,7 @@ export const openrouterInstallInputSchema = z
       model?: string | undefined;
       apiKey?: string | undefined;
       secretRef?: string | undefined;
-    }) =>
-      value.apiKey !== undefined || value.secretRef !== undefined,
+    }) => value.apiKey !== undefined || value.secretRef !== undefined,
     {
       message: "openrouter.apiKey or openrouter.secretRef is required",
       path: ["secretRef"],
@@ -135,9 +128,7 @@ export const mailSentinelInstallInputSchema = z.object({
 });
 
 export const advancedInstallInputSchema = z.object({
-  rollbackPolicy: z
-    .enum(["safe_partial", "manual", "aggressive_non_destructive"])
-    .optional(),
+  rollbackPolicy: z.enum(["safe_partial", "manual", "aggressive_non_destructive"]).optional(),
   skipPreflight: z.boolean().optional(),
   nonInteractive: z.boolean().optional(),
 });

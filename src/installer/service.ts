@@ -1,4 +1,13 @@
 import type {
+  PreflightRequest,
+  ReconfigureImapRequest,
+  ReconfigureMatrixRequest,
+  ReconfigureOpenrouterRequest,
+  TestAlertRequest,
+  TestImapRequest,
+  TestMatrixRequest,
+} from "../contracts/api.js";
+import type {
   DoctorReport,
   InstallJobStatusResponse,
   InstallRequest,
@@ -11,15 +20,6 @@ import type {
   TestImapResult,
   TestMatrixResult,
 } from "../contracts/index.js";
-import type {
-  PreflightRequest,
-  ReconfigureImapRequest,
-  ReconfigureMatrixRequest,
-  ReconfigureOpenrouterRequest,
-  TestAlertRequest,
-  TestImapRequest,
-  TestMatrixRequest,
-} from "../contracts/api.js";
 
 export type ManagedAgent = {
   id: string;

@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -106,7 +106,10 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(synapseDirStat.mode & 0o777).toBe(0o777);
       expect(postgresDirStat.mode & 0o777).toBe(0o777);
 
-      const homeserverText = await readFile(join(result.projectDir, "synapse", "homeserver.yaml"), "utf8");
+      const homeserverText = await readFile(
+        join(result.projectDir, "synapse", "homeserver.yaml"),
+        "utf8",
+      );
       expect(homeserverText).toContain('server_name: "matrix.local.test"');
       expect(homeserverText).toContain('public_baseurl: "http://matrix.local.test:8008/"');
       expect(homeserverText).toContain("allow_unsafe_locale: true");
@@ -238,11 +241,17 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(composeText).toContain('"80:80"');
       expect(composeText).toContain('"443:443"');
 
-      const homeserverText = await readFile(join(result.projectDir, "synapse", "homeserver.yaml"), "utf8");
+      const homeserverText = await readFile(
+        join(result.projectDir, "synapse", "homeserver.yaml"),
+        "utf8",
+      );
       expect(homeserverText).toContain('public_baseurl: "https://matrix.example.org/"');
       expect(homeserverText).toContain("x_forwarded: true");
 
-      const caddyText = await readFile(join(result.projectDir, "reverse-proxy", "Caddyfile"), "utf8");
+      const caddyText = await readFile(
+        join(result.projectDir, "reverse-proxy", "Caddyfile"),
+        "utf8",
+      );
       expect(caddyText).toContain("matrix.example.org {");
       expect(caddyText).toContain("@onboard path /onboard /onboard/ /onboard/index.html");
       expect(caddyText).toContain("@onboardApi path /onboard/api /onboard/api/*");
@@ -334,7 +343,10 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(composeText).toContain('"8448:443"');
       expect(composeText).not.toContain('"80:80"');
 
-      const caddyText = await readFile(join(result.projectDir, "reverse-proxy", "Caddyfile"), "utf8");
+      const caddyText = await readFile(
+        join(result.projectDir, "reverse-proxy", "Caddyfile"),
+        "utf8",
+      );
       expect(caddyText).toContain("192.168.0.54 {");
       expect(caddyText).toContain("default_sni 192.168.0.54");
       expect(caddyText).toContain("tls internal");
@@ -432,7 +444,10 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(composeText).not.toContain('"80:80"');
       expect(composeText).not.toContain(':443"');
 
-      const caddyText = await readFile(join(result.projectDir, "reverse-proxy", "Caddyfile"), "utf8");
+      const caddyText = await readFile(
+        join(result.projectDir, "reverse-proxy", "Caddyfile"),
+        "utf8",
+      );
       expect(caddyText).toContain(":80 {");
       expect(caddyText).not.toContain("tls internal");
       expect(caddyText).not.toContain("/downloads/caddy-root-ca.crt");
@@ -464,9 +479,9 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
         if (input.command === "docker") {
           const args = input.args ?? [];
           if (
-            args.includes("config")
-            || args.includes("up")
-            || args.includes("register_new_matrix_user")
+            args.includes("config") ||
+            args.includes("up") ||
+            args.includes("register_new_matrix_user")
           ) {
             return {
               command: [input.command, ...args].join(" "),
@@ -591,10 +606,10 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
         if (input.command === "docker") {
           const args = input.args ?? [];
           if (
-            args.includes("config")
-            || args.includes("up")
-            || args.includes("down")
-            || args.includes("register_new_matrix_user")
+            args.includes("config") ||
+            args.includes("up") ||
+            args.includes("down") ||
+            args.includes("register_new_matrix_user")
           ) {
             return {
               command: [input.command, ...args].join(" "),
@@ -681,10 +696,10 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
         if (input.command === "docker") {
           const args = input.args ?? [];
           if (
-            args.includes("config")
-            || args.includes("up")
-            || args.includes("down")
-            || args.includes("register_new_matrix_user")
+            args.includes("config") ||
+            args.includes("up") ||
+            args.includes("down") ||
+            args.includes("register_new_matrix_user")
           ) {
             return {
               command: [input.command, ...args].join(" "),
@@ -784,10 +799,10 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
         if (input.command === "docker") {
           const args = input.args ?? [];
           if (
-            args.includes("config")
-            || args.includes("up")
-            || args.includes("down")
-            || args.includes("register_new_matrix_user")
+            args.includes("config") ||
+            args.includes("up") ||
+            args.includes("down") ||
+            args.includes("register_new_matrix_user")
           ) {
             return {
               command: [input.command, ...args].join(" "),

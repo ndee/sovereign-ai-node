@@ -5,9 +5,9 @@ import { createServer } from "node:http";
 import { dirname, resolve } from "node:path";
 
 import {
+  type MatrixOnboardingState,
   parseMatrixOnboardingState,
   redeemMatrixOnboardingCode,
-  type MatrixOnboardingState,
 } from "../onboarding/bootstrap-code.js";
 
 const bindHost = process.env.SOVEREIGN_ONBOARDING_BIND_HOST ?? "0.0.0.0";
@@ -58,37 +58,38 @@ const resolveAllowedSecretPath = (secretRef: string): string => {
 
 const readBody = async (
   request: import("node:http").IncomingMessage,
-): Promise<Record<string, unknown>> => new Promise((resolveBody, reject) => {
-  const chunks: Buffer[] = [];
-  let totalLength = 0;
-  request.on("data", (chunk: Buffer) => {
-    totalLength += chunk.length;
-    if (totalLength > maxBodyBytes) {
-      reject(new Error("Request body too large"));
-      request.destroy();
-      return;
-    }
-    chunks.push(chunk);
-  });
-  request.on("error", reject);
-  request.on("end", () => {
-    const raw = Buffer.concat(chunks).toString("utf8").trim();
-    if (raw.length === 0) {
-      resolveBody({});
-      return;
-    }
-    try {
-      const parsed = JSON.parse(raw) as unknown;
-      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-        reject(new Error("Request body must be a JSON object"));
+): Promise<Record<string, unknown>> =>
+  new Promise((resolveBody, reject) => {
+    const chunks: Buffer[] = [];
+    let totalLength = 0;
+    request.on("data", (chunk: Buffer) => {
+      totalLength += chunk.length;
+      if (totalLength > maxBodyBytes) {
+        reject(new Error("Request body too large"));
+        request.destroy();
         return;
       }
-      resolveBody(parsed as Record<string, unknown>);
-    } catch (error) {
-      reject(error);
-    }
+      chunks.push(chunk);
+    });
+    request.on("error", reject);
+    request.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf8").trim();
+      if (raw.length === 0) {
+        resolveBody({});
+        return;
+      }
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+          reject(new Error("Request body must be a JSON object"));
+          return;
+        }
+        resolveBody(parsed as Record<string, unknown>);
+      } catch (error) {
+        reject(error);
+      }
+    });
   });
-});
 
 const main = async (): Promise<void> => {
   const server = createServer(async (request, response) => {
@@ -113,9 +114,12 @@ const main = async (): Promise<void> => {
       await writeState(outcome.state);
       if (!outcome.ok) {
         const status =
-          outcome.reason === "consumed" ? 410
-            : outcome.reason === "expired" ? 410
-              : outcome.reason === "locked" ? 429
+          outcome.reason === "consumed"
+            ? 410
+            : outcome.reason === "expired"
+              ? 410
+              : outcome.reason === "locked"
+                ? 429
                 : 401;
         sendJson(response, status, {
           error: outcome.reason,

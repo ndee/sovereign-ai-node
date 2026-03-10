@@ -15,4 +15,3 @@ export const DEFAULT_PATHS: SovereignPaths = {
   installJobsDir: "/var/lib/sovereign-node/install-jobs",
   openclawServiceHome: "/var/lib/sovereign-node/openclaw-home",
 };
-

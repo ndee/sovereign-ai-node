@@ -23,12 +23,7 @@ export const checkResultSchema = z.object({
   details: z.record(z.string(), z.unknown()).optional(),
 });
 
-export const componentHealthSchema = z.enum([
-  "healthy",
-  "degraded",
-  "unhealthy",
-  "unknown",
-]);
+export const componentHealthSchema = z.enum(["healthy", "degraded", "unhealthy", "unknown"]);
 
 export const baseSuccessEnvelopeSchema = <T extends z.ZodTypeAny>(resultSchema: T) =>
   z.object({
@@ -51,10 +46,7 @@ export type ErrorDetail = z.infer<typeof errorDetailSchema>;
 export type CheckResult = z.infer<typeof checkResultSchema>;
 export type ComponentHealth = z.infer<typeof componentHealthSchema>;
 
-export const normalizeErrorDetail = (
-  error: unknown,
-  fallbackCode: string,
-): ErrorDetail => {
+export const normalizeErrorDetail = (error: unknown, fallbackCode: string): ErrorDetail => {
   if (error instanceof Error) {
     return {
       code: fallbackCode,
@@ -65,10 +57,7 @@ export const normalizeErrorDetail = (
 
   if (isRecord(error)) {
     return {
-      code:
-        typeof error.code === "string" && error.code.length > 0
-          ? error.code
-          : fallbackCode,
+      code: typeof error.code === "string" && error.code.length > 0 ? error.code : fallbackCode,
       message:
         typeof error.message === "string" && error.message.length > 0
           ? error.message

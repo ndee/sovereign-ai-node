@@ -13,9 +13,7 @@ export interface OpenClawGatewayServiceManager {
   restart(): Promise<void>;
 }
 
-export class ShellOpenClawGatewayServiceManager
-  implements OpenClawGatewayServiceManager
-{
+export class ShellOpenClawGatewayServiceManager implements OpenClawGatewayServiceManager {
   constructor(
     private readonly execRunner: ExecRunner,
     private readonly logger: Logger,

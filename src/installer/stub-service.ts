@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto";
-
-import { CONTRACT_VERSION, type CheckResult } from "../contracts/common.js";
+import type {
+  PreflightRequest,
+  ReconfigureImapRequest,
+  ReconfigureMatrixRequest,
+  ReconfigureOpenrouterRequest,
+  TestAlertRequest,
+  TestImapRequest,
+  TestMatrixRequest,
+} from "../contracts/api.js";
+import { type CheckResult, CONTRACT_VERSION } from "../contracts/common.js";
 import type {
   DoctorReport,
   InstallJobStatusResponse,
@@ -14,15 +22,6 @@ import type {
   TestImapResult,
   TestMatrixResult,
 } from "../contracts/index.js";
-import type {
-  PreflightRequest,
-  ReconfigureImapRequest,
-  ReconfigureMatrixRequest,
-  ReconfigureOpenrouterRequest,
-  TestAlertRequest,
-  TestImapRequest,
-  TestMatrixRequest,
-} from "../contracts/api.js";
 import type { Logger } from "../logging/logger.js";
 import type {
   InstallerService,
@@ -41,7 +40,11 @@ import type {
 
 const now = () => new Date().toISOString();
 
-const check = (id: string, message: string, status: CheckResult["status"] = "pass"): CheckResult => ({
+const check = (
+  id: string,
+  message: string,
+  status: CheckResult["status"] = "pass",
+): CheckResult => ({
   id,
   name: id,
   status,
@@ -231,10 +234,7 @@ export class StubInstallerService implements InstallerService {
         check("openclaw-version-pin", "OpenClaw version pin check not implemented", "warn"),
         check("gateway-service", "OpenClaw gateway service check not implemented", "warn"),
       ],
-      suggestedCommands: [
-        "pnpm install",
-        "pnpm dev:cli -- doctor --json",
-      ],
+      suggestedCommands: ["pnpm install", "pnpm dev:cli -- doctor --json"],
     };
   }
 
@@ -359,7 +359,8 @@ export class StubInstallerService implements InstallerService {
           id: "mail-sentinel",
           version: "1.0.0",
           displayName: "Mail Sentinel",
-          description: "Conversational inbox sentinel for read-only IMAP triage and Matrix summaries.",
+          description:
+            "Conversational inbox sentinel for read-only IMAP triage and Matrix summaries.",
           defaultInstall: true,
           templateRef: "mail-sentinel@1.0.0",
           installed: true,
@@ -436,14 +437,12 @@ export class StubInstallerService implements InstallerService {
     };
   }
 
-  async createSovereignToolInstance(
-    req: {
-      id: string;
-      templateRef: string;
-      config?: Record<string, string>;
-      secretRefs?: Record<string, string>;
-    },
-  ): Promise<SovereignToolInstanceUpsertResult> {
+  async createSovereignToolInstance(req: {
+    id: string;
+    templateRef: string;
+    config?: Record<string, string>;
+    secretRefs?: Record<string, string>;
+  }): Promise<SovereignToolInstanceUpsertResult> {
     return {
       tool: {
         id: req.id,
@@ -456,14 +455,12 @@ export class StubInstallerService implements InstallerService {
     };
   }
 
-  async updateSovereignToolInstance(
-    req: {
-      id: string;
-      templateRef?: string;
-      config?: Record<string, string>;
-      secretRefs?: Record<string, string>;
-    },
-  ): Promise<SovereignToolInstanceUpsertResult> {
+  async updateSovereignToolInstance(req: {
+    id: string;
+    templateRef?: string;
+    config?: Record<string, string>;
+    secretRefs?: Record<string, string>;
+  }): Promise<SovereignToolInstanceUpsertResult> {
     return {
       tool: {
         id: req.id,

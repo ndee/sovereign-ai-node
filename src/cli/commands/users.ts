@@ -16,10 +16,7 @@ type UserInviteOptions = {
   json?: boolean;
 };
 
-export const registerUsersCommand = (
-  program: Command,
-  app: AppContainer,
-): void => {
+export const registerUsersCommand = (program: Command, app: AppContainer): void => {
   const users = program
     .command("users")
     .description("Manage local human Matrix users for this node");

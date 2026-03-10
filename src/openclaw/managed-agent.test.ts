@@ -14,7 +14,7 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
         return {
           command: serialized,
           exitCode: 0,
-          stdout: serialized === "openclaw cron list --json" ? "{\"jobs\":[]}" : "",
+          stdout: serialized === "openclaw cron list --json" ? '{"jobs":[]}' : "",
           stderr: "",
         };
       },
@@ -75,7 +75,7 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
           return {
             command: serialized,
             exitCode: 0,
-            stdout: "{\"jobs\":[]}",
+            stdout: '{"jobs":[]}',
             stderr: "",
           };
         }
@@ -121,7 +121,7 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
           return {
             command: serialized,
             exitCode: 0,
-            stdout: "{\"jobs\":[]}",
+            stdout: '{"jobs":[]}',
             stderr: "",
           };
         }
@@ -172,9 +172,7 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
     expect(result.agentCommand).toContain(
       "openclaw agents upsert --id mail-sentinel --workspace /tmp/ws",
     );
-    expect(calls).toContain(
-      "openclaw agents upsert --id mail-sentinel --workspace /tmp/ws",
-    );
+    expect(calls).toContain("openclaw agents upsert --id mail-sentinel --workspace /tmp/ws");
   });
 
   it("removes existing cron jobs with the same name before re-registering", async () => {
@@ -249,7 +247,7 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
           return {
             command: serialized,
             exitCode: 0,
-            stdout: "{\"jobs\":[]}",
+            stdout: '{"jobs":[]}',
             stderr: "",
           };
         }
