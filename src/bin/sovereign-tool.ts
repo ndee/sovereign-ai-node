@@ -17,6 +17,7 @@ import {
 } from "../contracts/tool.js";
 import {
   GuardedJsonStateToolService,
+  normalizeMatrixActorUserId,
   resolveMatrixActorFromSessionStatus,
 } from "../tooling/guarded-json-state.js";
 import { ImapReadonlyToolService } from "../tooling/imap-readonly.js";
@@ -150,17 +151,19 @@ const parseInputJsonAssignments = (
 
   const fields: Record<string, string> = {};
   const arrayFields: Record<string, string[]> = {};
+  const isScalar = (entry: unknown): entry is string | number | boolean =>
+    typeof entry === "string" || typeof entry === "number" || typeof entry === "boolean";
   for (const [key, entry] of Object.entries(parsed)) {
-    if (typeof entry === "string") {
-      fields[key] = entry;
+    if (isScalar(entry)) {
+      fields[key] = String(entry);
       continue;
     }
-    if (Array.isArray(entry) && entry.every((item) => typeof item === "string")) {
-      arrayFields[key] = [...entry];
+    if (Array.isArray(entry) && entry.every((item) => isScalar(item))) {
+      arrayFields[key] = entry.map((item) => String(item));
       continue;
     }
     throw new InvalidArgumentError(
-      `Expected --input-json.${key} to be a string or an array of strings`,
+      `Expected --input-json.${key} to be a scalar or an array of scalars`,
     );
   }
 
@@ -170,14 +173,30 @@ const parseInputJsonAssignments = (
   };
 };
 
-const resolveActorFromSessionStatusOptions = (opts: {
+const resolveActorFromMutationOptions = (opts: {
+  actor?: string;
   sessionKey?: string;
   originFrom?: string;
-}): string =>
-  resolveMatrixActorFromSessionStatus({
-    ...(opts.sessionKey === undefined ? {} : { sessionKey: opts.sessionKey }),
-    ...(opts.originFrom === undefined ? {} : { originFrom: opts.originFrom }),
-  });
+}): string => {
+  const fromActor = opts.actor === undefined ? null : normalizeMatrixActorUserId(opts.actor);
+  const fromSessionStatus = opts.sessionKey === undefined && opts.originFrom === undefined
+    ? null
+    : resolveMatrixActorFromSessionStatus({
+        ...(opts.sessionKey === undefined ? {} : { sessionKey: opts.sessionKey }),
+        ...(opts.originFrom === undefined ? {} : { originFrom: opts.originFrom }),
+      });
+
+  if (fromActor !== null && fromSessionStatus !== null && fromActor !== fromSessionStatus) {
+    throw new InvalidArgumentError("Expected --actor to match the current session_status actor");
+  }
+  if (fromActor !== null) {
+    return fromActor;
+  }
+  if (fromSessionStatus !== null) {
+    return fromSessionStatus;
+  }
+  throw new InvalidArgumentError("Expected --actor or current session_status metadata");
+};
 
 const resolveMutationInput = (opts: {
   inputJson?: string;
@@ -334,6 +353,7 @@ const main = async (): Promise<void> => {
     .command("upsert-self")
     .requiredOption("--instance <id>", "Tool instance ID")
     .requiredOption("--entity <id>", "Policy entity ID")
+    .option("--actor <value>", "Current Matrix actor user id")
     .option("--session-key <value>", "Current session_status.sessionKey value")
     .option("--origin-from <value>", "Current session_status.origin.from value")
     .option("--input-json <json>", "JSON object with scalar and string-array fields")
@@ -344,6 +364,7 @@ const main = async (): Promise<void> => {
     .action(async (opts: {
       instance: string;
       entity: string;
+      actor?: string;
       sessionKey?: string;
       originFrom?: string;
       inputJson?: string;
@@ -354,7 +375,7 @@ const main = async (): Promise<void> => {
     }) => {
       const command = "json-state upsert-self";
       try {
-        const actor = resolveActorFromSessionStatusOptions(opts);
+        const actor = resolveActorFromMutationOptions(opts);
         const mutationInput = resolveMutationInput(opts);
         const result = await guardedStateService.upsertSelf({
           instanceId: opts.instance,
@@ -384,6 +405,7 @@ const main = async (): Promise<void> => {
     .command("delete-self")
     .requiredOption("--instance <id>", "Tool instance ID")
     .requiredOption("--entity <id>", "Policy entity ID")
+    .option("--actor <value>", "Current Matrix actor user id")
     .option("--session-key <value>", "Current session_status.sessionKey value")
     .option("--origin-from <value>", "Current session_status.origin.from value")
     .requiredOption("--id <value>", "Entity key value")
@@ -392,6 +414,7 @@ const main = async (): Promise<void> => {
     .action(async (opts: {
       instance: string;
       entity: string;
+      actor?: string;
       sessionKey?: string;
       originFrom?: string;
       id: string;
@@ -400,7 +423,7 @@ const main = async (): Promise<void> => {
     }) => {
       const command = "json-state delete-self";
       try {
-        const actor = resolveActorFromSessionStatusOptions(opts);
+        const actor = resolveActorFromMutationOptions(opts);
         const result = await guardedStateService.deleteSelf({
           instanceId: opts.instance,
           entityId: opts.entity,

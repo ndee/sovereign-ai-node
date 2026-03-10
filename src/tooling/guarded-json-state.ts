@@ -58,6 +58,7 @@ const childArrayEntityPolicySchema = z.object({
   ensureParentEntity: z.string().min(1).optional(),
   childArrayField: z.string().min(1),
   keyField: z.string().min(1),
+  selfKeyTemplate: z.string().min(1).optional(),
   updatedAtField: z.string().min(1).optional(),
   defaults: z.record(z.string(), defaultValueSchema).default({}),
   inputFields: z.record(z.string(), z.enum(["string", "string[]"])).default({}),
@@ -131,6 +132,18 @@ const matrixOriginFromSchema = z.string().regex(
 );
 
 const nowIso = (): string => new Date().toISOString();
+
+const compactIsoTimestamp = (value: string): string =>
+  value
+    .replaceAll("-", "")
+    .replaceAll(":", "")
+    .replaceAll(".", "");
+
+export const normalizeMatrixActorUserId = (value: string): string => {
+  const trimmed = value.trim();
+  const candidate = trimmed.startsWith("matrix:") ? trimmed.slice("matrix:".length) : trimmed;
+  return actorUserIdSchema.parse(candidate);
+};
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -215,6 +228,9 @@ const renderTemplateString = (
     if (token === "now") {
       return context.now;
     }
+    if (token === "nowCompact") {
+      return compactIsoTimestamp(context.now);
+    }
     if (token.startsWith("input.")) {
       const key = token.slice("input.".length);
       const value = context.input[key];
@@ -284,10 +300,7 @@ const extractActorFromMatrixOriginFrom = (originFrom: string): string | null => 
   if (!matrixOriginFromSchema.safeParse(originFrom).success) {
     return null;
   }
-  const candidate = originFrom.startsWith("matrix:")
-    ? originFrom.slice("matrix:".length)
-    : originFrom;
-  return actorUserIdSchema.safeParse(candidate).success ? candidate : null;
+  return normalizeMatrixActorUserId(originFrom);
 };
 
 export const resolveMatrixActorFromSessionStatus = (input: {
@@ -477,6 +490,14 @@ const applyChildMetadata = (
   if (policy.updatedAtField !== undefined) {
     record[policy.updatedAtField] = context.now;
   }
+};
+
+const findScalarInput = (
+  input: Record<string, string | string[]>,
+  field: string,
+): string | undefined => {
+  const value = input[field];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 };
 
 export class GuardedJsonStateToolService {
@@ -732,7 +753,10 @@ export class GuardedJsonStateToolService {
     record: Record<string, unknown>;
   } {
     const parent = this.resolveOrCreateSelfParent(state, policy, entity, context);
-    const childId = this.requireScalarInput(context.input, entity.keyField, entityId);
+    const childId = findScalarInput(context.input, entity.keyField)
+      ?? (entity.selfKeyTemplate === undefined
+        ? this.requireScalarInput(context.input, entity.keyField, entityId)
+        : renderTemplateString(entity.selfKeyTemplate, context));
     const allParents = parseRootArray(state, entity.parentCollection);
     const foreignOwner = allParents.find((candidate) => {
       const children = Array.isArray(candidate[entity.childArrayField])

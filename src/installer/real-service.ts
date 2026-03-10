@@ -52,6 +52,19 @@ import type {
   ManagedAgentRegistrationResult,
   OpenClawManagedAgentRegistrar,
 } from "../openclaw/managed-agent.js";
+import {
+  GUARDED_JSON_STATE_OPENCLAW_PLUGIN_ID,
+  GUARDED_JSON_STATE_OPENCLAW_TOOL_NAME,
+  extractGuardedJsonStateActorFromConversationInfoText,
+  extractGuardedJsonStateActorFromDirectSessionKey,
+  extractGuardedJsonStateActorFromUserContent,
+  extractLatestGuardedJsonStateActorFromBranch,
+  isGuardedJsonStateRecord,
+  normalizeGuardedJsonStateMatrixActorUserId,
+  resolveGuardedJsonStateSessionContext,
+  resolveGuardedJsonStateToolContext,
+  resolveGuardedJsonStateWorkspaceDir,
+} from "../openclaw/guarded-json-state-context.js";
 import type { ImapTester } from "../system/imap.js";
 import type {
   BundledMatrixAccountsResult,
@@ -2038,10 +2051,12 @@ export class RealInstallerService implements InstallerService {
     }
     if (manifest.id === "guarded-json-state") {
       return [
-        "  note: in Matrix conversations, call `session_status` first with `{}` only and pass whichever of `session_status.sessionKey` / `session_status.origin.from` are present; in DMs, `session_status.sessionKey` alone is sufficient",
-        "  note: for upserts, pass mutation fields via `--input-json <json-object>` and never as a raw trailing JSON argument or a shell pipe",
-        "  note: never use shell substitution, jq, cat, env vars, temp files, or guessed paths to recover session fields; use the literal values returned by the current `session_status` call",
+        `  note: use the OpenClaw tool \`${GUARDED_JSON_STATE_OPENCLAW_TOOL_NAME}\` for all reads and mutations; do not use \`exec\` or direct file tools`,
+        "  note: the guarded tool resolves the current Matrix sender from the active OpenClaw session on its own; never pass `--actor` or session metadata manually",
+        "  note: for upserts, pass mutation fields through the tool's `input` object and never as raw shell JSON",
+        "  note: if the policy defines a generated self key for the entity, you may omit the id field in the tool `input`; the CLI will generate it",
         "  note: for string-array fields, prefer JSON arrays; the CLI also normalizes a single scalar into a one-item array",
+        "  note: the CLI also normalizes numeric and boolean scalar inputs into strings",
         "  note: use `show` or `list` for reads and reserve `upsert-self` / `delete-self` for creator-owned mutations",
       ];
     }
@@ -2052,6 +2067,359 @@ export class RealInstallerService implements InstallerService {
       ];
     }
     return [];
+  }
+
+  private listDocumentedOpenClawToolNames(manifest: ToolTemplateDefinition): string[] {
+    return dedupeStrings(manifest.openclawToolNames ?? []);
+  }
+
+  private listRequiredOpenClawPluginIds(botPackages: LoadedBotPackage[]): string[] {
+    return dedupeStrings([
+      "matrix",
+      ...botPackages.flatMap((botPackage) =>
+        botPackage.toolTemplates.flatMap((toolTemplate) => toolTemplate.manifest.openclawPlugins ?? [])),
+    ]);
+  }
+
+  private async listManagedOpenClawPluginIds(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<string[]> {
+    const pluginIds = new Set<string>();
+    for (const agent of runtimeConfig.openclawProfile.agents) {
+      for (const tool of this.resolveBoundToolInstances(runtimeConfig, agent.toolInstanceIds ?? [])) {
+        const manifest = await this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef);
+        for (const pluginId of manifest.openclawPlugins ?? []) {
+          pluginIds.add(pluginId);
+        }
+      }
+    }
+    return Array.from(pluginIds).sort();
+  }
+
+  private async listManagedOpenClawPluginLoadPaths(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<string[]> {
+    const pluginIds = await this.listManagedOpenClawPluginIds(runtimeConfig);
+    return pluginIds.map((pluginId) =>
+      join(runtimeConfig.openclaw.openclawHome, "extensions", pluginId));
+  }
+
+  private renderGuardedJsonStateWorkspacePluginManifest(): string {
+    return JSON.stringify(
+      {
+        id: GUARDED_JSON_STATE_OPENCLAW_PLUGIN_ID,
+        configSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {},
+        },
+      },
+      null,
+      2,
+    );
+  }
+
+  private renderGuardedJsonStateWorkspacePluginConfig(input: {
+    workspaceBindings: Record<string, string[]>;
+    runtimeConfigPath: string;
+  }): string {
+    return JSON.stringify(
+      {
+        executablePath: SOVEREIGN_EXECUTABLE_PATHS["sovereign-tool"],
+        runtimeConfigPath: input.runtimeConfigPath,
+        workspaceBindings: Object.fromEntries(
+          Object.entries(input.workspaceBindings)
+            .map(([workspace, toolInstanceIds]) => [workspace, dedupeStrings(toolInstanceIds)] as const)
+            .sort(([left], [right]) => left.localeCompare(right)),
+        ),
+      },
+      null,
+      2,
+    );
+  }
+
+  private renderGuardedJsonStateWorkspacePluginRuntime(): string {
+    const exports = [
+      ["isGuardedJsonStateRecord", isGuardedJsonStateRecord],
+      ["normalizeGuardedJsonStateMatrixActorUserId", normalizeGuardedJsonStateMatrixActorUserId],
+      ["extractGuardedJsonStateActorFromDirectSessionKey", extractGuardedJsonStateActorFromDirectSessionKey],
+      ["resolveGuardedJsonStateWorkspaceDir", resolveGuardedJsonStateWorkspaceDir],
+      ["extractGuardedJsonStateActorFromConversationInfoText", extractGuardedJsonStateActorFromConversationInfoText],
+      ["extractGuardedJsonStateActorFromUserContent", extractGuardedJsonStateActorFromUserContent],
+      ["extractLatestGuardedJsonStateActorFromBranch", extractLatestGuardedJsonStateActorFromBranch],
+      ["resolveGuardedJsonStateSessionContext", resolveGuardedJsonStateSessionContext],
+      ["resolveGuardedJsonStateToolContext", resolveGuardedJsonStateToolContext],
+    ] as const;
+    return `${exports.map(([name, fn]) => `export const ${name} = ${fn.toString()};`).join("\n\n")}\n`;
+  }
+
+  private renderGuardedJsonStateWorkspacePluginIndex(): string {
+    return `import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
+
+import {
+  resolveGuardedJsonStateToolContext,
+  resolveGuardedJsonStateWorkspaceDir,
+} from "./runtime.js";
+
+const TOOL_NAME = ${JSON.stringify(GUARDED_JSON_STATE_OPENCLAW_TOOL_NAME)};
+const ACTIONS = ["show", "list", "upsert-self", "delete-self"];
+
+let cachedConfig;
+const loadConfig = async () => {
+  if (cachedConfig !== undefined) {
+    return cachedConfig;
+  }
+  cachedConfig = JSON.parse(await readFile(new URL("./plugin-config.json", import.meta.url), "utf8"));
+  return cachedConfig;
+};
+
+const runCommand = async (command, args) =>
+  await new Promise((resolve) => {
+    const child = spawn(command, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", (error) => {
+      resolve({
+        exitCode: 127,
+        stdout,
+        stderr: stderr.length > 0 ? stderr : String(error?.message ?? error),
+      });
+    });
+    child.on("close", (exitCode) => {
+      resolve({
+        exitCode: typeof exitCode === "number" ? exitCode : 1,
+        stdout,
+        stderr,
+      });
+    });
+  });
+
+const readJsonText = (value) => {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  return trimmed.length === 0 ? undefined : trimmed;
+};
+
+const requireString = (value, label) => {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(\`Expected \${label}\`);
+  }
+  return value.trim();
+};
+
+const normalizeInput = (value) => {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Expected input to be a JSON object");
+  }
+  return value;
+};
+
+const buildCommandArgs = (params, config, sessionContext) => {
+  const args = ["json-state", params.action, "--instance", requireString(params.instance, "instance")];
+  if (typeof config.runtimeConfigPath === "string" && config.runtimeConfigPath.length > 0) {
+    args.push("--config-path", config.runtimeConfigPath);
+  }
+  if (params.action === "show") {
+    args.push("--json");
+    return args;
+  }
+  args.push("--entity", requireString(params.entity, "entity"));
+  if (params.action === "list") {
+    args.push("--json");
+    return args;
+  }
+  if (sessionContext === undefined) {
+    throw new Error("Missing current Matrix session context for mutation");
+  }
+  if (typeof sessionContext.sessionKey === "string" && sessionContext.sessionKey.length > 0) {
+    args.push("--session-key", sessionContext.sessionKey);
+  }
+  if (typeof sessionContext.originFrom === "string" && sessionContext.originFrom.length > 0) {
+    args.push("--origin-from", sessionContext.originFrom);
+  }
+  if (params.action === "delete-self") {
+    args.push("--id", requireString(params.id, "id"), "--json");
+    return args;
+  }
+  const input = normalizeInput(params.input);
+  args.push("--input-json", JSON.stringify(input ?? {}), "--json");
+  return args;
+};
+
+const parseCommandOutput = (stdout) => {
+  const text = readJsonText(stdout);
+  if (text === undefined) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+};
+
+export default function (api) {
+  api.registerTool(
+    (toolContext) => ({
+      name: TOOL_NAME,
+      label: TOOL_NAME,
+      description: "Read and mutate guarded JSON state for this agent's bound tool instances. Matrix actor resolution is derived from the active OpenClaw session.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["instance", "action"],
+        properties: {
+          instance: {
+            type: "string",
+            description: "Bound guarded state tool instance id",
+          },
+          action: {
+            type: "string",
+            enum: ACTIONS,
+            description: "State operation to perform",
+          },
+          entity: {
+            type: "string",
+            description: "Entity id for list or mutation calls",
+          },
+          id: {
+            type: "string",
+            description: "Record id for delete-self",
+          },
+          input: {
+            type: "object",
+            additionalProperties: true,
+            description: "Mutation payload for upsert-self",
+          },
+        },
+      },
+      async execute(_toolCallId, params) {
+        const config = await loadConfig();
+        const workspaceDir = resolveGuardedJsonStateWorkspaceDir(toolContext?.workspaceDir);
+        const allowedInstanceIds = Array.isArray(config.workspaceBindings?.[workspaceDir])
+          ? config.workspaceBindings[workspaceDir]
+          : [];
+        if (!allowedInstanceIds.includes(params.instance)) {
+          return {
+            content: [{ type: "text", text: \`Instance '\${String(params.instance ?? "")}' is not bound to this agent.\` }],
+            details: {
+              status: "failed",
+              exitCode: 2,
+              command: TOOL_NAME,
+            },
+          };
+        }
+
+        let sessionContext;
+        if (params.action === "upsert-self" || params.action === "delete-self") {
+          sessionContext = resolveGuardedJsonStateToolContext(toolContext ?? {});
+        }
+
+        const args = buildCommandArgs(params, config, sessionContext);
+        const result = await runCommand(config.executablePath, args);
+        const parsed = parseCommandOutput(result.stdout);
+        const text =
+          readJsonText(result.stdout)
+          ?? readJsonText(result.stderr)
+          ?? \`\${TOOL_NAME} exited with code \${String(result.exitCode)}\`;
+        return {
+          content: [{ type: "text", text }],
+          details: {
+            status: result.exitCode === 0 ? "completed" : "failed",
+            exitCode: result.exitCode,
+            command: [config.executablePath, ...args].join(" "),
+            ...(sessionContext === undefined
+              ? {}
+              : {
+                  actor: sessionContext.actor,
+                  ...(typeof sessionContext.sessionKey === "string"
+                    ? { sessionKey: sessionContext.sessionKey }
+                    : {}),
+                  ...(typeof sessionContext.originFrom === "string"
+                    ? { originFrom: sessionContext.originFrom }
+                    : {}),
+                }),
+            ...(parsed === undefined ? {} : { parsed }),
+          },
+        };
+      },
+    }),
+    { optional: true },
+  );
+}
+`;
+  }
+
+  private async writeManagedOpenClawExtensions(input: {
+    runtimeConfig: RuntimeConfig;
+  }): Promise<void> {
+    const workspaceBindings: Record<string, string[]> = {};
+    for (const agent of input.runtimeConfig.openclawProfile.agents) {
+      const toolInstanceIds = agent.toolInstanceIds ?? [];
+      if (toolInstanceIds.length === 0) {
+        continue;
+      }
+      for (const tool of this.resolveBoundToolInstances(input.runtimeConfig, toolInstanceIds)) {
+        const manifest = await this.resolveInstalledToolTemplate(input.runtimeConfig, tool.templateRef);
+        if (
+          !manifest.openclawPlugins?.includes(GUARDED_JSON_STATE_OPENCLAW_PLUGIN_ID)
+          && !manifest.openclawToolNames?.includes(GUARDED_JSON_STATE_OPENCLAW_TOOL_NAME)
+        ) {
+          continue;
+        }
+        workspaceBindings[agent.workspace] = [
+          ...(workspaceBindings[agent.workspace] ?? []),
+          tool.id,
+        ];
+      }
+    }
+    if (Object.keys(workspaceBindings).length === 0) {
+      return;
+    }
+
+    const extensionDir = join(
+      input.runtimeConfig.openclaw.openclawHome,
+      "extensions",
+      GUARDED_JSON_STATE_OPENCLAW_PLUGIN_ID,
+    );
+    await mkdir(extensionDir, { recursive: true });
+    await this.applyTrustedOpenClawExtensionOwnership(extensionDir);
+    const files = [
+      {
+        path: join(extensionDir, "openclaw.plugin.json"),
+        content: this.renderGuardedJsonStateWorkspacePluginManifest(),
+      },
+      {
+        path: join(extensionDir, "plugin-config.json"),
+        content: this.renderGuardedJsonStateWorkspacePluginConfig({
+          workspaceBindings,
+          runtimeConfigPath: this.paths.configPath,
+        }),
+      },
+      {
+        path: join(extensionDir, "runtime.js"),
+        content: this.renderGuardedJsonStateWorkspacePluginRuntime(),
+      },
+      {
+        path: join(extensionDir, "index.js"),
+        content: this.renderGuardedJsonStateWorkspacePluginIndex(),
+      },
+    ];
+    for (const file of files) {
+      await writeFile(file.path, `${file.content}\n`, "utf8");
+      await this.applyTrustedOpenClawExtensionOwnership(file.path);
+    }
   }
 
   private async listAgentExecAllowlistPatterns(
@@ -2077,23 +2445,39 @@ export class RealInstallerService implements InstallerService {
     toolInstanceIds: string[],
   ): Promise<{
     allow: string[];
-    exec: {
+    exec?: {
       host: "gateway";
       security: "allowlist";
       ask: "off";
     };
   } | null> {
+    const boundToolManifests = await Promise.all(
+      this.resolveBoundToolInstances(runtimeConfig, toolInstanceIds).map(async (tool) =>
+        await this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef)),
+    );
+    const openclawToolNames = dedupeStrings(
+      boundToolManifests.flatMap((manifest) => manifest.openclawToolNames ?? []),
+    );
     const execPatterns = await this.listAgentExecAllowlistPatterns(runtimeConfig, toolInstanceIds);
-    if (execPatterns.length === 0) {
+    if (execPatterns.length === 0 && openclawToolNames.length === 0) {
       return null;
     }
+    const allow = dedupeStrings([
+      ...(openclawToolNames.length === 0 ? [] : [OPENCLAW_SESSION_STATUS_TOOL_ID]),
+      ...openclawToolNames,
+      ...(execPatterns.length === 0 ? [] : [OPENCLAW_EXEC_TOOL_ID]),
+    ]);
     return {
-      allow: [OPENCLAW_EXEC_TOOL_ID, OPENCLAW_SESSION_STATUS_TOOL_ID],
-      exec: {
-        host: "gateway",
-        security: "allowlist",
-        ask: "off",
-      },
+      allow,
+      ...(execPatterns.length === 0
+        ? {}
+        : {
+            exec: {
+              host: "gateway",
+              security: "allowlist",
+              ask: "off",
+            } as const,
+          }),
     };
   }
 
@@ -3059,13 +3443,15 @@ export class RealInstallerService implements InstallerService {
     const toolLines =
       boundTools.length === 0
         ? ["No bound tool instances."]
-        : ["Run the listed commands with the OpenClaw `exec` tool.", ""];
+        : ["Use only the documented OpenClaw tools or CLI commands listed below.", ""];
     for (const tool of boundTools) {
       const manifest = await this.resolveInstalledToolTemplate(input.runtimeConfig, tool.templateRef);
       toolLines.push(
         `- \`${tool.id}\``,
         `  template: \`${tool.templateRef}\``,
         `  capabilities: ${manifest.capabilities.join(", ")}`,
+        ...this.listDocumentedOpenClawToolNames(manifest).map((toolName) =>
+          `  openclaw-tool: \`${toolName}\``),
         ...this.listDocumentedSovereignToolCommands(tool.id, manifest).map((command) =>
           `  command: \`${command}\``),
         ...this.listDocumentedSovereignToolNotes(manifest),
@@ -3085,6 +3471,9 @@ export class RealInstallerService implements InstallerService {
       await writeFile(targetPath, `${rendered}\n`, "utf8");
       await this.applyRuntimeOwnership(targetPath);
     }
+    await this.writeManagedOpenClawExtensions({
+      runtimeConfig: input.runtimeConfig,
+    });
   }
 
   private async tryReadRuntimeConfig(): Promise<RuntimeConfig | null> {
@@ -5585,6 +5974,7 @@ export class RealInstallerService implements InstallerService {
         ...entry.template.optionalToolTemplates.map((tool) => formatTemplateRef(tool.id, tool.version)),
       ]).filter((ref: string) => findCoreTemplateManifest(ref) !== undefined),
     );
+    const requiredPluginIds = this.listRequiredOpenClawPluginIds(selectedBotPackages);
     const preservedUserAgents =
       previousRuntimeConfig?.openclawProfile.agents.filter(
         (entry) =>
@@ -5645,7 +6035,7 @@ export class RealInstallerService implements InstallerService {
       },
       openclawProfile: {
         plugins: {
-          allow: ["matrix"],
+          allow: requiredPluginIds,
         },
         session: {
           dmScope: MANAGED_OPENCLAW_DM_SCOPE,
@@ -5758,7 +6148,7 @@ export class RealInstallerService implements InstallerService {
       ...provisionalRuntimeConfig,
       openclawProfile: {
         plugins: {
-          allow: ["matrix"],
+          allow: requiredPluginIds,
         },
         session: {
           dmScope: provisionalRuntimeConfig.openclawProfile.session?.dmScope ?? MANAGED_OPENCLAW_DM_SCOPE,
@@ -5983,6 +6373,12 @@ export class RealInstallerService implements InstallerService {
         enabled: true,
       },
     };
+    for (const pluginId of await this.listManagedOpenClawPluginIds(runtimeConfig)) {
+      pluginEntries[pluginId] = {
+        enabled: true,
+      };
+    }
+    const managedPluginLoadPaths = await this.listManagedOpenClawPluginLoadPaths(runtimeConfig);
     const matrixAccounts: Record<
       string,
       {
@@ -6115,6 +6511,13 @@ export class RealInstallerService implements InstallerService {
       },
       plugins: {
         allow: runtimeConfig.openclawProfile.plugins.allow,
+        ...(managedPluginLoadPaths.length === 0
+          ? {}
+          : {
+              load: {
+                paths: managedPluginLoadPaths,
+              },
+            }),
         entries: pluginEntries,
       },
       ...(matrixBindings[0] === undefined ? {} : { bindings: matrixBindings }),
@@ -6520,6 +6923,30 @@ export class RealInstallerService implements InstallerService {
           error: describeError(error),
         },
         "Failed to apply runtime ownership to installer artifact",
+      );
+    }
+  }
+
+  private async applyTrustedOpenClawExtensionOwnership(path: string): Promise<void> {
+    if (typeof process.getuid !== "function" || process.getuid() !== 0) {
+      return;
+    }
+
+    try {
+      await chown(path, 0, 0);
+    } catch (error) {
+      if (
+        isNodeError(error)
+        && (error.code === "ENOENT" || error.code === "EPERM" || error.code === "EACCES")
+      ) {
+        return;
+      }
+      this.logger.debug(
+        {
+          path,
+          error: describeError(error),
+        },
+        "Failed to apply trusted ownership to OpenClaw extension artifact",
       );
     }
   }

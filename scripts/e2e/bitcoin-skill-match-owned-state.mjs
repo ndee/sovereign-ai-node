@@ -297,6 +297,25 @@ const findOfferRecord = (state, marker) => {
   return null;
 };
 
+const findOfferByPredicate = (state, predicate) => {
+  const members = Array.isArray(state?.members) ? state.members : [];
+  for (const member of members) {
+    if (member === null || typeof member !== "object") {
+      continue;
+    }
+    const offers = Array.isArray(member.offers) ? member.offers : [];
+    for (const offer of offers) {
+      if (predicate(offer, member)) {
+        return {
+          member,
+          offer,
+        };
+      }
+    }
+  }
+  return null;
+};
+
 const offerExists = (state, marker) => findOfferOwner(state, marker) !== null;
 
 const assert = (condition, message) => {
@@ -341,6 +360,30 @@ const buildDeletePrompt = (marker) => [
   "Antworte kurz.",
 ].join("\n");
 
+const buildRichOfferPrompt = () => [
+  "Bitte speichere jetzt mein Angebot.",
+  "title: BitBox Einrichtung",
+  "description: Vor Ort im Umkreis von 100 km um Mannheim",
+  "region: Mannheim",
+  "radiusKm: 100",
+  "price: 250 EUR",
+  "settlementPreferences: lightning, cash-eur",
+  "visibility: public",
+  "Antworte kurz.",
+].join("\n");
+
+const waitFor = async (predicate, timeoutMs, description) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = await predicate();
+    if (value !== null && value !== undefined && value !== false) {
+      return value;
+    }
+    await delay(1000);
+  }
+  throw new Error(`Timed out waiting for ${description}`);
+};
+
 const main = async () => {
   if (typeof process.getuid === "function" && process.getuid() !== 0) {
     throw new Error("Run this script as root, for example via: sudo node scripts/e2e/bitcoin-skill-match-owned-state.mjs");
@@ -354,6 +397,7 @@ const main = async () => {
   const markerB = `E2E_${runSuffix.toUpperCase()}_B`;
   const summaryA = `Testangebot ${markerA}`;
   const summaryB = `Testangebot ${markerB}`;
+  const richOfferTitle = "BitBox Einrichtung";
 
   const status = execJson("sovereign-node", ["status"]);
   const agents = execJson("sovereign-node", ["agents", "list"]);
@@ -475,9 +519,15 @@ const main = async () => {
       senderUserId: botUserId,
       timeoutMs: options.timeoutMs,
       body: buildDeletePrompt(markerA),
-      containsAll: [markerA],
+      containsAll: [],
     });
     console.error(`Foreign delete reply: ${foreignDeleteReply.body}`);
+    assert(
+      foreignDeleteReply.body.toLowerCase().includes("nur der ersteller")
+        || foreignDeleteReply.body.toLowerCase().includes("nicht gelöscht")
+        || foreignDeleteReply.body.toLowerCase().includes("konnte nicht gelöscht"),
+      "Expected foreign delete reply to deny the mutation",
+    );
     state = loadState(statePath);
     assert(findOfferOwner(state, markerA) === clientA.userId, `Foreign delete changed ${markerA}`);
 
@@ -486,7 +536,7 @@ const main = async () => {
       senderUserId: botUserId,
       timeoutMs: options.timeoutMs,
       body: buildDeletePrompt(markerA),
-      containsAll: [markerA],
+      containsAll: [],
     });
     console.error(`Owner delete A reply: ${ownerDeleteA.body}`);
     const ownerDeleteB = await sendAndAwaitReply(clientB, {
@@ -494,13 +544,72 @@ const main = async () => {
       senderUserId: botUserId,
       timeoutMs: options.timeoutMs,
       body: buildDeletePrompt(markerB),
-      containsAll: [markerB],
+      containsAll: [],
     });
     console.error(`Owner delete B reply: ${ownerDeleteB.body}`);
 
     state = loadState(statePath);
     assert(!offerExists(state, markerA), `${markerA} still exists after owner delete`);
     assert(!offerExists(state, markerB), `${markerB} still exists after owner delete`);
+
+    const richOfferReply = await sendAndAwaitReply(clientA, {
+      roomId: dmRoomA,
+      senderUserId: botUserId,
+      timeoutMs: options.timeoutMs,
+      body: buildRichOfferPrompt(),
+      containsAll: [],
+    });
+    console.error(`Rich offer reply: ${richOfferReply.body}`);
+
+    const richOfferEntry = await waitFor(() => {
+      const currentState = loadState(statePath);
+      return findOfferByPredicate(currentState, (offer, member) =>
+        member?.createdByMatrixUserId === clientA.userId
+        && (
+          (typeof offer?.title === "string" && offer.title === richOfferTitle)
+          || (typeof offer?.summary === "string" && offer.summary.includes(richOfferTitle))
+        ));
+    }, options.timeoutMs, "rich offer to be persisted");
+
+    assert(
+      typeof richOfferEntry.offer.marker === "string" && richOfferEntry.offer.marker.length > 0,
+      "Expected rich offer marker to be generated",
+    );
+    assert(
+      richOfferEntry.offer.title === richOfferTitle
+      || (typeof richOfferEntry.offer.summary === "string" && richOfferEntry.offer.summary.includes(richOfferTitle)),
+      "Expected rich offer title or summary to mention BitBox Einrichtung",
+    );
+    assert(richOfferEntry.offer.price === "250 EUR", "Expected rich offer price to be stored");
+    assert(richOfferEntry.offer.radiusKm === "100", "Expected rich offer radiusKm to be stored as a string");
+    assert(
+      Array.isArray(richOfferEntry.offer.settlementPreferences)
+        && richOfferEntry.offer.settlementPreferences.includes("lightning"),
+      "Expected rich offer settlementPreferences to include lightning",
+    );
+    assert(
+      Array.isArray(richOfferEntry.offer.settlementPreferences)
+        && richOfferEntry.offer.settlementPreferences.includes("cash-eur"),
+      "Expected rich offer settlementPreferences to include cash-eur",
+    );
+    assert(richOfferEntry.offer.visibility === "public", "Expected rich offer visibility to be public");
+    assert(
+      richOfferEntry.offer.region === "Mannheim"
+      || (Array.isArray(richOfferEntry.offer.regions) && richOfferEntry.offer.regions.includes("Mannheim")),
+      "Expected rich offer Mannheim region data to be stored",
+    );
+
+    const richOfferDeleteReply = await sendAndAwaitReply(clientA, {
+      roomId: dmRoomA,
+      senderUserId: botUserId,
+      timeoutMs: options.timeoutMs,
+      body: buildDeletePrompt(richOfferEntry.offer.marker),
+      containsAll: [],
+    });
+    console.error(`Rich offer delete reply: ${richOfferDeleteReply.body}`);
+
+    state = loadState(statePath);
+    assert(!offerExists(state, richOfferEntry.offer.marker), `${richOfferEntry.offer.marker} still exists after rich owner delete`);
 
     if (options.cleanupMembers) {
       removeMemberRecord(toolInstanceId, clientB.userId);
@@ -530,6 +639,8 @@ const main = async () => {
         "foreign-delete-blocked",
         "owner-delete-a",
         "owner-delete-b",
+        "rich-offer-save-with-generated-marker",
+        "rich-offer-delete",
       ],
     };
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

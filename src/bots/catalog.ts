@@ -75,7 +75,9 @@ const toolTemplateSchema = z.object({
   capabilities: z.array(z.string().min(1)).min(1),
   requiredSecretRefs: z.array(z.string().min(1)).default([]),
   requiredConfigKeys: z.array(z.string().min(1)).default([]),
-  allowedCommands: z.array(z.string().min(1)).min(1),
+  allowedCommands: z.array(z.string().min(1)).default([]),
+  openclawPlugins: z.array(z.string().min(1)).default([]),
+  openclawToolNames: z.array(z.string().min(1)).default([]),
 });
 
 const agentTemplateSchema = z.object({
@@ -275,6 +277,8 @@ export class FilesystemBotCatalog implements BotCatalog {
           requiredSecretRefs: [...entry.requiredSecretRefs],
           requiredConfigKeys: [...entry.requiredConfigKeys],
           allowedCommands: [...entry.allowedCommands],
+          openclawPlugins: [...entry.openclawPlugins],
+          openclawToolNames: [...entry.openclawToolNames],
         },
         templateRef,
         keyId: BOT_PACKAGE_KEY_ID,

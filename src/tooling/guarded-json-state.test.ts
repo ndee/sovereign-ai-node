@@ -8,6 +8,7 @@ import type { RuntimeConfig } from "../installer/real-service-shared.js";
 import {
   GuardedJsonStateToolService,
   GuardedJsonStateToolError,
+  normalizeMatrixActorUserId,
   resolveMatrixActorFromSessionStatus,
 } from "./guarded-json-state.js";
 
@@ -148,6 +149,7 @@ const buildPolicy = () => ({
       ensureParentEntity: "members",
       childArrayField: "offers",
       keyField: "marker",
+      selfKeyTemplate: "OFFER_{actorLocalpart}_{nowCompact}",
       updatedAtField: "updatedAt",
       defaults: {
         notes: [],
@@ -155,8 +157,14 @@ const buildPolicy = () => ({
       },
       inputFields: {
         marker: "string",
+        title: "string",
+        description: "string",
         summary: "string",
         region: "string",
+        regions: "string[]",
+        radiusKm: "string",
+        price: "string",
+        visibility: "string",
         contactLevel: "string",
         notes: "string[]",
         settlementPreferences: "string[]",
@@ -188,6 +196,11 @@ describe("guarded-json-state tool service", () => {
     expect(resolveMatrixActorFromSessionStatus({
       sessionKey: "session:agent:bitcoin-skill-match:matrix:direct:@satoshi:matrix.example.org",
     })).toBe("@satoshi:matrix.example.org");
+  });
+
+  it("accepts actor values with or without the matrix: prefix", () => {
+    expect(normalizeMatrixActorUserId("@satoshi:matrix.example.org")).toBe("@satoshi:matrix.example.org");
+    expect(normalizeMatrixActorUserId("matrix:@satoshi:matrix.example.org")).toBe("@satoshi:matrix.example.org");
   });
 
   it("fails closed when session_status fields disagree about the current Matrix sender", () => {
@@ -304,6 +317,50 @@ describe("guarded-json-state tool service", () => {
       summary: "Guided node setup",
       settlementPreferences: ["lightning"],
       notes: ["remote"],
+    });
+  });
+
+  it("auto-generates a child marker when the policy defines a self key template", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "guarded-json-state-test-"));
+    tempRoots.push(tempRoot);
+    const statePath = join(tempRoot, "community-state.json");
+    const policyPath = join(tempRoot, "community-state.policy.json");
+    const auditPath = join(tempRoot, "community-state.audit.jsonl");
+    await writeFile(
+      statePath,
+      `${JSON.stringify({ community: { lastUpdated: "2026-03-09T00:00:00.000Z" }, members: [] }, null, 2)}\n`,
+      "utf8",
+    );
+    await writeFile(policyPath, `${JSON.stringify(buildPolicy(), null, 2)}\n`, "utf8");
+
+    const service = new GuardedJsonStateToolService({
+      configLoader: async () => buildRuntimeConfig({ statePath, policyPath, auditPath }),
+    });
+
+    const result = await service.upsertSelf({
+      instanceId: "bitcoin-state",
+      entityId: "offers",
+      actor: "@ndee:matrix.example.org",
+      fields: {
+        title: "BitBox Einrichtung",
+        summary: "BitBox Einrichtung in Mannheim",
+        radiusKm: "100",
+        price: "250 EUR",
+      },
+      arrayFields: {
+        regions: ["Mannheim"],
+        settlementPreferences: ["lightning", "cash-eur"],
+      },
+    });
+
+    expect(result.created).toBe(true);
+    expect(result.id).toMatch(/^OFFER_ndee_\d{8}T\d{9}Z$/);
+    expect(result.record).toMatchObject({
+      marker: result.id,
+      title: "BitBox Einrichtung",
+      price: "250 EUR",
+      radiusKm: "100",
+      regions: ["Mannheim"],
     });
   });
 

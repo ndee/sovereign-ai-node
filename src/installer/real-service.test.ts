@@ -195,16 +195,9 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
         capabilities: ["json-state.read", "json-state.self-upsert", "json-state.self-delete"],
         requiredSecretRefs: [],
         requiredConfigKeys: ["statePath", "policyPath"],
-        allowedCommands: [
-          "sovereign-tool json-state show --instance <tool-instance-id> --json",
-          "sovereign-tool json-state list --instance <tool-instance-id> --entity <id> --json",
-          "sovereign-tool json-state upsert-self --instance <tool-instance-id> --entity <id> --session-key <session_status.sessionKey> --input-json <json-object> --json",
-          "sovereign-tool json-state upsert-self --instance <tool-instance-id> --entity <id> --origin-from <session_status.origin.from> --input-json <json-object> --json",
-          "sovereign-tool json-state upsert-self --instance <tool-instance-id> --entity <id> --session-key <session_status.sessionKey> --origin-from <session_status.origin.from> --input-json <json-object> --json",
-          "sovereign-tool json-state delete-self --instance <tool-instance-id> --entity <id> --session-key <session_status.sessionKey> --id <value> --json",
-          "sovereign-tool json-state delete-self --instance <tool-instance-id> --entity <id> --origin-from <session_status.origin.from> --id <value> --json",
-          "sovereign-tool json-state delete-self --instance <tool-instance-id> --entity <id> --session-key <session_status.sessionKey> --origin-from <session_status.origin.from> --id <value> --json",
-        ],
+        allowedCommands: [],
+        openclawPlugins: ["guarded-json-state"],
+        openclawToolNames: ["guarded_json_state"],
       },
     ],
     toolInstances: [
@@ -1698,7 +1691,7 @@ describe("RealInstallerService", () => {
           expect.objectContaining({
             id: "mail-sentinel",
             tools: {
-              allow: ["exec", "session_status"],
+              allow: ["exec"],
               exec: {
                 host: "gateway",
                 security: "allowlist",
@@ -1726,7 +1719,9 @@ describe("RealInstallerService", () => {
         join(paths.stateDir, "mail-sentinel", "workspace", "TOOLS.md"),
         "utf8",
       );
-      expect(mailSentinelToolsRaw).toContain("Run the listed commands with the OpenClaw `exec` tool.");
+      expect(mailSentinelToolsRaw).toContain(
+        "Use only the documented OpenClaw tools or CLI commands listed below.",
+      );
       expect(mailSentinelToolsRaw).toContain(
         "/usr/local/bin/sovereign-tool imap-search-mail --instance mail-sentinel-imap --query <query>",
       );
@@ -1875,6 +1870,13 @@ describe("RealInstallerService", () => {
         "utf8",
       );
       const openclawConfig = JSON.parse(openclawConfigRaw) as {
+        plugins?: {
+          allow?: string[];
+          load?: {
+            paths?: string[];
+          };
+          entries?: Record<string, { enabled?: boolean }>;
+        };
         agents?: {
           list?: Array<{
             id?: string;
@@ -1885,17 +1887,28 @@ describe("RealInstallerService", () => {
           }>;
         };
       };
+      expect(openclawConfig.plugins?.allow).toEqual(
+        expect.arrayContaining(["matrix", "guarded-json-state"]),
+      );
+      expect(openclawConfig.plugins?.load?.paths).toEqual(
+        expect.arrayContaining([
+          join(paths.openclawServiceHome, ".openclaw", "extensions", "guarded-json-state"),
+        ]),
+      );
+      expect(openclawConfig.plugins?.entries?.["guarded-json-state"]?.enabled).toBe(true);
       expect(openclawConfig.agents?.list).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
             id: "bitcoin-skill-match",
             model: "openrouter/openai/gpt-5-mini",
             tools: expect.objectContaining({
-              allow: ["exec", "session_status"],
+              allow: expect.arrayContaining(["session_status", "guarded_json_state"]),
             }),
           }),
         ]),
       );
+      const bitcoinAgent = openclawConfig.agents?.list?.find((entry) => entry.id === "bitcoin-skill-match");
+      expect(bitcoinAgent?.tools?.allow).not.toEqual(expect.arrayContaining(["read", "write", "edit", "exec"]));
 
       const runtimeConfigRaw = await readFile(paths.configPath, "utf8");
       const runtimeConfig = JSON.parse(runtimeConfigRaw) as {
@@ -1935,17 +1948,87 @@ describe("RealInstallerService", () => {
         "utf8",
       );
       expect(toolsRaw).toContain("template: `guarded-json-state@1.0.0`");
-      expect(toolsRaw).toContain(
-        "/usr/local/bin/sovereign-tool json-state upsert-self --instance bitcoin-skill-match-state --entity <id> --session-key <session_status.sessionKey> --input-json <json-object> --json",
-      );
-      expect(toolsRaw).toContain(
-        "/usr/local/bin/sovereign-tool json-state upsert-self --instance bitcoin-skill-match-state --entity <id> --origin-from <session_status.origin.from> --input-json <json-object> --json",
-      );
-      expect(toolsRaw).toContain(
-        "/usr/local/bin/sovereign-tool json-state upsert-self --instance bitcoin-skill-match-state --entity <id> --session-key <session_status.sessionKey> --origin-from <session_status.origin.from> --input-json <json-object> --json",
-      );
-      expect(toolsRaw).toContain("call `session_status` first with `{}` only");
+      expect(toolsRaw).toContain("openclaw-tool: `guarded_json_state`");
+      expect(toolsRaw).toContain("resolves the current Matrix sender from the active OpenClaw session");
       expect(toolsRaw).toContain("normalizes a single scalar into a one-item array");
+      await expect(
+        readFile(
+          join(
+            paths.openclawServiceHome,
+            ".openclaw",
+            "extensions",
+            "guarded-json-state",
+            "index.js",
+          ),
+          "utf8",
+        ),
+      ).resolves.toEqual(
+        expect.stringContaining('const TOOL_NAME = "guarded_json_state"'),
+      );
+      await expect(
+        readFile(
+          join(
+            paths.openclawServiceHome,
+            ".openclaw",
+            "extensions",
+            "guarded-json-state",
+            "index.js",
+          ),
+          "utf8",
+        ),
+      ).resolves.toEqual(
+        expect.stringContaining("api.registerTool(\n    (toolContext) => ({"),
+      );
+      await expect(
+        readFile(
+          join(
+            paths.openclawServiceHome,
+            ".openclaw",
+            "extensions",
+            "guarded-json-state",
+            "index.js",
+          ),
+          "utf8",
+        ),
+      ).resolves.toEqual(
+        expect.stringContaining("resolveGuardedJsonStateToolContext(toolContext ?? {})"),
+      );
+      await expect(
+        readFile(
+          join(
+            paths.openclawServiceHome,
+            ".openclaw",
+            "extensions",
+            "guarded-json-state",
+            "index.js",
+          ),
+          "utf8",
+        ),
+      ).resolves.not.toContain("\\`");
+      await expect(
+        readFile(
+          join(
+            paths.openclawServiceHome,
+            ".openclaw",
+            "extensions",
+            "guarded-json-state",
+            "index.js",
+          ),
+          "utf8",
+        ),
+      ).resolves.not.toContain("ctx.cwd");
+      await expect(
+        readFile(
+          join(
+            paths.openclawServiceHome,
+            ".openclaw",
+            "extensions",
+            "guarded-json-state",
+            "index.js",
+          ),
+          "utf8",
+        ),
+      ).resolves.not.toContain("sessionManager");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
