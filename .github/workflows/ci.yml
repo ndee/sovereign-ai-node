@@ -81,3 +81,49 @@ jobs:
 
           curl -sf http://127.0.0.1:8787/healthz | grep '"ok":true'
           kill $API_PID
+
+  e2e:
+    name: E2E Install
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Pre-pull Docker images
+        run: |
+          docker pull postgres:16-alpine &
+          docker pull matrixdotorg/synapse:v1.125.0 &
+          wait
+
+      - name: Run full installer (local-dev, non-interactive)
+        run: |
+          sudo npx tsx src/bin/sovereign-node.ts install \
+            --request-file test/fixtures/ci-install-request.json \
+            --json
+        timeout-minutes: 15
+
+      - name: Verify Matrix is reachable
+        run: |
+          curl -sf http://127.0.0.1:8008/_matrix/client/versions | jq .
+
+      - name: Verify operator account exists
+        run: |
+          curl -sf http://127.0.0.1:8008/_matrix/client/v3/login | jq .
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== sovereign-node status ==="
+          sudo npx tsx src/bin/sovereign-node.ts status --json 2>&1 || true
+          echo "=== docker compose logs ==="
+          COMPOSE_DIR=$(find /etc/sovereign-node -name compose.yaml -exec dirname {} \; 2>/dev/null | head -1)
+          if [ -n "$COMPOSE_DIR" ]; then
+            cd "$COMPOSE_DIR" && docker compose logs --tail=100 2>&1 || true
+          fi

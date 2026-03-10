@@ -1,0 +1,31 @@
+{
+  "mode": "bundled_matrix",
+  "connectivity": {
+    "mode": "direct"
+  },
+  "matrix": {
+    "homeserverDomain": "ci.local.test",
+    "publicBaseUrl": "http://127.0.0.1:8008",
+    "federationEnabled": false,
+    "tlsMode": "local-dev",
+    "alertRoomName": "CI Alerts"
+  },
+  "operator": {
+    "username": "operator"
+  },
+  "openrouter": {
+    "model": "openai/gpt-5-nano",
+    "apiKey": "sk-ci-fake-key-not-used"
+  },
+  "openclaw": {
+    "manageInstallation": true,
+    "installMethod": "install_sh",
+    "version": "pinned-by-sovereign",
+    "skipIfCompatibleInstalled": true,
+    "forceReinstall": false,
+    "runOnboard": false
+  },
+  "advanced": {
+    "nonInteractive": true
+  }
+}
