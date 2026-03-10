@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-import { createApp } from "../app/create-app.js";
 import { buildApiServer } from "../api/server.js";
+import { createApp } from "../app/create-app.js";
 
 const main = async (): Promise<void> => {
   const app = createApp();
@@ -21,4 +21,3 @@ main().catch((error) => {
   );
   process.exitCode = 1;
 });
-

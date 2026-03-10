@@ -1,5 +1,12 @@
 import type { FastifyInstance } from "fastify";
-
+import type { AppContainer } from "../../app/create-app.js";
+import {
+  installJobParamsSchema,
+  preflightRequestSchema,
+  testAlertRequestSchema,
+  testImapRequestSchema,
+  testMatrixRequestSchema,
+} from "../../contracts/api.js";
 import {
   installJobStatusResponseSchema,
   installRequestSchema,
@@ -9,23 +16,13 @@ import {
   testImapResultSchema,
   testMatrixResultSchema,
 } from "../../contracts/index.js";
-import {
-  installJobParamsSchema,
-  preflightRequestSchema,
-  testAlertRequestSchema,
-  testImapRequestSchema,
-  testMatrixRequestSchema,
-} from "../../contracts/api.js";
-import type { AppContainer } from "../../app/create-app.js";
 import { sendApiError, sendApiSuccess } from "../response.js";
 
-export const registerInstallRoutes = (
-  server: FastifyInstance,
-  app: AppContainer,
-): void => {
+export const registerInstallRoutes = (server: FastifyInstance, app: AppContainer): void => {
   server.post("/api/install/preflight", async (request, reply) => {
     try {
-      const body = request.body === undefined ? undefined : preflightRequestSchema.parse(request.body);
+      const body =
+        request.body === undefined ? undefined : preflightRequestSchema.parse(request.body);
       const result = await app.installerService.preflight(body);
       return sendApiSuccess(reply, result, preflightResultSchema);
     } catch (error) {
@@ -83,4 +80,3 @@ export const registerInstallRoutes = (
     }
   });
 };
-

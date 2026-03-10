@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  buildImapConnectionPlans,
-  runWithImapClient,
-  type ImapClientLike,
-} from "./imap-client.js";
+import { buildImapConnectionPlans, type ImapClientLike, runWithImapClient } from "./imap-client.js";
 
 const createNoopClient = (): ImapClientLike => ({
   authenticated: false,
@@ -79,11 +75,12 @@ describe("imap-client", () => {
           password: "bridge-pass",
         },
         clientFactory: (options) => {
-          const label = options.doSTARTTLS === true
-            ? "starttls"
-            : options.secure === true
-              ? "implicit-tls"
-              : "plain";
+          const label =
+            options.doSTARTTLS === true
+              ? "starttls"
+              : options.secure === true
+                ? "implicit-tls"
+                : "plain";
           const client = createNoopClient();
           client.connect = async () => {
             connectedStrategies.push(label);

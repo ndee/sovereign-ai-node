@@ -57,12 +57,14 @@ export const guardedJsonStateListResultSchema = z.object({
   instanceId: z.string().min(1),
   entity: z.string().min(1),
   count: z.number().int().nonnegative(),
-  items: z.array(z.object({
-    id: z.string().min(1).optional(),
-    ownerMatrixUserId: z.string().min(1).optional(),
-    parentKey: z.string().min(1).optional(),
-    record: guardedJsonStateRecordSchema,
-  })),
+  items: z.array(
+    z.object({
+      id: z.string().min(1).optional(),
+      ownerMatrixUserId: z.string().min(1).optional(),
+      parentKey: z.string().min(1).optional(),
+      record: guardedJsonStateRecordSchema,
+    }),
+  ),
 });
 
 export const guardedJsonStateMutationResultSchema = z.object({

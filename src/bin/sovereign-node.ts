@@ -11,10 +11,7 @@ const main = async (): Promise<void> => {
 
 main().catch((error) => {
   process.stderr.write(
-    `sovereign-node bootstrap failure: ${
-      error instanceof Error ? error.message : String(error)
-    }\n`,
+    `sovereign-node bootstrap failure: ${error instanceof Error ? error.message : String(error)}\n`,
   );
   process.exitCode = 1;
 });
-

@@ -169,8 +169,10 @@ export type GatewayState = "running" | "stopped" | "failed" | "unknown";
 export const MAIL_SENTINEL_AGENT_ID = "mail-sentinel";
 export const MAIL_SENTINEL_CRON_ID = "mail-sentinel-poll";
 export const NODE_OPERATOR_AGENT_ID = "node-operator";
-export const MAIL_SENTINEL_HELLO_MESSAGE = "Hello from Mail Sentinel. I can summarize your latest 3 inbox mails.";
-export const NODE_OPERATOR_HELLO_MESSAGE = "Hello from Node Operator. Ask me for Sovereign Node and system status.";
+export const MAIL_SENTINEL_HELLO_MESSAGE =
+  "Hello from Mail Sentinel. I can summarize your latest 3 inbox mails.";
+export const NODE_OPERATOR_HELLO_MESSAGE =
+  "Hello from Node Operator. Ask me for Sovereign Node and system status.";
 export const NODE_CLI_OPS_TEMPLATE_REF = "node-cli-ops@1.0.0";
 export const IMAP_READONLY_TEMPLATE_REF = "imap-readonly@1.0.0";
 export const MAIL_SENTINEL_TEMPLATE_REF = "mail-sentinel@1.0.0";
@@ -192,8 +194,7 @@ const now = () => new Date().toISOString();
 
 const defaultFetch: FetchLike = (input, init) => globalThis.fetch(input, init);
 
-const ensureTrailingSlash = (value: string): string =>
-  value.endsWith("/") ? value : `${value}/`;
+const ensureTrailingSlash = (value: string): string => (value.endsWith("/") ? value : `${value}/`);
 
 const parseJsonSafely = (raw: string): unknown => {
   if (raw.trim().length === 0) {
@@ -239,16 +240,16 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
       ? matrix.adminBaseUrl
       : matrix.publicBaseUrl;
   if (
-    typeof matrix.publicBaseUrl !== "string"
-    || matrix.publicBaseUrl.length === 0
-    || typeof adminBaseUrl !== "string"
-    || adminBaseUrl.length === 0
-    || !isRecord(bot)
-    || typeof bot.accessTokenSecretRef !== "string"
-    || bot.accessTokenSecretRef.length === 0
-    || !isRecord(alertRoom)
-    || typeof alertRoom.roomId !== "string"
-    || alertRoom.roomId.length === 0
+    typeof matrix.publicBaseUrl !== "string" ||
+    matrix.publicBaseUrl.length === 0 ||
+    typeof adminBaseUrl !== "string" ||
+    adminBaseUrl.length === 0 ||
+    !isRecord(bot) ||
+    typeof bot.accessTokenSecretRef !== "string" ||
+    bot.accessTokenSecretRef.length === 0 ||
+    !isRecord(alertRoom) ||
+    typeof alertRoom.roomId !== "string" ||
+    alertRoom.roomId.length === 0
   ) {
     return null;
   }
@@ -286,86 +287,82 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
   const openclawPlugins = isRecord(openclawProfile.plugins) ? openclawProfile.plugins : {};
   const openclawSession = isRecord(openclawProfile.session) ? openclawProfile.session : {};
   const openclawDmScope =
-    openclawSession.dmScope === "main"
-    || openclawSession.dmScope === "per-peer"
-    || openclawSession.dmScope === "per-channel-peer"
-    || openclawSession.dmScope === "per-account-channel-peer"
+    openclawSession.dmScope === "main" ||
+    openclawSession.dmScope === "per-peer" ||
+    openclawSession.dmScope === "per-channel-peer" ||
+    openclawSession.dmScope === "per-account-channel-peer"
       ? openclawSession.dmScope
       : MANAGED_OPENCLAW_DM_SCOPE;
   const openclawAgents = Array.isArray(openclawProfile.agents)
-    ? openclawProfile.agents
-        .flatMap((agent): RuntimeAgentEntry[] => {
-          if (
-            !isRecord(agent)
-            || typeof agent.id !== "string"
-            || agent.id.length === 0
-            || typeof agent.workspace !== "string"
-            || agent.workspace.length === 0
-          ) {
-            return [];
-          }
-          const matrixIdentity = isRecord(agent.matrix)
-            && typeof agent.matrix.localpart === "string"
-            && agent.matrix.localpart.length > 0
-            && typeof agent.matrix.userId === "string"
-            && agent.matrix.userId.length > 0
-              ? {
-                  localpart: agent.matrix.localpart,
-                  userId: agent.matrix.userId,
-                  ...(typeof agent.matrix.passwordSecretRef === "string"
-                    && agent.matrix.passwordSecretRef.length > 0
-                    ? { passwordSecretRef: agent.matrix.passwordSecretRef }
-                    : {}),
-                  ...(typeof agent.matrix.accessTokenSecretRef === "string"
-                    && agent.matrix.accessTokenSecretRef.length > 0
-                    ? { accessTokenSecretRef: agent.matrix.accessTokenSecretRef }
-                    : {}),
-                }
-              : undefined;
-          const templateRef =
-            typeof agent.templateRef === "string" && agent.templateRef.length > 0
-              ? agent.templateRef
-              : undefined;
-          const toolInstanceIds = Array.isArray(agent.toolInstanceIds)
-            ? agent.toolInstanceIds.filter(
-                (entry): entry is string => typeof entry === "string" && entry.length > 0,
-              )
+    ? openclawProfile.agents.flatMap((agent): RuntimeAgentEntry[] => {
+        if (
+          !isRecord(agent) ||
+          typeof agent.id !== "string" ||
+          agent.id.length === 0 ||
+          typeof agent.workspace !== "string" ||
+          agent.workspace.length === 0
+        ) {
+          return [];
+        }
+        const matrixIdentity =
+          isRecord(agent.matrix) &&
+          typeof agent.matrix.localpart === "string" &&
+          agent.matrix.localpart.length > 0 &&
+          typeof agent.matrix.userId === "string" &&
+          agent.matrix.userId.length > 0
+            ? {
+                localpart: agent.matrix.localpart,
+                userId: agent.matrix.userId,
+                ...(typeof agent.matrix.passwordSecretRef === "string" &&
+                agent.matrix.passwordSecretRef.length > 0
+                  ? { passwordSecretRef: agent.matrix.passwordSecretRef }
+                  : {}),
+                ...(typeof agent.matrix.accessTokenSecretRef === "string" &&
+                agent.matrix.accessTokenSecretRef.length > 0
+                  ? { accessTokenSecretRef: agent.matrix.accessTokenSecretRef }
+                  : {}),
+              }
             : undefined;
-          const isDefault = agent.default === true;
-          const model =
-            typeof agent.model === "string" && agent.model.length > 0
-              ? agent.model
-              : undefined;
-          const botId =
-            typeof agent.botId === "string" && agent.botId.length > 0
-              ? agent.botId
-              : undefined;
-          return [
-            {
-              id: agent.id,
-              workspace: agent.workspace,
-              ...(isDefault ? { default: true } : {}),
-              ...(model === undefined ? {} : { model }),
-              ...(templateRef === undefined ? {} : { templateRef }),
-              ...(botId === undefined ? {} : { botId }),
-              ...(toolInstanceIds === undefined || toolInstanceIds.length === 0
-                ? {}
-                : { toolInstanceIds }),
-              ...(matrixIdentity === undefined ? {} : { matrix: matrixIdentity }),
-            },
-          ];
-        })
+        const templateRef =
+          typeof agent.templateRef === "string" && agent.templateRef.length > 0
+            ? agent.templateRef
+            : undefined;
+        const toolInstanceIds = Array.isArray(agent.toolInstanceIds)
+          ? agent.toolInstanceIds.filter(
+              (entry): entry is string => typeof entry === "string" && entry.length > 0,
+            )
+          : undefined;
+        const isDefault = agent.default === true;
+        const model =
+          typeof agent.model === "string" && agent.model.length > 0 ? agent.model : undefined;
+        const botId =
+          typeof agent.botId === "string" && agent.botId.length > 0 ? agent.botId : undefined;
+        return [
+          {
+            id: agent.id,
+            workspace: agent.workspace,
+            ...(isDefault ? { default: true } : {}),
+            ...(model === undefined ? {} : { model }),
+            ...(templateRef === undefined ? {} : { templateRef }),
+            ...(botId === undefined ? {} : { botId }),
+            ...(toolInstanceIds === undefined || toolInstanceIds.length === 0
+              ? {}
+              : { toolInstanceIds }),
+            ...(matrixIdentity === undefined ? {} : { matrix: matrixIdentity }),
+          },
+        ];
+      })
     : [];
   const openclawCrons = Array.isArray(openclawProfile.crons)
     ? openclawProfile.crons.flatMap((entry) => {
         if (
-          !isRecord(entry)
-          || typeof entry.id !== "string"
-          || entry.id.length === 0
-          || typeof entry.every !== "string"
-          || entry.every.length === 0
-          || typeof entry.agentId !== "string"
-          || entry.agentId.length === 0
+          !isRecord(entry) ||
+          typeof entry.id !== "string" ||
+          entry.id.length === 0 ||
+          typeof entry.every !== "string" ||
+          entry.every.length === 0 ||
+          typeof entry.agentId !== "string" ||
+          entry.agentId.length === 0
         ) {
           return [];
         }
@@ -380,20 +377,20 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
           },
         ];
       })
-    : isRecord(openclawProfile.cron)
-      && typeof openclawProfile.cron.id === "string"
-      && openclawProfile.cron.id.length > 0
-      && typeof openclawProfile.cron.every === "string"
-      && openclawProfile.cron.every.length > 0
-        ? [
-            {
-              id: openclawProfile.cron.id,
-              every: openclawProfile.cron.every,
-              agentId: MAIL_SENTINEL_AGENT_ID,
-              botId: MAIL_SENTINEL_AGENT_ID,
-            },
-          ]
-        : [];
+    : isRecord(openclawProfile.cron) &&
+        typeof openclawProfile.cron.id === "string" &&
+        openclawProfile.cron.id.length > 0 &&
+        typeof openclawProfile.cron.every === "string" &&
+        openclawProfile.cron.every.length > 0
+      ? [
+          {
+            id: openclawProfile.cron.id,
+            every: openclawProfile.cron.every,
+            agentId: MAIL_SENTINEL_AGENT_ID,
+            botId: MAIL_SENTINEL_AGENT_ID,
+          },
+        ]
+      : [];
   const openrouter = isRecord(parsed.openrouter) ? parsed.openrouter : {};
   const imap = isRecord(parsed.imap) ? parsed.imap : {};
   const legacyMailSentinel = isRecord(parsed.mailSentinel) ? parsed.mailSentinel : {};
@@ -407,13 +404,11 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
           }
           const configEntries = Object.entries(value).filter(
             (entry): entry is [string, BotConfigValue] =>
-              typeof entry[0] === "string"
-              && entry[0].length > 0
-              && (
-                typeof entry[1] === "string"
-                || typeof entry[1] === "number"
-                || typeof entry[1] === "boolean"
-              ),
+              typeof entry[0] === "string" &&
+              entry[0].length > 0 &&
+              (typeof entry[1] === "string" ||
+                typeof entry[1] === "number" ||
+                typeof entry[1] === "boolean"),
           );
           return [[botId, Object.fromEntries(configEntries)]];
         }),
@@ -423,17 +418,17 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
   const templateInstalledEntries = Array.isArray(templates.installed)
     ? templates.installed.flatMap((entry) => {
         if (
-          !isRecord(entry)
-          || (entry.kind !== "agent" && entry.kind !== "tool")
-          || typeof entry.id !== "string"
-          || entry.id.length === 0
-          || typeof entry.version !== "string"
-          || entry.version.length === 0
-          || typeof entry.description !== "string"
-          || typeof entry.keyId !== "string"
-          || entry.keyId.length === 0
-          || typeof entry.manifestSha256 !== "string"
-          || entry.manifestSha256.length === 0
+          !isRecord(entry) ||
+          (entry.kind !== "agent" && entry.kind !== "tool") ||
+          typeof entry.id !== "string" ||
+          entry.id.length === 0 ||
+          typeof entry.version !== "string" ||
+          entry.version.length === 0 ||
+          typeof entry.description !== "string" ||
+          typeof entry.keyId !== "string" ||
+          entry.keyId.length === 0 ||
+          typeof entry.manifestSha256 !== "string" ||
+          entry.manifestSha256.length === 0
         ) {
           return [];
         }
@@ -452,7 +447,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
               typeof entry.installedAt === "string" && entry.installedAt.length > 0
                 ? entry.installedAt
                 : now(),
-            source: entry.source === "bot-repo" ? "bot-repo" as const : "core" as const,
+            source: entry.source === "bot-repo" ? ("bot-repo" as const) : ("core" as const),
           },
         ];
       })
@@ -461,11 +456,11 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
   const sovereignToolInstances = Array.isArray(sovereignTools.instances)
     ? sovereignTools.instances.flatMap((entry) => {
         if (
-          !isRecord(entry)
-          || typeof entry.id !== "string"
-          || entry.id.length === 0
-          || typeof entry.templateRef !== "string"
-          || entry.templateRef.length === 0
+          !isRecord(entry) ||
+          typeof entry.id !== "string" ||
+          entry.id.length === 0 ||
+          typeof entry.templateRef !== "string" ||
+          entry.templateRef.length === 0
         ) {
           return [];
         }
@@ -478,10 +473,10 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
           ? Object.fromEntries(
               Object.entries(entry.config).filter(
                 (pair): pair is [string, string] =>
-                  typeof pair[0] === "string"
-                  && pair[0].length > 0
-                  && typeof pair[1] === "string"
-                  && pair[1].length > 0,
+                  typeof pair[0] === "string" &&
+                  pair[0].length > 0 &&
+                  typeof pair[1] === "string" &&
+                  pair[1].length > 0,
               ),
             )
           : {};
@@ -489,10 +484,10 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
           ? Object.fromEntries(
               Object.entries(entry.secretRefs).filter(
                 (pair): pair is [string, string] =>
-                  typeof pair[0] === "string"
-                  && pair[0].length > 0
-                  && typeof pair[1] === "string"
-                  && pair[1].length > 0,
+                  typeof pair[0] === "string" &&
+                  pair[0].length > 0 &&
+                  typeof pair[1] === "string" &&
+                  pair[1].length > 0,
               ),
             )
           : {};
@@ -530,34 +525,33 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
       ? matrix.onboardingStatePath
       : undefined;
   const inferredImapConfigured =
-    typeof imap.host === "string"
-    && imap.host.length > 0
-    && imap.host !== "pending"
-    && typeof imap.secretRef === "string"
-    && imap.secretRef.length > 0;
+    typeof imap.host === "string" &&
+    imap.host.length > 0 &&
+    imap.host !== "pending" &&
+    typeof imap.secretRef === "string" &&
+    imap.secretRef.length > 0;
   const relayTunnel = isRecord(relay.tunnel) ? relay.tunnel : {};
-  const accessMode =
-    matrix.accessMode === "relay" || relay.enabled === true ? "relay" : "direct";
+  const accessMode = matrix.accessMode === "relay" || relay.enabled === true ? "relay" : "direct";
   const relayConfig =
-    relay.enabled === true
-    && typeof relay.controlUrl === "string"
-    && relay.controlUrl.length > 0
-    && typeof relay.hostname === "string"
-    && relay.hostname.length > 0
-    && typeof relay.publicBaseUrl === "string"
-    && relay.publicBaseUrl.length > 0
-    && typeof relay.serviceName === "string"
-    && relay.serviceName.length > 0
-    && typeof relay.configPath === "string"
-    && relay.configPath.length > 0
-    && typeof relayTunnel.serverAddr === "string"
-    && relayTunnel.serverAddr.length > 0
-    && typeof relayTunnel.serverPort === "number"
-    && Number.isFinite(relayTunnel.serverPort)
-    && typeof relayTunnel.tokenSecretRef === "string"
-    && relayTunnel.tokenSecretRef.length > 0
-    && typeof relayTunnel.proxyName === "string"
-    && relayTunnel.proxyName.length > 0
+    relay.enabled === true &&
+    typeof relay.controlUrl === "string" &&
+    relay.controlUrl.length > 0 &&
+    typeof relay.hostname === "string" &&
+    relay.hostname.length > 0 &&
+    typeof relay.publicBaseUrl === "string" &&
+    relay.publicBaseUrl.length > 0 &&
+    typeof relay.serviceName === "string" &&
+    relay.serviceName.length > 0 &&
+    typeof relay.configPath === "string" &&
+    relay.configPath.length > 0 &&
+    typeof relayTunnel.serverAddr === "string" &&
+    relayTunnel.serverAddr.length > 0 &&
+    typeof relayTunnel.serverPort === "number" &&
+    Number.isFinite(relayTunnel.serverPort) &&
+    typeof relayTunnel.tokenSecretRef === "string" &&
+    relayTunnel.tokenSecretRef.length > 0 &&
+    typeof relayTunnel.proxyName === "string" &&
+    relayTunnel.proxyName.length > 0
       ? {
           enabled: true,
           controlUrl: relay.controlUrl,
@@ -593,10 +587,9 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
         typeof openclaw.managedInstallation === "boolean" ? openclaw.managedInstallation : true,
       installMethod:
         openclaw.installMethod === "install_sh" ? openclaw.installMethod : "install_sh",
-      requestedVersion:
-        resolveRequestedOpenClawVersion(
-          typeof openclaw.requestedVersion === "string" ? openclaw.requestedVersion : undefined,
-        ),
+      requestedVersion: resolveRequestedOpenClawVersion(
+        typeof openclaw.requestedVersion === "string" ? openclaw.requestedVersion : undefined,
+      ),
       openclawHome,
       runtimeConfigPath,
       runtimeProfilePath,
@@ -645,16 +638,11 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
             : "pending",
       host: typeof imap.host === "string" && imap.host.length > 0 ? imap.host : "unknown",
       port:
-        typeof imap.port === "number" && Number.isFinite(imap.port)
-          ? Math.trunc(imap.port)
-          : 993,
+        typeof imap.port === "number" && Number.isFinite(imap.port) ? Math.trunc(imap.port) : 993,
       tls: typeof imap.tls === "boolean" ? imap.tls : true,
       username:
-        typeof imap.username === "string" && imap.username.length > 0
-          ? imap.username
-          : "pending",
-      mailbox:
-        typeof imap.mailbox === "string" && imap.mailbox.length > 0 ? imap.mailbox : "INBOX",
+        typeof imap.username === "string" && imap.username.length > 0 ? imap.username : "pending",
+      mailbox: typeof imap.mailbox === "string" && imap.mailbox.length > 0 ? imap.mailbox : "INBOX",
       secretRef:
         typeof imap.secretRef === "string" && imap.secretRef.length > 0
           ? imap.secretRef
@@ -677,12 +665,11 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
         ...(typeof operator.localpart === "string" && operator.localpart.length > 0
           ? { localpart: operator.localpart }
           : {}),
-        ...(typeof operator.passwordSecretRef === "string"
-          && operator.passwordSecretRef.length > 0
+        ...(typeof operator.passwordSecretRef === "string" && operator.passwordSecretRef.length > 0
           ? { passwordSecretRef: operator.passwordSecretRef }
           : {}),
-        ...(typeof operator.accessTokenSecretRef === "string"
-          && operator.accessTokenSecretRef.length > 0
+        ...(typeof operator.accessTokenSecretRef === "string" &&
+        operator.accessTokenSecretRef.length > 0
           ? { accessTokenSecretRef: operator.accessTokenSecretRef }
           : {}),
       },
@@ -709,32 +696,31 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
     },
     ...(relayConfig === undefined ? {} : { relay: relayConfig }),
     bots: {
-      config: Object.keys(botConfig).length > 0
-        ? botConfig
-        : (
-            legacyMailSentinel.pollInterval !== undefined
-            || legacyMailSentinel.lookbackWindow !== undefined
-            || legacyMailSentinel.e2eeAlertRoom !== undefined
-          )
-          ? {
-              [MAIL_SENTINEL_AGENT_ID]: {
-                pollInterval:
-                  typeof legacyMailSentinel.pollInterval === "string"
-                  && legacyMailSentinel.pollInterval.length > 0
-                    ? legacyMailSentinel.pollInterval
-                    : "5m",
-                lookbackWindow:
-                  typeof legacyMailSentinel.lookbackWindow === "string"
-                  && legacyMailSentinel.lookbackWindow.length > 0
-                    ? legacyMailSentinel.lookbackWindow
-                    : "15m",
-                e2eeAlertRoom:
-                  typeof legacyMailSentinel.e2eeAlertRoom === "boolean"
-                    ? legacyMailSentinel.e2eeAlertRoom
-                    : false,
-              },
-            }
-          : {},
+      config:
+        Object.keys(botConfig).length > 0
+          ? botConfig
+          : legacyMailSentinel.pollInterval !== undefined ||
+              legacyMailSentinel.lookbackWindow !== undefined ||
+              legacyMailSentinel.e2eeAlertRoom !== undefined
+            ? {
+                [MAIL_SENTINEL_AGENT_ID]: {
+                  pollInterval:
+                    typeof legacyMailSentinel.pollInterval === "string" &&
+                    legacyMailSentinel.pollInterval.length > 0
+                      ? legacyMailSentinel.pollInterval
+                      : "5m",
+                  lookbackWindow:
+                    typeof legacyMailSentinel.lookbackWindow === "string" &&
+                    legacyMailSentinel.lookbackWindow.length > 0
+                      ? legacyMailSentinel.lookbackWindow
+                      : "15m",
+                  e2eeAlertRoom:
+                    typeof legacyMailSentinel.e2eeAlertRoom === "boolean"
+                      ? legacyMailSentinel.e2eeAlertRoom
+                      : false,
+                },
+              }
+            : {},
     },
     templates: {
       installed: templateInstalledEntries,
@@ -856,40 +842,37 @@ const sanitizeManagedWorkspace = (value: string | undefined, fallback: string): 
 
 const sanitizeManagedAgentLocalpart = (value: string | undefined, fallback: string): string => {
   const candidate = value?.trim().toLowerCase() ?? fallback;
-  const normalized = candidate
-    .replace(/[^a-z0-9._=+\-/]/g, "_")
-    .replace(/^_+|_+$/g, "");
+  const normalized = candidate.replace(/[^a-z0-9._=+\-/]/g, "_").replace(/^_+|_+$/g, "");
   return normalized.length > 0 ? normalized : fallback;
 };
 
 const sanitizeMatrixLocalpartFromAgentId = (agentId: string): string =>
   sanitizeManagedAgentLocalpart(agentId, "agent-bot");
 
-const generateAgentPassword = (): string =>
-  randomBytes(24).toString("base64url");
+const generateAgentPassword = (): string => randomBytes(24).toString("base64url");
 
 const areMatrixIdentitiesEqual = (
   left:
     | {
-      localpart: string;
-      userId: string;
-      passwordSecretRef?: string;
-      accessTokenSecretRef?: string;
-    }
+        localpart: string;
+        userId: string;
+        passwordSecretRef?: string;
+        accessTokenSecretRef?: string;
+      }
     | undefined,
   right:
     | {
-      localpart: string;
-      userId: string;
-      passwordSecretRef?: string;
-      accessTokenSecretRef?: string;
-    }
+        localpart: string;
+        userId: string;
+        passwordSecretRef?: string;
+        accessTokenSecretRef?: string;
+      }
     | undefined,
 ): boolean =>
-  left?.localpart === right?.localpart
-  && left?.userId === right?.userId
-  && left?.passwordSecretRef === right?.passwordSecretRef
-  && left?.accessTokenSecretRef === right?.accessTokenSecretRef;
+  left?.localpart === right?.localpart &&
+  left?.userId === right?.userId &&
+  left?.passwordSecretRef === right?.passwordSecretRef &&
+  left?.accessTokenSecretRef === right?.accessTokenSecretRef;
 
 const isAlreadyJoinedOrInvitedRoomError = (status: number, body: unknown): boolean => {
   if (status !== 400 && status !== 403 && status !== 409) {
@@ -899,9 +882,7 @@ const isAlreadyJoinedOrInvitedRoomError = (status: number, body: unknown): boole
   return /already in the room|is already in the room|already joined|already invited/.test(text);
 };
 
-const ensureCoreManagedAgents = (
-  agents: RuntimeAgentEntry[],
-): RuntimeAgentEntry[] => {
+const ensureCoreManagedAgents = (agents: RuntimeAgentEntry[]): RuntimeAgentEntry[] => {
   const byId = new Map<string, RuntimeAgentEntry>();
   for (const entry of agents) {
     if (entry.id.trim().length === 0 || entry.workspace.trim().length === 0) {
@@ -922,8 +903,8 @@ const ensureCoreManagedAgents = (
   }
   const orderedIds = Array.from(byId.keys()).sort((left, right) => left.localeCompare(right));
   const resolvedDefaultAgentId =
-    Array.from(byId.values()).find((entry) => entry.default === true)?.id
-    ?? (byId.has(NODE_OPERATOR_AGENT_ID) ? NODE_OPERATOR_AGENT_ID : orderedIds[0]);
+    Array.from(byId.values()).find((entry) => entry.default === true)?.id ??
+    (byId.has(NODE_OPERATOR_AGENT_ID) ? NODE_OPERATOR_AGENT_ID : orderedIds[0]);
   return orderedIds
     .map((id) => {
       const entry = byId.get(id);
@@ -939,15 +920,19 @@ const ensureCoreManagedAgents = (
 };
 
 const isRateLimitedMatrixLoginFailure = (error: unknown): boolean => {
-  if (!isStructuredError(error) || error.code !== "MATRIX_LOGIN_FAILED" || !isRecord(error.details)) {
+  if (
+    !isStructuredError(error) ||
+    error.code !== "MATRIX_LOGIN_FAILED" ||
+    !isRecord(error.details)
+  ) {
     return false;
   }
   if (error.details.status === 429) {
     return true;
   }
   return (
-    typeof error.details.body === "string"
-    && /m_limit_exceeded|too many requests/i.test(error.details.body)
+    typeof error.details.body === "string" &&
+    /m_limit_exceeded|too many requests/i.test(error.details.body)
   );
 };
 
@@ -1032,8 +1017,7 @@ const textContainsId = (value: string, id: string): boolean => {
   return regex.test(value);
 };
 
-const escapeRegExp = (value: string): string =>
-  value.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const escapeRegExp = (value: string): string => value.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const parseEnvFile = (raw: string): Record<string, string> => {
   const out: Record<string, string> = {};
@@ -1072,9 +1056,9 @@ const isGatewayUserSystemdUnavailableError = (error: unknown): boolean => {
   if (isRecord(error)) {
     if (typeof error.code === "string") {
       gatewayCommandFailure =
-        error.code === "OPENCLAW_GATEWAY_INSTALL_FAILED"
-        || error.code === "OPENCLAW_GATEWAY_START_FAILED"
-        || error.code === "OPENCLAW_GATEWAY_RESTART_FAILED";
+        error.code === "OPENCLAW_GATEWAY_INSTALL_FAILED" ||
+        error.code === "OPENCLAW_GATEWAY_START_FAILED" ||
+        error.code === "OPENCLAW_GATEWAY_RESTART_FAILED";
     }
 
     if (typeof error.message === "string") {
@@ -1096,9 +1080,7 @@ const isGatewayUserSystemdUnavailableError = (error: unknown): boolean => {
     return false;
   }
 
-  return /systemctl --user unavailable|failed to connect to bus|no medium found/i.test(
-    combined,
-  );
+  return /systemctl --user unavailable|failed to connect to bus|no medium found/i.test(combined);
 };
 
 const isMailSentinelGatewayUnavailableError = (error: unknown): boolean => {
@@ -1138,9 +1120,9 @@ const isAlreadyExistsOutput = (value: string): boolean =>
 
 const isCoreAgentBindingBestEffortSkippable = (error: unknown): boolean => {
   if (
-    !isRecord(error)
-    || (error.code !== "MAIL_SENTINEL_REGISTER_FAILED"
-      && error.code !== "MANAGED_AGENT_REGISTER_FAILED")
+    !isRecord(error) ||
+    (error.code !== "MAIL_SENTINEL_REGISTER_FAILED" &&
+      error.code !== "MANAGED_AGENT_REGISTER_FAILED")
   ) {
     return false;
   }
@@ -1254,8 +1236,8 @@ const buildSuggestedCommands = (input: {
   }
   if (input.wiringCheck.status !== "pass") {
     const runtimeConfigPath =
-      input.runtimeConfig?.openclaw.runtimeConfigPath
-      ?? "/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5";
+      input.runtimeConfig?.openclaw.runtimeConfigPath ??
+      "/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5";
     commands.push(`ls -l ${runtimeConfigPath}`);
   }
   if (!input.agentPresent || !input.cronPresent) {
@@ -1301,13 +1283,11 @@ const describeError = (error: unknown): string => {
 };
 
 const stripSingleTrailingNewline = (value: string): string =>
-  value.endsWith("\r\n")
-    ? value.slice(0, -2)
-    : value.endsWith("\n")
-      ? value.slice(0, -1)
-      : value;
+  value.endsWith("\r\n") ? value.slice(0, -2) : value.endsWith("\n") ? value.slice(0, -1) : value;
 
-const normalizeTestAlertError = (error: unknown): {
+const normalizeTestAlertError = (
+  error: unknown,
+): {
   code: string;
   message: string;
   retryable: boolean;
@@ -1348,9 +1328,9 @@ const isStructuredError = (
   }
 
   return (
-    typeof value.code === "string"
-    && typeof value.message === "string"
-    && typeof value.retryable === "boolean"
+    typeof value.code === "string" &&
+    typeof value.message === "string" &&
+    typeof value.retryable === "boolean"
   );
 };
 

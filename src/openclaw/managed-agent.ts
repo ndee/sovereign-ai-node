@@ -89,8 +89,8 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
 
   private async removeExistingCronJobs(agentId: string, cronJobId: string): Promise<void> {
     const jobs = await this.listCronJobs();
-    const staleJobs = jobs.filter((job) =>
-      job.name === cronJobId && (job.agentId === undefined || job.agentId === agentId)
+    const staleJobs = jobs.filter(
+      (job) => job.name === cronJobId && (job.agentId === undefined || job.agentId === agentId),
     );
     for (const job of staleJobs) {
       const result = await this.execRunner.run({
@@ -241,12 +241,14 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
       await delay(OPENCLAW_GATEWAY_RETRY_DELAY_MS);
     }
 
-    return result ?? {
-      command: `openclaw ${args.join(" ")}`,
-      exitCode: 1,
-      stdout: "",
-      stderr: "openclaw command did not execute",
-    };
+    return (
+      result ?? {
+        command: `openclaw ${args.join(" ")}`,
+        exitCode: 1,
+        stdout: "",
+        stderr: "openclaw command did not execute",
+      }
+    );
   }
 }
 
@@ -268,9 +270,10 @@ const buildCronCommands = (input: ManagedAgentRegistrationInput): string[][] => 
     "--message",
     input.cron.message,
   ];
-  const announceArgs = input.cron.announceRoomId === undefined
-    ? []
-    : ["--announce", "--channel", "matrix", "--to", input.cron.announceRoomId];
+  const announceArgs =
+    input.cron.announceRoomId === undefined
+      ? []
+      : ["--announce", "--channel", "matrix", "--to", input.cron.announceRoomId];
   return [
     [...sharedArgs, ...announceArgs, "--replace"],
     [...sharedArgs, ...announceArgs],
@@ -314,11 +317,13 @@ const parseCronListJson = (value: string): CronListJob[] | null => {
       if (typeof job.id !== "string" || job.id.length === 0) {
         return [];
       }
-      return [{
-        id: job.id,
-        ...(typeof job.name === "string" ? { name: job.name } : {}),
-        ...(typeof job.agentId === "string" ? { agentId: job.agentId } : {}),
-      }];
+      return [
+        {
+          id: job.id,
+          ...(typeof job.name === "string" ? { name: job.name } : {}),
+          ...(typeof job.agentId === "string" ? { agentId: job.agentId } : {}),
+        },
+      ];
     });
   } catch {
     return null;
@@ -331,9 +336,7 @@ const parseCronListTable = (value: string): CronListJob[] =>
     .map((line) => line.trim())
     .filter((line) => /^[0-9a-f]{8}-[0-9a-f-]{27}\s+/i.test(line))
     .map((line) => {
-      const match = line.match(
-        /^([0-9a-f-]{36})\s+(\S+)(?:\s+.+?\s+(?:isolated|main)\s+(\S+))?$/i,
-      );
+      const match = line.match(/^([0-9a-f-]{36})\s+(\S+)(?:\s+.+?\s+(?:isolated|main)\s+(\S+))?$/i);
       if (match === null) {
         const id = line.split(/\s+/, 1)[0];
         if (id === undefined || id.length === 0) {

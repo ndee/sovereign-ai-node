@@ -1,9 +1,10 @@
-export const buildManagedAgentWorkspaceReadme = (agentId: string): string => [
-  `# ${agentId} workspace`,
-  "",
-  "Provisioned by sovereign-node managed agent commands.",
-  "Managed by Sovereign Node installer.",
-].join("\n");
+export const buildManagedAgentWorkspaceReadme = (agentId: string): string =>
+  [
+    `# ${agentId} workspace`,
+    "",
+    "Provisioned by sovereign-node managed agent commands.",
+    "Managed by Sovereign Node installer.",
+  ].join("\n");
 
 export const renderTemplateWorkspaceContent = (input: {
   content: string;

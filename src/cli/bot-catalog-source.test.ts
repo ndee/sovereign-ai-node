@@ -50,7 +50,9 @@ describe("applyBotCatalogSourceOptions", () => {
     });
 
     expect(process.env.SOVEREIGN_BOTS_REPO_DIR).toBeUndefined();
-    expect(process.env.SOVEREIGN_BOTS_REPO_URL).toBe("https://github.com/example/sovereign-ai-bots");
+    expect(process.env.SOVEREIGN_BOTS_REPO_URL).toBe(
+      "https://github.com/example/sovereign-ai-bots",
+    );
     expect(process.env.SOVEREIGN_BOTS_REPO_REF).toBe("feature/custom-bots");
   });
 
@@ -68,6 +70,7 @@ describe("applyBotCatalogSourceOptions", () => {
       applyBotCatalogSourceOptions({
         botsRepoRef: "main",
         botsSourceDir: "/tmp/sovereign-ai-bots",
-      })).toThrow("--bots-repo-ref cannot be combined with --bots-source-dir.");
+      }),
+    ).toThrow("--bots-repo-ref cannot be combined with --bots-source-dir.");
   });
 });

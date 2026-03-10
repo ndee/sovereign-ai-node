@@ -1,15 +1,14 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-
+import type { SovereignPaths } from "../config/paths.js";
 import type { TestMatrixRequest } from "../contracts/api.js";
 import type { CheckResult } from "../contracts/common.js";
 import type { InstallRequest, TestMatrixResult } from "../contracts/index.js";
-import type { SovereignPaths } from "../config/paths.js";
 import type { Logger } from "../logging/logger.js";
 import { buildMatrixOnboardingUrl } from "../onboarding/bootstrap-code.js";
-import type { ExecRunner, ExecResult } from "./exec.js";
+import type { ExecResult, ExecRunner } from "./exec.js";
 
 const MATRIX_INTERNAL_BASE_URL = "http://127.0.0.1:8008";
 const MATRIX_READY_TIMEOUT_MS = resolveDurationFromEnv(
@@ -114,7 +113,8 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         publicBaseUrl,
       });
     }
-    const federationEnabled = accessMode === "relay" ? false : (req.matrix.federationEnabled ?? false);
+    const federationEnabled =
+      accessMode === "relay" ? false : (req.matrix.federationEnabled ?? false);
     if (accessMode === "relay" && req.matrix.federationEnabled === true) {
       throw {
         code: "MATRIX_RELAY_FEDERATION_UNSUPPORTED",
@@ -178,10 +178,9 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       secretsDir: this.paths.secretsDir,
       accessMode,
       tlsMode,
-      localSynapsePortBinding:
-        usesReverseProxy
-          ? "127.0.0.1:8008:8008"
-          : resolveLocalDevSynapsePortBinding(publicBaseUrl),
+      localSynapsePortBinding: usesReverseProxy
+        ? "127.0.0.1:8008:8008"
+        : resolveLocalDevSynapsePortBinding(publicBaseUrl),
       ...(accessMode === "direct" && tlsMode !== "local-dev"
         ? { httpsProxyPortBinding: resolveAutoHttpsProxyPortBinding(publicBaseUrl) }
         : {}),
@@ -209,7 +208,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     });
     const signingKey = renderSigningKey();
     const logConfig = renderSynapseLogConfig();
-    const operatorLocalpart = sanitizeMatrixLocalpart(req.operator.username, "operator");
+    const _operatorLocalpart = sanitizeMatrixLocalpart(req.operator.username, "operator");
 
     const writes = [
       writeFile(composeFilePath, `${composeYaml}\n`, "utf8"),
@@ -315,27 +314,21 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     await this.waitForSynapseReadyWithRecovery(provision);
 
     const operatorLocalpart = sanitizeMatrixLocalpart(req.operator.username, "operator");
-    const botLocalpart = chooseServiceBotLocalpart(
-      operatorLocalpart,
-      options?.botLocalpart,
-    );
+    const botLocalpart = chooseServiceBotLocalpart(operatorLocalpart, options?.botLocalpart);
     const secretsDir = await this.ensureManagedSecretsDir();
     const operatorSecretName = `matrix-${operatorLocalpart}.password`;
     const botSecretName = `matrix-${botLocalpart}.password`;
     const operatorPassword =
       (await this.readSecretFile(secretsDir, operatorSecretName)) ?? generatePassword();
-    const botPassword = (await this.readSecretFile(secretsDir, botSecretName)) ?? generatePassword();
+    const botPassword =
+      (await this.readSecretFile(secretsDir, botSecretName)) ?? generatePassword();
 
     const operatorPasswordSecretRef = await this.writeSecretFile(
       secretsDir,
       operatorSecretName,
       operatorPassword,
     );
-    const botPasswordSecretRef = await this.writeSecretFile(
-      secretsDir,
-      botSecretName,
-      botPassword,
-    );
+    const botPasswordSecretRef = await this.writeSecretFile(secretsDir, botSecretName, botPassword);
 
     try {
       return await this.bootstrapAccountsWithKnownPasswords({
@@ -812,8 +805,8 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         }
         credentialRetryAttempts += 1;
         if (
-          !isRecoverableAccountCredentialFailure(error)
-          || credentialRetryAttempts >= MATRIX_LOGIN_RETRY_ATTEMPTS
+          !isRecoverableAccountCredentialFailure(error) ||
+          credentialRetryAttempts >= MATRIX_LOGIN_RETRY_ATTEMPTS
         ) {
           break;
         }
@@ -927,14 +920,11 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     }
   }
 
-  private async resetBundledPostgresState(
-    provision: BundledMatrixProvisionResult,
-  ): Promise<void> {
-    await this.runComposeCommand(
-      provision.projectDir,
-      provision.composeFilePath,
-      ["down", "--remove-orphans"],
-    );
+  private async resetBundledPostgresState(provision: BundledMatrixProvisionResult): Promise<void> {
+    await this.runComposeCommand(provision.projectDir, provision.composeFilePath, [
+      "down",
+      "--remove-orphans",
+    ]);
     const postgresDir = join(provision.projectDir, "postgres-data");
     await rm(postgresDir, { recursive: true, force: true });
     await mkdir(postgresDir, { recursive: true });
@@ -944,11 +934,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
   private async collectComposeDiagnostics(
     provision: BundledMatrixProvisionResult,
   ): Promise<Record<string, unknown>> {
-    const ps = await this.safeComposeDiagnosticCommand(
-      provision,
-      ["ps", "-a"],
-      "ps-unavailable",
-    );
+    const ps = await this.safeComposeDiagnosticCommand(provision, ["ps", "-a"], "ps-unavailable");
     const synapseLogs = await this.safeComposeDiagnosticCommand(
       provision,
       ["logs", "--no-color", "--tail", "200", "synapse"],
@@ -1037,10 +1023,10 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       const parsedBody = parseJsonSafely(rawBody);
       if (!response.ok) {
         const retryAfterMs =
-          isRecord(parsedBody)
-          && typeof parsedBody.retry_after_ms === "number"
-          && Number.isFinite(parsedBody.retry_after_ms)
-          && parsedBody.retry_after_ms > 0
+          isRecord(parsedBody) &&
+          typeof parsedBody.retry_after_ms === "number" &&
+          Number.isFinite(parsedBody.retry_after_ms) &&
+          parsedBody.retry_after_ms > 0
             ? Math.trunc(parsedBody.retry_after_ms)
             : undefined;
         throw {
@@ -1110,7 +1096,11 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     trailingArgs: string[],
   ): Promise<ExecResult> {
     const commonArgs = ["compose", "-f", composeFilePath, "--project-directory", projectDir];
-    const dockerCompose = await this.safeExec("docker", [...commonArgs, ...trailingArgs], projectDir);
+    const dockerCompose = await this.safeExec(
+      "docker",
+      [...commonArgs, ...trailingArgs],
+      projectDir,
+    );
     if (dockerCompose.ok && dockerCompose.result.exitCode === 0) {
       return dockerCompose.result;
     }
@@ -1241,7 +1231,6 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       "utf8",
     );
   }
-
 }
 
 type EnvTemplateInput = {
@@ -1265,7 +1254,8 @@ type ComposeTemplateInput = {
   relayEdgePortBinding?: string;
 };
 
-const renderComposeYaml = (input: ComposeTemplateInput): string => `
+const renderComposeYaml = (input: ComposeTemplateInput): string =>
+  `
 services:
   postgres:
     image: postgres:16-alpine
@@ -1289,8 +1279,9 @@ services:
       - "${input.localSynapsePortBinding}"
     volumes:
       - ./synapse:/data
-${input.accessMode === "relay" || input.tlsMode !== "local-dev"
-  ? `
+${
+  input.accessMode === "relay" || input.tlsMode !== "local-dev"
+    ? `
 
   onboarding-api:
     image: ${input.onboardingApiImage}
@@ -1317,15 +1308,18 @@ ${input.accessMode === "relay" || input.tlsMode !== "local-dev"
       - synapse
       - onboarding-api
     ports:
-${input.accessMode === "relay"
-  ? `      - "${input.relayEdgePortBinding}"`
-  : `${input.tlsMode === "auto" ? '      - "80:80"\n' : ""}      - "${input.httpsProxyPortBinding}"`}
+${
+  input.accessMode === "relay"
+    ? `      - "${input.relayEdgePortBinding}"`
+    : `${input.tlsMode === "auto" ? '      - "80:80"\n' : ""}      - "${input.httpsProxyPortBinding}"`
+}
     volumes:
       - ./reverse-proxy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./well-known:/srv:ro
       - ./reverse-proxy-data:/data
       - ./reverse-proxy-config:/config`
-  : ""}
+    : ""
+}
 `.trim();
 
 const renderEnvFile = (input: EnvTemplateInput): string =>
@@ -1435,8 +1429,7 @@ const normalizeBundledTlsMode = (
   if (requestedTlsMode === "manual") {
     throw {
       code: "MATRIX_TLS_MODE_UNSUPPORTED",
-      message:
-        "Bundled Matrix provisioning does not yet support tlsMode=manual",
+      message: "Bundled Matrix provisioning does not yet support tlsMode=manual",
       retryable: false,
       details: {
         requestedTlsMode,
@@ -1445,10 +1438,10 @@ const normalizeBundledTlsMode = (
     };
   }
   if (
-    accessMode === "direct"
-    && requestedTlsMode !== "local-dev"
-    && requestedTlsMode !== "auto"
-    && requestedTlsMode !== "internal"
+    accessMode === "direct" &&
+    requestedTlsMode !== "local-dev" &&
+    requestedTlsMode !== "auto" &&
+    requestedTlsMode !== "internal"
   ) {
     throw {
       code: "MATRIX_TLS_MODE_UNSUPPORTED",
@@ -1496,23 +1489,20 @@ const resolveAutoHttpsProxyPortBinding = (publicBaseUrl: string): string => {
 };
 
 const isLoopbackHostname = (value: string): boolean =>
-  value === "localhost"
-  || value === "127.0.0.1"
-  || value === "::1"
-  || value === "[::1]";
+  value === "localhost" || value === "127.0.0.1" || value === "::1" || value === "[::1]";
 
 const isIpAddressHostname = (value: string): boolean =>
   /^[0-9]{1,3}(?:\.[0-9]{1,3}){3}$/.test(value) || value.includes(":");
 
 const isLikelyLanOnlyHostname = (value: string): boolean =>
-  isLoopbackHostname(value)
-  || isIpAddressHostname(value)
-  || !value.includes(".")
-  || value.endsWith(".local")
-  || value.endsWith(".localhost")
-  || value.endsWith(".home.arpa")
-  || value.endsWith(".internal")
-  || value.endsWith(".lan");
+  isLoopbackHostname(value) ||
+  isIpAddressHostname(value) ||
+  !value.includes(".") ||
+  value.endsWith(".local") ||
+  value.endsWith(".localhost") ||
+  value.endsWith(".home.arpa") ||
+  value.endsWith(".internal") ||
+  value.endsWith(".lan");
 
 const validateBundledTlsMode = (input: {
   tlsMode: BundledMatrixTlsMode;
@@ -1575,8 +1565,7 @@ const validateBundledTlsMode = (input: {
   if (publicPort === "8008") {
     throw {
       code: "MATRIX_TLS_MODE_INVALID",
-      message:
-        `Bundled Matrix tlsMode=${input.tlsMode} cannot publish HTTPS on port 8008 because that port is reserved for the local Synapse admin endpoint`,
+      message: `Bundled Matrix tlsMode=${input.tlsMode} cannot publish HTTPS on port 8008 because that port is reserved for the local Synapse admin endpoint`,
       retryable: false,
       details: {
         publicBaseUrl: input.publicBaseUrl,
@@ -1585,10 +1574,7 @@ const validateBundledTlsMode = (input: {
   }
 };
 
-const renderCaddyfile = (
-  siteHostname: string,
-  tlsMode: BundledMatrixOnboardingMode,
-): string =>
+const renderCaddyfile = (siteHostname: string, tlsMode: BundledMatrixOnboardingMode): string =>
   [
     "{",
     "  admin off",
@@ -1602,7 +1588,7 @@ const renderCaddyfile = (
     "    root * /srv",
     "    header Access-Control-Allow-Origin *",
     "    header Content-Type application/json",
-    "    header Cache-Control \"public, max-age=300\"",
+    '    header Cache-Control "public, max-age=300"',
     "    file_server",
     "  }",
     "",
@@ -1610,13 +1596,13 @@ const renderCaddyfile = (
     "  handle @onboard {",
     "    root * /srv",
     "    rewrite * /onboard/index.html",
-    "    header Cache-Control \"no-store\"",
+    '    header Cache-Control "no-store"',
     "    file_server",
     "  }",
     "",
     "  @onboardApi path /onboard/api /onboard/api/*",
     "  handle @onboardApi {",
-    "    header Cache-Control \"no-store\"",
+    '    header Cache-Control "no-store"',
     "    uri strip_prefix /onboard/api",
     `    reverse_proxy onboarding-api:${MATRIX_ONBOARDING_API_PORT}`,
     "  }",
@@ -1628,8 +1614,8 @@ const renderCaddyfile = (
           "    root * /data/caddy/pki/authorities/local",
           "    rewrite * /root.crt",
           "    header Content-Type application/x-x509-ca-cert",
-          "    header Content-Disposition \"attachment; filename=sovereign-node-caddy-root-ca.crt\"",
-          "    header Cache-Control \"no-store\"",
+          '    header Content-Disposition "attachment; filename=sovereign-node-caddy-root-ca.crt"',
+          '    header Cache-Control "no-store"',
           "    file_server",
           "  }",
           "",
@@ -1652,26 +1638,30 @@ const renderOnboardingPage = (input: {
   const elementWebLink = buildElementWebLoginLink(input.publicBaseUrl);
   const elementAndroidLink = buildElementAndroidIntentLink(input.publicBaseUrl);
   const roomLink = input.alertRoomId ? buildElementWebRoomLink(input.alertRoomId) : "";
-  const caSection = input.tlsMode === "internal"
-    ? [
-        "<section class=\"card caution\">",
-        "  <h2>1. Install the Local CA</h2>",
-        "  <p>This LAN-only setup uses Caddy&apos;s internal certificate authority. Install the CA on your phone before opening Element.</p>",
-        "  <a class=\"button button-secondary\" href=\"/downloads/caddy-root-ca.crt\">Download CA Certificate</a>",
-        "  <p class=\"meta\">After download, trust this certificate in your device&apos;s settings. Native Android Matrix apps may still reject local CAs; Element Web in the browser is the reliable path.</p>",
-        "</section>",
-      ].join("\n")
-    : "";
-  const nativeAppHint = input.tlsMode === "internal"
-    ? "If the native app still cannot reach the server, it is rejecting the local CA or local-network setup. In that case use the browser path above. Vanadium and Brave may behave differently, so the copy buttons below remain the fallback path."
-    : "The Android app button prefills the homeserver using Element Classic&apos;s documented deep link. If the app still drops you into a generic login flow, use the copy buttons below and paste the exact values manually.";
+  const caSection =
+    input.tlsMode === "internal"
+      ? [
+          '<section class="card caution">',
+          "  <h2>1. Install the Local CA</h2>",
+          "  <p>This LAN-only setup uses Caddy&apos;s internal certificate authority. Install the CA on your phone before opening Element.</p>",
+          '  <a class="button button-secondary" href="/downloads/caddy-root-ca.crt">Download CA Certificate</a>',
+          '  <p class="meta">After download, trust this certificate in your device&apos;s settings. Native Android Matrix apps may still reject local CAs; Element Web in the browser is the reliable path.</p>',
+          "</section>",
+        ].join("\n")
+      : "";
+  const nativeAppHint =
+    input.tlsMode === "internal"
+      ? "If the native app still cannot reach the server, it is rejecting the local CA or local-network setup. In that case use the browser path above. Vanadium and Brave may behave differently, so the copy buttons below remain the fallback path."
+      : "The Android app button prefills the homeserver using Element Classic&apos;s documented deep link. If the app still drops you into a generic login flow, use the copy buttons below and paste the exact values manually.";
   const roomSection = input.alertRoomId
     ? [
-        "<section class=\"card\">",
+        '<section class="card">',
         "  <h2>After login: open the alert room</h2>",
         "  <p>After login, use this button to jump directly into the existing Sovereign Alerts room.</p>",
-        "  <a class=\"button button-secondary\" href=\"" + escapeHtml(roomLink) + "\" target=\"_blank\" rel=\"noreferrer\">Open Alert Room in Element Web</a>",
-        "  <p class=\"meta\">If Element asks again, keep the same homeserver URL and session.</p>",
+        '  <a class="button button-secondary" href="' +
+          escapeHtml(roomLink) +
+          '" target="_blank" rel="noreferrer">Open Alert Room in Element Web</a>',
+        '  <p class="meta">If Element asks again, keep the same homeserver URL and session.</p>',
         "</section>",
       ].join("\n")
     : "";
@@ -1683,15 +1673,15 @@ const renderOnboardingPage = (input: {
 
   return [
     "<!doctype html>",
-    "<html lang=\"en\">",
+    '<html lang="en">',
     "<head>",
-    "  <meta charset=\"utf-8\">",
-    "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+    '  <meta charset="utf-8">',
+    '  <meta name="viewport" content="width=device-width, initial-scale=1">',
     "  <title>Sovereign Node Phone Setup</title>",
     "  <style>",
     "    :root { color-scheme: light; --bg: #0f172a; --panel: rgba(15, 23, 42, 0.84); --panel-2: rgba(30, 41, 59, 0.78); --text: #e2e8f0; --muted: #bfdbfe; --accent: #22c55e; --accent-2: #38bdf8; --warn: #f59e0b; }",
     "    * { box-sizing: border-box; }",
-    "    body { margin: 0; min-height: 100vh; font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; background: radial-gradient(circle at top, #1d4ed8 0%, #0f172a 42%, #020617 100%); color: var(--text); }",
+    '    body { margin: 0; min-height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: radial-gradient(circle at top, #1d4ed8 0%, #0f172a 42%, #020617 100%); color: var(--text); }',
     "    main { width: min(100%, 760px); margin: 0 auto; padding: 24px 16px 40px; }",
     "    .hero { padding: 24px; border-radius: 24px; background: linear-gradient(135deg, rgba(34, 197, 94, 0.2), rgba(14, 116, 144, 0.15)), var(--panel); box-shadow: 0 24px 80px rgba(2, 6, 23, 0.45); }",
     "    .eyebrow { margin: 0 0 8px; font-size: 0.85rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }",
@@ -1718,61 +1708,69 @@ const renderOnboardingPage = (input: {
     "</head>",
     "<body>",
     "  <main>",
-    "    <section class=\"hero\">",
-    "      <p class=\"eyebrow\">Sovereign Node</p>",
+    '    <section class="hero">',
+    '      <p class="eyebrow">Sovereign Node</p>',
     "      <h1>Connect your phone to Matrix</h1>",
     "      <p>Use this page on your phone to unlock a local Matrix invitation with the least manual typing.</p>",
-    "      <code>Homeserver URL: " + escapeHtml(input.publicBaseUrl) + "</code>",
-    "      <p class=\"meta\">Local usernames on this node end with <code>:" + escapeHtml(input.homeserverDomain) + "</code>.</p>",
+    `      <code>Homeserver URL: ${escapeHtml(input.publicBaseUrl)}</code>`,
+    '      <p class="meta">Local usernames on this node end with <code>:' +
+      escapeHtml(input.homeserverDomain) +
+      "</code>.</p>",
     "    </section>",
-    "    <div class=\"stack\">",
+    '    <div class="stack">',
     caSection,
-    "      <section class=\"card\">",
-    "        <h2>" + String(copyStep) + ". Quick copy and unlock</h2>",
+    '      <section class="card">',
+    `        <h2>${String(copyStep)}. Quick copy and unlock</h2>`,
     "        <p>Copy the homeserver here. Unlock the username and password with a one-time code printed by the installer or generated later with <code>sudo sovereign-node onboarding issue</code>.</p>",
-    "        <div class=\"button-row\">",
-    "          <button class=\"button button-secondary\" type=\"button\" onclick=\"copyHomeserverUrl(this)\">Copy Server URL</button>",
-    "          <button class=\"button button-secondary hidden\" id=\"copyUsernameButton\" type=\"button\" onclick=\"copyUsername(this)\">Copy Username</button>",
+    '        <div class="button-row">',
+    '          <button class="button button-secondary" type="button" onclick="copyHomeserverUrl(this)">Copy Server URL</button>',
+    '          <button class="button button-secondary hidden" id="copyUsernameButton" type="button" onclick="copyUsername(this)">Copy Username</button>',
     "        </div>",
-    "        <code id=\"revealedUsername\" class=\"hidden\"></code>",
-    "        <label class=\"field\" for=\"bootstrapCode\">",
+    '        <code id="revealedUsername" class="hidden"></code>',
+    '        <label class="field" for="bootstrapCode">',
     "          <span>One-time onboarding code</span>",
-    "          <input id=\"bootstrapCode\" name=\"bootstrapCode\" autocomplete=\"one-time-code\" autocapitalize=\"characters\" spellcheck=\"false\" placeholder=\"ABCD-EFGH-IJKL\">",
+    '          <input id="bootstrapCode" name="bootstrapCode" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" placeholder="ABCD-EFGH-IJKL">',
     "        </label>",
-    "        <div class=\"button-row\">",
-    "          <button class=\"button\" id=\"redeemButton\" type=\"button\" onclick=\"redeemCode(this)\">Unlock Password</button>",
-    "          <button class=\"button button-secondary hidden\" id=\"copyPasswordButton\" type=\"button\" onclick=\"copyPassword(this)\">Copy Password</button>",
+    '        <div class="button-row">',
+    '          <button class="button" id="redeemButton" type="button" onclick="redeemCode(this)">Unlock Password</button>',
+    '          <button class="button button-secondary hidden" id="copyPasswordButton" type="button" onclick="copyPassword(this)">Copy Password</button>',
     "        </div>",
-    "        <p class=\"meta\" id=\"passwordStatus\">The username and password are not embedded in this page. The code works once, expires after the configured TTL, and must be reissued for later onboarding.</p>",
+    '        <p class="meta" id="passwordStatus">The username and password are not embedded in this page. The code works once, expires after the configured TTL, and must be reissued for later onboarding.</p>',
     "      </section>",
-    "      <section class=\"card\">",
-    "        <h2>" + String(webStep) + ". Continue with Element Web</h2>",
+    '      <section class="card">',
+    `        <h2>${String(webStep)}. Continue with Element Web</h2>`,
     "        <p>The button opens Element Web with your homeserver prefilled. Browser restrictions still prevent safe password injection into app.element.io, so you may still need to paste the password manually.</p>",
-    "        <a class=\"button\" id=\"elementWebLink\" href=\"" + escapeHtml(elementWebLink) + "\" rel=\"noreferrer\">Connect via Element Web</a>",
-    "        <a class=\"button button-secondary\" id=\"elementAndroidLink\" href=\"" + escapeHtml(elementAndroidLink) + "\" rel=\"noreferrer\">Open in Element Android App</a>",
-    "        <p class=\"meta\">If Element still shows the generic login screen, tap <strong>Edit</strong> in the homeserver field and paste the full URL exactly as shown above. Do not type only " + escapeHtml(new URL(input.publicBaseUrl).host) + ".</p>",
-    "        <p class=\"meta\">The Android button uses Element Classic&apos;s documented <code>hs_url</code> deep link and explicitly targets the F-Droid package <code>im.vector.app</code>. It can prefill the homeserver, but not securely inject the password.</p>",
-    "        <p class=\"meta\" id=\"usernameHint\">Unlock the invitation first if you need the exact username.</p>",
-    "        <p class=\"meta\">" + nativeAppHint + "</p>",
+    '        <a class="button" id="elementWebLink" href="' +
+      escapeHtml(elementWebLink) +
+      '" rel="noreferrer">Connect via Element Web</a>',
+    '        <a class="button button-secondary" id="elementAndroidLink" href="' +
+      escapeHtml(elementAndroidLink) +
+      '" rel="noreferrer">Open in Element Android App</a>',
+    '        <p class="meta">If Element still shows the generic login screen, tap <strong>Edit</strong> in the homeserver field and paste the full URL exactly as shown above. Do not type only ' +
+      escapeHtml(new URL(input.publicBaseUrl).host) +
+      ".</p>",
+    '        <p class="meta">The Android button uses Element Classic&apos;s documented <code>hs_url</code> deep link and explicitly targets the F-Droid package <code>im.vector.app</code>. It can prefill the homeserver, but not securely inject the password.</p>',
+    '        <p class="meta" id="usernameHint">Unlock the invitation first if you need the exact username.</p>',
+    `        <p class="meta">${nativeAppHint}</p>`,
     "      </section>",
-    "      <section class=\"card\">",
-    "        <h2>" + String(qrStep) + ". Open this setup page on another device</h2>",
+    '      <section class="card">',
+    `        <h2>${String(qrStep)}. Open this setup page on another device</h2>`,
     "        <p>Open this page on a laptop, then scan the QR code from your phone if you want to hand off setup between devices. If you already have a link with a <code>#code=...</code> fragment, opening it on your phone can fill the code automatically.</p>",
-    "        <div class=\"qr-shell\">",
+    '        <div class="qr-shell">',
     input.onboardingQrSvg,
     "        </div>",
-    "        <p class=\"meta\">This QR points to " + escapeHtml(input.onboardingPageUrl) + "</p>",
+    `        <p class="meta">This QR points to ${escapeHtml(input.onboardingPageUrl)}</p>`,
     "      </section>",
-    "      <section class=\"card\">",
-    "        <h2>" + String(signInStep) + ". Sign in</h2>",
+    '      <section class="card">',
+    `        <h2>${String(signInStep)}. Sign in</h2>`,
     "        <ol>",
     "          <li>Unlock the invitation from this page to reveal the exact username and password.</li>",
     "          <li>Copy the username and password into Element.</li>",
     "          <li>If Element asks for a homeserver again, paste the exact <code>https://</code> URL shown at the top of this page.</li>",
     "        </ol>",
     "      </section>",
-    "      <section class=\"card\">",
-    "        <h2>" + String(verifyStep) + ". If Element asks to verify another device</h2>",
+    '      <section class="card">',
+    `        <h2>${String(verifyStep)}. If Element asks to verify another device</h2>`,
     "        <ol>",
     "          <li>Tap <strong>Bestätigung nicht möglich?</strong>.</li>",
     "          <li>Continue without verification or without secure backup.</li>",
@@ -1783,7 +1781,7 @@ const renderOnboardingPage = (input: {
     "    </div>",
     "  </main>",
     "  <script>",
-    "    const homeserverUrl = " + JSON.stringify(input.publicBaseUrl) + ";",
+    `    const homeserverUrl = ${JSON.stringify(input.publicBaseUrl)};`,
     "    let revealedUsername = '';",
     "    let revealedPassword = '';",
     "    async function copyHomeserverUrl(button) {",
@@ -1966,12 +1964,14 @@ const buildElementAndroidDeepLink = (publicBaseUrl: string, username?: string): 
 
 const buildElementAndroidIntentLink = (publicBaseUrl: string, username?: string): string => {
   const fallbackUrl = buildElementAndroidDeepLink(publicBaseUrl, username);
-  return "intent://mobile.element.io/"
-    + `?hs_url=${encodeURIComponent(publicBaseUrl)}`
-    + (username === undefined ? "" : `&login_hint=${encodeURIComponent(username)}`)
-    + "#Intent;scheme=https;package=im.vector.app"
-    + `;S.browser_fallback_url=${encodeURIComponent(fallbackUrl)}`
-    + ";end";
+  return (
+    "intent://mobile.element.io/" +
+    `?hs_url=${encodeURIComponent(publicBaseUrl)}` +
+    (username === undefined ? "" : `&login_hint=${encodeURIComponent(username)}`) +
+    "#Intent;scheme=https;package=im.vector.app" +
+    `;S.browser_fallback_url=${encodeURIComponent(fallbackUrl)}` +
+    ";end"
+  );
 };
 
 const buildElementWebRoomLink = (roomId: string): string =>
@@ -1995,7 +1995,8 @@ const renderWellKnownFiles = (input: {
     ),
     server: JSON.stringify(
       {
-        "m.server": httpsPort === "443" ? input.homeserverDomain : `${input.homeserverDomain}:${httpsPort}`,
+        "m.server":
+          httpsPort === "443" ? input.homeserverDomain : `${input.homeserverDomain}:${httpsPort}`,
       },
       null,
       2,
@@ -2028,9 +2029,9 @@ const ensureDirectoryTreesWritable = async (dirs: string[]): Promise<void> => {
 };
 
 const isRecoverablePostgresBootstrapFailure = (value: string): boolean =>
-  /password authentication failed for user ["']synapse["']/i.test(value)
-  || /incorrect collation/i.test(value)
-  || /incorrectdatabasesetup/i.test(value);
+  /password authentication failed for user ["']synapse["']/i.test(value) ||
+  /incorrect collation/i.test(value) ||
+  /incorrectdatabasesetup/i.test(value);
 
 const isRecoverableAccountCredentialFailure = (error: unknown): boolean => {
   if (!isStructuredError(error) || error.code !== "MATRIX_LOGIN_FAILED") {
@@ -2046,10 +2047,7 @@ const isRecoverableAccountCredentialFailure = (error: unknown): boolean => {
   }
 
   const body = error.details.body;
-  return (
-    typeof body === "string"
-    && /invalid username or password|m_forbidden/i.test(body)
-  );
+  return typeof body === "string" && /invalid username or password|m_forbidden/i.test(body);
 };
 
 const isRateLimitedMatrixLoginFailure = (error: unknown): boolean => {
@@ -2066,18 +2064,15 @@ const isRateLimitedMatrixLoginFailure = (error: unknown): boolean => {
   }
 
   const body = error.details.body;
-  return (
-    typeof body === "string"
-    && /m_limit_exceeded|too many requests/i.test(body)
-  );
+  return typeof body === "string" && /m_limit_exceeded|too many requests/i.test(body);
 };
 
 const readMatrixLoginRetryDelayMs = (error: unknown): number =>
   clampPositiveDelayMs(
-    isStructuredError(error)
-    && isRecord(error.details)
-    && typeof error.details.retryAfterMs === "number"
-    && Number.isFinite(error.details.retryAfterMs)
+    isStructuredError(error) &&
+      isRecord(error.details) &&
+      typeof error.details.retryAfterMs === "number" &&
+      Number.isFinite(error.details.retryAfterMs)
       ? Math.trunc(error.details.retryAfterMs)
       : MATRIX_LOGIN_RATE_LIMIT_FALLBACK_DELAY_MS,
     MATRIX_LOGIN_RATE_LIMIT_FALLBACK_DELAY_MS,
@@ -2112,7 +2107,8 @@ const parseSimpleEnv = (raw: string): Record<string, string> => {
   return out;
 };
 
-const renderSynapseLogConfig = (): string => `
+const renderSynapseLogConfig = (): string =>
+  `
 version: 1
 formatters:
   precise:
@@ -2152,7 +2148,7 @@ const escapeHtml = (value: string): string =>
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
-    .replaceAll("\"", "&quot;")
+    .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
 
 const normalizeEmbeddedSvg = (value: string): string =>
@@ -2164,16 +2160,16 @@ const normalizeEmbeddedSvg = (value: string): string =>
 const renderFallbackQrSvg = (value: string): string => {
   const safeValue = escapeHtml(value);
   return [
-    "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 320 320\" role=\"img\" aria-label=\"Open this setup page on another device\">",
-    "  <rect width=\"320\" height=\"320\" rx=\"24\" fill=\"#ffffff\" />",
-    "  <rect x=\"24\" y=\"24\" width=\"272\" height=\"272\" rx=\"16\" fill=\"#0f172a\" opacity=\"0.08\" />",
-    "  <rect x=\"42\" y=\"42\" width=\"72\" height=\"72\" rx=\"10\" fill=\"#0f172a\" />",
-    "  <rect x=\"206\" y=\"42\" width=\"72\" height=\"72\" rx=\"10\" fill=\"#0f172a\" />",
-    "  <rect x=\"42\" y=\"206\" width=\"72\" height=\"72\" rx=\"10\" fill=\"#0f172a\" />",
-    "  <rect x=\"144\" y=\"144\" width=\"32\" height=\"32\" rx=\"6\" fill=\"#0f172a\" />",
-    "  <rect x=\"190\" y=\"144\" width=\"20\" height=\"20\" rx=\"4\" fill=\"#0f172a\" />",
-    "  <rect x=\"220\" y=\"184\" width=\"26\" height=\"26\" rx=\"5\" fill=\"#0f172a\" />",
-    "  <text x=\"160\" y=\"250\" text-anchor=\"middle\" font-family=\"Arial, sans-serif\" font-size=\"15\" fill=\"#0f172a\">Open setup page</text>",
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 320" role="img" aria-label="Open this setup page on another device">',
+    '  <rect width="320" height="320" rx="24" fill="#ffffff" />',
+    '  <rect x="24" y="24" width="272" height="272" rx="16" fill="#0f172a" opacity="0.08" />',
+    '  <rect x="42" y="42" width="72" height="72" rx="10" fill="#0f172a" />',
+    '  <rect x="206" y="42" width="72" height="72" rx="10" fill="#0f172a" />',
+    '  <rect x="42" y="206" width="72" height="72" rx="10" fill="#0f172a" />',
+    '  <rect x="144" y="144" width="32" height="32" rx="6" fill="#0f172a" />',
+    '  <rect x="190" y="144" width="20" height="20" rx="4" fill="#0f172a" />',
+    '  <rect x="220" y="184" width="26" height="26" rx="5" fill="#0f172a" />',
+    '  <text x="160" y="250" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#0f172a">Open setup page</text>',
     `  <text x="160" y="273" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#334155">${safeValue}</text>`,
     "</svg>",
   ].join("\n");
@@ -2214,7 +2210,10 @@ const chooseServiceBotLocalpart = (
   operatorLocalpart: string,
   preferredLocalpart?: string,
 ): string => {
-  const desiredLocalpart = sanitizeMatrixLocalpart(preferredLocalpart ?? "service-bot", "service-bot");
+  const desiredLocalpart = sanitizeMatrixLocalpart(
+    preferredLocalpart ?? "service-bot",
+    "service-bot",
+  );
   return operatorLocalpart === desiredLocalpart ? `${desiredLocalpart}-bot` : desiredLocalpart;
 };
 
@@ -2296,8 +2295,8 @@ const isStructuredError = (
     return false;
   }
   return (
-    typeof value.code === "string"
-    && typeof value.message === "string"
-    && typeof value.retryable === "boolean"
+    typeof value.code === "string" &&
+    typeof value.message === "string" &&
+    typeof value.retryable === "boolean"
   );
 };

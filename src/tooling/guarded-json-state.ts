@@ -67,7 +67,10 @@ const childArrayEntityPolicySchema = z.object({
 const guardedJsonStatePolicySchema = z.object({
   version: z.literal(1),
   lastUpdatedPath: z.string().min(1).optional(),
-  entities: z.record(z.string(), z.union([rootArrayEntityPolicySchema, childArrayEntityPolicySchema])),
+  entities: z.record(
+    z.string(),
+    z.union([rootArrayEntityPolicySchema, childArrayEntityPolicySchema]),
+  ),
 });
 
 export class GuardedJsonStateToolError extends Error {
@@ -118,26 +121,23 @@ const defaultRuntimeConfigLoader: RuntimeConfigLoader = async (configPath) => {
 const defaultConfigPath = (): string =>
   process.env.SOVEREIGN_NODE_CONFIG ?? DEFAULT_PATHS.configPath;
 
-const stripSingleTrailingNewline = (value: string): string =>
-  value.replace(/\r?\n$/, "");
+const stripSingleTrailingNewline = (value: string): string => value.replace(/\r?\n$/, "");
 
 const actorUserIdSchema = z.string().regex(/^@[^:\s]+:[^\s]+$/, "Expected a full Matrix user id");
-const directMatrixSessionKeySchema = z.string().regex(
-  /(^|:)(session:)?agent:[^:\s]+:matrix:direct:@[^:\s]+:[^\s]+$/,
-  "Expected a Matrix direct-message session key",
-);
-const matrixOriginFromSchema = z.string().regex(
-  /^(matrix:)?@[^:\s]+:[^\s]+$/,
-  "Expected a Matrix sender reference",
-);
+const directMatrixSessionKeySchema = z
+  .string()
+  .regex(
+    /(^|:)(session:)?agent:[^:\s]+:matrix:direct:@[^:\s]+:[^\s]+$/,
+    "Expected a Matrix direct-message session key",
+  );
+const matrixOriginFromSchema = z
+  .string()
+  .regex(/^(matrix:)?@[^:\s]+:[^\s]+$/, "Expected a Matrix sender reference");
 
 const nowIso = (): string => new Date().toISOString();
 
 const compactIsoTimestamp = (value: string): string =>
-  value
-    .replaceAll("-", "")
-    .replaceAll(":", "")
-    .replaceAll(".", "");
+  value.replaceAll("-", "").replaceAll(":", "").replaceAll(".", "");
 
 export const normalizeMatrixActorUserId = (value: string): string => {
   const trimmed = value.trim();
@@ -148,7 +148,7 @@ export const normalizeMatrixActorUserId = (value: string): string => {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 
-const normalizePath = (value: string): string =>
+const _normalizePath = (value: string): string =>
   isAbsolute(value) ? value : resolve(process.cwd(), value);
 
 const resolveRelativeToBase = (value: string, baseDir: string): string =>
@@ -156,30 +156,18 @@ const resolveRelativeToBase = (value: string, baseDir: string): string =>
 
 const ensureRecord = (value: unknown, message: string): Record<string, unknown> => {
   if (!isRecord(value)) {
-    throw new GuardedJsonStateToolError(
-      "STATE_INVALID",
-      message,
-      false,
-    );
+    throw new GuardedJsonStateToolError("STATE_INVALID", message, false);
   }
   return value;
 };
 
 const ensureArray = (value: unknown, message: string): Array<Record<string, unknown>> => {
   if (!Array.isArray(value)) {
-    throw new GuardedJsonStateToolError(
-      "STATE_INVALID",
-      message,
-      false,
-    );
+    throw new GuardedJsonStateToolError("STATE_INVALID", message, false);
   }
   for (const entry of value) {
     if (!isRecord(entry)) {
-      throw new GuardedJsonStateToolError(
-        "STATE_INVALID",
-        message,
-        false,
-      );
+      throw new GuardedJsonStateToolError("STATE_INVALID", message, false);
     }
   }
   return value as Array<Record<string, unknown>>;
@@ -307,12 +295,12 @@ export const resolveMatrixActorFromSessionStatus = (input: {
   sessionKey?: string;
   originFrom?: string;
 }): string => {
-  const fromSessionKey = input.sessionKey === undefined
-    ? null
-    : extractActorFromDirectMatrixSessionKey(input.sessionKey);
-  const fromOrigin = input.originFrom === undefined
-    ? null
-    : extractActorFromMatrixOriginFrom(input.originFrom);
+  const fromSessionKey =
+    input.sessionKey === undefined
+      ? null
+      : extractActorFromDirectMatrixSessionKey(input.sessionKey);
+  const fromOrigin =
+    input.originFrom === undefined ? null : extractActorFromMatrixOriginFrom(input.originFrom);
   if (fromSessionKey !== null && fromOrigin !== null && fromSessionKey !== fromOrigin) {
     throw new GuardedJsonStateToolError(
       "SESSION_STATUS_ACTOR_MISMATCH",
@@ -343,7 +331,10 @@ export const resolveMatrixActorFromSessionStatus = (input: {
   );
 };
 
-const parseRootArray = (state: Record<string, unknown>, collectionPath: string): Array<Record<string, unknown>> => {
+const parseRootArray = (
+  state: Record<string, unknown>,
+  collectionPath: string,
+): Array<Record<string, unknown>> => {
   const existing = getPathValue(state, collectionPath);
   if (existing === undefined) {
     const created: Array<Record<string, unknown>> = [];
@@ -465,13 +456,21 @@ const applyRootMetadata = (
   creating: boolean,
 ): void => {
   record[policy.ownerField] = context.actor;
-  if (creating && policy.createdAtField !== undefined && record[policy.createdAtField] === undefined) {
+  if (
+    creating &&
+    policy.createdAtField !== undefined &&
+    record[policy.createdAtField] === undefined
+  ) {
     record[policy.createdAtField] = context.now;
   }
   if (policy.updatedAtField !== undefined) {
     record[policy.updatedAtField] = context.now;
   }
-  if (creating && policy.createdByDisplayField !== undefined && record[policy.createdByDisplayField] === undefined) {
+  if (
+    creating &&
+    policy.createdByDisplayField !== undefined &&
+    record[policy.createdByDisplayField] === undefined
+  ) {
     record[policy.createdByDisplayField] = context.actorLocalpart;
   }
   if (policy.updatedByField !== undefined) {
@@ -511,10 +510,7 @@ export class GuardedJsonStateToolService {
     return this.deps.configLoader ?? defaultRuntimeConfigLoader;
   }
 
-  async showState(input: {
-    instanceId: string;
-    configPath?: string;
-  }): Promise<{
+  async showState(input: { instanceId: string; configPath?: string }): Promise<{
     instanceId: string;
     statePath: string;
     policyPath: string;
@@ -530,11 +526,7 @@ export class GuardedJsonStateToolService {
     };
   }
 
-  async listEntity(input: {
-    instanceId: string;
-    entityId: string;
-    configPath?: string;
-  }): Promise<{
+  async listEntity(input: { instanceId: string; entityId: string; configPath?: string }): Promise<{
     instanceId: string;
     entity: string;
     count: number;
@@ -549,36 +541,45 @@ export class GuardedJsonStateToolService {
     const policy = await this.readPolicy(instance.policyPath);
     const entity = this.resolveEntity(policy, input.entityId);
     const state = await this.readState(instance.statePath);
-    const items = entity.kind === "owner-root-array"
-      ? parseRootArray(state, entity.collection).map((record) => ({
-          ...(typeof record[entity.keyField] === "string" ? { id: String(record[entity.keyField]) } : {}),
-          ...(typeof record[entity.ownerField] === "string"
-            ? { ownerMatrixUserId: String(record[entity.ownerField]) }
-            : {}),
-          record: cloneRecord(record),
-        }))
-      : parseRootArray(state, entity.parentCollection).flatMap((parent) => {
-          const owner = typeof parent[entity.parentOwnerField] === "string"
-            ? String(parent[entity.parentOwnerField])
-            : undefined;
-          const parentKey = typeof parent[entity.parentKeyField] === "string"
-            ? String(parent[entity.parentKeyField])
-            : undefined;
-          const children = Array.isArray(parent[entity.childArrayField])
-            ? parent[entity.childArrayField] as unknown[]
-            : [];
-          return children.flatMap((record: unknown) => {
-            if (!isRecord(record)) {
-              return [];
-            }
-            return [{
-              ...(typeof record[entity.keyField] === "string" ? { id: String(record[entity.keyField]) } : {}),
-              ...(owner === undefined ? {} : { ownerMatrixUserId: owner }),
-              ...(parentKey === undefined ? {} : { parentKey }),
-              record: cloneRecord(record),
-            }];
+    const items =
+      entity.kind === "owner-root-array"
+        ? parseRootArray(state, entity.collection).map((record) => ({
+            ...(typeof record[entity.keyField] === "string"
+              ? { id: String(record[entity.keyField]) }
+              : {}),
+            ...(typeof record[entity.ownerField] === "string"
+              ? { ownerMatrixUserId: String(record[entity.ownerField]) }
+              : {}),
+            record: cloneRecord(record),
+          }))
+        : parseRootArray(state, entity.parentCollection).flatMap((parent) => {
+            const owner =
+              typeof parent[entity.parentOwnerField] === "string"
+                ? String(parent[entity.parentOwnerField])
+                : undefined;
+            const parentKey =
+              typeof parent[entity.parentKeyField] === "string"
+                ? String(parent[entity.parentKeyField])
+                : undefined;
+            const children = Array.isArray(parent[entity.childArrayField])
+              ? (parent[entity.childArrayField] as unknown[])
+              : [];
+            return children.flatMap((record: unknown) => {
+              if (!isRecord(record)) {
+                return [];
+              }
+              return [
+                {
+                  ...(typeof record[entity.keyField] === "string"
+                    ? { id: String(record[entity.keyField]) }
+                    : {}),
+                  ...(owner === undefined ? {} : { ownerMatrixUserId: owner }),
+                  ...(parentKey === undefined ? {} : { parentKey }),
+                  record: cloneRecord(record),
+                },
+              ];
+            });
           });
-        });
     return {
       instanceId: instance.instanceId,
       entity: input.entityId,
@@ -617,9 +618,10 @@ export class GuardedJsonStateToolService {
         now: nowIso(),
         input: payload,
       };
-      const result = entity.kind === "owner-root-array"
-        ? this.applyRootUpsert(state, policy, input.entityId, entity, context)
-        : this.applyChildUpsert(state, policy, input.entityId, entity, context);
+      const result =
+        entity.kind === "owner-root-array"
+          ? this.applyRootUpsert(state, policy, input.entityId, entity, context)
+          : this.applyChildUpsert(state, policy, input.entityId, entity, context);
       this.touchLastUpdated(state, policy, context.now);
       await this.writeState(instance.statePath, state);
       await this.appendAudit(instance.auditPath, {
@@ -664,9 +666,10 @@ export class GuardedJsonStateToolService {
     const entity = this.resolveEntity(policy, input.entityId);
     return await this.withLock(instance.statePath, async () => {
       const state = await this.readState(instance.statePath);
-      const deleted = entity.kind === "owner-root-array"
-        ? this.applyRootDelete(state, input.entityId, entity, actor, input.id)
-        : this.applyChildDelete(state, input.entityId, entity, actor, input.id);
+      const deleted =
+        entity.kind === "owner-root-array"
+          ? this.applyRootDelete(state, input.entityId, entity, actor, input.id)
+          : this.applyChildDelete(state, input.entityId, entity, actor, input.id);
       if (deleted) {
         const timestamp = nowIso();
         this.touchLastUpdated(state, policy, timestamp);
@@ -704,9 +707,10 @@ export class GuardedJsonStateToolService {
     record: Record<string, unknown>;
   } {
     const collection = parseRootArray(state, entity.collection);
-    const keyValue = entity.selfKeyTemplate !== undefined
-      ? renderTemplateString(entity.selfKeyTemplate, context)
-      : this.requireScalarInput(context.input, entity.keyField, entityId);
+    const keyValue =
+      entity.selfKeyTemplate !== undefined
+        ? renderTemplateString(entity.selfKeyTemplate, context)
+        : this.requireScalarInput(context.input, entity.keyField, entityId);
     const existingIndex = findRootRecordIndex(collection, entity.keyField, keyValue);
     if (existingIndex >= 0) {
       const existing = ensureRecord(
@@ -753,17 +757,21 @@ export class GuardedJsonStateToolService {
     record: Record<string, unknown>;
   } {
     const parent = this.resolveOrCreateSelfParent(state, policy, entity, context);
-    const childId = findScalarInput(context.input, entity.keyField)
-      ?? (entity.selfKeyTemplate === undefined
+    const childId =
+      findScalarInput(context.input, entity.keyField) ??
+      (entity.selfKeyTemplate === undefined
         ? this.requireScalarInput(context.input, entity.keyField, entityId)
         : renderTemplateString(entity.selfKeyTemplate, context));
     const allParents = parseRootArray(state, entity.parentCollection);
     const foreignOwner = allParents.find((candidate) => {
       const children = Array.isArray(candidate[entity.childArrayField])
-        ? candidate[entity.childArrayField] as unknown[]
+        ? (candidate[entity.childArrayField] as unknown[])
         : [];
-      return children.some((record: unknown) => isRecord(record) && record[entity.keyField] === childId)
-        && candidate[entity.parentOwnerField] !== context.actor;
+      return (
+        children.some(
+          (record: unknown) => isRecord(record) && record[entity.keyField] === childId,
+        ) && candidate[entity.parentOwnerField] !== context.actor
+      );
     });
     if (foreignOwner !== undefined) {
       throw new GuardedJsonStateToolError(
@@ -848,9 +856,11 @@ export class GuardedJsonStateToolService {
     let foundForeignOwner = false;
     for (const parent of parents) {
       const children = Array.isArray(parent[entity.childArrayField])
-        ? parent[entity.childArrayField] as unknown[]
+        ? (parent[entity.childArrayField] as unknown[])
         : [];
-      const index = children.findIndex((record: unknown) => isRecord(record) && record[entity.keyField] === id);
+      const index = children.findIndex(
+        (record: unknown) => isRecord(record) && record[entity.keyField] === id,
+      );
       if (index < 0) {
         continue;
       }
@@ -885,9 +895,11 @@ export class GuardedJsonStateToolService {
   ): Record<string, unknown> {
     const parents = parseRootArray(state, entity.parentCollection);
     const selfParentKey = renderTemplateString(entity.parentSelfKeyTemplate, context);
-    const existing = parents.find((candidate) =>
-      candidate[entity.parentKeyField] === selfParentKey
-      || candidate[entity.parentOwnerField] === context.actor);
+    const existing = parents.find(
+      (candidate) =>
+        candidate[entity.parentKeyField] === selfParentKey ||
+        candidate[entity.parentOwnerField] === context.actor,
+    );
     if (existing !== undefined) {
       if (existing[entity.parentOwnerField] !== context.actor) {
         throw new GuardedJsonStateToolError(
@@ -927,7 +939,10 @@ export class GuardedJsonStateToolService {
     }).record;
   }
 
-  private resolveEntity(policy: GuardedJsonStatePolicy, entityId: string): GuardedJsonStateEntityPolicy {
+  private resolveEntity(
+    policy: GuardedJsonStatePolicy,
+    entityId: string,
+  ): GuardedJsonStateEntityPolicy {
     const entity = policy.entities[entityId];
     if (entity === undefined) {
       throw new GuardedJsonStateToolError(
@@ -978,7 +993,9 @@ export class GuardedJsonStateToolService {
   ): Promise<ResolvedToolInstance> {
     const configPath = configPathOverride ?? defaultConfigPath();
     const runtimeConfig = await this.loadRuntimeConfig(configPath);
-    const instance = runtimeConfig.sovereignTools.instances.find((entry) => entry.id === instanceId);
+    const instance = runtimeConfig.sovereignTools.instances.find(
+      (entry) => entry.id === instanceId,
+    );
     if (instance === undefined) {
       throw new GuardedJsonStateToolError(
         "TOOL_INSTANCE_NOT_FOUND",
@@ -1022,8 +1039,12 @@ export class GuardedJsonStateToolService {
           .filter((value): value is string => typeof value === "string" && value.length > 0),
       ),
     );
-    if ((!isAbsolute(statePath) || !isAbsolute(policyPath) || instance.config.auditPath !== undefined && !isAbsolute(instance.config.auditPath))
-      && referencingWorkspaces.length > 1) {
+    if (
+      (!isAbsolute(statePath) ||
+        !isAbsolute(policyPath) ||
+        (instance.config.auditPath !== undefined && !isAbsolute(instance.config.auditPath))) &&
+      referencingWorkspaces.length > 1
+    ) {
       throw new GuardedJsonStateToolError(
         "TOOL_INSTANCE_PATH_AMBIGUOUS",
         `Tool instance '${instanceId}' uses relative paths but is referenced by multiple workspaces`,
@@ -1063,7 +1084,9 @@ export class GuardedJsonStateToolService {
       );
     }
     try {
-      return guardedJsonStatePolicySchema.parse(JSON.parse(stripSingleTrailingNewline(raw)) as unknown);
+      return guardedJsonStatePolicySchema.parse(
+        JSON.parse(stripSingleTrailingNewline(raw)) as unknown,
+      );
     } catch (error) {
       throw new GuardedJsonStateToolError(
         "POLICY_INVALID",
@@ -1132,10 +1155,7 @@ export class GuardedJsonStateToolService {
     await appendFile(path, `${JSON.stringify(event)}\n`, "utf8");
   }
 
-  private async withLock<T>(
-    statePath: string,
-    action: () => Promise<T>,
-  ): Promise<T> {
+  private async withLock<T>(statePath: string, action: () => Promise<T>): Promise<T> {
     const lockPath = `${statePath}.lock`;
     let handle: Awaited<ReturnType<typeof open>> | null = null;
     for (let attempt = 0; attempt < LOCK_RETRY_ATTEMPTS; attempt += 1) {
@@ -1143,7 +1163,10 @@ export class GuardedJsonStateToolService {
         handle = await open(lockPath, "wx");
         break;
       } catch (error) {
-        const code = error instanceof Error && "code" in error ? String((error as NodeJS.ErrnoException).code) : "";
+        const code =
+          error instanceof Error && "code" in error
+            ? String((error as NodeJS.ErrnoException).code)
+            : "";
         if (code !== "EEXIST") {
           throw new GuardedJsonStateToolError(
             "STATE_LOCK_FAILED",

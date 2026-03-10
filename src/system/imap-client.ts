@@ -48,25 +48,23 @@ export class ImapConnectionError extends Error {
   }
 }
 
-const createDefaultImapClient = (options: ImapFlowOptions): ImapClientLike =>
-  new ImapFlow(options);
+const createDefaultImapClient = (options: ImapFlowOptions): ImapClientLike => new ImapFlow(options);
 
 const isLoopbackHost = (host: string): boolean => {
   const normalized = host.trim().toLowerCase();
   if (
-    normalized === "localhost"
-    || normalized === "::1"
-    || normalized === "[::1]"
-    || normalized === "0:0:0:0:0:0:0:1"
-    || normalized === "::ffff:127.0.0.1"
+    normalized === "localhost" ||
+    normalized === "::1" ||
+    normalized === "[::1]" ||
+    normalized === "0:0:0:0:0:0:0:1" ||
+    normalized === "::ffff:127.0.0.1"
   ) {
     return true;
   }
   return net.isIPv4(normalized) && normalized.startsWith("127.");
 };
 
-const shouldSendServername = (host: string): boolean =>
-  net.isIP(host.trim()) === 0;
+const shouldSendServername = (host: string): boolean => net.isIP(host.trim()) === 0;
 
 const describeUnknownError = (error: unknown): string => {
   if (error instanceof Error) {
@@ -76,10 +74,10 @@ const describeUnknownError = (error: unknown): string => {
 };
 
 const isAuthenticationFailure = (error: unknown): boolean =>
-  typeof error === "object"
-  && error !== null
-  && "authenticationFailed" in error
-  && error.authenticationFailed === true;
+  typeof error === "object" &&
+  error !== null &&
+  "authenticationFailed" in error &&
+  error.authenticationFailed === true;
 
 const buildBaseOptions = (input: {
   account: ImapAccountCredentials;
@@ -160,9 +158,9 @@ export const buildImapConnectionPlans = (input: {
   }
 
   if (
-    input.account.port === 143
-    || input.account.port === 1143
-    || isLoopbackHost(input.account.host)
+    input.account.port === 143 ||
+    input.account.port === 1143 ||
+    isLoopbackHost(input.account.host)
   ) {
     return [starttls, implicitTls];
   }
@@ -190,12 +188,15 @@ const closeClientQuietly = async (client: ImapClientLike): Promise<void> => {
 export const listImapCapabilities = (client: ImapClientLike): string[] =>
   Array.from(client.capabilities.keys()).sort((left, right) => left.localeCompare(right));
 
-export const runWithImapClient = async <T>(input: {
-  account: ImapAccountCredentials;
-  logger?: Logger;
-  timeoutMs?: number;
-  clientFactory?: ImapClientFactory;
-}, handler: (client: ImapClientLike, plan: ImapConnectionPlan) => Promise<T>): Promise<T> => {
+export const runWithImapClient = async <T>(
+  input: {
+    account: ImapAccountCredentials;
+    logger?: Logger;
+    timeoutMs?: number;
+    clientFactory?: ImapClientFactory;
+  },
+  handler: (client: ImapClientLike, plan: ImapConnectionPlan) => Promise<T>,
+): Promise<T> => {
   const clientFactory = input.clientFactory ?? createDefaultImapClient;
   const attempts = buildImapConnectionPlans({
     account: input.account,

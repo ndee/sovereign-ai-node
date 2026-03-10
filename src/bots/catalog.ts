@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { access, mkdtemp, readFile, readdir } from "node:fs/promises";
+import { access, mkdtemp, readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,8 +8,8 @@ import { execa } from "execa";
 import { z } from "zod";
 
 import {
-  formatTemplateRef,
   type AgentTemplateManifest,
+  formatTemplateRef,
   type ToolTemplateDefinition,
 } from "../templates/catalog.js";
 
@@ -53,13 +53,17 @@ const botCronSchema = z.object({
 
 const matrixRoutingSchema = z.object({
   defaultAccount: z.boolean().optional(),
-  dm: z.object({
-    enabled: z.boolean().optional(),
-  }).optional(),
-  alertRoom: z.object({
-    autoReply: z.boolean().optional(),
-    requireMention: z.boolean().optional(),
-  }).optional(),
+  dm: z
+    .object({
+      enabled: z.boolean().optional(),
+    })
+    .optional(),
+  alertRoom: z
+    .object({
+      autoReply: z.boolean().optional(),
+      requireMention: z.boolean().optional(),
+    })
+    .optional(),
 });
 
 const workspaceFileSchema = z.object({
@@ -87,18 +91,22 @@ const agentTemplateSchema = z.object({
   matrix: z.object({
     localpartPrefix: z.string().min(1),
   }),
-  requiredToolTemplates: z.array(
-    z.object({
-      id: z.string().min(1),
-      version: z.string().min(1),
-    }),
-  ).default([]),
-  optionalToolTemplates: z.array(
-    z.object({
-      id: z.string().min(1),
-      version: z.string().min(1),
-    }),
-  ).default([]),
+  requiredToolTemplates: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        version: z.string().min(1),
+      }),
+    )
+    .default([]),
+  optionalToolTemplates: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        version: z.string().min(1),
+      }),
+    )
+    .default([]),
   workspaceFiles: z.array(workspaceFileSchema).min(1),
 });
 
@@ -118,9 +126,11 @@ const botPackageSchema = z.object({
   configDefaults: z.record(z.string(), botConfigValueSchema).default({}),
   toolTemplates: z.array(toolTemplateSchema).default([]),
   toolInstances: z.array(toolInstanceSchema).default([]),
-  openclaw: z.object({
-    cron: botCronSchema.optional(),
-  }).default({}),
+  openclaw: z
+    .object({
+      cron: botCronSchema.optional(),
+    })
+    .default({}),
   agentTemplate: agentTemplateSchema,
 });
 
@@ -215,7 +225,8 @@ export class FilesystemBotCatalog implements BotCatalog {
     return packages.sort((left, right) =>
       `${left.manifest.id}:${left.manifest.version}`.localeCompare(
         `${right.manifest.id}:${right.manifest.version}`,
-      ));
+      ),
+    );
   }
 
   private async loadPackage(packageDir: string): Promise<LoadedBotPackage> {
@@ -224,9 +235,7 @@ export class FilesystemBotCatalog implements BotCatalog {
     const manifest = botPackageSchema.parse(JSON.parse(raw) as unknown);
     const workspaceFiles = await Promise.all(
       manifest.agentTemplate.workspaceFiles.map(
-        async (
-          file: SovereignBotPackageManifest["agentTemplate"]["workspaceFiles"][number],
-        ) => ({
+        async (file: SovereignBotPackageManifest["agentTemplate"]["workspaceFiles"][number]) => ({
           path: file.path,
           content: await readFile(join(packageDir, file.source), "utf8"),
         }),
@@ -240,18 +249,18 @@ export class FilesystemBotCatalog implements BotCatalog {
       matrix: {
         localpartPrefix: manifest.agentTemplate.matrix.localpartPrefix,
       },
-      requiredToolTemplates: manifest.agentTemplate.requiredToolTemplates.map((
-        entry: SovereignBotPackageManifest["agentTemplate"]["requiredToolTemplates"][number],
-      ) => ({
-        id: entry.id,
-        version: entry.version,
-      })),
-      optionalToolTemplates: manifest.agentTemplate.optionalToolTemplates.map((
-        entry: SovereignBotPackageManifest["agentTemplate"]["optionalToolTemplates"][number],
-      ) => ({
-        id: entry.id,
-        version: entry.version,
-      })),
+      requiredToolTemplates: manifest.agentTemplate.requiredToolTemplates.map(
+        (entry: SovereignBotPackageManifest["agentTemplate"]["requiredToolTemplates"][number]) => ({
+          id: entry.id,
+          version: entry.version,
+        }),
+      ),
+      optionalToolTemplates: manifest.agentTemplate.optionalToolTemplates.map(
+        (entry: SovereignBotPackageManifest["agentTemplate"]["optionalToolTemplates"][number]) => ({
+          id: entry.id,
+          version: entry.version,
+        }),
+      ),
       workspaceFiles,
       signature: {
         algorithm: "ed25519",
@@ -260,10 +269,12 @@ export class FilesystemBotCatalog implements BotCatalog {
       },
     };
     const manifestSha256 = createHash("sha256")
-      .update(stableSerialize({
-        manifest,
-        template,
-      }))
+      .update(
+        stableSerialize({
+          manifest,
+          template,
+        }),
+      )
       .digest("hex");
     const toolTemplates = manifest.toolTemplates.map((entry) => {
       const templateRef = formatTemplateRef(entry.id, entry.version);
@@ -282,9 +293,7 @@ export class FilesystemBotCatalog implements BotCatalog {
         },
         templateRef,
         keyId: BOT_PACKAGE_KEY_ID,
-        manifestSha256: createHash("sha256")
-          .update(stableSerialize(entry))
-          .digest("hex"),
+        manifestSha256: createHash("sha256").update(stableSerialize(entry)).digest("hex"),
       };
     });
 
@@ -355,8 +364,7 @@ export class FilesystemBotCatalog implements BotCatalog {
     if (repoDir !== undefined && repoUrl !== undefined) {
       throw {
         code: "BOT_REPO_SOURCE_CONFLICT",
-        message:
-          `Configure either ${BOT_REPO_DIR_ENV} or ${BOT_REPO_URL_ENV}, but not both at the same time.`,
+        message: `Configure either ${BOT_REPO_DIR_ENV} or ${BOT_REPO_URL_ENV}, but not both at the same time.`,
         retryable: false,
       };
     }
@@ -373,7 +381,9 @@ export class FilesystemBotCatalog implements BotCatalog {
       ...(repoDir === undefined ? {} : { repoDir }),
       ...(repoDir === undefined
         ? { repoUrl: repoUrl ?? DEFAULT_BOT_REPO_URL }
-        : (repoUrl === undefined ? {} : { repoUrl })),
+        : repoUrl === undefined
+          ? {}
+          : { repoUrl }),
       ...(repoRef === undefined ? {} : { repoRef }),
     };
   }
@@ -397,11 +407,12 @@ export class FilesystemBotCatalog implements BotCatalog {
       const fullClone = await execa("git", ["clone", repoUrl, fullDir], {
         reject: false,
       });
-      const checkout = fullClone.exitCode === 0
-        ? await execa("git", ["-C", fullDir, "checkout", repoRef], {
-            reject: false,
-          })
-        : null;
+      const checkout =
+        fullClone.exitCode === 0
+          ? await execa("git", ["-C", fullDir, "checkout", repoRef], {
+              reject: false,
+            })
+          : null;
 
       if (fullClone.exitCode === 0 && checkout?.exitCode === 0) {
         await ensureDirectory(join(fullDir, "bots"));
@@ -421,12 +432,13 @@ export class FilesystemBotCatalog implements BotCatalog {
             exitCode: fullClone.exitCode,
             stderr: fullClone.stderr,
           },
-          checkout: checkout === null
-            ? null
-            : {
-                exitCode: checkout.exitCode,
-                stderr: checkout.stderr,
-              },
+          checkout:
+            checkout === null
+              ? null
+              : {
+                  exitCode: checkout.exitCode,
+                  stderr: checkout.stderr,
+                },
         },
       };
     }
@@ -478,8 +490,10 @@ const stableSerialize = (value: unknown): string => {
   }
   if (value !== null && typeof value === "object") {
     const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).sort().map((key) =>
-      `${JSON.stringify(key)}:${stableSerialize(record[key])}`).join(",")}}`;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableSerialize(record[key])}`)
+      .join(",")}}`;
   }
   return JSON.stringify(value);
 };

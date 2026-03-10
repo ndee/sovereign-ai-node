@@ -22,14 +22,8 @@ export const createApp = () => {
     DEFAULT_PATHS,
   );
   const preflightChecker = new ShellHostPreflightChecker(execRunner, logger);
-  const openclawGatewayServiceManager = new ShellOpenClawGatewayServiceManager(
-    execRunner,
-    logger,
-  );
-  const managedAgentRegistrar = new ShellOpenClawManagedAgentRegistrar(
-    execRunner,
-    logger,
-  );
+  const openclawGatewayServiceManager = new ShellOpenClawGatewayServiceManager(execRunner, logger);
+  const managedAgentRegistrar = new ShellOpenClawManagedAgentRegistrar(execRunner, logger);
   const botCatalog = new FilesystemBotCatalog();
 
   return {

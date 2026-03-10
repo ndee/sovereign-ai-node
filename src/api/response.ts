@@ -2,13 +2,12 @@ import { randomUUID } from "node:crypto";
 
 import type { FastifyReply } from "fastify";
 import type { ZodType } from "zod";
-
 import {
+  baseSuccessEnvelopeSchema,
   CONTRACT_VERSION,
-  normalizeErrorDetail,
   type ErrorDetail,
+  normalizeErrorDetail,
 } from "../contracts/common.js";
-import { baseSuccessEnvelopeSchema } from "../contracts/common.js";
 
 const now = () => new Date().toISOString();
 

@@ -1,18 +1,15 @@
 import type { FastifyInstance } from "fastify";
 
 import type { AppContainer } from "../../app/create-app.js";
-import { reconfigureResultSchema } from "../../contracts/index.js";
 import {
   reconfigureImapRequestSchema,
   reconfigureMatrixRequestSchema,
   reconfigureOpenrouterRequestSchema,
 } from "../../contracts/api.js";
+import { reconfigureResultSchema } from "../../contracts/index.js";
 import { sendApiError, sendApiSuccess } from "../response.js";
 
-export const registerReconfigureRoutes = (
-  server: FastifyInstance,
-  app: AppContainer,
-): void => {
+export const registerReconfigureRoutes = (server: FastifyInstance, app: AppContainer): void => {
   server.post("/api/reconfigure/imap", async (request, reply) => {
     try {
       const body = reconfigureImapRequestSchema.parse(request.body);
