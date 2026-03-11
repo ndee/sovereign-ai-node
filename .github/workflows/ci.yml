@@ -82,8 +82,8 @@ jobs:
           curl -sf http://127.0.0.1:8787/healthz | grep '"ok":true'
           kill $API_PID
 
-  e2e:
-    name: E2E Install
+  e2e_noninteractive:
+    name: E2E Install (non-interactive)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: [test]
@@ -96,25 +96,32 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
 
+      - name: Clone bot catalog repo
+        run: git clone --depth 1 https://github.com/ndee/sovereign-ai-bots /tmp/sovereign-ai-bots
+
       - name: Pre-pull Docker images
         run: |
           docker pull postgres:16-alpine &
           docker pull matrixdotorg/synapse:v1.125.0 &
           wait
 
-      - name: Run full installer (local-dev, non-interactive)
+      - name: Run full installer (install.sh, non-interactive)
         run: |
-          sudo env "PATH=$PATH" npx tsx src/bin/sovereign-node.ts install \
-            --request-file test/fixtures/ci-install-request.json \
-            --json | tee /tmp/install-result.json
+          cp test/fixtures/ci-install-request.json /tmp/ci-install-request.json
 
-          # Fail the step if the installer reports a logical failure
-          STATE=$(jq -r '.result.job.state' /tmp/install-result.json)
-          if [ "$STATE" != "succeeded" ]; then
-            echo "::error::Installer finished with state=$STATE (expected succeeded)"
-            jq '.result.job.steps[] | select(.state == "failed")' /tmp/install-result.json
-            exit 1
-          fi
+          sudo env "PATH=$PATH" bash scripts/install.sh \
+            --source-dir "$GITHUB_WORKSPACE" \
+            --bots-source-dir /tmp/sovereign-ai-bots \
+            --request-file /tmp/ci-install-request.json \
+            --install \
+            --non-interactive
+
+          jq -e '
+            .connectivity.mode == "direct"
+            and .matrix.publicBaseUrl == "http://127.0.0.1:8008"
+            and .matrix.alertRoomName == "CI Alerts"
+            and .operator.username == "operator"
+          ' /tmp/ci-install-request.json > /dev/null
         timeout-minutes: 15
 
       - name: Verify Matrix is reachable
@@ -128,10 +135,88 @@ jobs:
       - name: Collect logs on failure
         if: failure()
         run: |
-          echo "=== install result ==="
-          cat /tmp/install-result.json 2>/dev/null | jq . || true
+          echo "=== request file ==="
+          cat /tmp/ci-install-request.json 2>/dev/null | jq . || true
           echo "=== sovereign-node status ==="
-          sudo env "PATH=$PATH" npx tsx src/bin/sovereign-node.ts status --json 2>&1 || true
+          sudo env "PATH=$PATH" sovereign-node status --json 2>&1 || true
+          echo "=== docker compose logs ==="
+          COMPOSE_DIR=$(find /etc/sovereign-node -name compose.yaml -exec dirname {} \; 2>/dev/null | head -1)
+          if [ -n "$COMPOSE_DIR" ]; then
+            cd "$COMPOSE_DIR" && docker compose logs --tail=100 2>&1 || true
+          fi
+
+  e2e_interactive:
+    name: E2E Install (interactive)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Clone bot catalog repo
+        run: git clone --depth 1 https://github.com/ndee/sovereign-ai-bots /tmp/sovereign-ai-bots
+
+      - name: Pre-pull Docker images
+        run: |
+          docker pull postgres:16-alpine &
+          docker pull matrixdotorg/synapse:v1.125.0 &
+          wait
+
+      - name: Run full installer (install.sh, interactive)
+        run: |
+          printf '%s\n' \
+            '' \
+            '' \
+            'sk-ci-fake-key-not-used' \
+            '2' \
+            'ci.local.test' \
+            'http://127.0.0.1:8008' \
+            '' \
+            '' \
+            '' \
+            'a' \
+            '' \
+            '' \
+            '' \
+            '' \
+            '' > /tmp/ci-interactive-input.txt
+
+          script -qefc \
+            "sudo env PATH=$PATH bash scripts/install.sh --source-dir \"$GITHUB_WORKSPACE\" --bots-source-dir /tmp/sovereign-ai-bots" \
+            /tmp/ci-interactive-transcript.log < /tmp/ci-interactive-input.txt
+
+          sudo jq -e '
+            .connectivity.mode == "direct"
+            and .matrix.publicBaseUrl == "http://127.0.0.1:8008"
+            and .matrix.alertRoomName == "Alerts"
+            and .operator.username == "admin"
+            and ((.bots.selected | sort) == ["bitcoin-skill-match", "mail-sentinel", "node-operator"])
+          ' /etc/sovereign-node/install-request.json > /dev/null
+        timeout-minutes: 20
+
+      - name: Verify Matrix is reachable
+        run: |
+          curl -f --retry 3 --retry-delay 2 http://127.0.0.1:8008/_matrix/client/versions | jq .
+
+      - name: Verify operator account exists
+        run: |
+          curl -f --retry 3 --retry-delay 2 http://127.0.0.1:8008/_matrix/client/v3/login | jq .
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== interactive transcript ==="
+          cat /tmp/ci-interactive-transcript.log 2>/dev/null || true
+          echo "=== request file ==="
+          sudo cat /etc/sovereign-node/install-request.json 2>/dev/null | jq . || true
+          echo "=== sovereign-node status ==="
+          sudo env "PATH=$PATH" sovereign-node status --json 2>&1 || true
           echo "=== docker compose logs ==="
           COMPOSE_DIR=$(find /etc/sovereign-node -name compose.yaml -exec dirname {} \; 2>/dev/null | head -1)
           if [ -n "$COMPOSE_DIR" ]; then
