@@ -148,7 +148,7 @@ jobs:
   e2e_interactive:
     name: E2E Install (interactive)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     needs: [test]
     steps:
       - uses: actions/checkout@v4
@@ -170,26 +170,12 @@ jobs:
 
       - name: Run full installer (install.sh, interactive)
         run: |
-          printf '%s\n' \
-            '' \
-            '' \
-            'sk-ci-fake-key-not-used' \
-            '2' \
-            'ci.local.test' \
-            'http://127.0.0.1:8008' \
-            '' \
-            '' \
-            '' \
-            'a' \
-            '' \
-            '' \
-            '' \
-            '' \
-            '' > /tmp/ci-interactive-input.txt
-
-          script -qefc \
-            "sudo env PATH=$PATH bash scripts/install.sh --source-dir \"$GITHUB_WORKSPACE\" --bots-source-dir /tmp/sovereign-ai-bots" \
-            /tmp/ci-interactive-transcript.log < /tmp/ci-interactive-input.txt
+          python3 scripts/ci-drive-interactive-installer.py \
+            --source-dir "$GITHUB_WORKSPACE" \
+            --bots-source-dir /tmp/sovereign-ai-bots \
+            --transcript /tmp/ci-interactive-transcript.log \
+            --idle-timeout-seconds 180 \
+            --overall-timeout-seconds 1800
 
           sudo jq -e '
             .connectivity.mode == "direct"
@@ -198,7 +184,7 @@ jobs:
             and .operator.username == "admin"
             and ((.bots.selected | sort) == ["bitcoin-skill-match", "mail-sentinel", "node-operator"])
           ' /etc/sovereign-node/install-request.json > /dev/null
-        timeout-minutes: 20
+        timeout-minutes: 30
 
       - name: Verify Matrix is reachable
         run: |
