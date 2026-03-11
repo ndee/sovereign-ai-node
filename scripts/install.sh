@@ -1131,7 +1131,29 @@ ui_print_summary_block() {
   done <<< "$payload"
 }
 
-ui_choice_menu() {
+ui_screen_line_count() {
+  local text width length count
+  text="$1"
+  width="${UI_TERMINAL_WIDTH:-80}"
+  length="${#text}"
+
+  if [[ "$width" -lt 1 ]]; then
+    width=80
+  fi
+
+  if [[ "$length" -le 0 ]]; then
+    printf '1'
+    return 0
+  fi
+
+  count=$(((length + width - 1) / width))
+  if [[ "$count" -lt 1 ]]; then
+    count=1
+  fi
+  printf '%s' "$count"
+}
+
+ui_choice_menu_simple() {
   local prompt default_choice answer option_count index option_number
   prompt="$1"
   default_choice="$2"
@@ -1162,7 +1184,111 @@ ui_choice_menu() {
   done
 }
 
-ui_confirm() {
+ui_choice_menu_graphical() {
+  local prompt default_choice current_index rendered_lines key extra option_count index option_number
+  local plain_line display_line help_line summary_line
+  prompt="$1"
+  default_choice="$2"
+  shift 2
+  local options=("$@")
+  option_count="${#options[@]}"
+  current_index=$((default_choice - 1))
+  rendered_lines=0
+  key=""
+  extra=""
+  help_line="  arrows move, enter confirm."
+
+  while true; do
+    if [[ "$rendered_lines" -gt 0 ]]; then
+      ui_print "\033[${rendered_lines}A\r\033[J"
+    fi
+
+    rendered_lines=0
+    ui_print "${prompt}\n"
+    rendered_lines=$((rendered_lines + $(ui_screen_line_count "$prompt")))
+    ui_print "${help_line}\n"
+    rendered_lines=$((rendered_lines + $(ui_screen_line_count "$help_line")))
+
+    for index in "${!options[@]}"; do
+      option_number=$((index + 1))
+      plain_line="${options[$index]}"
+      if [[ "$option_number" == "$default_choice" ]]; then
+        plain_line="${plain_line}  default"
+      fi
+      display_line="  ${plain_line}"
+
+      if [[ "$index" == "$current_index" ]]; then
+        if supports_color; then
+          ui_print "  \033[1;36m>\033[0m \033[7m${display_line}\033[0m\n"
+        else
+          ui_print "  > ${display_line}\n"
+        fi
+      else
+        ui_print "    ${display_line}\n"
+      fi
+      rendered_lines=$((rendered_lines + $(ui_screen_line_count "  > ${display_line}")))
+    done
+
+    IFS= read -rsn1 key < /dev/tty || true
+    if [[ "$key" == $'\e' ]]; then
+      IFS= read -rsn1 -t 0.05 extra < /dev/tty || extra=""
+      if [[ "$extra" == "[" ]]; then
+        IFS= read -rsn1 -t 0.05 extra < /dev/tty || extra=""
+        case "$extra" in
+          A)
+            if [[ "$current_index" -gt 0 ]]; then
+              current_index=$((current_index - 1))
+            fi
+            continue
+            ;;
+          B)
+            if [[ "$current_index" -lt $((option_count - 1)) ]]; then
+              current_index=$((current_index + 1))
+            fi
+            continue
+            ;;
+        esac
+      fi
+    fi
+
+    case "$key" in
+      "")
+        summary_line="Selected: ${options[$current_index]}"
+        ui_print "\033[${rendered_lines}A\r\033[J"
+        ui_print "${summary_line}\n"
+        printf '%s' "$((current_index + 1))"
+        return 0
+        ;;
+      j|J)
+        if [[ "$current_index" -lt $((option_count - 1)) ]]; then
+          current_index=$((current_index + 1))
+        fi
+        ;;
+      k|K)
+        if [[ "$current_index" -gt 0 ]]; then
+          current_index=$((current_index - 1))
+        fi
+        ;;
+      [1-9])
+        index=$((10#$key - 1))
+        if [[ "$index" -lt "$option_count" ]]; then
+          current_index="$index"
+        fi
+        ;;
+    esac
+  done
+}
+
+ui_choice_menu() {
+  if ui_is_fancy && has_tty; then
+    ui_choice_menu_graphical "$@"
+    return 0
+  fi
+
+  ui_choice_menu_simple "$@"
+}
+
+ui_confirm_simple() {
   local prompt default answer normalized
   prompt="$1"
   default="$2"
@@ -1183,6 +1309,31 @@ ui_confirm() {
     esac
     ui_warn "Please answer y or n."
   done
+}
+
+ui_confirm() {
+  local prompt default selected_choice default_choice
+  prompt="$1"
+  default="$2"
+
+  if ui_is_fancy && has_tty; then
+    if [[ "$default" == "y" ]] || [[ "$default" == "yes" ]]; then
+      default_choice="1"
+    else
+      default_choice="2"
+    fi
+    selected_choice="$(
+      ui_choice_menu \
+        "$prompt" \
+        "$default_choice" \
+        "Yes" \
+        "No"
+    )"
+    [[ "$selected_choice" == "1" ]]
+    return $?
+  fi
+
+  ui_confirm_simple "$prompt" "$default"
 }
 
 prompt_value() {
@@ -1497,6 +1648,7 @@ prompt_bot_selection_simple() {
 prompt_bot_selection_graphical() {
   local selected current_index rendered_lines key extra current_selection
   local index marker line suffix status_line display_name
+  local title_line help_line summary_plain
 
   selected="$1"
   current_index=0
@@ -1504,6 +1656,8 @@ prompt_bot_selection_graphical() {
   key=""
   extra=""
   status_line=""
+  title_line="Choose bots to install"
+  help_line="  arrows move, space toggle, enter confirm, a all, n none."
 
   if [[ "${#AVAILABLE_BOT_IDS[@]}" -eq 0 ]]; then
     die "No bots were loaded from ${BOTS_DIR}. Check the bots repository before continuing."
@@ -1533,10 +1687,10 @@ prompt_bot_selection_graphical() {
       fi
     done
 
-    ui_print "Choose bots to install\n"
-    rendered_lines=$((rendered_lines + 1))
-    ui_print "  Use up/down to move, space to toggle, enter to continue, a for all, n for none.\n"
-    rendered_lines=$((rendered_lines + 1))
+    ui_print "${title_line}\n"
+    rendered_lines=$((rendered_lines + $(ui_screen_line_count "$title_line")))
+    ui_print "${help_line}\n"
+    rendered_lines=$((rendered_lines + $(ui_screen_line_count "$help_line")))
 
     for index in "${!AVAILABLE_BOT_IDS[@]}"; do
       if [[ "${BOT_SELECTION_FLAGS[$index]}" == "1" ]]; then
@@ -1561,7 +1715,7 @@ prompt_bot_selection_graphical() {
       else
         ui_print "    ${line}\n"
       fi
-      rendered_lines=$((rendered_lines + 1))
+      rendered_lines=$((rendered_lines + $(ui_screen_line_count "  > ${line}")))
     done
 
     if [[ -n "$status_line" ]]; then
@@ -1570,10 +1724,12 @@ prompt_bot_selection_graphical() {
       else
         ui_print "  ${status_line}\n"
       fi
+      rendered_lines=$((rendered_lines + $(ui_screen_line_count "  ${status_line}")))
     else
-      ui_print "  Selected (${selected_count}): $(describe_selected_bots "$current_selection")\n"
+      summary_plain="  Selected (${selected_count}): $(describe_selected_bots "$current_selection")"
+      ui_print "${summary_plain}\n"
+      rendered_lines=$((rendered_lines + $(ui_screen_line_count "$summary_plain")))
     fi
-    rendered_lines=$((rendered_lines + 1))
   }
 
   while true; do
@@ -3366,13 +3522,13 @@ main() {
   normalize_service_identity
   require_root
   ensure_supported_os
-  detect_installation_state
-  resolve_action
   ui_setup_runtime
   ui_configure_progress_plan
   if ui_is_fancy; then
     ui_print_banner
   fi
+  detect_installation_state
+  resolve_action
 
   ui_run_step_foreground "Check source inputs" resolve_source_mode
   ui_run_step_captured "Install base packages" install_base_packages
