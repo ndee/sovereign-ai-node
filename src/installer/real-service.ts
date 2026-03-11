@@ -4450,7 +4450,7 @@ export default function (api) {
           }
 
           try {
-            await this.openclawGatewayServiceManager.restart();
+            await this.refreshGatewayAfterRuntimeConfig(runtimeConfig);
           } catch (error) {
             if (isGatewayUserSystemdUnavailableError(error)) {
               stepState.gatewayServiceSkipped = true;
@@ -4462,28 +4462,7 @@ export default function (api) {
               );
               return;
             }
-
-            this.logger.warn(
-              {
-                error: error instanceof Error ? error.message : String(error),
-              },
-              "OpenClaw gateway restart failed after runtime configure; retrying with start",
-            );
-            try {
-              await this.openclawGatewayServiceManager.start();
-            } catch (startError) {
-              if (isGatewayUserSystemdUnavailableError(startError)) {
-                stepState.gatewayServiceSkipped = true;
-                this.logger.warn(
-                  {
-                    error: describeError(startError),
-                  },
-                  "OpenClaw gateway start skipped because systemd user services are unavailable",
-                );
-                return;
-              }
-              throw startError;
-            }
+            throw error;
           }
         },
       },
@@ -5885,22 +5864,76 @@ export default function (api) {
 
     try {
       await this.openclawGatewayServiceManager.restart();
-      return;
     } catch (error) {
       if (isGatewayUserSystemdUnavailableError(error)) {
-        throw {
-          code: "OPENCLAW_GATEWAY_RESTART_FAILED",
-          message:
-            "OpenClaw gateway restart is unavailable because systemd user services are unavailable in this context",
-          retryable: true,
-          details: {
-            error: describeError(error),
-          },
-        };
+        throw error;
       }
+      this.logger.warn(
+        {
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "OpenClaw gateway restart failed after runtime configure; retrying with start",
+      );
+      await this.openclawGatewayServiceManager.start();
     }
 
-    await this.openclawGatewayServiceManager.start();
+    if (this.execRunner === null) {
+      return;
+    }
+
+    const gatewayState = await this.inspectGatewayRuntimeState();
+    if (
+      gatewayState.health.ok &&
+      gatewayState.gateway.installed &&
+      (gatewayState.gateway.state === "running" || gatewayState.gateway.state === "unknown")
+    ) {
+      return;
+    }
+
+    this.logger.warn(
+      {
+        state: gatewayState.gateway.state,
+        message: gatewayState.gateway.message,
+        health: gatewayState.health.message,
+      },
+      "OpenClaw gateway did not become healthy after runtime configure; trying system-level fallback",
+    );
+    const fallbackStarted = await this.ensureSystemGatewayServiceFallback(runtimeConfig);
+    if (fallbackStarted) {
+      return;
+    }
+
+    throw {
+      code: "OPENCLAW_GATEWAY_RESTART_FAILED",
+      message: "OpenClaw gateway did not become healthy after runtime configure",
+      retryable: true,
+      details: {
+        state: gatewayState.gateway.state,
+        message: gatewayState.gateway.message,
+        health: gatewayState.health.message,
+      },
+    };
+  }
+
+  private async inspectGatewayRuntimeState(): Promise<{
+    gateway: {
+      installed: boolean;
+      state: GatewayState;
+      message?: string;
+    };
+    health: {
+      ok: boolean;
+      message: string;
+    };
+  }> {
+    const [gateway, health] = await Promise.all([
+      this.inspectGatewayService(),
+      this.probeOpenClawHealth(),
+    ]);
+    return {
+      gateway,
+      health,
+    };
   }
 
   private async resolveSecretRef(secretRef: string): Promise<string> {
