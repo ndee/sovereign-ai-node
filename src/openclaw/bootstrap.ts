@@ -352,28 +352,44 @@ const resolveInstalledOpenClawPackageRoot = async (
 
 const hardenBundledExtensionDirectories = async (packageRoot: string): Promise<void> => {
   const extensionsRoot = join(packageRoot, "extensions");
-  let entries: Dirent[];
-  try {
-    entries = await readdir(extensionsRoot, { withFileTypes: true });
-  } catch {
-    return;
-  }
+  const queue = [extensionsRoot];
 
-  const candidateDirs = [
-    extensionsRoot,
-    ...entries
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => join(extensionsRoot, entry.name)),
-  ];
-
-  for (const candidateDir of candidateDirs) {
-    const info = await stat(candidateDir);
-    const currentMode = info.mode & 0o777;
-    const hardenedMode = currentMode & ~0o022;
-    if (hardenedMode === currentMode) {
+  while (queue.length > 0) {
+    const currentPath = queue.shift();
+    if (currentPath === undefined) {
       continue;
     }
-    await chmod(candidateDir, hardenedMode);
+
+    let info;
+    try {
+      info = await stat(currentPath);
+    } catch {
+      continue;
+    }
+
+    const currentMode = info.mode & 0o777;
+    const hardenedMode = currentMode & ~0o022;
+    if (hardenedMode !== currentMode) {
+      await chmod(currentPath, hardenedMode);
+    }
+
+    if (!info.isDirectory()) {
+      continue;
+    }
+
+    let entries: Dirent[];
+    try {
+      entries = await readdir(currentPath, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) {
+        continue;
+      }
+      queue.push(join(currentPath, entry.name));
+    }
   }
 };
 

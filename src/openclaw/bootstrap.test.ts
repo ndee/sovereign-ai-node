@@ -59,12 +59,15 @@ describe("ShellOpenClawBootstrapper", () => {
     const extensionDir = await writeBundledMatrixExtensionPackage(globalRoot);
     const extensionsRoot = join(globalRoot, "openclaw", "extensions");
     const memoryCoreDir = join(extensionsRoot, "memory-core");
+    const memoryCoreIndexPath = join(memoryCoreDir, "index.ts");
     await writeInstalledPackage(extensionDir, "@matrix-org/matrix-sdk-crypto-nodejs");
     await writeInstalledPackage(extensionDir, "@vector-im/matrix-bot-sdk");
     await mkdir(memoryCoreDir, { recursive: true });
+    await writeFile(memoryCoreIndexPath, "export {};\n", "utf8");
     await chmod(extensionsRoot, 0o777);
     await chmod(extensionDir, 0o777);
     await chmod(memoryCoreDir, 0o777);
+    await chmod(memoryCoreIndexPath, 0o666);
 
     const execRunner: ExecRunner = {
       run: async (input): Promise<ExecResult> => {
@@ -96,6 +99,7 @@ describe("ShellOpenClawBootstrapper", () => {
     expect((await stat(extensionsRoot)).mode & 0o022).toBe(0);
     expect((await stat(extensionDir)).mode & 0o022).toBe(0);
     expect((await stat(memoryCoreDir)).mode & 0o022).toBe(0);
+    expect((await stat(memoryCoreIndexPath)).mode & 0o022).toBe(0);
   });
 
   it("resolves pinned-by-sovereign to the concrete pinned version during install", async () => {
