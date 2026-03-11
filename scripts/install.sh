@@ -579,11 +579,9 @@ supports_color() {
 }
 
 ui_print() {
-  if has_tty; then
-    printf '%b' "$*" > /dev/tty
-  else
-    printf '%b' "$*"
-  fi
+  # Write human-facing prompts to stderr so interactive runs launched via a pipe
+  # still render menus even when writing directly to /dev/tty is unreliable.
+  printf '%b' "$*" >&2
 }
 
 ui_title() {
