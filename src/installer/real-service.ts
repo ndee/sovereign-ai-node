@@ -4009,7 +4009,7 @@ export default function (api) {
       ? [
           "-u",
           openclawServiceUser,
-          "--preserve-env=OPENCLAW_HOME,OPENCLAW_CONFIG,OPENCLAW_CONFIG_PATH,SOVEREIGN_NODE_CONFIG,SOVEREIGN_NODE_SERVICE_USER,SOVEREIGN_NODE_SERVICE_GROUP,CI,TMPDIR,TMP,TEMP,PATH",
+          "--preserve-env=HOME,OPENCLAW_HOME,OPENCLAW_CONFIG,OPENCLAW_CONFIG_PATH,SOVEREIGN_NODE_CONFIG,SOVEREIGN_NODE_SERVICE_USER,SOVEREIGN_NODE_SERVICE_GROUP,CI,TMPDIR,TMP,TEMP,PATH",
           "--",
           delegatedCommand,
           ...args,
@@ -4076,6 +4076,7 @@ export default function (api) {
   private buildManagedOpenClawEnv(runtimeConfig: RuntimeConfig): Record<string, string> {
     const tempDir = this.getManagedOpenClawTempDir(runtimeConfig);
     return {
+      HOME: this.paths.openclawServiceHome,
       OPENCLAW_HOME: runtimeConfig.openclaw.openclawHome,
       OPENCLAW_CONFIG: runtimeConfig.openclaw.runtimeConfigPath,
       OPENCLAW_CONFIG_PATH: runtimeConfig.openclaw.runtimeConfigPath,
@@ -6733,6 +6734,7 @@ export default function (api) {
       );
 
       const envFileLines = [
+        `HOME=${this.paths.openclawServiceHome}`,
         `OPENCLAW_HOME=${runtimeConfig.openclaw.openclawHome}`,
         `OPENCLAW_CONFIG=${runtimeConfig.openclaw.runtimeConfigPath}`,
         `OPENCLAW_CONFIG_PATH=${runtimeConfig.openclaw.runtimeConfigPath}`,
