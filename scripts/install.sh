@@ -1422,7 +1422,34 @@ parse_bot_selection_input() {
   printf '%s' "$selected"
 }
 
-prompt_bot_selection() {
+build_bot_selection_from_flags() {
+  local result index
+  result=""
+
+  for index in "${!AVAILABLE_BOT_IDS[@]}"; do
+    if [[ "${BOT_SELECTION_FLAGS[$index]:-0}" == "1" ]]; then
+      result="$(append_selected_bot "$result" "${AVAILABLE_BOT_IDS[$index]}")"
+    fi
+  done
+
+  printf '%s' "$result"
+}
+
+set_bot_selection_flags_from_list() {
+  local selected index
+  selected="$1"
+
+  BOT_SELECTION_FLAGS=()
+  for index in "${!AVAILABLE_BOT_IDS[@]}"; do
+    if bot_list_contains "$selected" "${AVAILABLE_BOT_IDS[$index]}"; then
+      BOT_SELECTION_FLAGS+=("1")
+    else
+      BOT_SELECTION_FLAGS+=("0")
+    fi
+  done
+}
+
+prompt_bot_selection_simple() {
   local selected default_numbers answer parsed_selection index option_number marker suffix
   selected="$1"
 
@@ -1465,6 +1492,187 @@ prompt_bot_selection() {
     printf '%s' "$parsed_selection"
     return 0
   done
+}
+
+prompt_bot_selection_graphical() {
+  local selected current_index rendered_lines key extra current_selection
+  local index marker line suffix status_line display_name
+
+  selected="$1"
+  current_index=0
+  rendered_lines=0
+  key=""
+  extra=""
+  status_line=""
+
+  if [[ "${#AVAILABLE_BOT_IDS[@]}" -eq 0 ]]; then
+    die "No bots were loaded from ${BOTS_DIR}. Check the bots repository before continuing."
+  fi
+
+  set_bot_selection_flags_from_list "$selected"
+  for index in "${!BOT_SELECTION_FLAGS[@]}"; do
+    if [[ "${BOT_SELECTION_FLAGS[$index]}" == "1" ]]; then
+      current_index="$index"
+      break
+    fi
+  done
+
+  redraw_bot_selection_menu() {
+    local selected_count
+
+    if [[ "$rendered_lines" -gt 0 ]]; then
+      ui_print "\033[${rendered_lines}A\r\033[J"
+    fi
+
+    rendered_lines=0
+    current_selection="$(build_bot_selection_from_flags)"
+    selected_count=0
+    for index in "${!BOT_SELECTION_FLAGS[@]}"; do
+      if [[ "${BOT_SELECTION_FLAGS[$index]}" == "1" ]]; then
+        selected_count=$((selected_count + 1))
+      fi
+    done
+
+    ui_print "Choose bots to install\n"
+    rendered_lines=$((rendered_lines + 1))
+    ui_print "  Use up/down to move, space to toggle, enter to continue, a for all, n for none.\n"
+    rendered_lines=$((rendered_lines + 1))
+
+    for index in "${!AVAILABLE_BOT_IDS[@]}"; do
+      if [[ "${BOT_SELECTION_FLAGS[$index]}" == "1" ]]; then
+        marker="[x]"
+      else
+        marker="[ ]"
+      fi
+
+      suffix=""
+      if [[ "${AVAILABLE_BOT_DEFAULT_INSTALLS[$index]}" == "1" ]]; then
+        suffix="  default"
+      fi
+      display_name="${AVAILABLE_BOT_DISPLAY_NAMES[$index]}${suffix}"
+      line="  ${marker} ${display_name}"
+
+      if [[ "$index" == "$current_index" ]]; then
+        if supports_color; then
+          ui_print "  \033[1;36m>\033[0m \033[7m${line}\033[0m\n"
+        else
+          ui_print "  > ${line}\n"
+        fi
+      else
+        ui_print "    ${line}\n"
+      fi
+      rendered_lines=$((rendered_lines + 1))
+    done
+
+    if [[ -n "$status_line" ]]; then
+      if supports_color; then
+        ui_print "  \033[33m${status_line}\033[0m\n"
+      else
+        ui_print "  ${status_line}\n"
+      fi
+    else
+      ui_print "  Selected (${selected_count}): $(describe_selected_bots "$current_selection")\n"
+    fi
+    rendered_lines=$((rendered_lines + 1))
+  }
+
+  while true; do
+    redraw_bot_selection_menu
+    IFS= read -rsn1 key < /dev/tty || true
+
+    if [[ "$key" == $'\e' ]]; then
+      IFS= read -rsn1 -t 0.05 extra < /dev/tty || extra=""
+      if [[ "$extra" == "[" ]]; then
+        IFS= read -rsn1 -t 0.05 extra < /dev/tty || extra=""
+        case "$extra" in
+          A)
+            if [[ "$current_index" -gt 0 ]]; then
+              current_index=$((current_index - 1))
+            fi
+            status_line=""
+            continue
+            ;;
+          B)
+            if [[ "$current_index" -lt $((${#AVAILABLE_BOT_IDS[@]} - 1)) ]]; then
+              current_index=$((current_index + 1))
+            fi
+            status_line=""
+            continue
+            ;;
+        esac
+      fi
+    fi
+
+    case "$key" in
+      " ")
+        if [[ "${BOT_SELECTION_FLAGS[$current_index]}" == "1" ]]; then
+          BOT_SELECTION_FLAGS[$current_index]="0"
+        else
+          BOT_SELECTION_FLAGS[$current_index]="1"
+        fi
+        status_line=""
+        ;;
+      "")
+        current_selection="$(build_bot_selection_from_flags)"
+        if [[ -z "$current_selection" ]]; then
+          status_line="Select at least one bot to install."
+          continue
+        fi
+        ui_print "\033[${rendered_lines}A\r\033[J"
+        ui_print "Selected bots: $(describe_selected_bots "$current_selection")\n"
+        printf '%s' "$current_selection"
+        return 0
+        ;;
+      a|A)
+        for index in "${!BOT_SELECTION_FLAGS[@]}"; do
+          BOT_SELECTION_FLAGS[$index]="1"
+        done
+        status_line=""
+        ;;
+      n|N)
+        for index in "${!BOT_SELECTION_FLAGS[@]}"; do
+          BOT_SELECTION_FLAGS[$index]="0"
+        done
+        status_line=""
+        ;;
+      j|J)
+        if [[ "$current_index" -lt $((${#AVAILABLE_BOT_IDS[@]} - 1)) ]]; then
+          current_index=$((current_index + 1))
+        fi
+        status_line=""
+        ;;
+      k|K)
+        if [[ "$current_index" -gt 0 ]]; then
+          current_index=$((current_index - 1))
+        fi
+        status_line=""
+        ;;
+      [1-9])
+        index=$((10#$key - 1))
+        if [[ "$index" -lt "${#BOT_SELECTION_FLAGS[@]}" ]]; then
+          if [[ "${BOT_SELECTION_FLAGS[$index]}" == "1" ]]; then
+            BOT_SELECTION_FLAGS[$index]="0"
+          else
+            BOT_SELECTION_FLAGS[$index]="1"
+          fi
+          current_index="$index"
+          status_line=""
+        fi
+        ;;
+      *)
+        status_line="Use up/down, space, enter, a, or n."
+        ;;
+    esac
+  done
+}
+
+prompt_bot_selection() {
+  if ui_is_fancy && has_tty; then
+    prompt_bot_selection_graphical "$1"
+    return 0
+  fi
+
+  prompt_bot_selection_simple "$1"
 }
 
 reset_request_defaults() {
