@@ -100,14 +100,21 @@ describe("ShellOpenClawGatewayServiceManager", () => {
       });
       expect(calls[1]).toMatchObject({
         command: "sudo",
-        args: ["-u", "user1", "--", resolvedOpenclaw, "gateway", "install"],
+        args: [
+          "-u",
+          "user1",
+          "--",
+          "/usr/bin/env",
+          "CI=1",
+          "XDG_RUNTIME_DIR=/run/user/1000",
+          "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
+          process.execPath,
+          resolvedOpenclaw,
+          "gateway",
+          "install",
+        ],
         options: {
           timeout: 120000,
-          env: {
-            CI: "1",
-            XDG_RUNTIME_DIR: "/run/user/1000",
-            DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
-          },
         },
       });
     } finally {

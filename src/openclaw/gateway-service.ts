@@ -68,16 +68,25 @@ export class ShellOpenClawGatewayServiceManager implements OpenClawGatewayServic
     }
 
     const sudoGatewayCommand = (await resolveExecutablePath("openclaw")) ?? "openclaw";
+    const sudoGatewayEnv = [
+      "CI=1",
+      `XDG_RUNTIME_DIR=/run/user/${fallback.uid}`,
+      `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${fallback.uid}/bus`,
+    ];
     const retry = await this.execRunner.run({
       command: "sudo",
-      args: ["-u", fallback.user, "--", sudoGatewayCommand, ...args],
+      args: [
+        "-u",
+        fallback.user,
+        "--",
+        "/usr/bin/env",
+        ...sudoGatewayEnv,
+        process.execPath,
+        sudoGatewayCommand,
+        ...args,
+      ],
       options: {
         timeout: OPENCLAW_GATEWAY_COMMAND_TIMEOUT_MS,
-        env: {
-          CI: "1",
-          XDG_RUNTIME_DIR: `/run/user/${fallback.uid}`,
-          DBUS_SESSION_BUS_ADDRESS: `unix:path=/run/user/${fallback.uid}/bus`,
-        },
       },
     });
     if (retry.exitCode === 0) {
