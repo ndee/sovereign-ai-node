@@ -12,7 +12,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import type {
   BotCatalog,
   BotConfigRecord,
@@ -4000,6 +4000,10 @@ export default function (api) {
       process.getuid() === 0 &&
       openclawServiceUser !== null &&
       openclawServiceUser !== "root";
+    const delegatedCommand =
+      shouldRunOpenClawAsServiceUser && command === "openclaw"
+        ? ((await resolveExecutablePath(command)) ?? command)
+        : command;
     const effectiveCommand = shouldRunOpenClawAsServiceUser ? "sudo" : command;
     const effectiveArgs = shouldRunOpenClawAsServiceUser
       ? [
@@ -4007,7 +4011,7 @@ export default function (api) {
           openclawServiceUser,
           "--preserve-env=OPENCLAW_HOME,OPENCLAW_CONFIG,OPENCLAW_CONFIG_PATH,SOVEREIGN_NODE_CONFIG,SOVEREIGN_NODE_SERVICE_USER,SOVEREIGN_NODE_SERVICE_GROUP,CI,TMPDIR,TMP,TEMP,PATH",
           "--",
-          command,
+          delegatedCommand,
           ...args,
         ]
       : args;
@@ -5412,6 +5416,7 @@ export default function (api) {
 
     const serviceIdentity = this.getConfiguredServiceIdentity(runtimeConfig);
     const managedTempDir = this.getManagedOpenClawTempDir(runtimeConfig);
+    const openclawCommand = (await resolveExecutablePath("openclaw")) ?? "openclaw";
     const unitName = SOVEREIGN_GATEWAY_SYSTEMD_UNIT;
     const unitPath =
       process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH?.trim() ||
@@ -5433,7 +5438,7 @@ export default function (api) {
       `Environment=TMP=${managedTempDir}`,
       `Environment=TEMP=${managedTempDir}`,
       `EnvironmentFile=-${runtimeConfig.openclaw.gatewayEnvPath}`,
-      "ExecStart=/usr/bin/env openclaw gateway run --allow-unconfigured --bind loopback",
+      `ExecStart=${openclawCommand} gateway run --allow-unconfigured --bind loopback`,
       "Restart=always",
       "RestartSec=3",
       "",
@@ -7178,3 +7183,23 @@ const sortToolInstances = (
   entries: RuntimeConfig["sovereignTools"]["instances"],
 ): RuntimeConfig["sovereignTools"]["instances"] =>
   [...entries].sort((left, right) => left.id.localeCompare(right.id));
+
+const resolveExecutablePath = async (command: string): Promise<string | null> => {
+  if (command.includes("/")) {
+    return command;
+  }
+
+  const pathValue = process.env.PATH ?? "";
+  for (const entry of pathValue.split(delimiter)) {
+    if (entry.length === 0) {
+      continue;
+    }
+    const candidate = join(entry, command);
+    try {
+      await access(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {}
+  }
+
+  return null;
+};
