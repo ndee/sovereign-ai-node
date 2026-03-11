@@ -6676,12 +6676,26 @@ export default function (api) {
       await mkdir(dirname(runtimeConfig.openclaw.runtimeProfilePath), { recursive: true });
       await mkdir(managedTempDir, { recursive: true });
       await chmod(managedTempDir, 0o700);
-      await this.applyRuntimeOwnership(this.paths.openclawServiceHome);
-      await this.applyRuntimeOwnership(runtimeConfig.openclaw.openclawHome);
-      await this.applyRuntimeOwnership(dirname(runtimeConfig.openclaw.runtimeProfilePath));
-      await this.applyRuntimeOwnership(managedTempDir);
-      await this.writeProtectedJsonFile(runtimeConfig.openclaw.runtimeConfigPath, runtimePayload);
-      await this.writeProtectedJsonFile(runtimeConfig.openclaw.runtimeProfilePath, profilePayload);
+      await this.applyConfiguredRuntimeOwnership(this.paths.openclawServiceHome, runtimeConfig);
+      await this.applyConfiguredRuntimeOwnership(
+        runtimeConfig.openclaw.openclawHome,
+        runtimeConfig,
+      );
+      await this.applyConfiguredRuntimeOwnership(
+        dirname(runtimeConfig.openclaw.runtimeProfilePath),
+        runtimeConfig,
+      );
+      await this.applyConfiguredRuntimeOwnership(managedTempDir, runtimeConfig);
+      await this.writeProtectedJsonFile(
+        runtimeConfig.openclaw.runtimeConfigPath,
+        runtimePayload,
+        runtimeConfig,
+      );
+      await this.writeProtectedJsonFile(
+        runtimeConfig.openclaw.runtimeProfilePath,
+        profilePayload,
+        runtimeConfig,
+      );
 
       const envFileLines = [
         `OPENCLAW_HOME=${runtimeConfig.openclaw.openclawHome}`,
@@ -6703,7 +6717,10 @@ export default function (api) {
       await writeFile(envTempPath, `${envFileLines.join("\n")}\n`, "utf8");
       await chmod(envTempPath, 0o600);
       await rename(envTempPath, runtimeConfig.openclaw.gatewayEnvPath);
-      await this.applyRuntimeOwnership(runtimeConfig.openclaw.gatewayEnvPath);
+      await this.applyConfiguredRuntimeOwnership(
+        runtimeConfig.openclaw.gatewayEnvPath,
+        runtimeConfig,
+      );
     } catch (error) {
       throw {
         code: "OPENCLAW_CONFIG_WRITE_FAILED",
@@ -6720,12 +6737,20 @@ export default function (api) {
     }
   }
 
-  private async writeProtectedJsonFile(path: string, value: unknown): Promise<void> {
+  private async writeProtectedJsonFile(
+    path: string,
+    value: unknown,
+    runtimeConfig?: RuntimeConfig,
+  ): Promise<void> {
     const tempPath = `${path}.${randomUUID()}.tmp`;
     await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
     await chmod(tempPath, 0o600);
     await rename(tempPath, path);
-    await this.applyRuntimeOwnership(path);
+    if (runtimeConfig === undefined) {
+      await this.applyRuntimeOwnership(path);
+      return;
+    }
+    await this.applyConfiguredRuntimeOwnership(path, runtimeConfig);
   }
 
   private async resolveImapConfig(imap: InstallRequest["imap"]): Promise<RuntimeConfig["imap"]> {
@@ -6936,6 +6961,86 @@ export default function (api) {
 
   private async applyRuntimeOwnership(path: string): Promise<void> {
     const ownership = await this.resolveRuntimeOwnership();
+    await this.applyOwnership(path, ownership);
+  }
+
+  private async resolveConfiguredRuntimeOwnership(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<{ uid: number; gid: number } | null> {
+    if (typeof process.getuid !== "function" || process.getuid() !== 0) {
+      return null;
+    }
+
+    const serviceIdentity = this.getConfiguredServiceIdentity(runtimeConfig);
+    if (serviceIdentity.user === "root" && serviceIdentity.group === "root") {
+      return { uid: 0, gid: 0 };
+    }
+    if (this.execRunner === null) {
+      return null;
+    }
+
+    try {
+      const passwdResult = await this.execRunner.run({
+        command: "getent",
+        args: ["passwd", serviceIdentity.user],
+        options: {
+          timeout: INSTALLER_EXEC_TIMEOUT_MS,
+        },
+      });
+      if (passwdResult.exitCode !== 0) {
+        return null;
+      }
+
+      const passwdFields = passwdResult.stdout.trim().split(":");
+      const uid = Number.parseInt(passwdFields[2] ?? "", 10);
+      const primaryGid = Number.parseInt(passwdFields[3] ?? "", 10);
+      if (!Number.isInteger(uid) || !Number.isInteger(primaryGid)) {
+        return null;
+      }
+
+      if (serviceIdentity.group.length === 0 || serviceIdentity.group === serviceIdentity.user) {
+        return { uid, gid: primaryGid };
+      }
+
+      const groupResult = await this.execRunner.run({
+        command: "getent",
+        args: ["group", serviceIdentity.group],
+        options: {
+          timeout: INSTALLER_EXEC_TIMEOUT_MS,
+        },
+      });
+      if (groupResult.exitCode !== 0) {
+        return { uid, gid: primaryGid };
+      }
+
+      const groupFields = groupResult.stdout.trim().split(":");
+      const groupGid = Number.parseInt(groupFields[2] ?? "", 10);
+      if (!Number.isInteger(groupGid)) {
+        return { uid, gid: primaryGid };
+      }
+
+      return { uid, gid: groupGid };
+    } catch {
+      return null;
+    }
+  }
+
+  private async applyConfiguredRuntimeOwnership(
+    path: string,
+    runtimeConfig: RuntimeConfig,
+  ): Promise<void> {
+    const ownership = await this.resolveConfiguredRuntimeOwnership(runtimeConfig);
+    if (ownership !== null) {
+      await this.applyOwnership(path, ownership);
+      return;
+    }
+    await this.applyRuntimeOwnership(path);
+  }
+
+  private async applyOwnership(
+    path: string,
+    ownership: { uid: number; gid: number } | null,
+  ): Promise<void> {
     if (ownership === null) {
       return;
     }

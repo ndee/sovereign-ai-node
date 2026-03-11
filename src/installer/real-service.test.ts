@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { LoadedBotPackage } from "../bots/catalog.js";
 import type { SovereignPaths } from "../config/paths.js";
@@ -3560,6 +3560,119 @@ describe("RealInstallerService", () => {
         "openclaw agents bind --agent bitcoin-skill-match --bind matrix:default",
       ),
     ).toBe(false);
+  });
+
+  it("resolves configured runtime ownership from the service identity when running as root", async () => {
+    const getuidMock =
+      typeof process.getuid === "function"
+        ? vi
+            .spyOn(process as typeof process & { getuid: () => number }, "getuid")
+            .mockImplementation(() => 0)
+        : null;
+    const commandCalls: string[] = [];
+    const service = new RealInstallerService(
+      createLogger(),
+      {
+        configPath: "/tmp/sovereign-node.json5",
+        secretsDir: "/tmp/sovereign-secrets",
+        stateDir: "/tmp/sovereign-state",
+        logsDir: "/tmp/sovereign-logs",
+        installJobsDir: "/tmp/sovereign-install-jobs",
+        openclawServiceHome: "/tmp/sovereign-openclaw-home",
+      },
+      {
+        openclawBootstrapper: {
+          detectInstalled: async () => null,
+          ensureInstalled: async () => {
+            throw new Error("not used");
+          },
+        },
+        openclawGatewayServiceManager: {
+          install: async () => {
+            throw new Error("not used");
+          },
+          start: async () => {
+            throw new Error("not used");
+          },
+          restart: async () => {
+            throw new Error("not used");
+          },
+        },
+        mailSentinelRegistrar: {
+          register: async () => {
+            throw new Error("not used");
+          },
+        },
+        preflightChecker: {
+          run: async () => {
+            throw new Error("not used");
+          },
+        },
+        imapTester: {
+          test: async () => {
+            throw new Error("not used");
+          },
+        },
+        matrixProvisioner: {
+          provision: async () => {
+            throw new Error("not used");
+          },
+          bootstrapAccounts: async () => {
+            throw new Error("not used");
+          },
+          bootstrapRoom: async () => {
+            throw new Error("not used");
+          },
+          test: async () => ({
+            ok: true,
+            homeserverUrl: "https://matrix.example.org",
+            checks: [],
+          }),
+        },
+        execRunner: {
+          run: async ({ command, args }): Promise<ExecResult> => {
+            const serialized = [command, ...(args ?? [])].join(" ");
+            commandCalls.push(serialized);
+            if (serialized === "getent passwd runner") {
+              return {
+                command: serialized,
+                exitCode: 0,
+                stdout: "runner:x:1001:1001::/home/runner:/bin/bash\n",
+                stderr: "",
+              };
+            }
+            return {
+              command: serialized,
+              exitCode: 1,
+              stdout: "",
+              stderr: "unexpected command",
+            };
+          },
+        },
+      },
+    );
+
+    const runtimeConfig = {
+      openclaw: {
+        serviceUser: "runner",
+        serviceGroup: "runner",
+      },
+    } as RuntimeConfig;
+
+    try {
+      const ownership = await (
+        service as unknown as {
+          resolveConfiguredRuntimeOwnership(
+            config: RuntimeConfig,
+          ): Promise<{ uid: number; gid: number } | null>;
+        }
+      ).resolveConfiguredRuntimeOwnership(runtimeConfig);
+
+      expect(ownership).toEqual({ uid: 1001, gid: 1001 });
+      expect(commandCalls).toEqual(["getent passwd runner"]);
+    } finally {
+      getuidMock?.mockRestore();
+    }
   });
 
   it("builds status from runtime config and OpenClaw probes", async () => {
