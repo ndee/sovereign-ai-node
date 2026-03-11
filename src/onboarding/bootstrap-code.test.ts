@@ -57,13 +57,13 @@ describe("Matrix onboarding bootstrap code", () => {
       username: "@operator:matrix.example.org",
       homeserverUrl: "https://matrix.example.org",
       now: new Date("2026-03-06T10:00:00.000Z"),
-      ttlMinutes: 10,
+      ttlMinutes: 21,
     });
 
     const expired = redeemMatrixOnboardingCode({
       state: issued.state,
       code: issued.code,
-      now: new Date("2026-03-06T10:11:00.000Z"),
+      now: new Date("2026-03-06T10:22:00.000Z"),
     });
     expect(expired).toMatchObject({
       ok: false,
