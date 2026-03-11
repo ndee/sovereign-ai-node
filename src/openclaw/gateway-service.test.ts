@@ -1,3 +1,7 @@
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { createLogger } from "../logging/logger.js";
@@ -56,8 +60,14 @@ describe("ShellOpenClawGatewayServiceManager", () => {
     const calls: ExecInput[] = [];
     const priorSudoUser = process.env.SUDO_USER;
     const priorSudoUid = process.env.SUDO_UID;
+    const priorPath = process.env.PATH;
+    const commandDir = await mkdtemp(join(tmpdir(), "openclaw-bin-"));
+    const resolvedOpenclaw = join(commandDir, "openclaw");
+    await writeFile(resolvedOpenclaw, "#!/bin/sh\nexit 0\n", "utf8");
+    await chmod(resolvedOpenclaw, 0o755);
     process.env.SUDO_USER = "user1";
     process.env.SUDO_UID = "1000";
+    process.env.PATH = priorPath ? `${commandDir}${delimiter}${priorPath}` : commandDir;
     try {
       const execRunner: ExecRunner = {
         run: async (input): Promise<ExecResult> => {
@@ -90,7 +100,7 @@ describe("ShellOpenClawGatewayServiceManager", () => {
       });
       expect(calls[1]).toMatchObject({
         command: "sudo",
-        args: ["-u", "user1", "--", "openclaw", "gateway", "install"],
+        args: ["-u", "user1", "--", resolvedOpenclaw, "gateway", "install"],
         options: {
           timeout: 120000,
           env: {
@@ -111,6 +121,12 @@ describe("ShellOpenClawGatewayServiceManager", () => {
       } else {
         process.env.SUDO_UID = priorSudoUid;
       }
+      if (priorPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = priorPath;
+      }
+      await rm(commandDir, { recursive: true, force: true });
     }
   });
 });

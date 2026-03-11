@@ -1,3 +1,7 @@
+import { constants as fsConstants } from "node:fs";
+import { access } from "node:fs/promises";
+import { delimiter, join } from "node:path";
+
 import type { Logger } from "../logging/logger.js";
 import type { ExecResult, ExecRunner } from "../system/exec.js";
 
@@ -63,9 +67,10 @@ export class ShellOpenClawGatewayServiceManager implements OpenClawGatewayServic
       return primary;
     }
 
+    const sudoGatewayCommand = (await resolveExecutablePath("openclaw")) ?? "openclaw";
     const retry = await this.execRunner.run({
       command: "sudo",
-      args: ["-u", fallback.user, "--", "openclaw", ...args],
+      args: ["-u", fallback.user, "--", sudoGatewayCommand, ...args],
       options: {
         timeout: OPENCLAW_GATEWAY_COMMAND_TIMEOUT_MS,
         env: {
@@ -120,6 +125,28 @@ const looksLikeSystemdUserBusError = (result: ExecResult): boolean =>
   /systemctl --user unavailable|failed to connect to bus|no medium found/i.test(
     `${result.stderr}\n${result.stdout}`,
   );
+
+const resolveExecutablePath = async (command: string): Promise<string | null> => {
+  if (command.includes("/")) {
+    return command;
+  }
+
+  const pathValue = process.env.PATH ?? "";
+  for (const entry of pathValue.split(delimiter)) {
+    if (entry.length === 0) {
+      continue;
+    }
+    const candidate = join(entry, command);
+    try {
+      await access(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+};
 
 const resolveSudoUserFallback = (): { user: string; uid: string } | null => {
   const user = process.env.SUDO_USER?.trim() ?? "";
