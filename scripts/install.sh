@@ -631,7 +631,7 @@ detect_installation_state() {
 }
 
 has_tty() {
-  [[ -e /dev/tty ]]
+  [[ -t 0 || -t 1 ]] && [[ -r /dev/tty ]]
 }
 
 supports_color() {
