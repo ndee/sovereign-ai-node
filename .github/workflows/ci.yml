@@ -110,8 +110,8 @@ jobs:
 
           # Fail the step if the installer reports a logical failure
           STATE=$(jq -r '.result.job.state' /tmp/install-result.json)
-          if [ "$STATE" != "completed" ]; then
-            echo "::error::Installer finished with state=$STATE (expected completed)"
+          if [ "$STATE" != "succeeded" ]; then
+            echo "::error::Installer finished with state=$STATE (expected succeeded)"
             jq '.result.job.steps[] | select(.state == "failed")' /tmp/install-result.json
             exit 1
           fi
