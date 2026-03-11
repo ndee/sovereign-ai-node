@@ -5450,6 +5450,11 @@ export default function (api) {
         return false;
       }
       if (result.result.exitCode !== 0) {
+        const output = `${result.result.stdout}\n${result.result.stderr}`;
+        const systemctlStillStarting = args[0] === "is-active" && /\bactivating\b/i.test(output);
+        if (systemctlStillStarting) {
+          continue;
+        }
         this.logger.warn(
           {
             command: result.result.command,
@@ -5882,11 +5887,7 @@ export default function (api) {
     }
 
     const gatewayState = await this.inspectGatewayRuntimeState();
-    if (
-      gatewayState.health.ok &&
-      gatewayState.gateway.installed &&
-      (gatewayState.gateway.state === "running" || gatewayState.gateway.state === "unknown")
-    ) {
+    if (gatewayState.health.ok) {
       return;
     }
 
