@@ -4005,7 +4005,7 @@ export default function (api) {
       ? [
           "-u",
           openclawServiceUser,
-          "--preserve-env=OPENCLAW_HOME,OPENCLAW_CONFIG,OPENCLAW_CONFIG_PATH,SOVEREIGN_NODE_CONFIG,CI,TMPDIR,TMP,TEMP",
+          "--preserve-env=OPENCLAW_HOME,OPENCLAW_CONFIG,OPENCLAW_CONFIG_PATH,SOVEREIGN_NODE_CONFIG,SOVEREIGN_NODE_SERVICE_USER,SOVEREIGN_NODE_SERVICE_GROUP,CI,TMPDIR,TMP,TEMP,PATH",
           "--",
           command,
           ...args,
@@ -4022,6 +4022,7 @@ export default function (api) {
             ? {
                 env: {
                   CI: "1",
+                  PATH: process.env.PATH ?? "",
                   ...(openclawEnv ?? {}),
                 },
               }
@@ -4095,6 +4096,30 @@ export default function (api) {
         continue;
       }
       process.env[key] = value;
+    }
+  }
+
+  private async withManagedOpenClawServiceIdentityEnv<T>(
+    runtimeConfig: RuntimeConfig,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    const priorUser = process.env.SOVEREIGN_NODE_SERVICE_USER;
+    const priorGroup = process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+    process.env.SOVEREIGN_NODE_SERVICE_USER = runtimeConfig.openclaw.serviceUser;
+    process.env.SOVEREIGN_NODE_SERVICE_GROUP = runtimeConfig.openclaw.serviceGroup;
+    try {
+      return await action();
+    } finally {
+      if (priorUser === undefined) {
+        delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+      } else {
+        process.env.SOVEREIGN_NODE_SERVICE_USER = priorUser;
+      }
+      if (priorGroup === undefined) {
+        delete process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+      } else {
+        process.env.SOVEREIGN_NODE_SERVICE_GROUP = priorGroup;
+      }
     }
   }
 
@@ -5079,23 +5104,27 @@ export default function (api) {
         (entry) => entry.botId === botPackage.manifest.id || entry.agentId === agent.id,
       );
       try {
-        const registration = await this.managedAgentRegistrar.register({
-          agentId: agent.id,
-          workspaceDir: agent.workspace,
-          ...(cronEntry === undefined || botPackage.manifest.openclaw.cron === undefined
-            ? {}
-            : {
-                cron: {
-                  id: cronEntry.id,
-                  every: cronEntry.every,
-                  message: botPackage.manifest.openclaw.cron.message,
-                  announceRoomId: runtimeConfig.matrix.alertRoom.roomId,
-                  ...(botPackage.manifest.openclaw.cron.session === undefined
-                    ? {}
-                    : { session: botPackage.manifest.openclaw.cron.session }),
-                },
-              }),
-        });
+        const registration = await this.withManagedOpenClawServiceIdentityEnv(
+          runtimeConfig,
+          async () =>
+            await this.managedAgentRegistrar.register({
+              agentId: agent.id,
+              workspaceDir: agent.workspace,
+              ...(cronEntry === undefined || botPackage.manifest.openclaw.cron === undefined
+                ? {}
+                : {
+                    cron: {
+                      id: cronEntry.id,
+                      every: cronEntry.every,
+                      message: botPackage.manifest.openclaw.cron.message,
+                      announceRoomId: runtimeConfig.matrix.alertRoom.roomId,
+                      ...(botPackage.manifest.openclaw.cron.session === undefined
+                        ? {}
+                        : { session: botPackage.manifest.openclaw.cron.session }),
+                    },
+                  }),
+            }),
+        );
         registrations.push(registration);
       } catch (error) {
         if (
@@ -5399,6 +5428,7 @@ export default function (api) {
       `Group=${serviceIdentity.group}`,
       `WorkingDirectory=${this.paths.openclawServiceHome}`,
       `Environment=HOME=${this.paths.openclawServiceHome}`,
+      `Environment=PATH=${process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}`,
       `Environment=TMPDIR=${managedTempDir}`,
       `Environment=TMP=${managedTempDir}`,
       `Environment=TEMP=${managedTempDir}`,

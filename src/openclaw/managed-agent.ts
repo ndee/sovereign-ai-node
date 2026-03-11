@@ -199,30 +199,39 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
 
   private async runOpenClawCommandWithGatewayRetry(args: string[]): Promise<ExecResult> {
     let result: ExecResult | null = null;
+    const preferredSudoUser = resolvePreferredManagedOpenClawSudoUser();
     for (let attempt = 1; attempt <= OPENCLAW_GATEWAY_RETRY_ATTEMPTS; attempt += 1) {
-      const primaryResult = await this.execRunner.run({
-        command: "openclaw",
-        args,
-        options: {
-          timeout: OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS,
-          env: {
-            CI: "1",
-          },
-        },
-      });
-      result = primaryResult;
-      if (primaryResult.exitCode === 0) {
-        return primaryResult;
-      }
-
-      const sudoUserRetry = await this.retryGatewayCommandViaSudoUser(args, primaryResult);
-      if (sudoUserRetry !== null) {
-        result = sudoUserRetry;
-        if (sudoUserRetry.exitCode === 0 || !isGatewayUnavailableResult(sudoUserRetry)) {
-          return sudoUserRetry;
+      if (preferredSudoUser !== null) {
+        const delegatedResult = await this.runOpenClawCommandViaSudoUser(args, preferredSudoUser);
+        result = delegatedResult;
+        if (delegatedResult.exitCode === 0 || !isGatewayUnavailableResult(delegatedResult)) {
+          return delegatedResult;
         }
-      } else if (!isGatewayUnavailableResult(primaryResult)) {
-        return primaryResult;
+      } else {
+        const primaryResult = await this.execRunner.run({
+          command: "openclaw",
+          args,
+          options: {
+            timeout: OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS,
+            env: {
+              CI: "1",
+            },
+          },
+        });
+        result = primaryResult;
+        if (primaryResult.exitCode === 0) {
+          return primaryResult;
+        }
+
+        const sudoUserRetry = await this.retryGatewayCommandViaSudoUser(args, primaryResult);
+        if (sudoUserRetry !== null) {
+          result = sudoUserRetry;
+          if (sudoUserRetry.exitCode === 0 || !isGatewayUnavailableResult(sudoUserRetry)) {
+            return sudoUserRetry;
+          }
+        } else if (!isGatewayUnavailableResult(primaryResult)) {
+          return primaryResult;
+        }
       }
       if (attempt >= OPENCLAW_GATEWAY_RETRY_ATTEMPTS) {
         break;
@@ -262,6 +271,25 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
       return null;
     }
 
+    const retry = await this.runOpenClawCommandViaSudoUser(args, fallback);
+    if (retry.exitCode === 0) {
+      this.logger.warn(
+        {
+          user: fallback.user,
+          uid: fallback.uid,
+          command: result.command,
+        },
+        "OpenClaw managed-agent command failed as root; retry succeeded via invoking sudo user",
+      );
+    }
+
+    return retry;
+  }
+
+  private async runOpenClawCommandViaSudoUser(
+    args: string[],
+    fallback: { user: string; uid: string },
+  ): Promise<ExecResult> {
     const sudoGatewayCommand = (await resolveExecutablePath("openclaw")) ?? "openclaw";
     const sudoGatewayEnv = [
       "CI=1",
@@ -269,7 +297,7 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
       `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${fallback.uid}/bus`,
       ...resolveManagedOpenClawEnvArgs(),
     ];
-    const retry = await this.execRunner.run({
+    return await this.execRunner.run({
       command: "sudo",
       args: [
         "-u",
@@ -285,18 +313,6 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
         timeout: OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS,
       },
     });
-    if (retry.exitCode === 0) {
-      this.logger.warn(
-        {
-          user: fallback.user,
-          uid: fallback.uid,
-          command: result.command,
-        },
-        "OpenClaw managed-agent command failed as root; retry succeeded via invoking sudo user",
-      );
-    }
-
-    return retry;
   }
 }
 
@@ -380,6 +396,18 @@ const resolveSudoUserFallback = (): { user: string; uid: string } | null => {
     return null;
   }
   return { user, uid };
+};
+
+const resolvePreferredManagedOpenClawSudoUser = (): { user: string; uid: string } | null => {
+  const fallback = resolveSudoUserFallback();
+  if (fallback === null) {
+    return null;
+  }
+  const serviceUser = process.env.SOVEREIGN_NODE_SERVICE_USER?.trim() ?? "";
+  if (serviceUser.length === 0 || serviceUser === "root" || serviceUser !== fallback.user) {
+    return null;
+  }
+  return fallback;
 };
 
 const delay = async (ms: number): Promise<void> =>

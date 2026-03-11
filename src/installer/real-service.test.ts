@@ -3344,6 +3344,7 @@ describe("RealInstallerService", () => {
       const unitRaw = await readFile(gatewayUnitPath, "utf8");
       expect(unitRaw).toContain("User=sovereign-node");
       expect(unitRaw).toContain("Group=sovereign-node");
+      expect(unitRaw).toContain("Environment=PATH=");
     } finally {
       if (priorGatewayUnitPath === undefined) {
         delete process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH;
