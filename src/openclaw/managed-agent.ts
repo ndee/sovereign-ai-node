@@ -1,3 +1,7 @@
+import { constants as fsConstants } from "node:fs";
+import { access } from "node:fs/promises";
+import { delimiter, join } from "node:path";
+
 import type { Logger } from "../logging/logger.js";
 import type { ExecResult, ExecRunner } from "../system/exec.js";
 
@@ -156,40 +160,17 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
   }
 
   private async listCronJobs(): Promise<CronListJob[]> {
-    let lastJsonResult: ExecResult | null = null;
-    let lastTextResult: ExecResult | null = null;
-
-    for (let attempt = 1; attempt <= OPENCLAW_GATEWAY_RETRY_ATTEMPTS; attempt += 1) {
-      const jsonResult = await this.runOpenClawCommandWithGatewayRetry(["cron", "list", "--json"]);
-      lastJsonResult = jsonResult;
-      if (jsonResult.exitCode === 0) {
-        const parsed = parseCronListJson(jsonResult.stdout);
-        if (parsed !== null) {
-          return parsed;
-        }
+    const jsonResult = await this.runOpenClawCommandWithGatewayRetry(["cron", "list", "--json"]);
+    if (jsonResult.exitCode === 0) {
+      const parsed = parseCronListJson(jsonResult.stdout);
+      if (parsed !== null) {
+        return parsed;
       }
+    }
 
-      const textResult = await this.runOpenClawCommandWithGatewayRetry(["cron", "list"]);
-      lastTextResult = textResult;
-      if (textResult.exitCode === 0) {
-        return parseCronListTable(textResult.stdout);
-      }
-
-      const gatewayUnavailable =
-        isGatewayUnavailableResult(jsonResult) || isGatewayUnavailableResult(textResult);
-      if (!gatewayUnavailable || attempt >= OPENCLAW_GATEWAY_RETRY_ATTEMPTS) {
-        break;
-      }
-      this.logger.warn(
-        {
-          attempt,
-          maxAttempts: OPENCLAW_GATEWAY_RETRY_ATTEMPTS,
-          jsonExitCode: jsonResult.exitCode,
-          textExitCode: textResult.exitCode,
-        },
-        "OpenClaw gateway unavailable while listing cron jobs; retrying",
-      );
-      await delay(OPENCLAW_GATEWAY_RETRY_DELAY_MS);
+    const textResult = await this.runOpenClawCommandWithGatewayRetry(["cron", "list"]);
+    if (textResult.exitCode === 0) {
+      return parseCronListTable(textResult.stdout);
     }
 
     throw {
@@ -198,14 +179,14 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
       retryable: true,
       details: {
         attempts: OPENCLAW_GATEWAY_RETRY_ATTEMPTS,
-        jsonCommand: lastJsonResult?.command ?? "openclaw cron list --json",
-        jsonExitCode: lastJsonResult?.exitCode ?? -1,
-        jsonStdout: truncateText(lastJsonResult?.stdout ?? "", 1200),
-        jsonStderr: truncateText(lastJsonResult?.stderr ?? "", 1200),
-        textCommand: lastTextResult?.command ?? "openclaw cron list",
-        textExitCode: lastTextResult?.exitCode ?? -1,
-        textStdout: truncateText(lastTextResult?.stdout ?? "", 1200),
-        textStderr: truncateText(lastTextResult?.stderr ?? "", 1200),
+        jsonCommand: jsonResult.command,
+        jsonExitCode: jsonResult.exitCode,
+        jsonStdout: truncateText(jsonResult.stdout, 1200),
+        jsonStderr: truncateText(jsonResult.stderr, 1200),
+        textCommand: textResult.command,
+        textExitCode: textResult.exitCode,
+        textStdout: truncateText(textResult.stdout, 1200),
+        textStderr: truncateText(textResult.stderr, 1200),
       },
     };
   }
@@ -213,7 +194,7 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
   private async runOpenClawCommandWithGatewayRetry(args: string[]): Promise<ExecResult> {
     let result: ExecResult | null = null;
     for (let attempt = 1; attempt <= OPENCLAW_GATEWAY_RETRY_ATTEMPTS; attempt += 1) {
-      result = await this.execRunner.run({
+      const primaryResult = await this.execRunner.run({
         command: "openclaw",
         args,
         options: {
@@ -223,8 +204,19 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
           },
         },
       });
-      if (result.exitCode === 0 || !isGatewayUnavailableResult(result)) {
-        return result;
+      result = primaryResult;
+      if (primaryResult.exitCode === 0) {
+        return primaryResult;
+      }
+
+      const sudoUserRetry = await this.retryGatewayCommandViaSudoUser(args, primaryResult);
+      if (sudoUserRetry !== null) {
+        result = sudoUserRetry;
+        if (sudoUserRetry.exitCode === 0 || !isGatewayUnavailableResult(sudoUserRetry)) {
+          return sudoUserRetry;
+        }
+      } else if (!isGatewayUnavailableResult(primaryResult)) {
+        return primaryResult;
       }
       if (attempt >= OPENCLAW_GATEWAY_RETRY_ATTEMPTS) {
         break;
@@ -249,6 +241,55 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
         stderr: "openclaw command did not execute",
       }
     );
+  }
+
+  private async retryGatewayCommandViaSudoUser(
+    args: string[],
+    result: ExecResult,
+  ): Promise<ExecResult | null> {
+    if (!isGatewayUnavailableResult(result)) {
+      return null;
+    }
+
+    const fallback = resolveSudoUserFallback();
+    if (fallback === null) {
+      return null;
+    }
+
+    const sudoGatewayCommand = (await resolveExecutablePath("openclaw")) ?? "openclaw";
+    const sudoGatewayEnv = [
+      "CI=1",
+      `XDG_RUNTIME_DIR=/run/user/${fallback.uid}`,
+      `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${fallback.uid}/bus`,
+    ];
+    const retry = await this.execRunner.run({
+      command: "sudo",
+      args: [
+        "-u",
+        fallback.user,
+        "--",
+        "/usr/bin/env",
+        ...sudoGatewayEnv,
+        process.execPath,
+        sudoGatewayCommand,
+        ...args,
+      ],
+      options: {
+        timeout: OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS,
+      },
+    });
+    if (retry.exitCode === 0) {
+      this.logger.warn(
+        {
+          user: fallback.user,
+          uid: fallback.uid,
+          command: result.command,
+        },
+        "OpenClaw managed-agent command failed as root; retry succeeded via invoking sudo user",
+      );
+    }
+
+    return retry;
   }
 }
 
@@ -295,6 +336,38 @@ const isGatewayUnavailableOutput = (value: string): boolean =>
   /gateway\s+closed|gateway\s+unavailable|abnormal\s+closure|econnrefused|connect\s+econnrefused|socket\s+hang\s+up/i.test(
     value.toLowerCase(),
   );
+
+const resolveExecutablePath = async (command: string): Promise<string | null> => {
+  if (command.includes("/")) {
+    return command;
+  }
+
+  const pathValue = process.env.PATH ?? "";
+  for (const entry of pathValue.split(delimiter)) {
+    if (entry.length === 0) {
+      continue;
+    }
+    const candidate = join(entry, command);
+    try {
+      await access(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {}
+  }
+
+  return null;
+};
+
+const resolveSudoUserFallback = (): { user: string; uid: string } | null => {
+  const user = process.env.SUDO_USER?.trim() ?? "";
+  const uid = process.env.SUDO_UID?.trim() ?? "";
+  if (user.length === 0 || user === "root") {
+    return null;
+  }
+  if (!/^[0-9]+$/.test(uid)) {
+    return null;
+  }
+  return { user, uid };
+};
 
 const delay = async (ms: number): Promise<void> =>
   new Promise((resolveTimeout) => {

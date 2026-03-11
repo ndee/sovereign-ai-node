@@ -275,4 +275,79 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
     expect(jsonListAttempts).toBe(2);
     expect(calls).toContain("openclaw cron list --json");
   });
+
+  it("retries gateway commands via the sudo user when root cannot reach the gateway", async () => {
+    const calls: string[] = [];
+    const priorSudoUser = process.env.SUDO_USER;
+    const priorSudoUid = process.env.SUDO_UID;
+    process.env.SUDO_USER = "runner";
+    process.env.SUDO_UID = "1001";
+
+    try {
+      const execRunner: ExecRunner = {
+        run: async (input): Promise<ExecResult> => {
+          const serialized = [input.command, ...(input.args ?? [])].join(" ");
+          calls.push(serialized);
+          if (serialized === "openclaw cron list --json") {
+            return {
+              command: serialized,
+              exitCode: 1,
+              stdout: "",
+              stderr: "Error: gateway closed (1006 abnormal closure (no close frame))",
+            };
+          }
+          if (
+            serialized.startsWith(
+              `sudo -u runner -- /usr/bin/env CI=1 XDG_RUNTIME_DIR=/run/user/1001 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus ${process.execPath} `,
+            ) &&
+            serialized.endsWith(" cron list --json")
+          ) {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: '{"jobs":[]}',
+              stderr: "",
+            };
+          }
+          return {
+            command: serialized,
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          };
+        },
+      };
+
+      const registrar = new ShellOpenClawManagedAgentRegistrar(execRunner, createLogger());
+      const result = await registrar.register({
+        agentId: "mail-sentinel",
+        workspaceDir: "/tmp/ws",
+        cron: {
+          id: "mail-sentinel-poll",
+          every: "5m",
+          message: "Summarize new inbox mail",
+        },
+      });
+
+      expect(result.cronJobId).toBe("mail-sentinel-poll");
+      expect(
+        calls.some(
+          (entry) =>
+            entry.startsWith("sudo -u runner -- /usr/bin/env CI=1") &&
+            entry.endsWith(" cron list --json"),
+        ),
+      ).toBe(true);
+    } finally {
+      if (priorSudoUser === undefined) {
+        delete process.env.SUDO_USER;
+      } else {
+        process.env.SUDO_USER = priorSudoUser;
+      }
+      if (priorSudoUid === undefined) {
+        delete process.env.SUDO_UID;
+      } else {
+        process.env.SUDO_UID = priorSudoUid;
+      }
+    }
+  });
 });
