@@ -37,8 +37,8 @@ DEFAULT_MATRIX_PUBLIC_BASE_URL="http://127.0.0.1:8008"
 LEGACY_MATRIX_DOMAIN="matrix.local.test"
 LEGACY_MATRIX_PUBLIC_BASE_URL="http://127.0.0.1:8008"
 LEGACY_MATRIX_ALT_PUBLIC_BASE_URL="http://matrix.local.test:8008"
-DEFAULT_OPERATOR_USERNAME="operator"
-DEFAULT_ALERT_ROOM_NAME="Sovereign Alerts"
+DEFAULT_OPERATOR_USERNAME="admin"
+DEFAULT_ALERT_ROOM_NAME="Alerts"
 DEFAULT_SELECTED_BOTS="mail-sentinel"
 DEFAULT_POLL_INTERVAL="5m"
 DEFAULT_LOOKBACK_WINDOW="15m"
@@ -66,6 +66,7 @@ UI_ACTIVE_STEP_STARTED_AT=0
 UI_STEP_LOG_DIR=""
 UI_PRESERVE_STEP_LOGS="0"
 UI_BAR_WIDTH=28
+UI_TERMINAL_WIDTH=80
 UI_FANCY="0"
 INSTALL_COMMAND_OUTPUT=""
 RUNTIME_STATUS_OUTPUT=""
@@ -717,12 +718,31 @@ ui_setup_runtime() {
   if has_tty; then
     UI_FANCY="1"
   fi
+  UI_TERMINAL_WIDTH="$(detect_terminal_width)"
   UI_STEP_LOG_DIR="$(mktemp -d /tmp/sovereign-node-installer.XXXXXX)"
   trap cleanup_ui_runtime EXIT
 }
 
 ui_configure_progress_plan() {
   UI_TOTAL_STEPS=17
+}
+
+detect_terminal_width() {
+  local detected
+
+  detected=""
+  if has_tty; then
+    detected="$(stty size < /dev/tty 2>/dev/null | awk '{print $2}')"
+    if [[ -z "$detected" ]] && command -v tput >/dev/null 2>&1; then
+      detected="$(tput cols 2>/dev/null || true)"
+    fi
+  fi
+
+  if [[ -z "$detected" ]] || [[ ! "$detected" =~ ^[0-9]+$ ]] || [[ "$detected" -lt 40 ]]; then
+    detected=80
+  fi
+
+  printf '%s' "$detected"
 }
 
 format_duration() {
@@ -777,6 +797,29 @@ ui_progress_bar() {
   printf '%s' "$bar"
 }
 
+ui_truncate_text() {
+  local input max_width
+  input="$1"
+  max_width="${2:-0}"
+
+  if [[ "$max_width" -le 0 ]]; then
+    printf ''
+    return 0
+  fi
+
+  if [[ "${#input}" -le "$max_width" ]]; then
+    printf '%s' "$input"
+    return 0
+  fi
+
+  if [[ "$max_width" -le 3 ]]; then
+    printf '%s' "${input:0:max_width}"
+    return 0
+  fi
+
+  printf '%s...' "${input:0:max_width-3}"
+}
+
 ui_step_log_path() {
   local slug
   slug="$(
@@ -806,7 +849,8 @@ ui_show_log_excerpt() {
 }
 
 ui_render_step_line() {
-  local state label detail frame completed percent bar counter line prefix
+  local state label detail frame completed percent bar counter line prefix prefix_plain
+  local body line_prefix bar_width available_body_width terminal_width
   state="$1"
   label="$2"
   detail="${3:-}"
@@ -839,12 +883,27 @@ ui_render_step_line() {
   esac
 
   percent="$(ui_progress_percent "$completed" "$UI_TOTAL_STEPS")"
-  bar="$(ui_progress_bar "$completed" "$UI_TOTAL_STEPS" "$( [[ "$state" == "running" ]] && printf '1' || printf '0' )")"
-  counter="$(printf '%02d/%02d' "$UI_CURRENT_STEP" "$UI_TOTAL_STEPS")"
-  line="$(printf '%3s%% |%s| %s %s' "$percent" "$bar" "$counter" "$label")"
-  if [[ -n "$detail" ]]; then
-    line="${line} - ${detail}"
+  bar_width="$UI_BAR_WIDTH"
+  terminal_width="${UI_TERMINAL_WIDTH:-80}"
+  if [[ "$terminal_width" -lt 72 ]]; then
+    bar_width=16
+  elif [[ "$terminal_width" -lt 88 ]]; then
+    bar_width=20
   fi
+  bar="$(ui_progress_bar "$completed" "$UI_TOTAL_STEPS" "$( [[ "$state" == "running" ]] && printf '1' || printf '0' )" "$bar_width")"
+  counter="$(printf '%02d/%02d' "$UI_CURRENT_STEP" "$UI_TOTAL_STEPS")"
+  line_prefix="$(printf '%3s%% |%s| %s ' "$percent" "$bar" "$counter")"
+  body="$label"
+  if [[ -n "$detail" ]]; then
+    body="${body} - ${detail}"
+  fi
+  prefix_plain="$prefix"
+  available_body_width=$((terminal_width - ${#prefix_plain} - 1 - ${#line_prefix}))
+  if [[ "$available_body_width" -lt 8 ]]; then
+    available_body_width=8
+  fi
+  body="$(ui_truncate_text "$body" "$available_body_width")"
+  line="${line_prefix}${body}"
 
   if supports_color; then
     case "$state" in
@@ -1029,11 +1088,18 @@ ui_print_banner() {
   if supports_color; then
     ui_print "\033[1;36m"
   fi
-  ui_print "   ____                                 _               _   \n"
-  ui_print "  / ___|  ___  _   _  ___ _ __ ___  ___| |__   ___  ___| |_ \n"
-  ui_print "  \\___ \\ / _ \\| | | |/ _ \\ '__/ _ \\/ __| '_ \\ / _ \\/ __| __|\n"
-  ui_print "   ___) | (_) | |_| |  __/ | |  __/ (__| | | |  __/ (__| |_ \n"
-  ui_print "  |____/ \\___/ \\__,_|\\___|_|  \\___|\\___|_| |_|\\___|\\___|\\__|\n"
+  ui_print "   ____                             _                    _       _\n"
+  ui_print "  / ___|  ___  _ __  _   _ _ __ ___(_) __ _ _ __        / \\   |_|\n"
+  ui_print "  \\___ \\ / _ \\| '_ \\| | | | '__/ _ \\ |/ _\` | '_ \\      / _ \\  | |\n"
+  ui_print "   ___) | (_) | |_) | |_| | | |  __/ | (_| | | | |    / ___ \\ | |\n"
+  ui_print "  |____/ \\___/| .__/ \\__,_|_|  \\___|_|\\__, |_| |_|   /_/   \\_\\|_|\n"
+  ui_print "              |_|                     |___/\n"
+  ui_print "                    ____  _   _  ___  ____  _____\n"
+  ui_print "                   |  _ \\| | | |/ _ \\|  _ \\| ____|\n"
+  ui_print "                   | | | | | | | | | | | | |  _|\n"
+  ui_print "                   | |_| | |_| | |_| | |_| | |___\n"
+  ui_print "                   |____/ \\___/ \\___/|____/|_____|\n"
+  ui_print "                     S O V E R E I G N   A I   N O D E\n"
   if supports_color; then
     ui_print "\033[0m"
   fi
@@ -1280,6 +1346,115 @@ describe_selected_bots() {
   printf '%s' "$joined"
 }
 
+build_default_bot_selection_numbers() {
+  local selected numbers index option_number
+  selected="$1"
+  numbers=""
+
+  for index in "${!AVAILABLE_BOT_IDS[@]}"; do
+    if bot_list_contains "$selected" "${AVAILABLE_BOT_IDS[$index]}"; then
+      option_number=$((index + 1))
+      if [[ -n "$numbers" ]]; then
+        numbers="${numbers},${option_number}"
+      else
+        numbers="$option_number"
+      fi
+    fi
+  done
+
+  printf '%s' "$numbers"
+}
+
+parse_bot_selection_input() {
+  local raw token selected index option_number
+  local -a requested_numbers
+  raw="$1"
+  selected=""
+  requested_numbers=()
+
+  case "$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')" in
+    all)
+      for index in "${!AVAILABLE_BOT_IDS[@]}"; do
+        selected="$(append_selected_bot "$selected" "${AVAILABLE_BOT_IDS[$index]}")"
+      done
+      printf '%s' "$selected"
+      return 0
+      ;;
+    none)
+      printf ''
+      return 0
+      ;;
+  esac
+
+  raw="$(printf '%s' "$raw" | tr ',' ' ')"
+  for token in $raw; do
+    if [[ ! "$token" =~ ^[0-9]+$ ]]; then
+      return 1
+    fi
+    if (( token < 1 || token > ${#AVAILABLE_BOT_IDS[@]} )); then
+      return 1
+    fi
+    requested_numbers+=("$token")
+  done
+
+  for index in "${!AVAILABLE_BOT_IDS[@]}"; do
+    option_number=$((index + 1))
+    for token in "${requested_numbers[@]}"; do
+      if [[ "$token" == "$option_number" ]]; then
+        selected="$(append_selected_bot "$selected" "${AVAILABLE_BOT_IDS[$index]}")"
+        break
+      fi
+    done
+  done
+
+  printf '%s' "$selected"
+}
+
+prompt_bot_selection() {
+  local selected default_numbers answer parsed_selection index option_number marker suffix
+  selected="$1"
+
+  if [[ "${#AVAILABLE_BOT_IDS[@]}" -eq 0 ]]; then
+    die "No bots were loaded from ${BOTS_DIR}. Check the bots repository before continuing."
+  fi
+
+  while true; do
+    default_numbers="$(build_default_bot_selection_numbers "$selected")"
+    ui_print "Choose bots to install (comma-separated numbers, or 'all').\n"
+    for index in "${!AVAILABLE_BOT_IDS[@]}"; do
+      option_number=$((index + 1))
+      marker=" "
+      suffix=""
+      if bot_list_contains "$selected" "${AVAILABLE_BOT_IDS[$index]}"; then
+        marker="x"
+      fi
+      if [[ "${AVAILABLE_BOT_DEFAULT_INSTALLS[$index]}" == "1" ]]; then
+        suffix=" [default]"
+      fi
+      ui_print "  ${option_number}) [${marker}] ${AVAILABLE_BOT_DISPLAY_NAMES[$index]}${suffix}\n"
+    done
+    if [[ -n "$default_numbers" ]]; then
+      ui_print "Select [${default_numbers}]: "
+    else
+      ui_print "Select: "
+    fi
+    IFS= read -r answer < /dev/tty || true
+    if [[ -z "$answer" ]]; then
+      answer="$default_numbers"
+    fi
+    if ! parsed_selection="$(parse_bot_selection_input "$answer")"; then
+      ui_warn "Enter one or more bot numbers separated by commas, or 'all'."
+      continue
+    fi
+    if [[ -z "$parsed_selection" ]]; then
+      ui_warn "Select at least one bot to install."
+      continue
+    fi
+    printf '%s' "$parsed_selection"
+    return 0
+  done
+}
+
 reset_request_defaults() {
   EXISTING_REQUEST_VALID="0"
   LAST_REQUEST_LOAD_ERROR=""
@@ -1287,8 +1462,8 @@ reset_request_defaults() {
   DEFAULT_OPENROUTER_MODEL="$RECOMMENDED_OPENROUTER_MODEL"
   DEFAULT_MATRIX_DOMAIN="$RECOMMENDED_MATRIX_DOMAIN"
   DEFAULT_MATRIX_PUBLIC_BASE_URL="$RECOMMENDED_MATRIX_PUBLIC_BASE_URL"
-  DEFAULT_OPERATOR_USERNAME="operator"
-  DEFAULT_ALERT_ROOM_NAME="Sovereign Alerts"
+  DEFAULT_OPERATOR_USERNAME="admin"
+  DEFAULT_ALERT_ROOM_NAME="Alerts"
   DEFAULT_SELECTED_BOTS="$(default_selected_bots_from_catalog)"
   DEFAULT_POLL_INTERVAL="5m"
   DEFAULT_LOOKBACK_WINDOW="15m"
@@ -1985,7 +2160,7 @@ run_install_wizard() {
   local defaults_status openrouter_api_key openrouter_model matrix_domain matrix_public_base_url
   local operator_username alert_room_name selected_bots poll_interval lookback_window federation_enabled
   local matrix_tls_mode connectivity_choice connectivity_choice_default connectivity_mode
-  local prompted_selected_bots bot_prompt_default index
+  local prompted_selected_bots
   local relay_control_url relay_enrollment_token
   local openrouter_secret_ref openrouter_secret_path openrouter_secret_mode
   local configure_imap imap_choice imap_host imap_port imap_tls imap_username imap_password
@@ -2132,24 +2307,8 @@ run_install_wizard() {
   imap_secret_mode="pending"
 
   ui_section "Bots"
-  while true; do
-    prompted_selected_bots=""
-    for index in "${!AVAILABLE_BOT_IDS[@]}"; do
-      if bot_list_contains "$selected_bots" "${AVAILABLE_BOT_IDS[$index]}"; then
-        bot_prompt_default="y"
-      else
-        bot_prompt_default="n"
-      fi
-      if ui_confirm "Install ${AVAILABLE_BOT_DISPLAY_NAMES[$index]}?" "$bot_prompt_default"; then
-        prompted_selected_bots="$(append_selected_bot "$prompted_selected_bots" "${AVAILABLE_BOT_IDS[$index]}")"
-      fi
-    done
-    if [[ -n "$prompted_selected_bots" ]]; then
-      selected_bots="$prompted_selected_bots"
-      break
-    fi
-    ui_warn "Select at least one bot to install."
-  done
+  prompted_selected_bots="$(prompt_bot_selection "$selected_bots")"
+  selected_bots="$prompted_selected_bots"
 
   if bot_list_contains "$selected_bots" "mail-sentinel"; then
     ui_section "Mail Sentinel"
@@ -3003,7 +3162,7 @@ main() {
   ui_run_step_captured "Prepare runtime directories" ensure_runtime_directories
   ui_run_step_captured "Sync application source" sync_app_source
   ui_run_step_captured "Sync bot package source" sync_bots_source
-  ui_run_step_captured "Load bot catalog" load_available_bot_catalog
+  ui_run_step_foreground "Load bot catalog" load_available_bot_catalog
   ui_run_step_captured "Build application" build_app
   ui_run_step_captured "Install CLI wrappers" install_wrappers
   ui_run_step_captured "Install systemd service" install_systemd_unit
