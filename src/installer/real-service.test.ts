@@ -3675,6 +3675,120 @@ describe("RealInstallerService", () => {
     }
   });
 
+  it("defaults the managed service identity to the invoking sudo user in root installs", () => {
+    const getuidMock =
+      typeof process.getuid === "function"
+        ? vi
+            .spyOn(process as typeof process & { getuid: () => number }, "getuid")
+            .mockImplementation(() => 0)
+        : null;
+    const priorSudoUser = process.env.SUDO_USER;
+    const priorServiceUser = process.env.SOVEREIGN_NODE_SERVICE_USER;
+    const priorServiceGroup = process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+    process.env.SUDO_USER = "runner";
+    delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+    delete process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+
+    const service = new RealInstallerService(
+      createLogger(),
+      {
+        configPath: "/tmp/sovereign-node.json5",
+        secretsDir: "/tmp/sovereign-secrets",
+        stateDir: "/tmp/sovereign-state",
+        logsDir: "/tmp/sovereign-logs",
+        installJobsDir: "/tmp/sovereign-install-jobs",
+        openclawServiceHome: "/tmp/sovereign-openclaw-home",
+      },
+      {
+        openclawBootstrapper: {
+          detectInstalled: async () => null,
+          ensureInstalled: async () => {
+            throw new Error("not used");
+          },
+        },
+        openclawGatewayServiceManager: {
+          install: async () => {
+            throw new Error("not used");
+          },
+          start: async () => {
+            throw new Error("not used");
+          },
+          restart: async () => {
+            throw new Error("not used");
+          },
+        },
+        mailSentinelRegistrar: {
+          register: async () => {
+            throw new Error("not used");
+          },
+        },
+        preflightChecker: {
+          run: async () => ({
+            ok: true,
+            mode: "bundled_matrix",
+            overall: "pass",
+            checks: [],
+            recommendedActions: [],
+          }),
+        },
+        imapTester: {
+          test: async () => {
+            throw new Error("not used");
+          },
+        },
+        matrixProvisioner: {
+          provision: async () => {
+            throw new Error("not used");
+          },
+          bootstrapAccounts: async () => {
+            throw new Error("not used");
+          },
+          bootstrapRoom: async () => {
+            throw new Error("not used");
+          },
+          test: async () => ({
+            ok: true,
+            homeserverUrl: "https://matrix.example.org",
+            checks: [],
+          }),
+        },
+      },
+    );
+
+    try {
+      const internals = service as unknown as {
+        getConfiguredServiceIdentity(config?: RuntimeConfig): {
+          user: string;
+          group: string;
+        };
+        shouldPreferSystemGatewayService(config?: RuntimeConfig): boolean;
+      };
+
+      expect(internals.getConfiguredServiceIdentity()).toEqual({
+        user: "runner",
+        group: "runner",
+      });
+      expect(internals.shouldPreferSystemGatewayService()).toBe(true);
+    } finally {
+      if (priorSudoUser === undefined) {
+        delete process.env.SUDO_USER;
+      } else {
+        process.env.SUDO_USER = priorSudoUser;
+      }
+      if (priorServiceUser === undefined) {
+        delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+      } else {
+        process.env.SOVEREIGN_NODE_SERVICE_USER = priorServiceUser;
+      }
+      if (priorServiceGroup === undefined) {
+        delete process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+      } else {
+        process.env.SOVEREIGN_NODE_SERVICE_GROUP = priorServiceGroup;
+      }
+      getuidMock?.mockRestore();
+    }
+  });
+
   it("builds status from runtime config and OpenClaw probes", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {

@@ -5416,8 +5416,8 @@ export default function (api) {
       await mkdir(this.paths.openclawServiceHome, { recursive: true });
       await mkdir(managedTempDir, { recursive: true });
       await chmod(managedTempDir, 0o700);
-      await this.applyRuntimeOwnership(this.paths.openclawServiceHome);
-      await this.applyRuntimeOwnership(managedTempDir);
+      await this.applyConfiguredRuntimeOwnership(this.paths.openclawServiceHome, runtimeConfig);
+      await this.applyConfiguredRuntimeOwnership(managedTempDir, runtimeConfig);
       await mkdir(dirname(unitPath), { recursive: true });
       await writeFile(unitPath, unitContents, "utf8");
     } catch (error) {
@@ -6899,12 +6899,18 @@ export default function (api) {
     const envGroup = process.env.SOVEREIGN_NODE_SERVICE_GROUP?.trim();
     const configUser = runtimeConfig?.openclaw.serviceUser?.trim();
     const configGroup = runtimeConfig?.openclaw.serviceGroup?.trim();
+    const sudoUser =
+      typeof process.getuid === "function" && process.getuid() === 0
+        ? process.env.SUDO_USER?.trim()
+        : undefined;
+    const fallbackUser =
+      sudoUser !== undefined && sudoUser.length > 0 && sudoUser !== "root" ? sudoUser : undefined;
     const user =
       envUser !== undefined && envUser.length > 0
         ? envUser
         : configUser !== undefined && configUser.length > 0
           ? configUser
-          : DEFAULT_SERVICE_USER;
+          : (fallbackUser ?? DEFAULT_SERVICE_USER);
     const group =
       envGroup !== undefined && envGroup.length > 0
         ? envGroup
