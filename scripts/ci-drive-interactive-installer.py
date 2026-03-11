@@ -9,7 +9,6 @@ import re
 import select
 import signal
 import struct
-import subprocess
 import sys
 import termios
 import time
@@ -73,21 +72,27 @@ def set_pty_size(fd: int, rows: int = 40, columns: int = 120) -> None:
         pass
 
 
-def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is not None:
-        return
+def terminate_process_group(pid: int) -> None:
     try:
-        os.killpg(process.pid, signal.SIGTERM)
+        os.killpg(pid, signal.SIGTERM)
     except ProcessLookupError:
         return
-    try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if poll_child(pid) is not None:
             return
-        process.wait(timeout=5)
+        time.sleep(0.2)
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+
+
+def poll_child(pid: int) -> int | None:
+    waited_pid, status = os.waitpid(pid, os.WNOHANG)
+    if waited_pid == 0:
+        return None
+    return os.waitstatus_to_exitcode(status)
 
 
 def format_tail(value: str, max_chars: int = 4000) -> str:
@@ -102,17 +107,10 @@ def spawn_installer(
     idle_timeout_seconds: int,
     overall_timeout_seconds: int,
 ) -> int:
-    master_fd, slave_fd = pty.openpty()
-    set_pty_size(slave_fd)
-    process = subprocess.Popen(
-        command,
-        stdin=slave_fd,
-        stdout=slave_fd,
-        stderr=slave_fd,
-        start_new_session=True,
-        close_fds=True,
-    )
-    os.close(slave_fd)
+    pid, master_fd = pty.fork()
+    if pid == 0:
+        os.execvpe(command[0], list(command), os.environ)
+    set_pty_size(master_fd)
 
     transcript_dir = os.path.dirname(transcript_path)
     if transcript_dir:
@@ -126,8 +124,19 @@ def spawn_installer(
     with open(transcript_path, "wb") as transcript:
         try:
             while True:
-                if process.poll() is not None:
-                    break
+                exit_code = poll_child(pid)
+                if exit_code is not None:
+                    try:
+                        chunk = os.read(master_fd, 4096)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    transcript.write(chunk)
+                    transcript.flush()
+                    sys.stdout.buffer.write(chunk)
+                    sys.stdout.buffer.flush()
+                    continue
 
                 now = time.monotonic()
                 if now - start_time > overall_timeout_seconds:
@@ -166,7 +175,7 @@ def spawn_installer(
                         seen_output = ""
                     break
         except Exception:
-            terminate_process_group(process)
+            terminate_process_group(pid)
             raise
         finally:
             try:
@@ -174,7 +183,11 @@ def spawn_installer(
             except OSError:
                 pass
 
-    return process.wait(timeout=5)
+    exit_code = poll_child(pid)
+    if exit_code is None:
+        terminate_process_group(pid)
+        exit_code = poll_child(pid)
+    return 1 if exit_code is None else exit_code
 
 
 if __name__ == "__main__":
