@@ -15,12 +15,12 @@ export const registerOnboardingCommand = (program: Command, app: AppContainer): 
   onboarding
     .command("issue")
     .description("Issue a one-time Matrix onboarding code")
-    .option("--ttl-minutes <minutes>", "Override code lifetime in minutes", "10")
+    .option("--ttl-minutes <minutes>", "Override code lifetime in minutes", "21")
     .option("--json", "Emit JSON output")
     .action(async (opts: OnboardingIssueOptions) => {
       const command = "onboarding issue";
       try {
-        const ttlMinutes = Number.parseInt(opts.ttlMinutes ?? "10", 10);
+        const ttlMinutes = Number.parseInt(opts.ttlMinutes ?? "21", 10);
         if (!Number.isFinite(ttlMinutes) || ttlMinutes <= 0) {
           throw new Error("Provide a positive integer for --ttl-minutes");
         }

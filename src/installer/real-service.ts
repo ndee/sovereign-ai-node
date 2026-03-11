@@ -3916,7 +3916,8 @@ export default function (api) {
       const env = parseEnvFile(envRaw);
       const configRef = env.OPENCLAW_CONFIG ?? env.OPENCLAW_CONFIG_PATH;
       const homeRef = env.OPENCLAW_HOME;
-      const matches = configRef === runtimeConfigPath && homeRef === openclawHome;
+      const expectedOpenclawHome = dirname(openclawHome);
+      const matches = configRef === runtimeConfigPath && homeRef === expectedOpenclawHome;
 
       return check(
         "openclaw-runtime-wiring",
@@ -3927,7 +3928,7 @@ export default function (api) {
           : "OpenClaw runtime env wiring is present but does not match expected paths",
         {
           expectedConfigPath: runtimeConfigPath,
-          expectedOpenclawHome: openclawHome,
+          expectedOpenclawHome,
           envConfigPath: configRef,
           envOpenclawHome: homeRef,
         },
@@ -4009,7 +4010,7 @@ export default function (api) {
       ? [
           "-u",
           openclawServiceUser,
-          "--preserve-env=OPENCLAW_HOME,OPENCLAW_CONFIG,OPENCLAW_CONFIG_PATH,SOVEREIGN_NODE_CONFIG,SOVEREIGN_NODE_SERVICE_USER,SOVEREIGN_NODE_SERVICE_GROUP,CI,TMPDIR,TMP,TEMP,PATH",
+          "--preserve-env=HOME,OPENCLAW_HOME,OPENCLAW_CONFIG,OPENCLAW_CONFIG_PATH,SOVEREIGN_NODE_CONFIG,SOVEREIGN_NODE_SERVICE_USER,SOVEREIGN_NODE_SERVICE_GROUP,CI,TMPDIR,TMP,TEMP,PATH",
           "--",
           delegatedCommand,
           ...args,
@@ -4075,8 +4076,10 @@ export default function (api) {
 
   private buildManagedOpenClawEnv(runtimeConfig: RuntimeConfig): Record<string, string> {
     const tempDir = this.getManagedOpenClawTempDir(runtimeConfig);
+    const openclawServiceHome = dirname(runtimeConfig.openclaw.openclawHome);
     return {
-      OPENCLAW_HOME: runtimeConfig.openclaw.openclawHome,
+      HOME: openclawServiceHome,
+      OPENCLAW_HOME: openclawServiceHome,
       OPENCLAW_CONFIG: runtimeConfig.openclaw.runtimeConfigPath,
       OPENCLAW_CONFIG_PATH: runtimeConfig.openclaw.runtimeConfigPath,
       SOVEREIGN_NODE_CONFIG: this.paths.configPath,
@@ -6733,7 +6736,8 @@ export default function (api) {
       );
 
       const envFileLines = [
-        `OPENCLAW_HOME=${runtimeConfig.openclaw.openclawHome}`,
+        `HOME=${this.paths.openclawServiceHome}`,
+        `OPENCLAW_HOME=${this.paths.openclawServiceHome}`,
         `OPENCLAW_CONFIG=${runtimeConfig.openclaw.runtimeConfigPath}`,
         `OPENCLAW_CONFIG_PATH=${runtimeConfig.openclaw.runtimeConfigPath}`,
         `SOVEREIGN_NODE_CONFIG=${this.paths.configPath}`,

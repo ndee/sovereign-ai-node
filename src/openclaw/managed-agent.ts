@@ -41,6 +41,17 @@ type CronListJob = {
   agentId?: string;
 };
 
+type PreferredManagedOpenClawUser =
+  | {
+      mode: "service-user";
+      user: string;
+    }
+  | {
+      mode: "sudo-user-bus";
+      user: string;
+      uid: string;
+    };
+
 export interface OpenClawManagedAgentRegistrar {
   register(input: ManagedAgentRegistrationInput): Promise<ManagedAgentRegistrationResult>;
 }
@@ -199,10 +210,10 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
 
   private async runOpenClawCommandWithGatewayRetry(args: string[]): Promise<ExecResult> {
     let result: ExecResult | null = null;
-    const preferredSudoUser = resolvePreferredManagedOpenClawSudoUser();
+    const preferredUser = resolvePreferredManagedOpenClawUser();
     for (let attempt = 1; attempt <= OPENCLAW_GATEWAY_RETRY_ATTEMPTS; attempt += 1) {
-      if (preferredSudoUser !== null) {
-        const delegatedResult = await this.runOpenClawCommandViaSudoUser(args, preferredSudoUser);
+      if (preferredUser !== null) {
+        const delegatedResult = await this.runOpenClawCommandViaPreferredUser(args, preferredUser);
         result = delegatedResult;
         if (delegatedResult.exitCode === 0 || !isGatewayUnavailableResult(delegatedResult)) {
           return delegatedResult;
@@ -290,18 +301,32 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
     args: string[],
     fallback: { user: string; uid: string },
   ): Promise<ExecResult> {
+    return await this.runOpenClawCommandViaPreferredUser(args, {
+      mode: "sudo-user-bus",
+      user: fallback.user,
+      uid: fallback.uid,
+    });
+  }
+
+  private async runOpenClawCommandViaPreferredUser(
+    args: string[],
+    preferredUser: PreferredManagedOpenClawUser,
+  ): Promise<ExecResult> {
     const sudoGatewayCommand = (await resolveExecutablePath("openclaw")) ?? "openclaw";
-    const sudoGatewayEnv = [
-      "CI=1",
-      `XDG_RUNTIME_DIR=/run/user/${fallback.uid}`,
-      `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${fallback.uid}/bus`,
-      ...resolveManagedOpenClawEnvArgs(),
-    ];
+    const sudoGatewayEnv =
+      preferredUser.mode === "sudo-user-bus"
+        ? [
+            "CI=1",
+            `XDG_RUNTIME_DIR=/run/user/${preferredUser.uid}`,
+            `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${preferredUser.uid}/bus`,
+            ...resolveManagedOpenClawEnvArgs(),
+          ]
+        : ["CI=1", ...resolveManagedOpenClawEnvArgs()];
     return await this.execRunner.run({
       command: "sudo",
       args: [
         "-u",
-        fallback.user,
+        preferredUser.user,
         "--",
         "/usr/bin/env",
         ...sudoGatewayEnv,
@@ -398,16 +423,29 @@ const resolveSudoUserFallback = (): { user: string; uid: string } | null => {
   return { user, uid };
 };
 
-const resolvePreferredManagedOpenClawSudoUser = (): { user: string; uid: string } | null => {
-  const fallback = resolveSudoUserFallback();
-  if (fallback === null) {
-    return null;
-  }
+const resolvePreferredManagedOpenClawUser = (): PreferredManagedOpenClawUser | null => {
   const serviceUser = process.env.SOVEREIGN_NODE_SERVICE_USER?.trim() ?? "";
-  if (serviceUser.length === 0 || serviceUser === "root" || serviceUser !== fallback.user) {
+  if (serviceUser.length === 0 || serviceUser === "root") {
     return null;
   }
-  return fallback;
+
+  const fallback = resolveSudoUserFallback();
+  if (fallback !== null && serviceUser === fallback.user) {
+    return {
+      mode: "sudo-user-bus",
+      user: fallback.user,
+      uid: fallback.uid,
+    };
+  }
+
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    return {
+      mode: "service-user",
+      user: serviceUser,
+    };
+  }
+
+  return null;
 };
 
 const delay = async (ms: number): Promise<void> =>
