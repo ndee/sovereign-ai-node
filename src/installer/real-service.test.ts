@@ -576,7 +576,7 @@ const writeRuntimeArtifacts = async (paths: SovereignPaths): Promise<void> => {
     gatewayEnvPath,
     [
       `HOME=${paths.openclawServiceHome}`,
-      `OPENCLAW_HOME=${join(paths.openclawServiceHome, ".openclaw")}`,
+      `OPENCLAW_HOME=${paths.openclawServiceHome}`,
       `OPENCLAW_CONFIG=${runtimeConfigPath}`,
       `OPENCLAW_CONFIG_PATH=${runtimeConfigPath}`,
       `SOVEREIGN_NODE_CONFIG=${paths.configPath}`,
@@ -5324,6 +5324,7 @@ describe("RealInstallerService", () => {
 
       const gatewayEnvRaw = await readFile(join(paths.openclawServiceHome, "gateway.env"), "utf8");
       expect(gatewayEnvRaw).toContain(`HOME=${paths.openclawServiceHome}`);
+      expect(gatewayEnvRaw).toContain(`OPENCLAW_HOME=${paths.openclawServiceHome}`);
       expect(gatewayEnvRaw).toContain("OPENROUTER_API_KEY=sk-or-updated");
       expect(gatewayEnvRaw).toContain(`TMPDIR=${join(paths.openclawServiceHome, "tmp")}`);
       expect(gatewayEnvRaw).toContain(`TMP=${join(paths.openclawServiceHome, "tmp")}`);
