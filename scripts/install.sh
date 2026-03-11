@@ -68,6 +68,7 @@ UI_PRESERVE_STEP_LOGS="0"
 UI_BAR_WIDTH=28
 UI_TERMINAL_WIDTH=80
 UI_FANCY="0"
+UI_PROGRESS_LINE_OPEN="0"
 INSTALL_COMMAND_OUTPUT=""
 RUNTIME_STATUS_OUTPUT=""
 DOCTOR_REPORT_OUTPUT=""
@@ -842,10 +843,18 @@ ui_show_log_excerpt() {
   path="$1"
   [[ -f "$path" ]] || return 0
 
+  ui_break_progress_line
   ui_print "\nRecent output:\n"
   while IFS= read -r line; do
     ui_print "  ${line}\n"
   done < <(tail -n 20 "$path")
+}
+
+ui_break_progress_line() {
+  if ui_is_fancy && [[ "${UI_PROGRESS_LINE_OPEN:-0}" == "1" ]]; then
+    ui_print "\n"
+    UI_PROGRESS_LINE_OPEN="0"
+  fi
 }
 
 ui_render_step_line() {
@@ -925,8 +934,13 @@ ui_render_step_line() {
   if ui_is_fancy; then
     if [[ "$state" == "running" ]]; then
       ui_print "\r\033[2K${prefix} ${line}"
-    else
+      UI_PROGRESS_LINE_OPEN="1"
+    elif [[ "$state" == "failed" ]]; then
       ui_print "\r\033[2K${prefix} ${line}\n"
+      UI_PROGRESS_LINE_OPEN="0"
+    else
+      ui_print "\r\033[2K${prefix} ${line}"
+      UI_PROGRESS_LINE_OPEN="1"
     fi
   elif [[ "$state" == "success" ]]; then
     log "${label}: ${detail:-done}"
@@ -951,9 +965,6 @@ ui_begin_step_static() {
   UI_ACTIVE_STEP_LABEL="$1"
   UI_ACTIVE_STEP_STARTED_AT="$SECONDS"
   ui_render_step_line "running" "$UI_ACTIVE_STEP_LABEL" "${2:-working}" "${UI_SPINNER_FRAMES[0]}"
-  if ui_is_fancy; then
-    ui_print "\n"
-  fi
 }
 
 ui_update_step() {
@@ -1064,6 +1075,7 @@ ui_run_step_interactive() {
   label="$1"
   shift
   ui_begin_step_static "$label" "interactive"
+  ui_break_progress_line
   set +e
   "$@"
   step_status=$?
@@ -3192,12 +3204,14 @@ main() {
   fi
 
   if ui_is_fancy; then
+    ui_break_progress_line
     ui_title "Summary" "$completion_label"
     ui_print_summary_block "Installer" "$(summarize_install_command_output "$INSTALL_COMMAND_OUTPUT")"
     ui_print_summary_block "Runtime" "$(summarize_status_output "$RUNTIME_STATUS_OUTPUT")"
     ui_print_summary_block "Diagnostics" "$(summarize_doctor_output "$DOCTOR_REPORT_OUTPUT")"
   fi
 
+  ui_break_progress_line
   cat <<EOF
 ${completion_label}
 
