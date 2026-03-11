@@ -1,7 +1,17 @@
+import { constants as fsConstants } from "node:fs";
+import { access } from "node:fs/promises";
+import { delimiter, join } from "node:path";
+
 import type { Logger } from "../logging/logger.js";
 import type { ExecResult, ExecRunner } from "../system/exec.js";
 
 const OPENCLAW_GATEWAY_COMMAND_TIMEOUT_MS = 120_000;
+const MANAGED_OPENCLAW_ENV_KEYS = [
+  "OPENCLAW_HOME",
+  "OPENCLAW_CONFIG",
+  "OPENCLAW_CONFIG_PATH",
+  "SOVEREIGN_NODE_CONFIG",
+] as const;
 
 export type GatewayInstallOptions = {
   force?: boolean;
@@ -63,16 +73,27 @@ export class ShellOpenClawGatewayServiceManager implements OpenClawGatewayServic
       return primary;
     }
 
+    const sudoGatewayCommand = (await resolveExecutablePath("openclaw")) ?? "openclaw";
+    const sudoGatewayEnv = [
+      "CI=1",
+      `XDG_RUNTIME_DIR=/run/user/${fallback.uid}`,
+      `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${fallback.uid}/bus`,
+      ...resolveManagedOpenClawEnvArgs(),
+    ];
     const retry = await this.execRunner.run({
       command: "sudo",
-      args: ["-u", fallback.user, "--", "openclaw", ...args],
+      args: [
+        "-u",
+        fallback.user,
+        "--",
+        "/usr/bin/env",
+        ...sudoGatewayEnv,
+        process.execPath,
+        sudoGatewayCommand,
+        ...args,
+      ],
       options: {
         timeout: OPENCLAW_GATEWAY_COMMAND_TIMEOUT_MS,
-        env: {
-          CI: "1",
-          XDG_RUNTIME_DIR: `/run/user/${fallback.uid}`,
-          DBUS_SESSION_BUS_ADDRESS: `unix:path=/run/user/${fallback.uid}/bus`,
-        },
       },
     });
     if (retry.exitCode === 0) {
@@ -120,6 +141,32 @@ const looksLikeSystemdUserBusError = (result: ExecResult): boolean =>
   /systemctl --user unavailable|failed to connect to bus|no medium found/i.test(
     `${result.stderr}\n${result.stdout}`,
   );
+
+const resolveExecutablePath = async (command: string): Promise<string | null> => {
+  if (command.includes("/")) {
+    return command;
+  }
+
+  const pathValue = process.env.PATH ?? "";
+  for (const entry of pathValue.split(delimiter)) {
+    if (entry.length === 0) {
+      continue;
+    }
+    const candidate = join(entry, command);
+    try {
+      await access(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {}
+  }
+
+  return null;
+};
+
+const resolveManagedOpenClawEnvArgs = (): string[] =>
+  MANAGED_OPENCLAW_ENV_KEYS.flatMap((key) => {
+    const value = process.env[key];
+    return typeof value === "string" && value.length > 0 ? [`${key}=${value}`] : [];
+  });
 
 const resolveSudoUserFallback = (): { user: string; uid: string } | null => {
   const user = process.env.SUDO_USER?.trim() ?? "";

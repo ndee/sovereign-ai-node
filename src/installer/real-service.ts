@@ -12,7 +12,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import type {
   BotCatalog,
   BotConfigRecord,
@@ -4000,14 +4000,18 @@ export default function (api) {
       process.getuid() === 0 &&
       openclawServiceUser !== null &&
       openclawServiceUser !== "root";
+    const delegatedCommand =
+      shouldRunOpenClawAsServiceUser && command === "openclaw"
+        ? ((await resolveExecutablePath(command)) ?? command)
+        : command;
     const effectiveCommand = shouldRunOpenClawAsServiceUser ? "sudo" : command;
     const effectiveArgs = shouldRunOpenClawAsServiceUser
       ? [
           "-u",
           openclawServiceUser,
-          "--preserve-env=OPENCLAW_HOME,OPENCLAW_CONFIG,OPENCLAW_CONFIG_PATH,SOVEREIGN_NODE_CONFIG,CI,TMPDIR,TMP,TEMP",
+          "--preserve-env=OPENCLAW_HOME,OPENCLAW_CONFIG,OPENCLAW_CONFIG_PATH,SOVEREIGN_NODE_CONFIG,SOVEREIGN_NODE_SERVICE_USER,SOVEREIGN_NODE_SERVICE_GROUP,CI,TMPDIR,TMP,TEMP,PATH",
           "--",
-          command,
+          delegatedCommand,
           ...args,
         ]
       : args;
@@ -4022,6 +4026,7 @@ export default function (api) {
             ? {
                 env: {
                   CI: "1",
+                  PATH: process.env.PATH ?? "",
                   ...(openclawEnv ?? {}),
                 },
               }
@@ -4095,6 +4100,30 @@ export default function (api) {
         continue;
       }
       process.env[key] = value;
+    }
+  }
+
+  private async withManagedOpenClawServiceIdentityEnv<T>(
+    runtimeConfig: RuntimeConfig,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    const priorUser = process.env.SOVEREIGN_NODE_SERVICE_USER;
+    const priorGroup = process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+    process.env.SOVEREIGN_NODE_SERVICE_USER = runtimeConfig.openclaw.serviceUser;
+    process.env.SOVEREIGN_NODE_SERVICE_GROUP = runtimeConfig.openclaw.serviceGroup;
+    try {
+      return await action();
+    } finally {
+      if (priorUser === undefined) {
+        delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+      } else {
+        process.env.SOVEREIGN_NODE_SERVICE_USER = priorUser;
+      }
+      if (priorGroup === undefined) {
+        delete process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+      } else {
+        process.env.SOVEREIGN_NODE_SERVICE_GROUP = priorGroup;
+      }
     }
   }
 
@@ -4450,7 +4479,7 @@ export default function (api) {
           }
 
           try {
-            await this.openclawGatewayServiceManager.restart();
+            await this.refreshGatewayAfterRuntimeConfig(runtimeConfig);
           } catch (error) {
             if (isGatewayUserSystemdUnavailableError(error)) {
               stepState.gatewayServiceSkipped = true;
@@ -4462,28 +4491,7 @@ export default function (api) {
               );
               return;
             }
-
-            this.logger.warn(
-              {
-                error: error instanceof Error ? error.message : String(error),
-              },
-              "OpenClaw gateway restart failed after runtime configure; retrying with start",
-            );
-            try {
-              await this.openclawGatewayServiceManager.start();
-            } catch (startError) {
-              if (isGatewayUserSystemdUnavailableError(startError)) {
-                stepState.gatewayServiceSkipped = true;
-                this.logger.warn(
-                  {
-                    error: describeError(startError),
-                  },
-                  "OpenClaw gateway start skipped because systemd user services are unavailable",
-                );
-                return;
-              }
-              throw startError;
-            }
+            throw error;
           }
         },
       },
@@ -5100,23 +5108,27 @@ export default function (api) {
         (entry) => entry.botId === botPackage.manifest.id || entry.agentId === agent.id,
       );
       try {
-        const registration = await this.managedAgentRegistrar.register({
-          agentId: agent.id,
-          workspaceDir: agent.workspace,
-          ...(cronEntry === undefined || botPackage.manifest.openclaw.cron === undefined
-            ? {}
-            : {
-                cron: {
-                  id: cronEntry.id,
-                  every: cronEntry.every,
-                  message: botPackage.manifest.openclaw.cron.message,
-                  announceRoomId: runtimeConfig.matrix.alertRoom.roomId,
-                  ...(botPackage.manifest.openclaw.cron.session === undefined
-                    ? {}
-                    : { session: botPackage.manifest.openclaw.cron.session }),
-                },
-              }),
-        });
+        const registration = await this.withManagedOpenClawServiceIdentityEnv(
+          runtimeConfig,
+          async () =>
+            await this.managedAgentRegistrar.register({
+              agentId: agent.id,
+              workspaceDir: agent.workspace,
+              ...(cronEntry === undefined || botPackage.manifest.openclaw.cron === undefined
+                ? {}
+                : {
+                    cron: {
+                      id: cronEntry.id,
+                      every: cronEntry.every,
+                      message: botPackage.manifest.openclaw.cron.message,
+                      announceRoomId: runtimeConfig.matrix.alertRoom.roomId,
+                      ...(botPackage.manifest.openclaw.cron.session === undefined
+                        ? {}
+                        : { session: botPackage.manifest.openclaw.cron.session }),
+                    },
+                  }),
+            }),
+        );
         registrations.push(registration);
       } catch (error) {
         if (
@@ -5404,6 +5416,7 @@ export default function (api) {
 
     const serviceIdentity = this.getConfiguredServiceIdentity(runtimeConfig);
     const managedTempDir = this.getManagedOpenClawTempDir(runtimeConfig);
+    const openclawCommand = (await resolveExecutablePath("openclaw")) ?? "openclaw";
     const unitName = SOVEREIGN_GATEWAY_SYSTEMD_UNIT;
     const unitPath =
       process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH?.trim() ||
@@ -5420,11 +5433,12 @@ export default function (api) {
       `Group=${serviceIdentity.group}`,
       `WorkingDirectory=${this.paths.openclawServiceHome}`,
       `Environment=HOME=${this.paths.openclawServiceHome}`,
+      `Environment=PATH=${process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}`,
       `Environment=TMPDIR=${managedTempDir}`,
       `Environment=TMP=${managedTempDir}`,
       `Environment=TEMP=${managedTempDir}`,
       `EnvironmentFile=-${runtimeConfig.openclaw.gatewayEnvPath}`,
-      "ExecStart=/usr/bin/env openclaw gateway run --allow-unconfigured --bind loopback",
+      `ExecStart=${openclawCommand} gateway run --allow-unconfigured --bind loopback`,
       "Restart=always",
       "RestartSec=3",
       "",
@@ -5437,8 +5451,8 @@ export default function (api) {
       await mkdir(this.paths.openclawServiceHome, { recursive: true });
       await mkdir(managedTempDir, { recursive: true });
       await chmod(managedTempDir, 0o700);
-      await this.applyRuntimeOwnership(this.paths.openclawServiceHome);
-      await this.applyRuntimeOwnership(managedTempDir);
+      await this.applyConfiguredRuntimeOwnership(this.paths.openclawServiceHome, runtimeConfig);
+      await this.applyConfiguredRuntimeOwnership(managedTempDir, runtimeConfig);
       await mkdir(dirname(unitPath), { recursive: true });
       await writeFile(unitPath, unitContents, "utf8");
     } catch (error) {
@@ -5471,6 +5485,11 @@ export default function (api) {
         return false;
       }
       if (result.result.exitCode !== 0) {
+        const output = `${result.result.stdout}\n${result.result.stderr}`;
+        const systemctlStillStarting = args[0] === "is-active" && /\bactivating\b/i.test(output);
+        if (systemctlStillStarting) {
+          continue;
+        }
         this.logger.warn(
           {
             command: result.result.command,
@@ -5885,22 +5904,72 @@ export default function (api) {
 
     try {
       await this.openclawGatewayServiceManager.restart();
-      return;
     } catch (error) {
       if (isGatewayUserSystemdUnavailableError(error)) {
-        throw {
-          code: "OPENCLAW_GATEWAY_RESTART_FAILED",
-          message:
-            "OpenClaw gateway restart is unavailable because systemd user services are unavailable in this context",
-          retryable: true,
-          details: {
-            error: describeError(error),
-          },
-        };
+        throw error;
       }
+      this.logger.warn(
+        {
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "OpenClaw gateway restart failed after runtime configure; retrying with start",
+      );
+      await this.openclawGatewayServiceManager.start();
     }
 
-    await this.openclawGatewayServiceManager.start();
+    if (this.execRunner === null) {
+      return;
+    }
+
+    const gatewayState = await this.inspectGatewayRuntimeState();
+    if (gatewayState.health.ok) {
+      return;
+    }
+
+    this.logger.warn(
+      {
+        state: gatewayState.gateway.state,
+        message: gatewayState.gateway.message,
+        health: gatewayState.health.message,
+      },
+      "OpenClaw gateway did not become healthy after runtime configure; trying system-level fallback",
+    );
+    const fallbackStarted = await this.ensureSystemGatewayServiceFallback(runtimeConfig);
+    if (fallbackStarted) {
+      return;
+    }
+
+    throw {
+      code: "OPENCLAW_GATEWAY_RESTART_FAILED",
+      message: "OpenClaw gateway did not become healthy after runtime configure",
+      retryable: true,
+      details: {
+        state: gatewayState.gateway.state,
+        message: gatewayState.gateway.message,
+        health: gatewayState.health.message,
+      },
+    };
+  }
+
+  private async inspectGatewayRuntimeState(): Promise<{
+    gateway: {
+      installed: boolean;
+      state: GatewayState;
+      message?: string;
+    };
+    health: {
+      ok: boolean;
+      message: string;
+    };
+  }> {
+    const [gateway, health] = await Promise.all([
+      this.inspectGatewayService(),
+      this.probeOpenClawHealth(),
+    ]);
+    return {
+      gateway,
+      health,
+    };
   }
 
   private async resolveSecretRef(secretRef: string): Promise<string> {
@@ -6642,12 +6711,26 @@ export default function (api) {
       await mkdir(dirname(runtimeConfig.openclaw.runtimeProfilePath), { recursive: true });
       await mkdir(managedTempDir, { recursive: true });
       await chmod(managedTempDir, 0o700);
-      await this.applyRuntimeOwnership(this.paths.openclawServiceHome);
-      await this.applyRuntimeOwnership(runtimeConfig.openclaw.openclawHome);
-      await this.applyRuntimeOwnership(dirname(runtimeConfig.openclaw.runtimeProfilePath));
-      await this.applyRuntimeOwnership(managedTempDir);
-      await this.writeProtectedJsonFile(runtimeConfig.openclaw.runtimeConfigPath, runtimePayload);
-      await this.writeProtectedJsonFile(runtimeConfig.openclaw.runtimeProfilePath, profilePayload);
+      await this.applyConfiguredRuntimeOwnership(this.paths.openclawServiceHome, runtimeConfig);
+      await this.applyConfiguredRuntimeOwnership(
+        runtimeConfig.openclaw.openclawHome,
+        runtimeConfig,
+      );
+      await this.applyConfiguredRuntimeOwnership(
+        dirname(runtimeConfig.openclaw.runtimeProfilePath),
+        runtimeConfig,
+      );
+      await this.applyConfiguredRuntimeOwnership(managedTempDir, runtimeConfig);
+      await this.writeProtectedJsonFile(
+        runtimeConfig.openclaw.runtimeConfigPath,
+        runtimePayload,
+        runtimeConfig,
+      );
+      await this.writeProtectedJsonFile(
+        runtimeConfig.openclaw.runtimeProfilePath,
+        profilePayload,
+        runtimeConfig,
+      );
 
       const envFileLines = [
         `OPENCLAW_HOME=${runtimeConfig.openclaw.openclawHome}`,
@@ -6669,7 +6752,10 @@ export default function (api) {
       await writeFile(envTempPath, `${envFileLines.join("\n")}\n`, "utf8");
       await chmod(envTempPath, 0o600);
       await rename(envTempPath, runtimeConfig.openclaw.gatewayEnvPath);
-      await this.applyRuntimeOwnership(runtimeConfig.openclaw.gatewayEnvPath);
+      await this.applyConfiguredRuntimeOwnership(
+        runtimeConfig.openclaw.gatewayEnvPath,
+        runtimeConfig,
+      );
     } catch (error) {
       throw {
         code: "OPENCLAW_CONFIG_WRITE_FAILED",
@@ -6686,12 +6772,20 @@ export default function (api) {
     }
   }
 
-  private async writeProtectedJsonFile(path: string, value: unknown): Promise<void> {
+  private async writeProtectedJsonFile(
+    path: string,
+    value: unknown,
+    runtimeConfig?: RuntimeConfig,
+  ): Promise<void> {
     const tempPath = `${path}.${randomUUID()}.tmp`;
     await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
     await chmod(tempPath, 0o600);
     await rename(tempPath, path);
-    await this.applyRuntimeOwnership(path);
+    if (runtimeConfig === undefined) {
+      await this.applyRuntimeOwnership(path);
+      return;
+    }
+    await this.applyConfiguredRuntimeOwnership(path, runtimeConfig);
   }
 
   private async resolveImapConfig(imap: InstallRequest["imap"]): Promise<RuntimeConfig["imap"]> {
@@ -6840,12 +6934,18 @@ export default function (api) {
     const envGroup = process.env.SOVEREIGN_NODE_SERVICE_GROUP?.trim();
     const configUser = runtimeConfig?.openclaw.serviceUser?.trim();
     const configGroup = runtimeConfig?.openclaw.serviceGroup?.trim();
+    const sudoUser =
+      typeof process.getuid === "function" && process.getuid() === 0
+        ? process.env.SUDO_USER?.trim()
+        : undefined;
+    const fallbackUser =
+      sudoUser !== undefined && sudoUser.length > 0 && sudoUser !== "root" ? sudoUser : undefined;
     const user =
       envUser !== undefined && envUser.length > 0
         ? envUser
         : configUser !== undefined && configUser.length > 0
           ? configUser
-          : DEFAULT_SERVICE_USER;
+          : (fallbackUser ?? DEFAULT_SERVICE_USER);
     const group =
       envGroup !== undefined && envGroup.length > 0
         ? envGroup
@@ -6902,6 +7002,86 @@ export default function (api) {
 
   private async applyRuntimeOwnership(path: string): Promise<void> {
     const ownership = await this.resolveRuntimeOwnership();
+    await this.applyOwnership(path, ownership);
+  }
+
+  private async resolveConfiguredRuntimeOwnership(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<{ uid: number; gid: number } | null> {
+    if (typeof process.getuid !== "function" || process.getuid() !== 0) {
+      return null;
+    }
+
+    const serviceIdentity = this.getConfiguredServiceIdentity(runtimeConfig);
+    if (serviceIdentity.user === "root" && serviceIdentity.group === "root") {
+      return { uid: 0, gid: 0 };
+    }
+    if (this.execRunner === null) {
+      return null;
+    }
+
+    try {
+      const passwdResult = await this.execRunner.run({
+        command: "getent",
+        args: ["passwd", serviceIdentity.user],
+        options: {
+          timeout: INSTALLER_EXEC_TIMEOUT_MS,
+        },
+      });
+      if (passwdResult.exitCode !== 0) {
+        return null;
+      }
+
+      const passwdFields = passwdResult.stdout.trim().split(":");
+      const uid = Number.parseInt(passwdFields[2] ?? "", 10);
+      const primaryGid = Number.parseInt(passwdFields[3] ?? "", 10);
+      if (!Number.isInteger(uid) || !Number.isInteger(primaryGid)) {
+        return null;
+      }
+
+      if (serviceIdentity.group.length === 0 || serviceIdentity.group === serviceIdentity.user) {
+        return { uid, gid: primaryGid };
+      }
+
+      const groupResult = await this.execRunner.run({
+        command: "getent",
+        args: ["group", serviceIdentity.group],
+        options: {
+          timeout: INSTALLER_EXEC_TIMEOUT_MS,
+        },
+      });
+      if (groupResult.exitCode !== 0) {
+        return { uid, gid: primaryGid };
+      }
+
+      const groupFields = groupResult.stdout.trim().split(":");
+      const groupGid = Number.parseInt(groupFields[2] ?? "", 10);
+      if (!Number.isInteger(groupGid)) {
+        return { uid, gid: primaryGid };
+      }
+
+      return { uid, gid: groupGid };
+    } catch {
+      return null;
+    }
+  }
+
+  private async applyConfiguredRuntimeOwnership(
+    path: string,
+    runtimeConfig: RuntimeConfig,
+  ): Promise<void> {
+    const ownership = await this.resolveConfiguredRuntimeOwnership(runtimeConfig);
+    if (ownership !== null) {
+      await this.applyOwnership(path, ownership);
+      return;
+    }
+    await this.applyRuntimeOwnership(path);
+  }
+
+  private async applyOwnership(
+    path: string,
+    ownership: { uid: number; gid: number } | null,
+  ): Promise<void> {
     if (ownership === null) {
       return;
     }
@@ -7003,3 +7183,23 @@ const sortToolInstances = (
   entries: RuntimeConfig["sovereignTools"]["instances"],
 ): RuntimeConfig["sovereignTools"]["instances"] =>
   [...entries].sort((left, right) => left.id.localeCompare(right.id));
+
+const resolveExecutablePath = async (command: string): Promise<string | null> => {
+  if (command.includes("/")) {
+    return command;
+  }
+
+  const pathValue = process.env.PATH ?? "";
+  for (const entry of pathValue.split(delimiter)) {
+    if (entry.length === 0) {
+      continue;
+    }
+    const candidate = join(entry, command);
+    try {
+      await access(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {}
+  }
+
+  return null;
+};

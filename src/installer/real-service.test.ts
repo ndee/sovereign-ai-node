@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { LoadedBotPackage } from "../bots/catalog.js";
 import type { SovereignPaths } from "../config/paths.js";
@@ -2813,6 +2813,548 @@ describe("RealInstallerService", () => {
     }
   });
 
+  it("falls back to the system gateway when post-config refresh leaves the gateway stopped", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const priorGatewayUnitPath = process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH;
+    const gatewayUnitPath = join(tempRoot, "systemd", "sovereign-openclaw-gateway.service");
+    process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH = gatewayUnitPath;
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+
+    let gatewayInstallCalls = 0;
+    let gatewayRestartCalls = 0;
+    let gatewayStartCalls = 0;
+    let registrarCalls = 0;
+    let systemGatewayStarted = false;
+    const commandCalls: string[] = [];
+    let sentMessageBody = "";
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async (opts) => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: opts.version,
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {
+          gatewayInstallCalls += 1;
+        },
+        start: async () => {
+          gatewayStartCalls += 1;
+        },
+        restart: async () => {
+          gatewayRestartCalls += 1;
+          throw new Error("gateway restart returned before the service was healthy");
+        },
+      },
+      mailSentinelRegistrar: {
+        register: async () => {
+          registrarCalls += 1;
+          return {
+            agentId: "mail-sentinel",
+            cronJobId: "mail-sentinel-poll",
+            workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+            agentCommand: "openclaw agents add mail-sentinel --workspace /tmp/ws",
+            cronCommand: "openclaw cron add --name mail-sentinel-poll --every 5m",
+          };
+        },
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+          capabilities: ["IMAP4rev1"],
+        }),
+      },
+      matrixProvisioner: {
+        provision: async (req) => ({
+          projectDir: join(tempRoot, "matrix"),
+          composeFilePath: join(tempRoot, "matrix", "compose.yaml"),
+          accessMode: "direct",
+          homeserverDomain: req.matrix.homeserverDomain,
+          publicBaseUrl: req.matrix.publicBaseUrl,
+          adminBaseUrl: "http://127.0.0.1:8008",
+          federationEnabled: req.matrix.federationEnabled ?? false,
+          tlsMode: "local-dev",
+        }),
+        bootstrapAccounts: async () => ({
+          operator: {
+            localpart: "operator",
+            userId: "@operator:matrix.example.org",
+            passwordSecretRef: "file:/tmp/operator.password",
+            accessToken: "operator-token",
+          },
+          bot: {
+            localpart: "mail-sentinel",
+            userId: "@mail-sentinel:matrix.example.org",
+            passwordSecretRef: "file:/tmp/mail-sentinel.password",
+            accessToken: "bot-token",
+          },
+        }),
+        bootstrapRoom: async () => ({
+          roomId: "!alerts:matrix.example.org",
+          roomName: "Sovereign Alerts",
+        }),
+        test: async (req) => ({
+          ok: true,
+          homeserverUrl: req.publicBaseUrl,
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async (input): Promise<ExecResult> => {
+          const serialized = [input.command, ...(input.args ?? [])].join(" ");
+          commandCalls.push(serialized);
+
+          if (serialized.startsWith("systemctl ")) {
+            if (!serialized.endsWith("daemon-reload")) {
+              systemGatewayStarted = true;
+            }
+            if (serialized === "systemctl is-active sovereign-openclaw-gateway.service") {
+              return {
+                command: serialized,
+                exitCode: 3,
+                stdout: "activating",
+                stderr: "",
+              };
+            }
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "active",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw health") {
+            return systemGatewayStarted
+              ? {
+                  command: serialized,
+                  exitCode: 0,
+                  stdout: "ok",
+                  stderr: "",
+                }
+              : {
+                  command: serialized,
+                  exitCode: 1,
+                  stdout: "",
+                  stderr: "Error: gateway closed (1006 abnormal closure (no close frame))",
+                };
+          }
+          if (serialized === "openclaw gateway status") {
+            return systemGatewayStarted
+              ? {
+                  command: serialized,
+                  exitCode: 0,
+                  stdout: "Service: systemd\nState: running",
+                  stderr: "",
+                }
+              : {
+                  command: serialized,
+                  exitCode: 3,
+                  stdout: "inactive",
+                  stderr: "",
+                };
+          }
+          if (serialized === "openclaw agents list") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "mail-sentinel\nnode-operator",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw cron list") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "mail-sentinel-poll",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw plugins enable matrix") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "enabled",
+              stderr: "",
+            };
+          }
+          if (serialized.startsWith("openclaw agents ")) {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+          if (serialized.startsWith("openclaw approvals allowlist add --agent ")) {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+          return {
+            command: serialized,
+            exitCode: 1,
+            stdout: "",
+            stderr: "unexpected command",
+          };
+        },
+      },
+      fetchImpl: async (url, init) => {
+        const provisionResponse = buildManagedAgentMatrixProvisionResponse(url, init);
+        if (provisionResponse !== null) {
+          return provisionResponse;
+        }
+        if (url.includes("/joined_members")) {
+          return new Response(JSON.stringify({ joined: {} }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+
+        if (url.includes("/send/m.room.message/")) {
+          sentMessageBody = typeof init?.body === "string" ? init.body : "";
+          return new Response(JSON.stringify({ event_id: "$evt1" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+
+        return new Response("not found", { status: 404 });
+      },
+    });
+
+    try {
+      const started = await service.startInstall(buildInstallRequest());
+      expect(started.job.state).toBe("succeeded");
+      expect(gatewayInstallCalls).toBe(1);
+      expect(gatewayRestartCalls).toBe(1);
+      expect(gatewayStartCalls).toBe(2);
+      expect(registrarCalls).toBe(1);
+      expect(systemGatewayStarted).toBe(true);
+
+      const stepStates = Object.fromEntries(started.job.steps.map((step) => [step.id, step.state]));
+      expect(stepStates.openclaw_configure).toBe("succeeded");
+      expect(stepStates.bots_configure).toBe("succeeded");
+      expect(stepStates.smoke_checks).toBe("succeeded");
+      expect(sentMessageBody).toContain("Hello from Mail Sentinel");
+    } finally {
+      if (priorGatewayUnitPath === undefined) {
+        delete process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH;
+      } else {
+        process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH = priorGatewayUnitPath;
+      }
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a healthy gateway when gateway status still reports inactive after runtime configure", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+
+    let gatewayRestartCalls = 0;
+    let gatewayStartCalls = 0;
+    const commandCalls: string[] = [];
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => {
+          throw new Error("not used");
+        },
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {
+          throw new Error("not used");
+        },
+        start: async () => {
+          gatewayStartCalls += 1;
+        },
+        restart: async () => {
+          gatewayRestartCalls += 1;
+        },
+      },
+      mailSentinelRegistrar: {
+        register: async () => {
+          throw new Error("not used");
+        },
+      },
+      preflightChecker: {
+        run: async () => {
+          throw new Error("not used");
+        },
+      },
+      imapTester: {
+        test: async () => {
+          throw new Error("not used");
+        },
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async ({ command, args }): Promise<ExecResult> => {
+          const serialized = [command, ...(args ?? [])].join(" ");
+          commandCalls.push(serialized);
+
+          if (serialized === "systemctl is-active sovereign-openclaw-gateway.service") {
+            return {
+              command: serialized,
+              exitCode: 4,
+              stdout: "",
+              stderr: "Unit sovereign-openclaw-gateway.service could not be found.",
+            };
+          }
+          if (serialized === "openclaw gateway status") {
+            return {
+              command: serialized,
+              exitCode: 3,
+              stdout: "inactive",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw health") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+
+          return {
+            command: serialized,
+            exitCode: 1,
+            stdout: "",
+            stderr: "unexpected command",
+          };
+        },
+      },
+    });
+
+    const runtimeConfig = {
+      openclaw: {
+        managedInstallation: true,
+        installMethod: "install_sh",
+        requestedVersion: "0.2.0",
+        openclawHome: join(paths.openclawServiceHome, ".openclaw"),
+        runtimeConfigPath: join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
+        runtimeProfilePath: join(paths.openclawServiceHome, "profiles", "runtime.json5"),
+        gatewayEnvPath: join(paths.openclawServiceHome, "gateway.env"),
+      },
+    } as RuntimeConfig;
+
+    try {
+      await (
+        service as unknown as {
+          refreshGatewayAfterRuntimeConfig(config: RuntimeConfig): Promise<void>;
+        }
+      ).refreshGatewayAfterRuntimeConfig(runtimeConfig);
+
+      expect(gatewayRestartCalls).toBe(1);
+      expect(gatewayStartCalls).toBe(0);
+      expect(commandCalls).toContain("openclaw gateway status");
+      expect(commandCalls).toContain("openclaw health");
+      expect(commandCalls).not.toContain("systemctl daemon-reload");
+      expect(commandCalls.some((command) => command.includes("enable --now"))).toBe(false);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("waits through activating systemd state when starting the system gateway fallback", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const priorGatewayUnitPath = process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH;
+    const gatewayUnitPath = join(tempRoot, "systemd", "sovereign-openclaw-gateway.service");
+    process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH = gatewayUnitPath;
+
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+
+    const commandCalls: string[] = [];
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => {
+          throw new Error("not used");
+        },
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {
+          throw new Error("not used");
+        },
+        start: async () => {
+          throw new Error("not used");
+        },
+        restart: async () => {
+          throw new Error("not used");
+        },
+      },
+      mailSentinelRegistrar: {
+        register: async () => {
+          throw new Error("not used");
+        },
+      },
+      preflightChecker: {
+        run: async () => {
+          throw new Error("not used");
+        },
+      },
+      imapTester: {
+        test: async () => {
+          throw new Error("not used");
+        },
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async ({ command, args }): Promise<ExecResult> => {
+          const serialized = [command, ...(args ?? [])].join(" ");
+          commandCalls.push(serialized);
+
+          if (serialized === "systemctl is-active sovereign-openclaw-gateway.service") {
+            return {
+              command: serialized,
+              exitCode: 3,
+              stdout: "activating",
+              stderr: "",
+            };
+          }
+          if (serialized.startsWith("systemctl ")) {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw health") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+
+          return {
+            command: serialized,
+            exitCode: 1,
+            stdout: "",
+            stderr: "unexpected command",
+          };
+        },
+      },
+    });
+
+    const runtimeConfig = {
+      openclaw: {
+        managedInstallation: true,
+        installMethod: "install_sh",
+        requestedVersion: "0.2.0",
+        openclawHome: join(paths.openclawServiceHome, ".openclaw"),
+        runtimeConfigPath: join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
+        runtimeProfilePath: join(paths.openclawServiceHome, "profiles", "runtime.json5"),
+        gatewayEnvPath: join(paths.openclawServiceHome, "gateway.env"),
+        serviceUser: "sovereign-node",
+        serviceGroup: "sovereign-node",
+      },
+    } as RuntimeConfig;
+
+    try {
+      const started = await (
+        service as unknown as {
+          ensureSystemGatewayServiceFallback(config: RuntimeConfig): Promise<boolean>;
+        }
+      ).ensureSystemGatewayServiceFallback(runtimeConfig);
+
+      expect(started).toBe(true);
+      expect(commandCalls).toContain("systemctl daemon-reload");
+      expect(commandCalls).toContain("systemctl enable --now sovereign-openclaw-gateway.service");
+      expect(commandCalls).toContain("systemctl restart sovereign-openclaw-gateway.service");
+      expect(commandCalls).toContain("systemctl is-active sovereign-openclaw-gateway.service");
+      const unitRaw = await readFile(gatewayUnitPath, "utf8");
+      expect(unitRaw).toContain("User=sovereign-node");
+      expect(unitRaw).toContain("Group=sovereign-node");
+      expect(unitRaw).toContain("Environment=PATH=");
+    } finally {
+      if (priorGatewayUnitPath === undefined) {
+        delete process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH;
+      } else {
+        process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH = priorGatewayUnitPath;
+      }
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("binds the shared default Matrix account to the matching managed agent", async () => {
     const botPackage = buildTestLoadedBotPackage({
       id: "bitcoin-skill-match",
@@ -3019,6 +3561,233 @@ describe("RealInstallerService", () => {
         "openclaw agents bind --agent bitcoin-skill-match --bind matrix:default",
       ),
     ).toBe(false);
+  });
+
+  it("resolves configured runtime ownership from the service identity when running as root", async () => {
+    const getuidMock =
+      typeof process.getuid === "function"
+        ? vi
+            .spyOn(process as typeof process & { getuid: () => number }, "getuid")
+            .mockImplementation(() => 0)
+        : null;
+    const commandCalls: string[] = [];
+    const service = new RealInstallerService(
+      createLogger(),
+      {
+        configPath: "/tmp/sovereign-node.json5",
+        secretsDir: "/tmp/sovereign-secrets",
+        stateDir: "/tmp/sovereign-state",
+        logsDir: "/tmp/sovereign-logs",
+        installJobsDir: "/tmp/sovereign-install-jobs",
+        openclawServiceHome: "/tmp/sovereign-openclaw-home",
+      },
+      {
+        openclawBootstrapper: {
+          detectInstalled: async () => null,
+          ensureInstalled: async () => {
+            throw new Error("not used");
+          },
+        },
+        openclawGatewayServiceManager: {
+          install: async () => {
+            throw new Error("not used");
+          },
+          start: async () => {
+            throw new Error("not used");
+          },
+          restart: async () => {
+            throw new Error("not used");
+          },
+        },
+        mailSentinelRegistrar: {
+          register: async () => {
+            throw new Error("not used");
+          },
+        },
+        preflightChecker: {
+          run: async () => {
+            throw new Error("not used");
+          },
+        },
+        imapTester: {
+          test: async () => {
+            throw new Error("not used");
+          },
+        },
+        matrixProvisioner: {
+          provision: async () => {
+            throw new Error("not used");
+          },
+          bootstrapAccounts: async () => {
+            throw new Error("not used");
+          },
+          bootstrapRoom: async () => {
+            throw new Error("not used");
+          },
+          test: async () => ({
+            ok: true,
+            homeserverUrl: "https://matrix.example.org",
+            checks: [],
+          }),
+        },
+        execRunner: {
+          run: async ({ command, args }): Promise<ExecResult> => {
+            const serialized = [command, ...(args ?? [])].join(" ");
+            commandCalls.push(serialized);
+            if (serialized === "getent passwd runner") {
+              return {
+                command: serialized,
+                exitCode: 0,
+                stdout: "runner:x:1001:1001::/home/runner:/bin/bash\n",
+                stderr: "",
+              };
+            }
+            return {
+              command: serialized,
+              exitCode: 1,
+              stdout: "",
+              stderr: "unexpected command",
+            };
+          },
+        },
+      },
+    );
+
+    const runtimeConfig = {
+      openclaw: {
+        serviceUser: "runner",
+        serviceGroup: "runner",
+      },
+    } as RuntimeConfig;
+
+    try {
+      const ownership = await (
+        service as unknown as {
+          resolveConfiguredRuntimeOwnership(
+            config: RuntimeConfig,
+          ): Promise<{ uid: number; gid: number } | null>;
+        }
+      ).resolveConfiguredRuntimeOwnership(runtimeConfig);
+
+      expect(ownership).toEqual({ uid: 1001, gid: 1001 });
+      expect(commandCalls).toEqual(["getent passwd runner"]);
+    } finally {
+      getuidMock?.mockRestore();
+    }
+  });
+
+  it("defaults the managed service identity to the invoking sudo user in root installs", () => {
+    const getuidMock =
+      typeof process.getuid === "function"
+        ? vi
+            .spyOn(process as typeof process & { getuid: () => number }, "getuid")
+            .mockImplementation(() => 0)
+        : null;
+    const priorSudoUser = process.env.SUDO_USER;
+    const priorServiceUser = process.env.SOVEREIGN_NODE_SERVICE_USER;
+    const priorServiceGroup = process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+    process.env.SUDO_USER = "runner";
+    delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+    delete process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+
+    const service = new RealInstallerService(
+      createLogger(),
+      {
+        configPath: "/tmp/sovereign-node.json5",
+        secretsDir: "/tmp/sovereign-secrets",
+        stateDir: "/tmp/sovereign-state",
+        logsDir: "/tmp/sovereign-logs",
+        installJobsDir: "/tmp/sovereign-install-jobs",
+        openclawServiceHome: "/tmp/sovereign-openclaw-home",
+      },
+      {
+        openclawBootstrapper: {
+          detectInstalled: async () => null,
+          ensureInstalled: async () => {
+            throw new Error("not used");
+          },
+        },
+        openclawGatewayServiceManager: {
+          install: async () => {
+            throw new Error("not used");
+          },
+          start: async () => {
+            throw new Error("not used");
+          },
+          restart: async () => {
+            throw new Error("not used");
+          },
+        },
+        mailSentinelRegistrar: {
+          register: async () => {
+            throw new Error("not used");
+          },
+        },
+        preflightChecker: {
+          run: async () => ({
+            ok: true,
+            mode: "bundled_matrix",
+            overall: "pass",
+            checks: [],
+            recommendedActions: [],
+          }),
+        },
+        imapTester: {
+          test: async () => {
+            throw new Error("not used");
+          },
+        },
+        matrixProvisioner: {
+          provision: async () => {
+            throw new Error("not used");
+          },
+          bootstrapAccounts: async () => {
+            throw new Error("not used");
+          },
+          bootstrapRoom: async () => {
+            throw new Error("not used");
+          },
+          test: async () => ({
+            ok: true,
+            homeserverUrl: "https://matrix.example.org",
+            checks: [],
+          }),
+        },
+      },
+    );
+
+    try {
+      const internals = service as unknown as {
+        getConfiguredServiceIdentity(config?: RuntimeConfig): {
+          user: string;
+          group: string;
+        };
+        shouldPreferSystemGatewayService(config?: RuntimeConfig): boolean;
+      };
+
+      expect(internals.getConfiguredServiceIdentity()).toEqual({
+        user: "runner",
+        group: "runner",
+      });
+      expect(internals.shouldPreferSystemGatewayService()).toBe(true);
+    } finally {
+      if (priorSudoUser === undefined) {
+        delete process.env.SUDO_USER;
+      } else {
+        process.env.SUDO_USER = priorSudoUser;
+      }
+      if (priorServiceUser === undefined) {
+        delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+      } else {
+        process.env.SOVEREIGN_NODE_SERVICE_USER = priorServiceUser;
+      }
+      if (priorServiceGroup === undefined) {
+        delete process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+      } else {
+        process.env.SOVEREIGN_NODE_SERVICE_GROUP = priorServiceGroup;
+      }
+      getuidMock?.mockRestore();
+    }
   });
 
   it("builds status from runtime config and OpenClaw probes", async () => {
@@ -3294,6 +4063,144 @@ describe("RealInstallerService", () => {
       expect(status.openclaw.health).toBe("healthy");
       expect(status.openclaw.agentPresent).toBe(true);
       expect(status.openclaw.cronPresent).toBe(true);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reports OpenClaw as stopped when gateway status is inactive", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+    await writeRuntimeArtifacts(paths);
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      mailSentinelRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert",
+          cronCommand: "openclaw cron add",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async ({ command, args }) => {
+          const serialized = [command, ...(args ?? [])].join(" ");
+          if (serialized === "openclaw gateway status") {
+            return {
+              command: serialized,
+              exitCode: 3,
+              stdout: "inactive",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw health") {
+            return {
+              command: serialized,
+              exitCode: 1,
+              stdout: "",
+              stderr: "health check failed",
+            };
+          }
+          if (serialized === "openclaw agents list") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "mail-sentinel\nnode-operator",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw cron list") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "mail-sentinel-poll",
+              stderr: "",
+            };
+          }
+          return {
+            command: serialized,
+            exitCode: 1,
+            stdout: "",
+            stderr: "unexpected command",
+          };
+        },
+      },
+      fetchImpl: async (url) => {
+        if (!url.includes("/joined_members")) {
+          return new Response("not found", { status: 404 });
+        }
+        return new Response(JSON.stringify({ joined: {} }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+
+    try {
+      const status = await service.getStatus();
+      expect(status.openclaw.serviceState).toBe("stopped");
+      expect(status.services.find((entry) => entry.name === "openclaw-gateway")?.state).toBe(
+        "stopped",
+      );
+      expect(status.openclaw.health).toBe("degraded");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }

@@ -1,5 +1,5 @@
-import { constants as fsConstants } from "node:fs";
-import { access, readFile } from "node:fs/promises";
+import { type Dirent, constants as fsConstants } from "node:fs";
+import { access, chmod, readdir, readFile, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 
@@ -183,6 +183,8 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
       return;
     }
 
+    await hardenBundledExtensionDirectories(packageRoot);
+
     for (const target of BUNDLED_OPENCLAW_EXTENSION_REPAIR_TARGETS) {
       const extensionDir = join(packageRoot, target.relativeDir);
       const repairPlan = await planBundledExtensionDependencyRepair(extensionDir);
@@ -346,6 +348,49 @@ const resolveInstalledOpenClawPackageRoot = async (
   }
 
   return null;
+};
+
+const hardenBundledExtensionDirectories = async (packageRoot: string): Promise<void> => {
+  const extensionsRoot = join(packageRoot, "extensions");
+  const queue = [extensionsRoot];
+
+  while (queue.length > 0) {
+    const currentPath = queue.shift();
+    if (currentPath === undefined) {
+      continue;
+    }
+
+    let info;
+    try {
+      info = await stat(currentPath);
+    } catch {
+      continue;
+    }
+
+    const currentMode = info.mode & 0o777;
+    const hardenedMode = currentMode & ~0o022;
+    if (hardenedMode !== currentMode) {
+      await chmod(currentPath, hardenedMode);
+    }
+
+    if (!info.isDirectory()) {
+      continue;
+    }
+
+    let entries: Dirent[];
+    try {
+      entries = await readdir(currentPath, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) {
+        continue;
+      }
+      queue.push(join(currentPath, entry.name));
+    }
+  }
 };
 
 const planBundledExtensionDependencyRepair = async (

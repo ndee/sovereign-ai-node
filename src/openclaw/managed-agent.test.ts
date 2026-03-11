@@ -275,4 +275,214 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
     expect(jsonListAttempts).toBe(2);
     expect(calls).toContain("openclaw cron list --json");
   });
+
+  it("retries gateway commands via the sudo user when root cannot reach the gateway", async () => {
+    const calls: string[] = [];
+    const priorSudoUser = process.env.SUDO_USER;
+    const priorSudoUid = process.env.SUDO_UID;
+    const priorOpenClawHome = process.env.OPENCLAW_HOME;
+    const priorOpenClawConfig = process.env.OPENCLAW_CONFIG;
+    const priorOpenClawConfigPath = process.env.OPENCLAW_CONFIG_PATH;
+    const priorSovereignNodeConfig = process.env.SOVEREIGN_NODE_CONFIG;
+    process.env.SUDO_USER = "runner";
+    process.env.SUDO_UID = "1001";
+    process.env.OPENCLAW_HOME = "/var/lib/sovereign-node/openclaw-home/.openclaw";
+    process.env.OPENCLAW_CONFIG = "/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5";
+    process.env.OPENCLAW_CONFIG_PATH =
+      "/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5";
+    process.env.SOVEREIGN_NODE_CONFIG = "/etc/sovereign-node/config.json5";
+
+    try {
+      const execRunner: ExecRunner = {
+        run: async (input): Promise<ExecResult> => {
+          const serialized = [input.command, ...(input.args ?? [])].join(" ");
+          calls.push(serialized);
+          if (serialized === "openclaw cron list --json") {
+            return {
+              command: serialized,
+              exitCode: 1,
+              stdout: "",
+              stderr: "Error: gateway closed (1006 abnormal closure (no close frame))",
+            };
+          }
+          if (
+            serialized.startsWith(
+              `sudo -u runner -- /usr/bin/env CI=1 XDG_RUNTIME_DIR=/run/user/1001 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus OPENCLAW_HOME=/var/lib/sovereign-node/openclaw-home/.openclaw OPENCLAW_CONFIG=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 OPENCLAW_CONFIG_PATH=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 SOVEREIGN_NODE_CONFIG=/etc/sovereign-node/config.json5 ${process.execPath} `,
+            ) &&
+            serialized.endsWith(" cron list --json")
+          ) {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: '{"jobs":[]}',
+              stderr: "",
+            };
+          }
+          return {
+            command: serialized,
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          };
+        },
+      };
+
+      const registrar = new ShellOpenClawManagedAgentRegistrar(execRunner, createLogger());
+      const result = await registrar.register({
+        agentId: "mail-sentinel",
+        workspaceDir: "/tmp/ws",
+        cron: {
+          id: "mail-sentinel-poll",
+          every: "5m",
+          message: "Summarize new inbox mail",
+        },
+      });
+
+      expect(result.cronJobId).toBe("mail-sentinel-poll");
+      expect(
+        calls.some(
+          (entry) =>
+            entry.startsWith(
+              "sudo -u runner -- /usr/bin/env CI=1 XDG_RUNTIME_DIR=/run/user/1001 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus OPENCLAW_HOME=/var/lib/sovereign-node/openclaw-home/.openclaw OPENCLAW_CONFIG=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 OPENCLAW_CONFIG_PATH=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 SOVEREIGN_NODE_CONFIG=/etc/sovereign-node/config.json5",
+            ) && entry.endsWith(" cron list --json"),
+        ),
+      ).toBe(true);
+    } finally {
+      if (priorSudoUser === undefined) {
+        delete process.env.SUDO_USER;
+      } else {
+        process.env.SUDO_USER = priorSudoUser;
+      }
+      if (priorSudoUid === undefined) {
+        delete process.env.SUDO_UID;
+      } else {
+        process.env.SUDO_UID = priorSudoUid;
+      }
+      if (priorOpenClawHome === undefined) {
+        delete process.env.OPENCLAW_HOME;
+      } else {
+        process.env.OPENCLAW_HOME = priorOpenClawHome;
+      }
+      if (priorOpenClawConfig === undefined) {
+        delete process.env.OPENCLAW_CONFIG;
+      } else {
+        process.env.OPENCLAW_CONFIG = priorOpenClawConfig;
+      }
+      if (priorOpenClawConfigPath === undefined) {
+        delete process.env.OPENCLAW_CONFIG_PATH;
+      } else {
+        process.env.OPENCLAW_CONFIG_PATH = priorOpenClawConfigPath;
+      }
+      if (priorSovereignNodeConfig === undefined) {
+        delete process.env.SOVEREIGN_NODE_CONFIG;
+      } else {
+        process.env.SOVEREIGN_NODE_CONFIG = priorSovereignNodeConfig;
+      }
+    }
+  });
+
+  it("prefers the configured managed service user before probing OpenClaw as root", async () => {
+    const calls: string[] = [];
+    const priorSudoUser = process.env.SUDO_USER;
+    const priorSudoUid = process.env.SUDO_UID;
+    const priorServiceUser = process.env.SOVEREIGN_NODE_SERVICE_USER;
+    const priorOpenClawHome = process.env.OPENCLAW_HOME;
+    const priorOpenClawConfig = process.env.OPENCLAW_CONFIG;
+    const priorOpenClawConfigPath = process.env.OPENCLAW_CONFIG_PATH;
+    const priorSovereignNodeConfig = process.env.SOVEREIGN_NODE_CONFIG;
+    process.env.SUDO_USER = "runner";
+    process.env.SUDO_UID = "1001";
+    process.env.SOVEREIGN_NODE_SERVICE_USER = "runner";
+    process.env.OPENCLAW_HOME = "/var/lib/sovereign-node/openclaw-home/.openclaw";
+    process.env.OPENCLAW_CONFIG = "/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5";
+    process.env.OPENCLAW_CONFIG_PATH =
+      "/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5";
+    process.env.SOVEREIGN_NODE_CONFIG = "/etc/sovereign-node/config.json5";
+
+    try {
+      const execRunner: ExecRunner = {
+        run: async (input): Promise<ExecResult> => {
+          const serialized = [input.command, ...(input.args ?? [])].join(" ");
+          calls.push(serialized);
+          if (serialized.startsWith("openclaw ")) {
+            return {
+              command: serialized,
+              exitCode: 1,
+              stdout: "",
+              stderr: "root OpenClaw command should not run in service-user mode",
+            };
+          }
+          if (
+            serialized.startsWith(
+              `sudo -u runner -- /usr/bin/env CI=1 XDG_RUNTIME_DIR=/run/user/1001 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus OPENCLAW_HOME=/var/lib/sovereign-node/openclaw-home/.openclaw OPENCLAW_CONFIG=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 OPENCLAW_CONFIG_PATH=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 SOVEREIGN_NODE_CONFIG=/etc/sovereign-node/config.json5 ${process.execPath} `,
+            )
+          ) {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: serialized.endsWith(" cron list --json") ? '{"jobs":[]}' : "",
+              stderr: "",
+            };
+          }
+          return {
+            command: serialized,
+            exitCode: 1,
+            stdout: "",
+            stderr: "unexpected command",
+          };
+        },
+      };
+
+      const registrar = new ShellOpenClawManagedAgentRegistrar(execRunner, createLogger());
+      const result = await registrar.register({
+        agentId: "mail-sentinel",
+        workspaceDir: "/tmp/ws",
+        cron: {
+          id: "mail-sentinel-poll",
+          every: "5m",
+          message: "Summarize new inbox mail",
+        },
+      });
+
+      expect(result.cronJobId).toBe("mail-sentinel-poll");
+      expect(calls).not.toContain("openclaw cron list --json");
+      expect(calls.some((entry) => entry.startsWith("sudo -u runner -- /usr/bin/env"))).toBe(true);
+    } finally {
+      if (priorSudoUser === undefined) {
+        delete process.env.SUDO_USER;
+      } else {
+        process.env.SUDO_USER = priorSudoUser;
+      }
+      if (priorSudoUid === undefined) {
+        delete process.env.SUDO_UID;
+      } else {
+        process.env.SUDO_UID = priorSudoUid;
+      }
+      if (priorServiceUser === undefined) {
+        delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+      } else {
+        process.env.SOVEREIGN_NODE_SERVICE_USER = priorServiceUser;
+      }
+      if (priorOpenClawHome === undefined) {
+        delete process.env.OPENCLAW_HOME;
+      } else {
+        process.env.OPENCLAW_HOME = priorOpenClawHome;
+      }
+      if (priorOpenClawConfig === undefined) {
+        delete process.env.OPENCLAW_CONFIG;
+      } else {
+        process.env.OPENCLAW_CONFIG = priorOpenClawConfig;
+      }
+      if (priorOpenClawConfigPath === undefined) {
+        delete process.env.OPENCLAW_CONFIG_PATH;
+      } else {
+        process.env.OPENCLAW_CONFIG_PATH = priorOpenClawConfigPath;
+      }
+      if (priorSovereignNodeConfig === undefined) {
+        delete process.env.SOVEREIGN_NODE_CONFIG;
+      } else {
+        process.env.SOVEREIGN_NODE_CONFIG = priorSovereignNodeConfig;
+      }
+    }
+  });
 });

@@ -993,14 +993,14 @@ const deriveOpenClawHealth = (input: {
 
 const parseGatewayState = (value: string): GatewayState => {
   const normalized = value.toLowerCase();
-  if (/running|active/.test(normalized)) {
-    return "running";
-  }
-  if (/inactive|stopped|dead/.test(normalized)) {
-    return "stopped";
-  }
   if (/failed|error/.test(normalized)) {
     return "failed";
+  }
+  if (/\binactive\b|\bstopped\b|\bdead\b/.test(normalized)) {
+    return "stopped";
+  }
+  if (/\brunning\b|\bactive\b/.test(normalized)) {
+    return "running";
   }
   return "unknown";
 };

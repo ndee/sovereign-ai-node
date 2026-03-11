@@ -489,6 +489,22 @@ build_app() {
   log "Installing dependencies and building app"
   (
     cd "$APP_DIR"
+    if [[ -f "pnpm-lock.yaml" ]]; then
+      if command -v corepack >/dev/null 2>&1; then
+        corepack pnpm install --frozen-lockfile
+        corepack pnpm run build
+        exit 0
+      fi
+
+      if command -v pnpm >/dev/null 2>&1; then
+        pnpm install --frozen-lockfile
+        pnpm run build
+        exit 0
+      fi
+
+      die "pnpm lockfile detected but neither corepack nor pnpm is available"
+    fi
+
     npm ci
     npm run build
   )
