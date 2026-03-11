@@ -1,5 +1,5 @@
-import { constants as fsConstants } from "node:fs";
-import { access, chmod, readFile, readdir, stat } from "node:fs/promises";
+import { type Dirent, constants as fsConstants } from "node:fs";
+import { access, chmod, readdir, readFile, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 
@@ -352,7 +352,7 @@ const resolveInstalledOpenClawPackageRoot = async (
 
 const hardenBundledExtensionDirectories = async (packageRoot: string): Promise<void> => {
   const extensionsRoot = join(packageRoot, "extensions");
-  let entries;
+  let entries: Dirent[];
   try {
     entries = await readdir(extensionsRoot, { withFileTypes: true });
   } catch {
@@ -361,7 +361,9 @@ const hardenBundledExtensionDirectories = async (packageRoot: string): Promise<v
 
   const candidateDirs = [
     extensionsRoot,
-    ...entries.filter((entry) => entry.isDirectory()).map((entry) => join(extensionsRoot, entry.name)),
+    ...entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join(extensionsRoot, entry.name)),
   ];
 
   for (const candidateDir of candidateDirs) {

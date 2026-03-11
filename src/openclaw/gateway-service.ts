@@ -149,9 +149,7 @@ const resolveExecutablePath = async (command: string): Promise<string | null> =>
     try {
       await access(candidate, fsConstants.X_OK);
       return candidate;
-    } catch {
-      continue;
-    }
+    } catch {}
   }
 
   return null;
