@@ -280,8 +280,17 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
     const calls: string[] = [];
     const priorSudoUser = process.env.SUDO_USER;
     const priorSudoUid = process.env.SUDO_UID;
+    const priorOpenClawHome = process.env.OPENCLAW_HOME;
+    const priorOpenClawConfig = process.env.OPENCLAW_CONFIG;
+    const priorOpenClawConfigPath = process.env.OPENCLAW_CONFIG_PATH;
+    const priorSovereignNodeConfig = process.env.SOVEREIGN_NODE_CONFIG;
     process.env.SUDO_USER = "runner";
     process.env.SUDO_UID = "1001";
+    process.env.OPENCLAW_HOME = "/var/lib/sovereign-node/openclaw-home/.openclaw";
+    process.env.OPENCLAW_CONFIG = "/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5";
+    process.env.OPENCLAW_CONFIG_PATH =
+      "/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5";
+    process.env.SOVEREIGN_NODE_CONFIG = "/etc/sovereign-node/config.json5";
 
     try {
       const execRunner: ExecRunner = {
@@ -298,7 +307,7 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
           }
           if (
             serialized.startsWith(
-              `sudo -u runner -- /usr/bin/env CI=1 XDG_RUNTIME_DIR=/run/user/1001 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus ${process.execPath} `,
+              `sudo -u runner -- /usr/bin/env CI=1 XDG_RUNTIME_DIR=/run/user/1001 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus OPENCLAW_HOME=/var/lib/sovereign-node/openclaw-home/.openclaw OPENCLAW_CONFIG=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 OPENCLAW_CONFIG_PATH=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 SOVEREIGN_NODE_CONFIG=/etc/sovereign-node/config.json5 ${process.execPath} `,
             ) &&
             serialized.endsWith(" cron list --json")
           ) {
@@ -333,8 +342,9 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
       expect(
         calls.some(
           (entry) =>
-            entry.startsWith("sudo -u runner -- /usr/bin/env CI=1") &&
-            entry.endsWith(" cron list --json"),
+            entry.startsWith(
+              "sudo -u runner -- /usr/bin/env CI=1 XDG_RUNTIME_DIR=/run/user/1001 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus OPENCLAW_HOME=/var/lib/sovereign-node/openclaw-home/.openclaw OPENCLAW_CONFIG=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 OPENCLAW_CONFIG_PATH=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 SOVEREIGN_NODE_CONFIG=/etc/sovereign-node/config.json5",
+            ) && entry.endsWith(" cron list --json"),
         ),
       ).toBe(true);
     } finally {
@@ -347,6 +357,26 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
         delete process.env.SUDO_UID;
       } else {
         process.env.SUDO_UID = priorSudoUid;
+      }
+      if (priorOpenClawHome === undefined) {
+        delete process.env.OPENCLAW_HOME;
+      } else {
+        process.env.OPENCLAW_HOME = priorOpenClawHome;
+      }
+      if (priorOpenClawConfig === undefined) {
+        delete process.env.OPENCLAW_CONFIG;
+      } else {
+        process.env.OPENCLAW_CONFIG = priorOpenClawConfig;
+      }
+      if (priorOpenClawConfigPath === undefined) {
+        delete process.env.OPENCLAW_CONFIG_PATH;
+      } else {
+        process.env.OPENCLAW_CONFIG_PATH = priorOpenClawConfigPath;
+      }
+      if (priorSovereignNodeConfig === undefined) {
+        delete process.env.SOVEREIGN_NODE_CONFIG;
+      } else {
+        process.env.SOVEREIGN_NODE_CONFIG = priorSovereignNodeConfig;
       }
     }
   });

@@ -6,6 +6,12 @@ import type { Logger } from "../logging/logger.js";
 import type { ExecResult, ExecRunner } from "../system/exec.js";
 
 const OPENCLAW_GATEWAY_COMMAND_TIMEOUT_MS = 120_000;
+const MANAGED_OPENCLAW_ENV_KEYS = [
+  "OPENCLAW_HOME",
+  "OPENCLAW_CONFIG",
+  "OPENCLAW_CONFIG_PATH",
+  "SOVEREIGN_NODE_CONFIG",
+] as const;
 
 export type GatewayInstallOptions = {
   force?: boolean;
@@ -72,6 +78,7 @@ export class ShellOpenClawGatewayServiceManager implements OpenClawGatewayServic
       "CI=1",
       `XDG_RUNTIME_DIR=/run/user/${fallback.uid}`,
       `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${fallback.uid}/bus`,
+      ...resolveManagedOpenClawEnvArgs(),
     ];
     const retry = await this.execRunner.run({
       command: "sudo",
@@ -154,6 +161,12 @@ const resolveExecutablePath = async (command: string): Promise<string | null> =>
 
   return null;
 };
+
+const resolveManagedOpenClawEnvArgs = (): string[] =>
+  MANAGED_OPENCLAW_ENV_KEYS.flatMap((key) => {
+    const value = process.env[key];
+    return typeof value === "string" && value.length > 0 ? [`${key}=${value}`] : [];
+  });
 
 const resolveSudoUserFallback = (): { user: string; uid: string } | null => {
   const user = process.env.SUDO_USER?.trim() ?? "";
