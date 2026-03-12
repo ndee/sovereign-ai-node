@@ -1649,12 +1649,11 @@ const renderOnboardingPage = (input: {
   const alertRoomName = namedAlertRoom || "alert room";
   const escapedAlertRoomName = escapeHtml(alertRoomName);
   const alertRoomLabel =
+    namedAlertRoom.length > 0 ? `<code>${escapedAlertRoomName}</code>` : "the alert room";
+  const alertRoomLinkTarget =
     namedAlertRoom.length > 0
-      ? `<code>${escapedAlertRoomName}</code>`
-      : "the alert room";
-  const alertRoomLinkTarget = namedAlertRoom.length > 0
-    ? `the existing ${escapedAlertRoomName} room`
-    : "the existing alert room";
+      ? `the existing ${escapedAlertRoomName} room`
+      : "the existing alert room";
   const caSection =
     input.tlsMode === "internal"
       ? [
@@ -1671,12 +1670,12 @@ const renderOnboardingPage = (input: {
       ? "If the native app still cannot reach the server, it is rejecting the local CA or local-network setup. In that case use the browser path above. Vanadium and Brave may behave differently, so the copy buttons below remain the fallback path."
       : "The Android app button prefills the homeserver using Element Classic&apos;s documented deep link. If the app still drops you into a generic login flow, use the copy buttons below and paste the exact values manually.";
   const botGuidanceSection = [
-    "<section class=\"card\">",
+    '<section class="card">',
     "  <h2>After login: message the right bot</h2>",
     "  <ol>",
     "    <li>Use <strong>Node Operator</strong> for Sovereign Node status, installer health, and system operations.</li>",
     "    <li>Use <strong>Mail Sentinel</strong> for inbox summaries after IMAP is configured.</li>",
-    "    <li>Use " + alertRoomLabel + " for notifications and hello messages from both bots.</li>",
+    `    <li>Use ${alertRoomLabel} for notifications and hello messages from both bots.</li>`,
     "  </ol>",
     "</section>",
   ].join("\n");
@@ -1684,7 +1683,7 @@ const renderOnboardingPage = (input: {
     ? [
         '<section class="card">',
         "  <h2>After login: open the alert room</h2>",
-        "  <p>After login, use this button to jump directly into " + alertRoomLinkTarget + ".</p>",
+        `  <p>After login, use this button to jump directly into ${alertRoomLinkTarget}.</p>`,
         '  <a class="button button-secondary" href="' +
           escapeHtml(roomLink) +
           '" target="_blank" rel="noreferrer">Open Alert Room in Element Web</a>',
@@ -1801,7 +1800,7 @@ const renderOnboardingPage = (input: {
     "        <ol>",
     "          <li>Tap <strong>Bestätigung nicht möglich?</strong>.</li>",
     "          <li>Continue without verification or without secure backup.</li>",
-    "          <li>This is acceptable for " + alertRoomLabel + " because it is not configured as an encrypted room.</li>",
+    `          <li>This is acceptable for ${alertRoomLabel} because it is not configured as an encrypted room.</li>`,
     "        </ol>",
     "      </section>",
     botGuidanceSection,
