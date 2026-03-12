@@ -6640,7 +6640,6 @@ export default function (api) {
         matrix: {
           enabled: true,
           homeserver: runtimeConfig.matrix.adminBaseUrl,
-          userId: runtimeConfig.matrix.bot.userId,
           ...(!hasSharedServiceBot && preferredDefaultAccountId !== undefined
             ? { defaultAccount: preferredDefaultAccountId }
             : {}),
