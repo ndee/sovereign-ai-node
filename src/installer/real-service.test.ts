@@ -1639,7 +1639,7 @@ describe("RealInstallerService", () => {
       expect(openclawConfig.plugins?.entries?.matrix?.config).toBeUndefined();
       expect(openclawConfig.channels?.matrix?.enabled).toBe(true);
       expect(openclawConfig.channels?.matrix?.homeserver).toBe("http://127.0.0.1:8008");
-      expect(openclawConfig.channels?.matrix?.userId).toBe("@mail-sentinel:matrix.example.org");
+      expect(openclawConfig.channels?.matrix?.userId).toBeUndefined();
       expect(openclawConfig.channels?.matrix?.groupAllowFrom).toEqual([
         "@operator:matrix.example.org",
       ]);
@@ -6241,9 +6241,7 @@ describe("RealInstallerService", () => {
           };
         };
       };
-      expect(openclawConfig.channels?.matrix?.userId).toBe(
-        "@bitcoin-skill-match:matrix.example.org",
-      );
+      expect(openclawConfig.channels?.matrix?.userId).toBeUndefined();
       expect(openclawConfig.channels?.matrix?.defaultAccount).toBe("bitcoin-skill-match");
       expect(openclawConfig.bindings).toEqual([
         {
