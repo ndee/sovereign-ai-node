@@ -359,8 +359,7 @@ export class StubInstallerService implements InstallerService {
           id: "mail-sentinel",
           version: "1.0.0",
           displayName: "Mail Sentinel",
-          description:
-            "Conversational inbox sentinel for read-only IMAP triage and Matrix summaries.",
+          description: "Inbox triage bot for read-only IMAP summaries and Matrix alerting.",
           defaultInstall: true,
           templateRef: "mail-sentinel@1.0.0",
           installed: true,
@@ -372,7 +371,7 @@ export class StubInstallerService implements InstallerService {
           id: "node-operator",
           version: "1.0.0",
           displayName: "Node Operator",
-          description: "Conversational operator that manages Sovereign Node and managed agents.",
+          description: "Primary conversational operator for Sovereign Node and managed agents.",
           defaultInstall: false,
           templateRef: "node-operator@1.0.0",
           installed: false,

@@ -285,6 +285,9 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(onboardPage).toContain("The username and password are not embedded in this page.");
       expect(onboardPage).toContain("sudo sovereign-node onboarding issue");
       expect(onboardPage).toContain("Bestätigung nicht möglich?");
+      expect(onboardPage).toContain("After login: message the right bot");
+      expect(onboardPage).toContain("Node Operator");
+      expect(onboardPage).toContain("Mail Sentinel");
       expect(onboardPage).toContain("<svg");
       expect(onboardPage).not.toContain("/downloads/caddy-root-ca.crt");
       expect(recordedExecCalls).toHaveLength(2);
@@ -373,6 +376,9 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(onboardPage).toContain("Do not type only 192.168.0.54:8448.");
       expect(onboardPage).toContain("Vanadium and Brave may behave differently");
       expect(onboardPage).toContain("Bestätigung nicht möglich?");
+      expect(onboardPage).toContain("After login: message the right bot");
+      expect(onboardPage).toContain("Node Operator");
+      expect(onboardPage).toContain("Mail Sentinel");
       expect(onboardPage).toContain("<svg");
       expect(recordedExecCalls).toHaveLength(2);
       expect(recordedExecCalls.some((call) => call.command === "qrencode")).toBe(true);
@@ -546,6 +552,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       const req = buildInstallRequest();
       req.matrix.publicBaseUrl = "https://192.168.0.54:8448";
       req.matrix.tlsMode = "internal";
+      req.matrix.alertRoomName = "Alerts";
       const provision = await provisioner.provision(req);
       const accounts = await provisioner.bootstrapAccounts(req, provision);
       const room = await provisioner.bootstrapRoom(req, provision, accounts);
@@ -555,7 +562,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(accounts.operator.passwordSecretRef.startsWith("file:")).toBe(true);
       expect(accounts.bot.passwordSecretRef.startsWith("file:")).toBe(true);
       expect(room.roomId).toBe("!alerts:matrix.local.test");
-      expect(room.roomName).toBe("Sovereign Alerts");
+      expect(room.roomName).toBe("Alerts");
 
       const operatorSecretPath = accounts.operator.passwordSecretRef.slice("file:".length);
       const botSecretPath = accounts.bot.passwordSecretRef.slice("file:".length);
@@ -572,6 +579,9 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(onboardPage).toContain("The username and password are not embedded in this page.");
       expect(onboardPage).not.toContain(operatorPassword);
       expect(onboardPage).toContain("Open Alert Room in Element Web");
+      expect(onboardPage).toContain("existing Alerts room");
+      expect(onboardPage).toContain("Use <code>Alerts</code> for notifications");
+      expect(onboardPage).not.toContain("existing Sovereign Alerts room");
 
       const composeUpCalls = recordedExecCalls.filter(
         (call) => call.command === "docker" && (call.args ?? []).includes("up"),

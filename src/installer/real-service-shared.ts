@@ -170,9 +170,9 @@ export const MAIL_SENTINEL_AGENT_ID = "mail-sentinel";
 export const MAIL_SENTINEL_CRON_ID = "mail-sentinel-poll";
 export const NODE_OPERATOR_AGENT_ID = "node-operator";
 export const MAIL_SENTINEL_HELLO_MESSAGE =
-  "Hello from Mail Sentinel. I can summarize your latest 3 inbox mails.";
+  "Hello from Mail Sentinel. Ask me for inbox summaries after IMAP is configured.";
 export const NODE_OPERATOR_HELLO_MESSAGE =
-  "Hello from Node Operator. Ask me for Sovereign Node and system status.";
+  "Hello from Node Operator. DM me for Sovereign Node status, install health, and system checks.";
 export const NODE_CLI_OPS_TEMPLATE_REF = "node-cli-ops@1.0.0";
 export const IMAP_READONLY_TEMPLATE_REF = "imap-readonly@1.0.0";
 export const MAIL_SENTINEL_TEMPLATE_REF = "mail-sentinel@1.0.0";

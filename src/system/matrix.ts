@@ -249,6 +249,9 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         publicBaseUrl,
         homeserverDomain,
         tlsMode: resolveOnboardingMode(accessMode, tlsMode),
+        ...(req.matrix.alertRoomName?.trim()
+          ? { alertRoomName: req.matrix.alertRoomName.trim() }
+          : {}),
       });
     }
     await ensureDirectoryTreesWritable([synapseDir, postgresDir]);
@@ -509,6 +512,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         publicBaseUrl: provision.publicBaseUrl,
         homeserverDomain: provision.homeserverDomain,
         tlsMode: resolveOnboardingMode(provision.accessMode, provision.tlsMode),
+        alertRoomName: roomName,
         alertRoomId: roomId,
       });
     }
@@ -1213,6 +1217,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     publicBaseUrl: string;
     homeserverDomain: string;
     tlsMode: BundledMatrixOnboardingMode;
+    alertRoomName?: string;
     alertRoomId?: string;
   }): Promise<void> {
     const onboardingPageUrl = buildOnboardingPageUrl(input.publicBaseUrl);
@@ -1223,6 +1228,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       tlsMode: input.tlsMode,
       onboardingPageUrl,
       onboardingQrSvg,
+      ...(input.alertRoomName === undefined ? {} : { alertRoomName: input.alertRoomName }),
       ...(input.alertRoomId === undefined ? {} : { alertRoomId: input.alertRoomId }),
     });
     await writeFile(
@@ -1633,11 +1639,21 @@ const renderOnboardingPage = (input: {
   tlsMode: BundledMatrixOnboardingMode;
   onboardingPageUrl: string;
   onboardingQrSvg: string;
+  alertRoomName?: string;
   alertRoomId?: string;
 }): string => {
   const elementWebLink = buildElementWebLoginLink(input.publicBaseUrl);
   const elementAndroidLink = buildElementAndroidIntentLink(input.publicBaseUrl);
   const roomLink = input.alertRoomId ? buildElementWebRoomLink(input.alertRoomId) : "";
+  const namedAlertRoom = input.alertRoomName?.trim() ?? "";
+  const alertRoomName = namedAlertRoom || "alert room";
+  const escapedAlertRoomName = escapeHtml(alertRoomName);
+  const alertRoomLabel =
+    namedAlertRoom.length > 0 ? `<code>${escapedAlertRoomName}</code>` : "the alert room";
+  const alertRoomLinkTarget =
+    namedAlertRoom.length > 0
+      ? `the existing ${escapedAlertRoomName} room`
+      : "the existing alert room";
   const caSection =
     input.tlsMode === "internal"
       ? [
@@ -1653,11 +1669,21 @@ const renderOnboardingPage = (input: {
     input.tlsMode === "internal"
       ? "If the native app still cannot reach the server, it is rejecting the local CA or local-network setup. In that case use the browser path above. Vanadium and Brave may behave differently, so the copy buttons below remain the fallback path."
       : "The Android app button prefills the homeserver using Element Classic&apos;s documented deep link. If the app still drops you into a generic login flow, use the copy buttons below and paste the exact values manually.";
+  const botGuidanceSection = [
+    '<section class="card">',
+    "  <h2>After login: message the right bot</h2>",
+    "  <ol>",
+    "    <li>Use <strong>Node Operator</strong> for Sovereign Node status, installer health, and system operations.</li>",
+    "    <li>Use <strong>Mail Sentinel</strong> for inbox summaries after IMAP is configured.</li>",
+    `    <li>Use ${alertRoomLabel} for notifications and hello messages from both bots.</li>`,
+    "  </ol>",
+    "</section>",
+  ].join("\n");
   const roomSection = input.alertRoomId
     ? [
         '<section class="card">',
         "  <h2>After login: open the alert room</h2>",
-        "  <p>After login, use this button to jump directly into the existing Sovereign Alerts room.</p>",
+        `  <p>After login, use this button to jump directly into ${alertRoomLinkTarget}.</p>`,
         '  <a class="button button-secondary" href="' +
           escapeHtml(roomLink) +
           '" target="_blank" rel="noreferrer">Open Alert Room in Element Web</a>',
@@ -1774,9 +1800,10 @@ const renderOnboardingPage = (input: {
     "        <ol>",
     "          <li>Tap <strong>Bestätigung nicht möglich?</strong>.</li>",
     "          <li>Continue without verification or without secure backup.</li>",
-    "          <li>This is acceptable for the default Sovereign Alerts room because it is not configured as an encrypted room.</li>",
+    `          <li>This is acceptable for ${alertRoomLabel} because it is not configured as an encrypted room.</li>`,
     "        </ol>",
     "      </section>",
+    botGuidanceSection,
     roomSection,
     "    </div>",
     "  </main>",
