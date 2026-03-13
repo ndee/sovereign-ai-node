@@ -25,10 +25,9 @@ This file defines mandatory working rules for Codex agents contributing to this 
 
 ## Testing and VM requirements
 
-- Test every feature and bug fix end-to-end using the known VM.
-- Before starting work, determine whether VM access is required.
-- If VM access is required and credentials are not already available, ask for the VM credentials before beginning implementation or testing.
-- Do not mark work complete until end-to-end validation has been performed on the known VM.
+- Test every feature and bug fix end-to-end when VM validation is required.
+- Use the shared launcher and VM policy from the `scripts` repo for dev/prod VM access instead of assuming a fixed known VM.
+- Do not mark work complete until end-to-end validation has been performed according to the shared VM policy.
 
 ## Compliance
 
