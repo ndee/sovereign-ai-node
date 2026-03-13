@@ -44,6 +44,58 @@ export const imapReadMailResultSchema = z.object({
 export type ImapSearchMailResult = z.infer<typeof imapSearchMailResultSchema>;
 export type ImapReadMailResult = z.infer<typeof imapReadMailResultSchema>;
 
+export const mailSentinelCategorySchema = z.enum([
+  "decision-required",
+  "financial-relevance",
+  "risk-escalation",
+]);
+
+export const mailSentinelAlertSummarySchema = z.object({
+  alertId: z.string().min(1),
+  kind: z.enum(["new-alert", "reminder"]),
+  category: mailSentinelCategorySchema,
+  subject: z.string(),
+  from: z.string(),
+  why: z.string().min(1),
+  sentAt: z.string().min(1),
+  messageId: z.string().min(1).optional(),
+  feedbackState: z.enum(["pending", "important", "not-important", "less-often"]).optional(),
+});
+
+export const mailSentinelScanResultSchema = z.object({
+  instanceId: z.string().min(1),
+  configured: z.boolean(),
+  lookbackWindow: z.string().min(1),
+  processedMessages: z.number().int().nonnegative(),
+  newMessages: z.number().int().nonnegative(),
+  alertsSent: z.number().int().nonnegative(),
+  remindersSent: z.number().int().nonnegative(),
+  lastPollAt: z.string().min(1),
+  note: z.string().min(1).optional(),
+  alerts: z.array(mailSentinelAlertSummarySchema),
+});
+
+export const mailSentinelFeedbackResultSchema = z.object({
+  instanceId: z.string().min(1),
+  alertId: z.string().min(1),
+  action: z.enum(["important", "not-important", "less-often", "remind-later"]),
+  changed: z.boolean(),
+  note: z.string().min(1),
+  nextReminderAt: z.string().min(1).optional(),
+});
+
+export const mailSentinelListAlertsResultSchema = z.object({
+  instanceId: z.string().min(1),
+  view: z.enum(["today", "recent"]),
+  count: z.number().int().nonnegative(),
+  alerts: z.array(mailSentinelAlertSummarySchema),
+});
+
+export type MailSentinelCategory = z.infer<typeof mailSentinelCategorySchema>;
+export type MailSentinelScanResult = z.infer<typeof mailSentinelScanResultSchema>;
+export type MailSentinelFeedbackResult = z.infer<typeof mailSentinelFeedbackResultSchema>;
+export type MailSentinelListAlertsResult = z.infer<typeof mailSentinelListAlertsResultSchema>;
+
 export const guardedJsonStateRecordSchema = z.record(z.string(), z.unknown());
 
 export const guardedJsonStateShowResultSchema = z.object({

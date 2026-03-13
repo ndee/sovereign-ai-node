@@ -48,6 +48,7 @@ const botCronSchema = z.object({
   everyConfigKey: z.string().min(1).optional(),
   defaultEvery: z.string().min(1).optional(),
   session: z.enum(["isolated"]).optional(),
+  announce: z.boolean().optional(),
   message: z.string().min(1),
 });
 
@@ -88,6 +89,7 @@ const agentTemplateSchema = z.object({
   id: z.string().min(1),
   version: z.string().min(1),
   description: z.string().min(1),
+  model: z.string().min(1).optional(),
   matrix: z.object({
     localpartPrefix: z.string().min(1),
   }),
@@ -246,6 +248,7 @@ export class FilesystemBotCatalog implements BotCatalog {
       id: manifest.agentTemplate.id,
       version: manifest.agentTemplate.version,
       description: manifest.agentTemplate.description,
+      ...(manifest.agentTemplate.model === undefined ? {} : { model: manifest.agentTemplate.model }),
       matrix: {
         localpartPrefix: manifest.agentTemplate.matrix.localpartPrefix,
       },

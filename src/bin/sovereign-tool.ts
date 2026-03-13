@@ -7,6 +7,9 @@ import {
   type GuardedJsonStateListResult,
   type GuardedJsonStateMutationResult,
   type GuardedJsonStateShowResult,
+  type MailSentinelFeedbackResult,
+  type MailSentinelListAlertsResult,
+  type MailSentinelScanResult,
   guardedJsonStateListResultSchema,
   guardedJsonStateMutationResultSchema,
   guardedJsonStateShowResultSchema,
@@ -14,6 +17,9 @@ import {
   type ImapSearchMailResult,
   imapReadMailResultSchema,
   imapSearchMailResultSchema,
+  mailSentinelFeedbackResultSchema,
+  mailSentinelListAlertsResultSchema,
+  mailSentinelScanResultSchema,
 } from "../contracts/tool.js";
 import {
   GuardedJsonStateToolService,
@@ -21,6 +27,12 @@ import {
   resolveMatrixActorFromSessionStatus,
 } from "../tooling/guarded-json-state.js";
 import { ImapReadonlyToolService } from "../tooling/imap-readonly.js";
+import {
+  formatMailSentinelFeedbackResult,
+  formatMailSentinelListAlertsResult,
+  formatMailSentinelScanResult,
+  MailSentinelToolService,
+} from "../tooling/mail-sentinel.js";
 
 const parsePositiveInteger = (value: string): number => {
   const parsed = Number.parseInt(value, 10);
@@ -225,9 +237,140 @@ const resolveMutationInput = (opts: {
 const main = async (): Promise<void> => {
   const toolService = new ImapReadonlyToolService();
   const guardedStateService = new GuardedJsonStateToolService();
+  const mailSentinelService = new MailSentinelToolService();
   const program = new Command()
     .name("sovereign-tool")
     .description("Execute trusted Sovereign tool instances");
+
+  program
+    .command("mail-sentinel-scan")
+    .requiredOption("--instance <id>", "Tool instance ID")
+    .option("--config-path <path>", "Override Sovereign runtime config path")
+    .option("--json", "Emit JSON output")
+    .action(async (opts: { instance: string; configPath?: string; json?: boolean }) => {
+      const command = "mail-sentinel-scan";
+      try {
+        const result = await mailSentinelService.scan({
+          instanceId: opts.instance,
+          ...(opts.configPath === undefined ? {} : { configPath: opts.configPath }),
+        });
+        if (opts.json) {
+          writeCliSuccess<MailSentinelScanResult>(command, result, mailSentinelScanResultSchema, true);
+          return;
+        }
+        process.stdout.write(`${formatMailSentinelScanResult(result)}\n`);
+      } catch (error) {
+        writeCliError(command, error, Boolean(opts.json));
+        process.exitCode = 1;
+      }
+    });
+
+  program
+    .command("mail-sentinel-feedback")
+    .requiredOption("--instance <id>", "Tool instance ID")
+    .requiredOption(
+      "--action <value>",
+      "important, not-important, less-often, or remind-later",
+    )
+    .option("--alert-id <id>", "Specific Mail Sentinel alert ID")
+    .option("--latest", "Apply to the latest alert")
+    .option("--delay <duration>", "Reminder delay like 30m, 4h, or 2d")
+    .option("--config-path <path>", "Override Sovereign runtime config path")
+    .option("--json", "Emit JSON output")
+    .action(
+      async (opts: {
+        instance: string;
+        action: string;
+        alertId?: string;
+        latest?: boolean;
+        delay?: string;
+        configPath?: string;
+        json?: boolean;
+      }) => {
+        const command = "mail-sentinel-feedback";
+        try {
+          const normalizedAction = opts.action.trim().toLowerCase();
+          if (
+            normalizedAction !== "important" &&
+            normalizedAction !== "not-important" &&
+            normalizedAction !== "less-often" &&
+            normalizedAction !== "remind-later"
+          ) {
+            throw new InvalidArgumentError(
+              "Expected --action to be important, not-important, less-often, or remind-later",
+            );
+          }
+          if ((opts.alertId === undefined && opts.latest !== true) || (opts.alertId && opts.latest)) {
+            throw new InvalidArgumentError("Use either --alert-id or --latest");
+          }
+          const result = await mailSentinelService.applyFeedback({
+            instanceId: opts.instance,
+            action: normalizedAction,
+            ...(opts.alertId === undefined ? {} : { alertId: opts.alertId }),
+            ...(opts.latest === true ? { latest: true } : {}),
+            ...(opts.delay === undefined ? {} : { delay: opts.delay }),
+            ...(opts.configPath === undefined ? {} : { configPath: opts.configPath }),
+          });
+          if (opts.json) {
+            writeCliSuccess<MailSentinelFeedbackResult>(
+              command,
+              result,
+              mailSentinelFeedbackResultSchema,
+              true,
+            );
+            return;
+          }
+          process.stdout.write(`${formatMailSentinelFeedbackResult(result)}\n`);
+        } catch (error) {
+          writeCliError(command, error, Boolean(opts.json));
+          process.exitCode = 1;
+        }
+      },
+    );
+
+  program
+    .command("mail-sentinel-list-alerts")
+    .requiredOption("--instance <id>", "Tool instance ID")
+    .requiredOption("--view <value>", "today or recent")
+    .option("--limit <count>", "Maximum alerts to return", parsePositiveInteger)
+    .option("--config-path <path>", "Override Sovereign runtime config path")
+    .option("--json", "Emit JSON output")
+    .action(
+      async (opts: {
+        instance: string;
+        view: string;
+        limit?: number;
+        configPath?: string;
+        json?: boolean;
+      }) => {
+        const command = "mail-sentinel-list-alerts";
+        try {
+          const normalizedView = opts.view.trim().toLowerCase();
+          if (normalizedView !== "today" && normalizedView !== "recent") {
+            throw new InvalidArgumentError("Expected --view to be today or recent");
+          }
+          const result = await mailSentinelService.listAlerts({
+            instanceId: opts.instance,
+            view: normalizedView,
+            ...(opts.limit === undefined ? {} : { limit: opts.limit }),
+            ...(opts.configPath === undefined ? {} : { configPath: opts.configPath }),
+          });
+          if (opts.json) {
+            writeCliSuccess<MailSentinelListAlertsResult>(
+              command,
+              result,
+              mailSentinelListAlertsResultSchema,
+              true,
+            );
+            return;
+          }
+          process.stdout.write(`${formatMailSentinelListAlertsResult(result)}\n`);
+        } catch (error) {
+          writeCliError(command, error, Boolean(opts.json));
+          process.exitCode = 1;
+        }
+      },
+    );
 
   program
     .command("imap-search-mail")

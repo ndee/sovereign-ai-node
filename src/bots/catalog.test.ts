@@ -39,6 +39,7 @@ const writeBotPackage = async (
     id: string;
     displayName: string;
     defaultInstall: boolean;
+    agentTemplateModel?: string;
     matrixRouting?: {
       defaultAccount?: boolean;
       dm?: {
@@ -77,6 +78,9 @@ const writeBotPackage = async (
           id: input.id,
           version: "1.0.0",
           description: `${input.displayName} template`,
+          ...(input.agentTemplateModel === undefined
+            ? {}
+            : { model: input.agentTemplateModel }),
           matrix: {
             localpartPrefix: input.id,
           },
@@ -117,6 +121,7 @@ describe("FilesystemBotCatalog", () => {
       id: "mail-sentinel",
       displayName: "Mail Sentinel",
       defaultInstall: true,
+      agentTemplateModel: "qwen/qwen-2.5-32b-instruct",
     });
     await writeBotPackage(tempRoot, {
       id: "node-operator",
@@ -130,6 +135,7 @@ describe("FilesystemBotCatalog", () => {
     expect(packages.map((entry) => entry.manifest.id)).toEqual(["mail-sentinel", "node-operator"]);
     expect(packages[0]?.templateRef).toBe("mail-sentinel@1.0.0");
     expect(packages[0]?.manifest.matrixRouting).toBeUndefined();
+    expect(packages[0]?.template.model).toBe("qwen/qwen-2.5-32b-instruct");
     expect(packages[0]?.template.workspaceFiles).toEqual([
       {
         path: "README.md",

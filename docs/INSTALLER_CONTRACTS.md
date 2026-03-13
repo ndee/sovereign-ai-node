@@ -91,6 +91,7 @@ Current core templates in the bundled profile:
   - `mail-sentinel@1.0.0`
   - `node-operator@1.0.0`
 - Tool templates:
+  - `mail-sentinel-tool@1.0.0`
   - `imap-readonly@1.0.0`
   - `node-cli-ops@1.0.0`
 

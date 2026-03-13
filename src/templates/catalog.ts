@@ -28,6 +28,7 @@ export type AgentTemplateManifest = {
   id: string;
   version: string;
   description: string;
+  model?: string;
   matrix: {
     localpartPrefix: string;
   };

@@ -74,6 +74,7 @@ import type {
   ManagedAgentRegistrationResult,
   OpenClawManagedAgentRegistrar,
 } from "../openclaw/managed-agent.js";
+import { readMailSentinelStatusSummary, resolveMailSentinelStatePath } from "../tooling/mail-sentinel.js";
 import type { ExecResult, ExecRunner } from "../system/exec.js";
 import type { ImapTester } from "../system/imap.js";
 import type {
@@ -700,6 +701,43 @@ export class RealInstallerService implements InstallerService {
           ? "degraded"
           : "unhealthy";
     const sovereignHealth: ComponentHealth = runtimeConfig === null ? "degraded" : "healthy";
+    let mailSentinelStatus: {
+      lastPollAt?: string;
+      lastAlertAt?: string;
+      lastError?: {
+        code: string;
+        message: string;
+        retryable: boolean;
+      };
+      consecutiveFailures: number;
+    } = {
+      consecutiveFailures: 0,
+    };
+    if (runtimeConfig !== null) {
+      const statePath = resolveMailSentinelStatePath(runtimeConfig);
+      if (statePath !== null) {
+        try {
+          const summary = await readMailSentinelStatusSummary(statePath);
+          if (summary !== null) {
+            mailSentinelStatus = {
+              consecutiveFailures: summary.consecutiveFailures,
+              ...(summary.lastPollAt === undefined ? {} : { lastPollAt: summary.lastPollAt }),
+              ...(summary.lastAlertAt === undefined ? {} : { lastAlertAt: summary.lastAlertAt }),
+              ...(summary.lastError === undefined ? {} : { lastError: summary.lastError }),
+            };
+          }
+        } catch (error) {
+          mailSentinelStatus = {
+            consecutiveFailures: 0,
+            lastError: {
+              code: "MAIL_SENTINEL_STATE_READ_FAILED",
+              message: error instanceof Error ? error.message : String(error),
+              retryable: false,
+            },
+          };
+        }
+      }
+    }
 
     return {
       mode: "bundled_matrix",
@@ -782,7 +820,7 @@ export class RealInstallerService implements InstallerService {
       },
       mailSentinel: {
         agentId: MAIL_SENTINEL_AGENT_ID,
-        consecutiveFailures: 0,
+        ...mailSentinelStatus,
       },
       imap: {
         authStatus: "unknown",
@@ -2134,6 +2172,13 @@ export class RealInstallerService implements InstallerService {
       return [
         "  note: use `sovereign-node onboarding issue` when the operator wants to sign into an existing account on another device",
         `  note: use bare localparts like \`satoshi\`; \`users invite\` defaults to ${String(DEFAULT_MATRIX_USER_INVITE_TTL_MINUTES)} minutes`,
+      ];
+    }
+    if (manifest.id === "mail-sentinel-tool") {
+      return [
+        "  note: use `mail-sentinel-scan` for background polling; do not summarize the inbox manually during cron runs",
+        "  note: use `mail-sentinel-list-alerts --view today` for 'What is important today?' requests",
+        "  note: use `mail-sentinel-feedback --latest` only when the user clearly refers to the newest alert; otherwise pass `--alert-id` explicitly",
       ];
     }
     return [];
@@ -5124,7 +5169,9 @@ export default function (api) {
                       id: cronEntry.id,
                       every: cronEntry.every,
                       message: botPackage.manifest.openclaw.cron.message,
-                      announceRoomId: runtimeConfig.matrix.alertRoom.roomId,
+                      ...(botPackage.manifest.openclaw.cron.announce === false
+                        ? {}
+                        : { announceRoomId: runtimeConfig.matrix.alertRoom.roomId }),
                       ...(botPackage.manifest.openclaw.cron.session === undefined
                         ? {}
                         : { session: botPackage.manifest.openclaw.cron.session }),
@@ -6221,7 +6268,8 @@ export default function (api) {
           ),
         )
         .map((tool: RuntimeConfig["sovereignTools"]["instances"][number]) => tool.id);
-      const configuredModel = selectedBotConfig[botPackage.manifest.id]?.model;
+      const configuredModel =
+        selectedBotConfig[botPackage.manifest.id]?.model ?? botPackage.template.model;
       return {
         id: botPackage.manifest.id,
         workspace: join(this.paths.stateDir, botPackage.manifest.id, "workspace"),
