@@ -12,7 +12,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import type {
   BotCatalog,
   BotConfigRecord,
@@ -74,7 +74,6 @@ import type {
   ManagedAgentRegistrationResult,
   OpenClawManagedAgentRegistrar,
 } from "../openclaw/managed-agent.js";
-import { readMailSentinelStatusSummary, resolveMailSentinelStatePath } from "../tooling/mail-sentinel.js";
 import type { ExecResult, ExecRunner } from "../system/exec.js";
 import type { ImapTester } from "../system/imap.js";
 import type {
@@ -714,10 +713,10 @@ export class RealInstallerService implements InstallerService {
       consecutiveFailures: 0,
     };
     if (runtimeConfig !== null) {
-      const statePath = resolveMailSentinelStatePath(runtimeConfig);
+      const statePath = this.resolveMailSentinelStatePath(runtimeConfig);
       if (statePath !== null) {
         try {
-          const summary = await readMailSentinelStatusSummary(statePath);
+          const summary = await this.readMailSentinelStatusSummary(statePath);
           if (summary !== null) {
             mailSentinelStatus = {
               consecutiveFailures: summary.consecutiveFailures,
@@ -2112,8 +2111,37 @@ export class RealInstallerService implements InstallerService {
       );
   }
 
-  private renderSovereignToolCommand(toolInstanceId: string, command: string): string {
-    const rendered = command.replaceAll("<tool-instance-id>", toolInstanceId);
+  private resolveSovereignToolCommandContext(
+    runtimeConfig: RuntimeConfig,
+    toolInstanceId: string,
+  ): {
+    agentWorkspace?: string;
+  } {
+    const tool = runtimeConfig.sovereignTools.instances.find((entry) => entry.id === toolInstanceId);
+    const configuredAgentId = tool?.config.agentId;
+    const agent =
+      (typeof configuredAgentId === "string"
+        ? runtimeConfig.openclawProfile.agents.find((entry) => entry.id === configuredAgentId)
+        : undefined) ??
+      runtimeConfig.openclawProfile.agents.find((entry) => entry.toolInstanceIds?.includes(toolInstanceId));
+    return {
+      ...(agent === undefined ? {} : { agentWorkspace: agent.workspace }),
+    };
+  }
+
+  private renderSovereignToolCommand(
+    runtimeConfig: RuntimeConfig,
+    toolInstanceId: string,
+    command: string,
+  ): string {
+    const context = this.resolveSovereignToolCommandContext(runtimeConfig, toolInstanceId);
+    let rendered = command.replaceAll("<tool-instance-id>", toolInstanceId);
+    if (rendered.includes("<agent-workspace>")) {
+      if (context.agentWorkspace === undefined) {
+        throw new Error(`Tool instance '${toolInstanceId}' is missing an agent workspace binding`);
+      }
+      rendered = rendered.replaceAll("<agent-workspace>", context.agentWorkspace);
+    }
     const [executable, ...rest] = rendered.split(" ");
     const resolvedExecutable =
       executable === undefined ? "" : (SOVEREIGN_EXECUTABLE_PATHS[executable] ?? executable);
@@ -2121,27 +2149,32 @@ export class RealInstallerService implements InstallerService {
   }
 
   private listDocumentedSovereignToolCommands(
+    runtimeConfig: RuntimeConfig,
     toolInstanceId: string,
     manifest: ToolTemplateDefinition,
   ): string[] {
     const commands = manifest.allowedCommands.map((command) =>
-      this.renderSovereignToolCommand(toolInstanceId, command),
+      this.renderSovereignToolCommand(runtimeConfig, toolInstanceId, command),
     );
     if (manifest.id === "node-cli-ops") {
       commands.push(
         this.renderSovereignToolCommand(
+          runtimeConfig,
           toolInstanceId,
           "sovereign-node onboarding issue --ttl-minutes <minutes> --json",
         ),
         this.renderSovereignToolCommand(
+          runtimeConfig,
           toolInstanceId,
           "sovereign-node users invite <username> --json",
         ),
         this.renderSovereignToolCommand(
+          runtimeConfig,
           toolInstanceId,
           "sovereign-node users invite <username> --ttl-minutes <minutes> --json",
         ),
         this.renderSovereignToolCommand(
+          runtimeConfig,
           toolInstanceId,
           "sovereign-node users remove <username> --json",
         ),
@@ -2176,12 +2209,71 @@ export class RealInstallerService implements InstallerService {
     }
     if (manifest.id === "mail-sentinel-tool") {
       return [
-        "  note: use `mail-sentinel-scan` for background polling; do not summarize the inbox manually during cron runs",
-        "  note: use `mail-sentinel-list-alerts --view today` for 'What is important today?' requests",
-        "  note: use `mail-sentinel-feedback --latest` only when the user clearly refers to the newest alert; otherwise pass `--alert-id` explicitly",
+        "  note: use the Mail Sentinel workspace helper `scan` command for background polling; do not summarize the inbox manually during cron runs",
+        "  note: use the Mail Sentinel workspace helper `list-alerts --view today` for 'What is important today?' requests",
+        "  note: use the Mail Sentinel workspace helper `feedback --latest` only when the user clearly refers to the newest alert; otherwise pass `--alert-id` explicitly",
       ];
     }
     return [];
+  }
+
+  private resolveMailSentinelStatePath(runtimeConfig: RuntimeConfig): string | null {
+    const agent = runtimeConfig.openclawProfile.agents.find((entry) => entry.id === MAIL_SENTINEL_AGENT_ID);
+    if (agent === undefined) {
+      return null;
+    }
+    const configured = runtimeConfig.bots.config[MAIL_SENTINEL_AGENT_ID]?.statePath;
+    const statePath = typeof configured === "string" && configured.trim().length > 0
+      ? configured
+      : "data/mail-sentinel-state.json";
+    return isAbsolute(statePath) ? statePath : resolve(agent.workspace, statePath);
+  }
+
+  private async readMailSentinelStatusSummary(statePath: string): Promise<{
+    lastPollAt?: string;
+    lastAlertAt?: string;
+    lastError?: {
+      code: string;
+      message: string;
+      retryable: boolean;
+    };
+    consecutiveFailures: number;
+  } | null> {
+    try {
+      const raw = await readFile(statePath, "utf8");
+      const parsed = JSON.parse(raw) as {
+        lastPollAt?: unknown;
+        lastAlertAt?: unknown;
+        lastError?: {
+          code?: unknown;
+          message?: unknown;
+          retryable?: unknown;
+        };
+        consecutiveFailures?: unknown;
+      };
+      return {
+        ...(typeof parsed.lastPollAt === "string" ? { lastPollAt: parsed.lastPollAt } : {}),
+        ...(typeof parsed.lastAlertAt === "string" ? { lastAlertAt: parsed.lastAlertAt } : {}),
+        ...(typeof parsed.lastError?.code === "string" && typeof parsed.lastError?.message === "string"
+          ? {
+              lastError: {
+                code: parsed.lastError.code,
+                message: parsed.lastError.message,
+                retryable: parsed.lastError.retryable === true,
+              },
+            }
+          : {}),
+        consecutiveFailures:
+          typeof parsed.consecutiveFailures === "number" && Number.isInteger(parsed.consecutiveFailures)
+            ? parsed.consecutiveFailures
+            : 0,
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+        return null;
+      }
+      throw error;
+    }
   }
 
   private listDocumentedOpenClawToolNames(manifest: ToolTemplateDefinition): string[] {
@@ -2565,7 +2657,7 @@ export default function (api) {
     for (const tool of this.resolveBoundToolInstances(runtimeConfig, toolInstanceIds)) {
       const manifest = await this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef);
       for (const command of manifest.allowedCommands) {
-        const rendered = this.renderSovereignToolCommand(tool.id, command);
+        const rendered = this.renderSovereignToolCommand(runtimeConfig, tool.id, command);
         const [executable] = rendered.split(" ");
         if (executable?.startsWith("/")) {
           patterns.add(executable);
@@ -3573,7 +3665,7 @@ export default function (api) {
         ...this.listDocumentedOpenClawToolNames(manifest).map(
           (toolName) => `  openclaw-tool: \`${toolName}\``,
         ),
-        ...this.listDocumentedSovereignToolCommands(tool.id, manifest).map(
+        ...this.listDocumentedSovereignToolCommands(input.runtimeConfig, tool.id, manifest).map(
           (command) => `  command: \`${command}\``,
         ),
         ...this.listDocumentedSovereignToolNotes(manifest),
@@ -3591,6 +3683,9 @@ export default function (api) {
         toolSection: toolLines.join("\n"),
       });
       await writeFile(targetPath, `${rendered}\n`, "utf8");
+      if (file.mode !== undefined) {
+        await chmod(targetPath, Number.parseInt(file.mode, 8));
+      }
       await this.applyRuntimeOwnership(targetPath);
     }
     await this.writeManagedOpenClawExtensions({

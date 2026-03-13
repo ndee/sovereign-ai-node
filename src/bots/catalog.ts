@@ -70,6 +70,7 @@ const matrixRoutingSchema = z.object({
 const workspaceFileSchema = z.object({
   path: z.string().min(1),
   source: z.string().min(1),
+  mode: z.string().regex(/^[0-7]{3,4}$/).optional(),
 });
 
 const toolTemplateSchema = z.object({
@@ -240,6 +241,7 @@ export class FilesystemBotCatalog implements BotCatalog {
         async (file: SovereignBotPackageManifest["agentTemplate"]["workspaceFiles"][number]) => ({
           path: file.path,
           content: await readFile(join(packageDir, file.source), "utf8"),
+          ...(file.mode === undefined ? {} : { mode: file.mode }),
         }),
       ),
     );

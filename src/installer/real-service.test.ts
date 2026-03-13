@@ -94,7 +94,7 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
     requiredToolTemplates?: Array<{ id: string; version: string }>;
     optionalToolTemplates?: Array<{ id: string; version: string }>;
     agentTemplateModel?: string;
-    extraWorkspaceFiles?: Array<{ path: string; source: string; content: string }>;
+    extraWorkspaceFiles?: Array<{ path: string; source: string; content: string; mode?: string }>;
   }): Promise<void> => {
     const packageDir = join(rootDir, "bots", input.id);
     await mkdir(join(packageDir, "workspace", "skills", `${input.id}-core`), { recursive: true });
@@ -166,6 +166,7 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
               ...(input.extraWorkspaceFiles ?? []).map((file) => ({
                 path: file.path,
                 source: file.source,
+                ...(file.mode === undefined ? {} : { mode: file.mode }),
               })),
             ],
           },
@@ -260,6 +261,7 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
     },
     configDefaults: {
       agentId: "mail-sentinel",
+      imapInstanceId: "mail-sentinel-imap",
       pollInterval: "5m",
       lookbackWindow: "15m",
       defaultReminderDelay: "4h",
@@ -280,24 +282,59 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
           "mail-sentinel.alerts.read",
         ],
         requiredSecretRefs: [],
-        requiredConfigKeys: ["agentId", "statePath", "rulesPath"],
+        requiredConfigKeys: ["agentId", "imapInstanceId", "statePath", "rulesPath"],
         allowedCommands: [
-          "sovereign-tool mail-sentinel-scan --instance <tool-instance-id> --json",
-          "sovereign-tool mail-sentinel-list-alerts --instance <tool-instance-id> --view today --json",
-          "sovereign-tool mail-sentinel-list-alerts --instance <tool-instance-id> --view recent --json",
-          "sovereign-tool mail-sentinel-feedback --instance <tool-instance-id> --latest --action important --json",
-          "sovereign-tool mail-sentinel-feedback --instance <tool-instance-id> --alert-id <alert-id> --action important --json",
-          "sovereign-tool mail-sentinel-feedback --instance <tool-instance-id> --alert-id <alert-id> --action remind-later --delay <duration> --json",
+          "<agent-workspace>/bin/mail-sentinel.mjs scan --instance <tool-instance-id> --json",
+          "<agent-workspace>/bin/mail-sentinel.mjs list-alerts --instance <tool-instance-id> --view today --json",
+          "<agent-workspace>/bin/mail-sentinel.mjs list-alerts --instance <tool-instance-id> --view recent --json",
+          "<agent-workspace>/bin/mail-sentinel.mjs feedback --instance <tool-instance-id> --latest --action important --json",
+          "<agent-workspace>/bin/mail-sentinel.mjs feedback --instance <tool-instance-id> --alert-id <alert-id> --action important --json",
+          "<agent-workspace>/bin/mail-sentinel.mjs feedback --instance <tool-instance-id> --alert-id <alert-id> --action remind-later --delay <duration> --json",
         ],
       },
     ],
     toolInstances: [
+      {
+        id: "mail-sentinel-imap",
+        templateRef: "imap-readonly@1.0.0",
+        enabledWhen: {
+          path: "imap.status",
+          equals: "configured",
+        },
+        config: {
+          host: {
+            from: "imap.host",
+          },
+          port: {
+            from: "imap.port",
+            stringify: true,
+          },
+          tls: {
+            from: "imap.tls",
+            stringify: true,
+          },
+          username: {
+            from: "imap.username",
+          },
+          mailbox: {
+            from: "imap.mailbox",
+          },
+        },
+        secretRefs: {
+          password: {
+            from: "imap.secretRef",
+          },
+        },
+      },
       {
         id: "mail-sentinel-core",
         templateRef: "mail-sentinel-tool@1.0.0",
         config: {
           agentId: {
             from: "bots.config.mail-sentinel.agentId",
+          },
+          imapInstanceId: {
+            from: "bots.config.mail-sentinel.imapInstanceId",
           },
           statePath: {
             from: "bots.config.mail-sentinel.statePath",
@@ -331,10 +368,20 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
         id: "mail-sentinel-tool",
         version: "1.0.0",
       },
+      {
+        id: "imap-readonly",
+        version: "1.0.0",
+      },
     ],
     optionalToolTemplates: [],
     agentTemplateModel: "qwen/qwen-2.5-32b-instruct",
     extraWorkspaceFiles: [
+      {
+        path: "bin/mail-sentinel.mjs",
+        source: "workspace/bin/mail-sentinel.mjs",
+        content: "#!/usr/bin/env node\n",
+        mode: "755",
+      },
       {
         path: "config/default-rules.json",
         source: "workspace/config/default-rules.json",
@@ -1778,10 +1825,10 @@ describe("RealInstallerService", () => {
         "Use only the documented OpenClaw tools or CLI commands listed below.",
       );
       expect(mailSentinelToolsRaw).toContain(
-        "/usr/local/bin/sovereign-tool mail-sentinel-scan --instance mail-sentinel-core --json",
+        `${join(paths.stateDir, "mail-sentinel", "workspace", "bin", "mail-sentinel.mjs")} scan --instance mail-sentinel-core --json`,
       );
       expect(mailSentinelToolsRaw).toContain(
-        "/usr/local/bin/sovereign-tool mail-sentinel-list-alerts --instance mail-sentinel-core --view today --json",
+        `${join(paths.stateDir, "mail-sentinel", "workspace", "bin", "mail-sentinel.mjs")} list-alerts --instance mail-sentinel-core --view today --json`,
       );
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
