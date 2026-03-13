@@ -70,7 +70,10 @@ const matrixRoutingSchema = z.object({
 const workspaceFileSchema = z.object({
   path: z.string().min(1),
   source: z.string().min(1),
-  mode: z.string().regex(/^[0-7]{3,4}$/).optional(),
+  mode: z
+    .string()
+    .regex(/^[0-7]{3,4}$/)
+    .optional(),
 });
 
 const toolTemplateSchema = z.object({
@@ -250,7 +253,9 @@ export class FilesystemBotCatalog implements BotCatalog {
       id: manifest.agentTemplate.id,
       version: manifest.agentTemplate.version,
       description: manifest.agentTemplate.description,
-      ...(manifest.agentTemplate.model === undefined ? {} : { model: manifest.agentTemplate.model }),
+      ...(manifest.agentTemplate.model === undefined
+        ? {}
+        : { model: manifest.agentTemplate.model }),
       matrix: {
         localpartPrefix: manifest.agentTemplate.matrix.localpartPrefix,
       },

@@ -2117,13 +2117,17 @@ export class RealInstallerService implements InstallerService {
   ): {
     agentWorkspace?: string;
   } {
-    const tool = runtimeConfig.sovereignTools.instances.find((entry) => entry.id === toolInstanceId);
+    const tool = runtimeConfig.sovereignTools.instances.find(
+      (entry) => entry.id === toolInstanceId,
+    );
     const configuredAgentId = tool?.config.agentId;
     const agent =
       (typeof configuredAgentId === "string"
         ? runtimeConfig.openclawProfile.agents.find((entry) => entry.id === configuredAgentId)
         : undefined) ??
-      runtimeConfig.openclawProfile.agents.find((entry) => entry.toolInstanceIds?.includes(toolInstanceId));
+      runtimeConfig.openclawProfile.agents.find((entry) =>
+        entry.toolInstanceIds?.includes(toolInstanceId),
+      );
     return {
       ...(agent === undefined ? {} : { agentWorkspace: agent.workspace }),
     };
@@ -2218,14 +2222,17 @@ export class RealInstallerService implements InstallerService {
   }
 
   private resolveMailSentinelStatePath(runtimeConfig: RuntimeConfig): string | null {
-    const agent = runtimeConfig.openclawProfile.agents.find((entry) => entry.id === MAIL_SENTINEL_AGENT_ID);
+    const agent = runtimeConfig.openclawProfile.agents.find(
+      (entry) => entry.id === MAIL_SENTINEL_AGENT_ID,
+    );
     if (agent === undefined) {
       return null;
     }
     const configured = runtimeConfig.bots.config[MAIL_SENTINEL_AGENT_ID]?.statePath;
-    const statePath = typeof configured === "string" && configured.trim().length > 0
-      ? configured
-      : "data/mail-sentinel-state.json";
+    const statePath =
+      typeof configured === "string" && configured.trim().length > 0
+        ? configured
+        : "data/mail-sentinel-state.json";
     return isAbsolute(statePath) ? statePath : resolve(agent.workspace, statePath);
   }
 
@@ -2254,7 +2261,8 @@ export class RealInstallerService implements InstallerService {
       return {
         ...(typeof parsed.lastPollAt === "string" ? { lastPollAt: parsed.lastPollAt } : {}),
         ...(typeof parsed.lastAlertAt === "string" ? { lastAlertAt: parsed.lastAlertAt } : {}),
-        ...(typeof parsed.lastError?.code === "string" && typeof parsed.lastError?.message === "string"
+        ...(typeof parsed.lastError?.code === "string" &&
+        typeof parsed.lastError?.message === "string"
           ? {
               lastError: {
                 code: parsed.lastError.code,
@@ -2264,7 +2272,8 @@ export class RealInstallerService implements InstallerService {
             }
           : {}),
         consecutiveFailures:
-          typeof parsed.consecutiveFailures === "number" && Number.isInteger(parsed.consecutiveFailures)
+          typeof parsed.consecutiveFailures === "number" &&
+          Number.isInteger(parsed.consecutiveFailures)
             ? parsed.consecutiveFailures
             : 0,
       };

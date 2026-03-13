@@ -78,9 +78,7 @@ const writeBotPackage = async (
           id: input.id,
           version: "1.0.0",
           description: `${input.displayName} template`,
-          ...(input.agentTemplateModel === undefined
-            ? {}
-            : { model: input.agentTemplateModel }),
+          ...(input.agentTemplateModel === undefined ? {} : { model: input.agentTemplateModel }),
           matrix: {
             localpartPrefix: input.id,
           },

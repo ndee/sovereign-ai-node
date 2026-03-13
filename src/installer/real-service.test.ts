@@ -138,9 +138,7 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
             id: input.id,
             version: "1.0.0",
             description: input.description,
-            ...(input.agentTemplateModel === undefined
-              ? {}
-              : { model: input.agentTemplateModel }),
+            ...(input.agentTemplateModel === undefined ? {} : { model: input.agentTemplateModel }),
             matrix: {
               localpartPrefix: input.id,
             },
@@ -245,7 +243,8 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
   await writeBotPackage({
     id: "mail-sentinel",
     displayName: "Mail Sentinel",
-    description: "Local-first inbox sentinel that detects important mail, alerts Matrix, and adapts from feedback.",
+    description:
+      "Local-first inbox sentinel that detects important mail, alerts Matrix, and adapts from feedback.",
     defaultInstall: true,
     helloMessage:
       "Hello from Mail Sentinel. I watch incoming mail, alert only on important signals, and learn from your feedback.",
@@ -275,12 +274,9 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
         kind: "sovereign-tool-template",
         id: "mail-sentinel-tool",
         version: "1.0.0",
-        description: "Local-first mail watcher for IMAP scoring, Matrix alerts, and feedback-driven tuning.",
-        capabilities: [
-          "mail-sentinel.scan",
-          "mail-sentinel.feedback",
-          "mail-sentinel.alerts.read",
-        ],
+        description:
+          "Local-first mail watcher for IMAP scoring, Matrix alerts, and feedback-driven tuning.",
+        capabilities: ["mail-sentinel.scan", "mail-sentinel.feedback", "mail-sentinel.alerts.read"],
         requiredSecretRefs: [],
         requiredConfigKeys: ["agentId", "imapInstanceId", "statePath", "rulesPath"],
         allowedCommands: [
