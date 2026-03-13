@@ -283,6 +283,8 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(onboardPage).toContain("Unlock Password");
       expect(onboardPage).toContain("/onboard/api/redeem");
       expect(onboardPage).toContain("The username and password are not embedded in this page.");
+      expect(onboardPage).toContain("Code prefilled from the link. Tap Unlock Password to redeem it once.");
+      expect(onboardPage).not.toContain("void redeemCode(redeemButton);");
       expect(onboardPage).toContain("sudo sovereign-node onboarding issue");
       expect(onboardPage).toContain("Bestätigung nicht möglich?");
       expect(onboardPage).toContain("After login: message the right bot");
@@ -372,6 +374,8 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(onboardPage).toContain("Copy Server URL");
       expect(onboardPage).toContain("Unlock Password");
       expect(onboardPage).toContain("The username and password are not embedded in this page.");
+      expect(onboardPage).toContain("Code prefilled from the link. Tap Unlock Password to redeem it once.");
+      expect(onboardPage).not.toContain("void redeemCode(redeemButton);");
       expect(onboardPage).toContain("Native Android Matrix apps may still reject local CAs");
       expect(onboardPage).toContain("Do not type only 192.168.0.54:8448.");
       expect(onboardPage).toContain("Vanadium and Brave may behave differently");
