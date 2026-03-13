@@ -28,6 +28,7 @@ export type AgentTemplateManifest = {
   id: string;
   version: string;
   description: string;
+  model?: string;
   matrix: {
     localpartPrefix: string;
   };
@@ -42,6 +43,7 @@ export type AgentTemplateManifest = {
   workspaceFiles: Array<{
     path: string;
     content: string;
+    mode?: string;
   }>;
   signature: TemplateSignature;
 };

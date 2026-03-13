@@ -93,6 +93,8 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
     openclaw?: Record<string, unknown>;
     requiredToolTemplates?: Array<{ id: string; version: string }>;
     optionalToolTemplates?: Array<{ id: string; version: string }>;
+    agentTemplateModel?: string;
+    extraWorkspaceFiles?: Array<{ path: string; source: string; content: string; mode?: string }>;
   }): Promise<void> => {
     const packageDir = join(rootDir, "bots", input.id);
     await mkdir(join(packageDir, "workspace", "skills", `${input.id}-core`), { recursive: true });
@@ -108,6 +110,10 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
       `# ${input.displayName}\n`,
       "utf8",
     );
+    for (const file of input.extraWorkspaceFiles ?? []) {
+      await mkdir(dirname(join(packageDir, file.source)), { recursive: true });
+      await writeFile(join(packageDir, file.source), file.content, "utf8");
+    }
     await writeFile(
       join(packageDir, "sovereign-bot.json"),
       `${JSON.stringify(
@@ -132,6 +138,7 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
             id: input.id,
             version: "1.0.0",
             description: input.description,
+            ...(input.agentTemplateModel === undefined ? {} : { model: input.agentTemplateModel }),
             matrix: {
               localpartPrefix: input.id,
             },
@@ -154,6 +161,11 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
                 path: `skills/${input.id}-core/SKILL.md`,
                 source: `workspace/skills/${input.id}-core/SKILL.md`,
               },
+              ...(input.extraWorkspaceFiles ?? []).map((file) => ({
+                path: file.path,
+                source: file.source,
+                ...(file.mode === undefined ? {} : { mode: file.mode }),
+              })),
             ],
           },
         },
@@ -231,24 +243,52 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
   await writeBotPackage({
     id: "mail-sentinel",
     displayName: "Mail Sentinel",
-    description: "Conversational inbox sentinel for read-only IMAP triage and Matrix summaries.",
+    description:
+      "Local-first inbox sentinel that detects important mail, alerts Matrix, and adapts from feedback.",
     defaultInstall: true,
-    helloMessage: "Hello from Mail Sentinel. I can summarize your latest 3 inbox mails.",
+    helloMessage:
+      "Hello from Mail Sentinel. I watch incoming mail, alert only on important signals, and learn from your feedback.",
     matrixMode: "dedicated-account",
     matrixRouting: {
       dm: {
         enabled: true,
       },
       alertRoom: {
-        autoReply: false,
-        requireMention: true,
+        autoReply: true,
+        requireMention: false,
       },
     },
     configDefaults: {
+      agentId: "mail-sentinel",
+      imapInstanceId: "mail-sentinel-imap",
       pollInterval: "5m",
       lookbackWindow: "15m",
+      defaultReminderDelay: "4h",
       e2eeAlertRoom: false,
+      model: "qwen/qwen-2.5-32b-instruct",
+      statePath: "data/mail-sentinel-state.json",
+      rulesPath: "config/default-rules.json",
     },
+    toolTemplates: [
+      {
+        kind: "sovereign-tool-template",
+        id: "mail-sentinel-tool",
+        version: "1.0.0",
+        description:
+          "Local-first mail watcher for IMAP scoring, Matrix alerts, and feedback-driven tuning.",
+        capabilities: ["mail-sentinel.scan", "mail-sentinel.feedback", "mail-sentinel.alerts.read"],
+        requiredSecretRefs: [],
+        requiredConfigKeys: ["agentId", "imapInstanceId", "statePath", "rulesPath"],
+        allowedCommands: [
+          "<agent-workspace>/bin/mail-sentinel.mjs scan --instance <tool-instance-id> --json",
+          "<agent-workspace>/bin/mail-sentinel.mjs list-alerts --instance <tool-instance-id> --view today --json",
+          "<agent-workspace>/bin/mail-sentinel.mjs list-alerts --instance <tool-instance-id> --view recent --json",
+          "<agent-workspace>/bin/mail-sentinel.mjs feedback --instance <tool-instance-id> --latest --action important --json",
+          "<agent-workspace>/bin/mail-sentinel.mjs feedback --instance <tool-instance-id> --alert-id <alert-id> --action important --json",
+          "<agent-workspace>/bin/mail-sentinel.mjs feedback --instance <tool-instance-id> --alert-id <alert-id> --action remind-later --delay <duration> --json",
+        ],
+      },
+    ],
     toolInstances: [
       {
         id: "mail-sentinel-imap",
@@ -282,6 +322,31 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
           },
         },
       },
+      {
+        id: "mail-sentinel-core",
+        templateRef: "mail-sentinel-tool@1.0.0",
+        config: {
+          agentId: {
+            from: "bots.config.mail-sentinel.agentId",
+          },
+          imapInstanceId: {
+            from: "bots.config.mail-sentinel.imapInstanceId",
+          },
+          statePath: {
+            from: "bots.config.mail-sentinel.statePath",
+          },
+          rulesPath: {
+            from: "bots.config.mail-sentinel.rulesPath",
+          },
+          lookbackWindow: {
+            from: "bots.config.mail-sentinel.lookbackWindow",
+          },
+          defaultReminderDelay: {
+            from: "bots.config.mail-sentinel.defaultReminderDelay",
+          },
+        },
+        secretRefs: {},
+      },
     ],
     openclaw: {
       cron: {
@@ -289,14 +354,39 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
         everyConfigKey: "pollInterval",
         defaultEvery: "5m",
         session: "isolated",
+        announce: false,
         message:
-          "Summarize the latest 3 emails in INBOX using read-only IMAP tools. The tool instance is already scoped to the configured mailbox, so use --query ALL for the whole mailbox and do not include INBOX in the query string. Highlight urgent or security-relevant items. If IMAP is not configured, report the missing setup clearly.",
+          "Run the Mail Sentinel scan command from TOOLS.md for the configured instance. Do not summarize the inbox manually. Do not add extra commentary beyond the tool result.",
       },
     },
-    optionalToolTemplates: [
+    requiredToolTemplates: [
+      {
+        id: "mail-sentinel-tool",
+        version: "1.0.0",
+      },
       {
         id: "imap-readonly",
         version: "1.0.0",
+      },
+    ],
+    optionalToolTemplates: [],
+    agentTemplateModel: "qwen/qwen-2.5-32b-instruct",
+    extraWorkspaceFiles: [
+      {
+        path: "bin/mail-sentinel.mjs",
+        source: "workspace/bin/mail-sentinel.mjs",
+        content: "#!/usr/bin/env node\n",
+        mode: "755",
+      },
+      {
+        path: "config/default-rules.json",
+        source: "workspace/config/default-rules.json",
+        content: "{}\n",
+      },
+      {
+        path: "data/README.md",
+        source: "workspace/data/README.md",
+        content: "Mail Sentinel data.\n",
       },
     ],
   });
@@ -345,6 +435,7 @@ const buildTestLoadedBotPackage = (input: {
   displayName: string;
   description: string;
   matrixMode: "dedicated-account" | "service-account";
+  model?: string;
   helloMessage?: string;
   matrixRouting?: {
     defaultAccount?: boolean;
@@ -378,6 +469,7 @@ const buildTestLoadedBotPackage = (input: {
       id: input.id,
       version: "1.0.0",
       description: input.description,
+      ...(input.model === undefined ? {} : { model: input.model }),
       matrix: {
         localpartPrefix: input.id,
       },
@@ -408,6 +500,7 @@ const buildTestLoadedBotPackage = (input: {
     id: input.id,
     version: "1.0.0",
     description: input.description,
+    ...(input.model === undefined ? {} : { model: input.model }),
     matrix: {
       localpartPrefix: input.id,
     },
@@ -1679,14 +1772,14 @@ describe("RealInstallerService", () => {
         ],
       ).toEqual(
         expect.objectContaining({
-          autoReply: false,
-          requireMention: true,
+          autoReply: true,
+          requireMention: false,
         }),
       );
       expect(openclawConfig.channels?.matrix?.accounts?.["mail-sentinel"]?.groups?.["*"]).toEqual(
         expect.objectContaining({
-          autoReply: false,
-          requireMention: true,
+          autoReply: true,
+          requireMention: false,
         }),
       );
       expect(
@@ -1696,6 +1789,7 @@ describe("RealInstallerService", () => {
         expect.arrayContaining([
           expect.objectContaining({
             id: "mail-sentinel",
+            model: "openrouter/qwen/qwen-2.5-32b-instruct",
             tools: {
               allow: ["exec"],
               exec: {
@@ -1727,10 +1821,10 @@ describe("RealInstallerService", () => {
         "Use only the documented OpenClaw tools or CLI commands listed below.",
       );
       expect(mailSentinelToolsRaw).toContain(
-        "/usr/local/bin/sovereign-tool imap-search-mail --instance mail-sentinel-imap --query <query>",
+        `${join(paths.stateDir, "mail-sentinel", "workspace", "bin", "mail-sentinel.mjs")} scan --instance mail-sentinel-core --json`,
       );
       expect(mailSentinelToolsRaw).toContain(
-        "/usr/local/bin/sovereign-tool imap-read-mail --instance mail-sentinel-imap --message-id <id>",
+        `${join(paths.stateDir, "mail-sentinel", "workspace", "bin", "mail-sentinel.mjs")} list-alerts --instance mail-sentinel-core --view today --json`,
       );
     } finally {
       await rm(tempRoot, { recursive: true, force: true });

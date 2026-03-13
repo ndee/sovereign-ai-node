@@ -48,6 +48,7 @@ const botCronSchema = z.object({
   everyConfigKey: z.string().min(1).optional(),
   defaultEvery: z.string().min(1).optional(),
   session: z.enum(["isolated"]).optional(),
+  announce: z.boolean().optional(),
   message: z.string().min(1),
 });
 
@@ -69,6 +70,10 @@ const matrixRoutingSchema = z.object({
 const workspaceFileSchema = z.object({
   path: z.string().min(1),
   source: z.string().min(1),
+  mode: z
+    .string()
+    .regex(/^[0-7]{3,4}$/)
+    .optional(),
 });
 
 const toolTemplateSchema = z.object({
@@ -88,6 +93,7 @@ const agentTemplateSchema = z.object({
   id: z.string().min(1),
   version: z.string().min(1),
   description: z.string().min(1),
+  model: z.string().min(1).optional(),
   matrix: z.object({
     localpartPrefix: z.string().min(1),
   }),
@@ -238,6 +244,7 @@ export class FilesystemBotCatalog implements BotCatalog {
         async (file: SovereignBotPackageManifest["agentTemplate"]["workspaceFiles"][number]) => ({
           path: file.path,
           content: await readFile(join(packageDir, file.source), "utf8"),
+          ...(file.mode === undefined ? {} : { mode: file.mode }),
         }),
       ),
     );
@@ -246,6 +253,9 @@ export class FilesystemBotCatalog implements BotCatalog {
       id: manifest.agentTemplate.id,
       version: manifest.agentTemplate.version,
       description: manifest.agentTemplate.description,
+      ...(manifest.agentTemplate.model === undefined
+        ? {}
+        : { model: manifest.agentTemplate.model }),
       matrix: {
         localpartPrefix: manifest.agentTemplate.matrix.localpartPrefix,
       },

@@ -73,6 +73,7 @@ Sovereign AI Node separates **templates** from **runtime instances**:
 
 ### Tool templates
 
+* `mail-sentinel-tool@1.0.0`
 * `imap-readonly@1.0.0`
 * `node-cli-ops@1.0.0`
 
@@ -123,4 +124,4 @@ See:
 
 * `docs/ARCHITECTURE.md`
 * `deploy/`
-* `
+* `docs/MAIL_SENTINEL_DESIGN.md`

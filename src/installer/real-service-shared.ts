@@ -170,7 +170,7 @@ export const MAIL_SENTINEL_AGENT_ID = "mail-sentinel";
 export const MAIL_SENTINEL_CRON_ID = "mail-sentinel-poll";
 export const NODE_OPERATOR_AGENT_ID = "node-operator";
 export const MAIL_SENTINEL_HELLO_MESSAGE =
-  "Hello from Mail Sentinel. Ask me for inbox summaries after IMAP is configured.";
+  "Hello from Mail Sentinel. I watch incoming mail, alert only on important signals, and learn from your feedback.";
 export const NODE_OPERATOR_HELLO_MESSAGE =
   "Hello from Node Operator. DM me for Sovereign Node status, install health, and system checks.";
 export const NODE_CLI_OPS_TEMPLATE_REF = "node-cli-ops@1.0.0";
@@ -178,7 +178,7 @@ export const IMAP_READONLY_TEMPLATE_REF = "imap-readonly@1.0.0";
 export const MAIL_SENTINEL_TEMPLATE_REF = "mail-sentinel@1.0.0";
 export const NODE_OPERATOR_TEMPLATE_REF = "node-operator@1.0.0";
 export const NODE_OPERATOR_TOOL_INSTANCE_ID = "node-operator-cli";
-export const MAIL_SENTINEL_TOOL_INSTANCE_ID = "mail-sentinel-imap";
+export const MAIL_SENTINEL_TOOL_INSTANCE_ID = "mail-sentinel-core";
 export const INSTALLER_EXEC_TIMEOUT_MS = 60_000;
 export const SOVEREIGN_GATEWAY_SYSTEMD_UNIT = "sovereign-openclaw-gateway.service";
 export const DEFAULT_OPENROUTER_MODEL = "openai/gpt-5-nano";

@@ -176,7 +176,7 @@ Current default core instantiation:
   - `node-operator`
 - Tool instances:
   - `node-operator-cli` (always)
-  - `mail-sentinel-imap` (only when IMAP is configured)
+  - `mail-sentinel-core` (when Mail Sentinel is installed)
 
 ### OpenClaw Bootstrap in the Default Sovereign Flow
 
@@ -318,6 +318,7 @@ If the simple flow fails, the operator should check these first:
 - OpenClaw CLI/version install sanity (bootstrap script reachability, version pin match)
 - Matrix service health and reverse proxy status
 - IMAP connectivity test and credential validity
+- when Proton Bridge is used in maintained validation flows, use the fresh-VM runbook from `sovereign-ai-node-pro/docs/PROTON_BRIDGE_VALIDATION.md`
 - alert room target and bot membership
 
 ## Related Docs
@@ -326,3 +327,4 @@ If the simple flow fails, the operator should check these first:
 - `docs/MAIL_SENTINEL_DESIGN.md`
 - `docs/MATRIX_BUNDLED_SETUP.md`
 - `docs/INSTALLER_CONTRACTS.md`
+- `sovereign-ai-node-pro/docs/PROTON_BRIDGE_VALIDATION.md`
