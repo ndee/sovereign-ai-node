@@ -27,7 +27,7 @@ INSTALLATION_DETECTED="0"
 CONFIGURED_INSTALLATION="0"
 EXISTING_REQUEST_VALID="0"
 LAST_REQUEST_LOAD_ERROR=""
-RECOMMENDED_OPENROUTER_MODEL="openai/gpt-5-nano"
+RECOMMENDED_OPENROUTER_MODEL="qwen/qwen3.5-9b"
 LEGACY_OPENROUTER_MODEL="openrouter/anthropic/claude-sonnet-4-5"
 DEFAULT_OPENROUTER_MODEL="$RECOMMENDED_OPENROUTER_MODEL"
 RECOMMENDED_MATRIX_DOMAIN="matrix.local.test"
@@ -1963,7 +1963,7 @@ const runtimeRelay = runtime && typeof runtime === "object" && !Array.isArray(ru
   ? runtime.relay ?? {}
   : {};
 
-const recommendedOpenrouterModel = "openai/gpt-5-nano";
+const recommendedOpenrouterModel = "qwen/qwen3.5-9b";
 const legacyOpenrouterModel = "openrouter/anthropic/claude-sonnet-4-5";
 const recommendedMatrixDomain = process.env.SN_RECOMMENDED_MATRIX_DOMAIN || "";
 const recommendedMatrixPublicBaseUrl = process.env.SN_RECOMMENDED_MATRIX_PUBLIC_BASE_URL || "";

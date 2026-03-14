@@ -6,8 +6,8 @@ import type { Logger } from "../logging/logger.js";
 import type { ExecResult, ExecRunner } from "../system/exec.js";
 
 const OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS = 90_000;
-const OPENCLAW_GATEWAY_RETRY_ATTEMPTS = 15;
-const OPENCLAW_GATEWAY_RETRY_DELAY_MS = 2_000;
+const OPENCLAW_GATEWAY_RETRY_ATTEMPTS = 20;
+const OPENCLAW_GATEWAY_RETRY_DELAY_MS = 3_000;
 const MANAGED_OPENCLAW_ENV_KEYS = [
   "OPENCLAW_HOME",
   "OPENCLAW_CONFIG",
@@ -381,7 +381,7 @@ const isGatewayUnavailableResult = (result: ExecResult): boolean =>
   isGatewayUnavailableOutput(`${result.stderr}\n${result.stdout}`);
 
 const isGatewayUnavailableOutput = (value: string): boolean =>
-  /gateway\s+closed|gateway\s+unavailable|abnormal\s+closure|econnrefused|connect\s+econnrefused|socket\s+hang\s+up/i.test(
+  /gateway\s+closed|gateway\s+unavailable|abnormal\s+closure|econnrefused|connect\s+econnrefused|socket\s+hang\s+up|device\s+token\s+mismatch/i.test(
     value.toLowerCase(),
   );
 
