@@ -6075,9 +6075,18 @@ export default function (api) {
       return;
     }
 
-    const gatewayState = await this.inspectGatewayRuntimeState();
+    let gatewayState = await this.inspectGatewayRuntimeState();
     if (gatewayState.health.ok) {
       return;
+    }
+
+    for (let probe = 1; probe <= 5; probe += 1) {
+      await delay(2000);
+      gatewayState = await this.inspectGatewayRuntimeState();
+      if (gatewayState.health.ok) {
+        this.logger.info({ probe }, "OpenClaw gateway became healthy after post-restart wait");
+        return;
+      }
     }
 
     this.logger.warn(
