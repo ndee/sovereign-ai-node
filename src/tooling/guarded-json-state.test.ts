@@ -21,7 +21,7 @@ const buildRuntimeConfig = (input: {
   workspace?: string;
 }): RuntimeConfig => ({
   openrouter: {
-    model: "openai/gpt-5-nano",
+    model: "qwen/qwen3.5-9b",
     apiKeySecretRef: "env:OPENROUTER_API_KEY",
   },
   openclaw: {

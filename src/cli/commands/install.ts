@@ -60,7 +60,7 @@ const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => {
       runOnboard: false,
     },
     openrouter: {
-      model: "openai/gpt-5-nano",
+      model: "qwen/qwen3.5-9b",
       secretRef: "env:OPENROUTER_API_KEY",
     },
     matrix: {

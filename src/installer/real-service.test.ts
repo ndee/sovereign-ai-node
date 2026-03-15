@@ -38,7 +38,7 @@ const buildInstallRequest = (): InstallRequest => ({
     runOnboard: false,
   },
   openrouter: {
-    model: "openai/gpt-5-nano",
+    model: "qwen/qwen3.5-9b",
     apiKey: "sk-or-test",
   },
   imap: {
@@ -605,7 +605,7 @@ const writeRuntimeArtifacts = async (paths: SovereignPaths): Promise<void> => {
           gatewayEnvPath,
         },
         openrouter: {
-          model: "openai/gpt-5-nano",
+          model: "qwen/qwen3.5-9b",
           apiKeySecretRef: "env:OPENROUTER_API_KEY",
         },
         openclawProfile: {
@@ -1335,20 +1335,19 @@ describe("RealInstallerService", () => {
       expect(started.job.steps[1]?.id).toBe("openclaw_bootstrap_cli");
       expect(started.job.steps[1]?.state).toBe("succeeded");
       expect(started.job.steps[2]?.id).toBe("imap_validate");
-      expect(started.job.steps[2]?.state).toBe("failed");
+      expect(started.job.steps[2]?.state).toBe("warned");
+      expect(started.job.steps[2]?.error?.code).toBe("IMAP_TEST_FAILED");
 
       const stored = await service.getInstallJob(started.job.jobId);
       expect(stored.job.jobId).toBe(started.job.jobId);
       expect(stored.job.state).toBe("failed");
-      expect(stored.error?.code).toBe("IMAP_TEST_FAILED");
 
       const files = await readdir(paths.installJobsDir);
       expect(files.some((name) => name.includes(started.job.jobId))).toBe(true);
       expect(preflightCalls).toBe(1);
       expect(ensureInstalledCalls).toHaveLength(1);
       expect(imapTestCalls).toBe(1);
-      expect(matrixProvisionCalls).toBe(0);
-      expect(gatewayInstallCalls).toBe(0);
+      expect(matrixProvisionCalls).toBe(1);
       expect(ensureInstalledCalls[0]).toMatchObject({
         version: SOVEREIGN_PINNED_OPENCLAW_VERSION,
         noOnboard: true,
@@ -1801,7 +1800,7 @@ describe("RealInstallerService", () => {
           }),
         ]),
       );
-      expect(openclawConfig.agents?.defaults?.model).toBe("openrouter/openai/gpt-5-nano");
+      expect(openclawConfig.agents?.defaults?.model).toBe("openrouter/qwen/qwen3.5-9b");
 
       const runtimeConfigRaw = await readFile(paths.configPath, "utf8");
       const runtimeConfig = JSON.parse(runtimeConfigRaw) as {
@@ -3550,7 +3549,7 @@ describe("RealInstallerService", () => {
 
     const runtimeConfig: RuntimeConfig = {
       openrouter: {
-        model: "openai/gpt-5-nano",
+        model: "qwen/qwen3.5-9b",
         apiKeySecretRef: "env:OPENROUTER_API_KEY",
       },
       openclaw: {

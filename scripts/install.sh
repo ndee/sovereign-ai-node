@@ -2899,7 +2899,15 @@ if (typeof state !== "string") {
 }
 
 if (state === "succeeded") {
-  process.stdout.write("succeeded\tInstall job completed successfully");
+  const warnedSteps = Array.isArray(parsed?.result?.job?.steps)
+    ? parsed.result.job.steps.filter((step) => step?.state === "warned")
+    : [];
+  if (warnedSteps.length > 0) {
+    const warnings = warnedSteps.map((step) => `${step.id}: ${step.error?.message ?? "warning"}`).join("; ");
+    process.stdout.write(`succeeded\tInstall completed with warnings: ${warnings}`);
+  } else {
+    process.stdout.write("succeeded\tInstall job completed successfully");
+  }
   process.exit(0);
 }
 
@@ -3429,7 +3437,16 @@ run_install_command() {
   fi
 
   if ui_is_fancy; then
-    ui_complete_step "job completed"
+    if [[ "$install_summary" == *"warnings:"* ]]; then
+      ui_complete_step "job completed (with warnings)"
+      log "Warning: $install_summary"
+    else
+      ui_complete_step "job completed"
+    fi
+  else
+    if [[ "$install_summary" == *"warnings:"* ]]; then
+      log "Warning: $install_summary"
+    fi
   fi
   return 0
 }
