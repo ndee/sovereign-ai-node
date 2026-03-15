@@ -38,7 +38,7 @@ const buildInstallRequest = (): InstallRequest => ({
     runOnboard: false,
   },
   openrouter: {
-    model: "openai/gpt-5-nano",
+    model: "qwen/qwen3.5-9b",
     apiKey: "sk-or-test",
   },
   imap: {
@@ -605,7 +605,7 @@ const writeRuntimeArtifacts = async (paths: SovereignPaths): Promise<void> => {
           gatewayEnvPath,
         },
         openrouter: {
-          model: "openai/gpt-5-nano",
+          model: "qwen/qwen3.5-9b",
           apiKeySecretRef: "env:OPENROUTER_API_KEY",
         },
         openclawProfile: {
@@ -1800,7 +1800,7 @@ describe("RealInstallerService", () => {
           }),
         ]),
       );
-      expect(openclawConfig.agents?.defaults?.model).toBe("openrouter/openai/gpt-5-nano");
+      expect(openclawConfig.agents?.defaults?.model).toBe("openrouter/qwen/qwen3.5-9b");
 
       const runtimeConfigRaw = await readFile(paths.configPath, "utf8");
       const runtimeConfig = JSON.parse(runtimeConfigRaw) as {
@@ -3549,7 +3549,7 @@ describe("RealInstallerService", () => {
 
     const runtimeConfig: RuntimeConfig = {
       openrouter: {
-        model: "openai/gpt-5-nano",
+        model: "qwen/qwen3.5-9b",
         apiKeySecretRef: "env:OPENROUTER_API_KEY",
       },
       openclaw: {
