@@ -17,6 +17,7 @@ export const stepStateSchema = z.enum([
   "failed",
   "canceled",
   "skipped",
+  "warned",
 ]);
 
 export const jobStepIdSchema = z.enum([

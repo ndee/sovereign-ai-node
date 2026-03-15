@@ -4372,6 +4372,7 @@ export default function (api) {
       {
         id: "imap_validate",
         label: "Validate IMAP",
+        softFail: true,
         run: async () => {
           if (req.imap === undefined) {
             this.logger.info(

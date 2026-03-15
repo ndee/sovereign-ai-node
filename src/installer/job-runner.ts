@@ -8,6 +8,7 @@ export type InstallContext = {
 export interface InstallStep {
   id: JobStepId;
   label: string;
+  softFail?: boolean;
   run(ctx: InstallContext): Promise<void>;
 }
 
@@ -63,6 +64,13 @@ export class JobRunner {
         await step.run(ctx);
       } catch (caught) {
         const error = normalizeInstallError(caught);
+        if (step.softFail === true) {
+          current.state = "warned";
+          current.endedAt = now();
+          current.error = error;
+          await notify(observer, { job });
+          continue;
+        }
         current.state = "failed";
         current.endedAt = now();
         current.error = error;
