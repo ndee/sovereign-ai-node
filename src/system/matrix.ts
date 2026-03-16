@@ -83,6 +83,9 @@ export interface BundledMatrixProvisioner {
     req: InstallRequest,
     provision: BundledMatrixProvisionResult,
     accounts: BundledMatrixAccountsResult,
+    options?: {
+      previousAlertRoom?: { roomId: string; roomName: string };
+    },
   ): Promise<BundledMatrixRoomBootstrapResult>;
   test(req: TestMatrixRequest): Promise<TestMatrixResult>;
 }
@@ -450,8 +453,56 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     req: InstallRequest,
     provision: BundledMatrixProvisionResult,
     accounts: BundledMatrixAccountsResult,
+    options?: {
+      previousAlertRoom?: { roomId: string; roomName: string };
+    },
   ): Promise<BundledMatrixRoomBootstrapResult> {
     await this.waitForSynapseReady(provision.adminBaseUrl);
+
+    const previousRoom = options?.previousAlertRoom;
+    if (previousRoom !== undefined && previousRoom.roomId.length > 0) {
+      const reachable = await this.isRoomReachable(
+        provision.adminBaseUrl,
+        previousRoom.roomId,
+        accounts.operator.accessToken,
+      );
+      if (reachable) {
+        this.logger.info(
+          {
+            projectDir: provision.projectDir,
+            roomId: previousRoom.roomId,
+            roomName: previousRoom.roomName,
+          },
+          "Reusing existing Matrix alert room from previous configuration",
+        );
+        await this.ensureBotInRoom(
+          provision.adminBaseUrl,
+          previousRoom.roomId,
+          accounts.operator.accessToken,
+          accounts.bot.userId,
+          accounts.bot.accessToken,
+        );
+        const result: BundledMatrixRoomBootstrapResult = {
+          roomId: previousRoom.roomId,
+          roomName: previousRoom.roomName,
+        };
+        if (shouldUseReverseProxy(provision.accessMode, provision.tlsMode)) {
+          await this.writeOnboardingPage({
+            projectDir: provision.projectDir,
+            publicBaseUrl: provision.publicBaseUrl,
+            homeserverDomain: provision.homeserverDomain,
+            tlsMode: resolveOnboardingMode(provision.accessMode, provision.tlsMode),
+            alertRoomName: previousRoom.roomName,
+            alertRoomId: previousRoom.roomId,
+          });
+        }
+        return result;
+      }
+      this.logger.warn(
+        { projectDir: provision.projectDir, roomId: previousRoom.roomId },
+        "Previous Matrix alert room is not reachable; creating a new one",
+      );
+    }
 
     const roomName = req.matrix.alertRoomName?.trim() || "Sovereign Alerts";
     const created = await this.matrixJsonRequest<{ room_id?: unknown }>({
@@ -525,6 +576,65 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       "Bundled Matrix alert room bootstrapped",
     );
     return result;
+  }
+
+  private async isRoomReachable(
+    adminBaseUrl: string,
+    roomId: string,
+    accessToken: string,
+  ): Promise<boolean> {
+    try {
+      await this.matrixJsonRequest<Record<string, unknown>>({
+        baseUrl: adminBaseUrl,
+        path: `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/joined_members`,
+        method: "GET",
+        accessToken,
+        errorCode: "MATRIX_ROOM_PROBE_FAILED",
+        errorMessage: "Room reachability probe failed",
+        retryable: false,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async ensureBotInRoom(
+    adminBaseUrl: string,
+    roomId: string,
+    inviterAccessToken: string,
+    botUserId: string,
+    botAccessToken: string,
+  ): Promise<void> {
+    try {
+      await this.matrixJsonRequest({
+        baseUrl: adminBaseUrl,
+        path: `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`,
+        method: "POST",
+        accessToken: inviterAccessToken,
+        body: { user_id: botUserId },
+        errorCode: "MATRIX_ROOM_INVITE_FAILED",
+        errorMessage: "Failed to invite bot into existing alert room",
+        retryable: true,
+      });
+    } catch {
+      // Invite may fail if bot is already in room; proceed to join
+    }
+
+    try {
+      await this.matrixJsonRequest({
+        baseUrl: adminBaseUrl,
+        path: `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/join`,
+        method: "POST",
+        accessToken: botAccessToken,
+        body: {},
+        errorCode: "MATRIX_ROOM_JOIN_FAILED",
+        errorMessage: "Bot could not join existing alert room",
+        retryable: true,
+      });
+    } catch {
+      // Join may fail if bot is already joined; this is fine
+    }
   }
 
   async resetState(provision: BundledMatrixProvisionResult): Promise<void> {
@@ -715,6 +825,14 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       };
     }
     if (registerResult.exitCode !== 0) {
+      const combinedOutput = `${registerResult.stderr}\n${registerResult.stdout}`;
+      if (isUserAlreadyExistsOutput(combinedOutput)) {
+        this.logger.info(
+          { localpart: input.localpart, projectDir: provision.projectDir },
+          "Matrix user already registered; skipping registration",
+        );
+        return;
+      }
       throw {
         code: "MATRIX_ACCOUNT_BOOTSTRAP_FAILED",
         message: `Failed to register Matrix account '${input.localpart}'`,
@@ -2084,6 +2202,9 @@ const isRecoverableAccountCredentialFailure = (error: unknown): boolean => {
   const body = error.details.body;
   return typeof body === "string" && /invalid username or password|m_forbidden/i.test(body);
 };
+
+const isUserAlreadyExistsOutput = (value: string): boolean =>
+  /user id already taken|already exists|already registered/i.test(value);
 
 const isRateLimitedMatrixLoginFailure = (error: unknown): boolean => {
   if (!isStructuredError(error) || error.code !== "MATRIX_LOGIN_FAILED") {

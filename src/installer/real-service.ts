@@ -4492,10 +4492,20 @@ export default function (api) {
               retryable: false,
             };
           }
+          const previousRuntimeConfig = await this.tryReadRuntimeConfig();
+          const previousAlertRoom =
+            previousRuntimeConfig !== null &&
+            previousRuntimeConfig.matrix.homeserverDomain ===
+              stepState.matrixProvision.homeserverDomain &&
+            previousRuntimeConfig.matrix.alertRoom.roomId.length > 0
+              ? previousRuntimeConfig.matrix.alertRoom
+              : undefined;
+
           stepState.matrixRoom = await this.matrixProvisioner.bootstrapRoom(
             stepState.effectiveRequest ?? req,
             stepState.matrixProvision,
             stepState.matrixAccounts,
+            previousAlertRoom !== undefined ? { previousAlertRoom } : undefined,
           );
         },
       },
