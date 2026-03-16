@@ -162,15 +162,18 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
 
     const existingEnv = await this.readExistingEnv(projectDir);
     const existingPostgresPassword = existingEnv.POSTGRES_PASSWORD?.trim();
+    const existingSynapseSecrets = await this.readExistingSynapseSecrets(synapseDir);
+    const signingKeyFile = `${homeserverDomain}.signing.key`;
+    const existingSigningKey = await this.readExistingFile(join(synapseDir, signingKeyFile));
     const generated = {
       postgresPassword:
         existingPostgresPassword !== undefined && existingPostgresPassword.length > 0
           ? existingPostgresPassword
           : `pg_${randomUUID().replaceAll("-", "")}`,
-      registrationSharedSecret: randomUUID().replaceAll("-", ""),
-      macaroonSecret: randomUUID().replaceAll("-", ""),
-      formSecret: randomUUID().replaceAll("-", ""),
-      signingKeyFile: `${homeserverDomain}.signing.key`,
+      registrationSharedSecret: existingSynapseSecrets.registrationSharedSecret ?? randomUUID().replaceAll("-", ""),
+      macaroonSecret: existingSynapseSecrets.macaroonSecret ?? randomUUID().replaceAll("-", ""),
+      formSecret: existingSynapseSecrets.formSecret ?? randomUUID().replaceAll("-", ""),
+      signingKeyFile,
     };
 
     const composeYaml = renderComposeYaml({
@@ -209,7 +212,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       formSecret: generated.formSecret,
       signingKeyFile: generated.signingKeyFile,
     });
-    const signingKey = renderSigningKey();
+    const signingKey = existingSigningKey ?? renderSigningKey();
     const logConfig = renderSynapseLogConfig();
     const _operatorLocalpart = sanitizeMatrixLocalpart(req.operator.username, "operator");
 
@@ -1311,6 +1314,35 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     }
   }
 
+  private async readExistingFile(path: string): Promise<string | null> {
+    try {
+      const raw = await readFile(path, "utf8");
+      const trimmed = raw.trim();
+      return trimmed.length > 0 ? trimmed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async readExistingSynapseSecrets(synapseDir: string): Promise<{
+    registrationSharedSecret?: string;
+    macaroonSecret?: string;
+    formSecret?: string;
+  }> {
+    const raw = await this.readExistingFile(join(synapseDir, "homeserver.yaml"));
+    if (raw === null) {
+      return {};
+    }
+    const result: { registrationSharedSecret?: string; macaroonSecret?: string; formSecret?: string } = {};
+    const reg = extractYamlStringValue(raw, "registration_shared_secret");
+    if (reg !== undefined) result.registrationSharedSecret = reg;
+    const mac = extractYamlStringValue(raw, "macaroon_secret_key");
+    if (mac !== undefined) result.macaroonSecret = mac;
+    const form = extractYamlStringValue(raw, "form_secret");
+    if (form !== undefined) result.formSecret = form;
+    return result;
+  }
+
   private async renderOnboardingQrSvg(value: string): Promise<string> {
     const qr = await this.execRunner.run({
       command: "qrencode",
@@ -2240,6 +2272,12 @@ const clampPositiveDelayMs = (value: number, fallback: number, max: number): num
     return fallback;
   }
   return Math.min(Math.trunc(value), max);
+};
+
+const extractYamlStringValue = (yaml: string, key: string): string | undefined => {
+  const pattern = new RegExp(`^${key}:\\s*"([^"]+)"`, "m");
+  const match = yaml.match(pattern);
+  return match?.[1];
 };
 
 const parseSimpleEnv = (raw: string): Record<string, string> => {
