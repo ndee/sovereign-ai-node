@@ -5605,6 +5605,7 @@ export default function (api) {
     try {
       await mkdir(this.paths.openclawServiceHome, { recursive: true });
       await mkdir(managedTempDir, { recursive: true });
+      await this.cleanStaleTempEntries(managedTempDir);
       await chmod(managedTempDir, 0o700);
       await this.applyConfiguredRuntimeOwnership(this.paths.openclawServiceHome, runtimeConfig);
       await this.applyConfiguredRuntimeOwnership(managedTempDir, runtimeConfig);
@@ -7228,6 +7229,27 @@ export default function (api) {
       return { uid, gid: groupGid };
     } catch {
       return null;
+    }
+  }
+
+  private async cleanStaleTempEntries(tempDir: string): Promise<void> {
+    try {
+      const entries = await readdir(tempDir);
+      for (const entry of entries) {
+        try {
+          await rm(join(tempDir, entry), { recursive: true, force: true });
+        } catch {
+          // best-effort cleanup
+        }
+      }
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return;
+      }
+      this.logger.debug(
+        { tempDir, error: describeError(error) },
+        "Failed to clean stale temp entries",
+      );
     }
   }
 
