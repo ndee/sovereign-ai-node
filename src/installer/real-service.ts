@@ -3721,6 +3721,47 @@ export default function (api) {
     }
   }
 
+  /**
+   * The bot configuration step may change the bot user's Synapse password via the
+   * admin API and store it under a different secret file name (matrix-agent-*-password)
+   * than what bootstrapAccounts expects (matrix-<localpart>.password).
+   * Sync the runtime config's bot password to the bootstrap file so the next
+   * bootstrapAccounts call uses the current password.
+   */
+  private async syncBotPasswordFromRuntimeConfig(
+    homeserverDomain: string,
+    botLocalpart: string,
+  ): Promise<void> {
+    try {
+      const runtimeConfig = await this.tryReadRuntimeConfig();
+      if (runtimeConfig === null) {
+        return;
+      }
+      if (runtimeConfig.matrix.homeserverDomain !== homeserverDomain) {
+        return;
+      }
+      const botPasswordRef = runtimeConfig.matrix.bot.passwordSecretRef;
+      if (botPasswordRef === undefined || botPasswordRef.length === 0) {
+        return;
+      }
+      const bootstrapFileName = `matrix-${botLocalpart}.password`;
+      const bootstrapRef = `file:${join(this.paths.secretsDir, bootstrapFileName)}`;
+      if (botPasswordRef === bootstrapRef) {
+        return;
+      }
+      const currentBotPassword = await this.resolveSecretRef(botPasswordRef);
+      if (currentBotPassword.length > 0) {
+        await this.writeManagedSecretFile(bootstrapFileName, currentBotPassword);
+        this.logger.info(
+          { botLocalpart, from: botPasswordRef, to: bootstrapRef },
+          "Synced bot password from runtime config to bootstrap file",
+        );
+      }
+    } catch {
+      // best-effort: if we can't sync, bootstrapAccounts will try its normal flow
+    }
+  }
+
   private async tryReuseExistingMatrixAccounts(input: {
     req: InstallRequest;
     provision: BundledMatrixProvisionResult;
@@ -4433,6 +4474,12 @@ export default function (api) {
           const bootstrapBotLocalpart = this.resolveBootstrapMatrixBotLocalpart(
             stepState.selectedBots,
           );
+          if (bootstrapBotLocalpart !== undefined) {
+            await this.syncBotPasswordFromRuntimeConfig(
+              stepState.matrixProvision.homeserverDomain,
+              bootstrapBotLocalpart,
+            );
+          }
           try {
             stepState.matrixAccounts = await this.matrixProvisioner.bootstrapAccounts(
               stepState.effectiveRequest ?? req,
