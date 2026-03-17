@@ -170,7 +170,8 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         existingPostgresPassword !== undefined && existingPostgresPassword.length > 0
           ? existingPostgresPassword
           : `pg_${randomUUID().replaceAll("-", "")}`,
-      registrationSharedSecret: existingSynapseSecrets.registrationSharedSecret ?? randomUUID().replaceAll("-", ""),
+      registrationSharedSecret:
+        existingSynapseSecrets.registrationSharedSecret ?? randomUUID().replaceAll("-", ""),
       macaroonSecret: existingSynapseSecrets.macaroonSecret ?? randomUUID().replaceAll("-", ""),
       formSecret: existingSynapseSecrets.formSecret ?? randomUUID().replaceAll("-", ""),
       signingKeyFile,
@@ -1333,7 +1334,11 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     if (raw === null) {
       return {};
     }
-    const result: { registrationSharedSecret?: string; macaroonSecret?: string; formSecret?: string } = {};
+    const result: {
+      registrationSharedSecret?: string;
+      macaroonSecret?: string;
+      formSecret?: string;
+    } = {};
     const reg = extractYamlStringValue(raw, "registration_shared_secret");
     if (reg !== undefined) result.registrationSharedSecret = reg;
     const mac = extractYamlStringValue(raw, "macaroon_secret_key");
@@ -1436,7 +1441,7 @@ services:
     volumes:
       - ./synapse:/data
     healthcheck:
-      test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8008/_matrix/client/versions\", timeout=5).read()' || exit 1"]
+      test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\\"http://localhost:8008/_matrix/client/versions\\", timeout=5).read()' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
