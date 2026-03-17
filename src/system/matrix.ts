@@ -1435,6 +1435,12 @@ services:
       - "${input.localSynapsePortBinding}"
     volumes:
       - ./synapse:/data
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8008/_matrix/client/versions\", timeout=5).read()' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 ${
   input.accessMode === "relay" || input.tlsMode !== "local-dev"
     ? `
