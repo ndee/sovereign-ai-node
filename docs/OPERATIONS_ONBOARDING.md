@@ -185,7 +185,7 @@ Sovereign installs OpenClaw on the machine as part of `sovereign-node install`.
 Default bootstrap behavior:
 
 - use the official OpenClaw installer script (`install.sh`)
-- install the current Sovereign-pinned OpenClaw version `2026.3.1` (not floating `latest`)
+- install the current Sovereign-pinned OpenClaw version `2026.3.13` (not floating `latest`)
 - skip OpenClaw onboarding (`--no-onboard`)
 - run non-interactively in the installer backend
 
@@ -193,7 +193,7 @@ The default internal command pattern is:
 
 ```bash
 curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install.sh | \
-  bash -s -- --version 2026.3.1 --no-onboard --no-prompt
+  bash -s -- --version 2026.3.13 --no-onboard --no-prompt
 ```
 
 Sovereign then installs the gateway service after writing Sovereign-managed config:

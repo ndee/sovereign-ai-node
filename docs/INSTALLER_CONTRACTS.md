@@ -102,7 +102,7 @@ In the default install path, `sovereign-node install` is responsible for install
 Default behavior:
 
 - use the official OpenClaw installer script (`https://openclaw.ai/install.sh`)
-- install the current Sovereign-pinned OpenClaw version `2026.3.1`
+- install the current Sovereign-pinned OpenClaw version `2026.3.13`
 - skip OpenClaw onboarding (`--no-onboard`) because Sovereign owns the domain-specific configuration flow
 - run non-interactively in the installer backend
 
@@ -110,7 +110,7 @@ Target internal command pattern:
 
 ```bash
 curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install.sh | \
-  bash -s -- --version 2026.3.1 --no-onboard --no-prompt
+  bash -s -- --version 2026.3.13 --no-onboard --no-prompt
 ```
 
 After writing Sovereign-managed OpenClaw config and environment, the installer installs or repairs the gateway service via `openclaw gateway install` (using `--force` when a rewrite is required).
