@@ -2681,6 +2681,9 @@ export default function (api) {
     toolInstanceIds: string[],
   ): Promise<{
     allow: string[];
+    elevated?: {
+      enabled: boolean;
+    };
     exec?: {
       host: "gateway";
       security: "allowlist";
@@ -2706,6 +2709,9 @@ export default function (api) {
     ]);
     return {
       allow,
+      elevated: {
+        enabled: true,
+      },
       ...(execPatterns.length === 0
         ? {}
         : {

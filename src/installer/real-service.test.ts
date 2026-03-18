@@ -1791,6 +1791,9 @@ describe("RealInstallerService", () => {
             model: "openrouter/qwen/qwen-2.5-32b-instruct",
             tools: {
               allow: ["exec"],
+              elevated: {
+                enabled: true,
+              },
               exec: {
                 host: "gateway",
                 security: "allowlist",
