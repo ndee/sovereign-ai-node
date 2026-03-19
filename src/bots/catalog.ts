@@ -86,6 +86,7 @@ const toolTemplateSchema = z.object({
   requiredConfigKeys: z.array(z.string().min(1)).default([]),
   allowedCommands: z.array(z.string().min(1)).default([]),
   openclawPlugins: z.array(z.string().min(1)).default([]),
+  openclawBundledPlugins: z.array(z.string().min(1)).default([]),
   openclawToolNames: z.array(z.string().min(1)).default([]),
 });
 
@@ -299,6 +300,7 @@ export class FilesystemBotCatalog implements BotCatalog {
           requiredConfigKeys: [...entry.requiredConfigKeys],
           allowedCommands: [...entry.allowedCommands],
           openclawPlugins: [...entry.openclawPlugins],
+          openclawBundledPlugins: [...entry.openclawBundledPlugins],
           openclawToolNames: [...entry.openclawToolNames],
         },
         templateRef,

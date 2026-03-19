@@ -38,7 +38,7 @@ export type DetectedOpenClaw = {
 export type OpenClawInstallInfo = {
   binaryPath: string;
   version: string;
-  installMethod: "install_sh";
+  installMethod: "install_sh" | "npm_fallback";
 };
 
 export interface OpenClawBootstrapper {
@@ -134,16 +134,29 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
       },
     });
     if (installResult.exitCode !== 0) {
-      throw {
-        code: "OPENCLAW_INSTALL_FAILED",
-        message: "OpenClaw install.sh exited with a non-zero status",
-        retryable: true,
-        details: {
+      this.logger.warn(
+        {
           command: installResult.command,
           exitCode: installResult.exitCode,
           stderr: truncateText(installResult.stderr, 4000),
           stdout: truncateText(installResult.stdout, 2000),
         },
+        "OpenClaw install.sh failed; attempting direct npm fallback install",
+      );
+      await this.installViaDirectNpmFallback(desiredVersion);
+      const installed = await this.detectInstalled();
+      if (installed === null) {
+        throw {
+          code: "OPENCLAW_INSTALL_FAILED",
+          message: "OpenClaw install fallback completed but the openclaw CLI was not detected",
+          retryable: true,
+        };
+      }
+      await this.repairBundledExtensionRuntimeDependencies();
+      return {
+        binaryPath: installed.binaryPath,
+        version: installed.version,
+        installMethod: "npm_fallback",
       };
     }
 
@@ -263,6 +276,38 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
       );
     }
   }
+
+  private async installViaDirectNpmFallback(desiredVersion: string): Promise<void> {
+    const installTarget =
+      desiredVersion === SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS ? SOVEREIGN_PINNED_OPENCLAW_VERSION : desiredVersion;
+    const cacheDir =
+      process.env.NPM_CONFIG_CACHE ?? join(process.env.HOME ?? "/root", ".npm");
+    const installResult = await this.execRunner.run({
+      command: "npm",
+      args: ["install", "-g", `openclaw@${installTarget}`],
+      options: {
+        timeout: OPENCLAW_INSTALL_TIMEOUT_MS,
+        env: {
+          CI: "1",
+          HOME: process.env.HOME ?? "/root",
+          NPM_CONFIG_CACHE: cacheDir,
+        },
+      },
+    });
+    if (installResult.exitCode !== 0) {
+      throw {
+        code: "OPENCLAW_INSTALL_FAILED",
+        message: "OpenClaw direct npm fallback install exited with a non-zero status",
+        retryable: true,
+        details: {
+          command: installResult.command,
+          exitCode: installResult.exitCode,
+          stderr: truncateText(installResult.stderr, 4000),
+          stdout: truncateText(installResult.stdout, 2000),
+        },
+      };
+    }
+  }
 }
 
 type InstallShellArgs = {
@@ -300,6 +345,9 @@ const buildInstallShellScript = (args: InstallShellArgs): string => {
 
   return [
     "set -euo pipefail",
+    "if [ \"$(id -u)\" = \"0\" ] && [ -z \"${HOME:-}\" ]; then export HOME=/root; fi",
+    "export NPM_CONFIG_CACHE=\"${NPM_CONFIG_CACHE:-${HOME:-/root}/.npm}\"",
+    "mkdir -p \"$NPM_CONFIG_CACHE\"",
     "curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install.sh \\",
     `  | bash ${installArgs.map(shellQuote).join(" ")}`,
   ].join("\n");

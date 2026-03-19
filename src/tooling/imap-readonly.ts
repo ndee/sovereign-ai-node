@@ -227,6 +227,53 @@ const stripHtmlTags = (value: string): string =>
     .replace(/\s+/g, " ")
     .trim();
 
+const normalizeParsedHeaders = (value: unknown): Record<string, string> => {
+  if (value instanceof Map) {
+    return Object.fromEntries(
+      Array.from(value.entries()).flatMap(([key, entryValue]) => {
+        if (typeof key !== "string") {
+          return [];
+        }
+        if (Array.isArray(entryValue)) {
+          return [[key.toLowerCase(), entryValue.map((part) => String(part)).join(", ")]];
+        }
+        if (entryValue === undefined || entryValue === null) {
+          return [];
+        }
+        return [[key.toLowerCase(), String(entryValue)]];
+      }),
+    );
+  }
+  if (Array.isArray(value)) {
+    return Object.fromEntries(
+      value.flatMap((entry) => {
+        if (entry && typeof entry === "object") {
+          const record = entry as Record<string, unknown>;
+          const key = typeof record.key === "string" ? record.key : record.name;
+          if (typeof key === "string" && typeof record.value === "string") {
+            return [[key.toLowerCase(), record.value]];
+          }
+        }
+        return [];
+      }),
+    );
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).flatMap(([key, entryValue]) => {
+        if (Array.isArray(entryValue)) {
+          return [[key.toLowerCase(), entryValue.map((part) => String(part)).join(", ")]];
+        }
+        if (typeof entryValue === "string") {
+          return [[key.toLowerCase(), entryValue]];
+        }
+        return [];
+      }),
+    );
+  }
+  return {};
+};
+
 const splitSearchTerms = (value: string): string[] => {
   const tokens: string[] = [];
   let current = "";
@@ -615,6 +662,7 @@ export class ImapReadonlyToolService {
             let textBody = "";
             let htmlAvailable = false;
             let attachments: ImapReadMailResult["message"]["attachments"] = [];
+            let headers: ImapReadMailResult["message"]["headers"] = {};
 
             try {
               const parsed = await PostalMime.parse(message.source);
@@ -623,6 +671,7 @@ export class ImapReadonlyToolService {
                 textBody = stripHtmlTags(parsed.html);
               }
               htmlAvailable = typeof parsed.html === "string" && parsed.html.length > 0;
+              headers = normalizeParsedHeaders(parsed.headers);
               attachments = parsed.attachments.map((attachment) => ({
                 filename: attachment.filename,
                 mimeType: attachment.mimeType,
@@ -642,6 +691,7 @@ export class ImapReadonlyToolService {
               selectedBy: selection.selectedBy,
               message: {
                 ...resolveFetchSummary(message),
+                headers,
                 text: truncated.text,
                 textTruncated: truncated.truncated,
                 htmlAvailable,

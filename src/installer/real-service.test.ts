@@ -69,6 +69,44 @@ const buildInstallRequest = (): InstallRequest => ({
   },
 });
 
+const maybeHandleInstalledLobsterExec = (input: {
+  command: string;
+  args?: string[];
+}): ExecResult | null => {
+  const serialized = [input.command, ...(input.args ?? [])].join(" ");
+  if (serialized === "lobster commands.list | json") {
+    return {
+      command: serialized,
+      exitCode: 0,
+      stdout: JSON.stringify(["commands.list", "clawd.invoke", "llm_task.invoke"]),
+      stderr: "",
+    };
+  }
+  if (serialized === "npm list -g @clawdbot/lobster --json --depth=0") {
+    return {
+      command: serialized,
+      exitCode: 0,
+      stdout: JSON.stringify({
+        dependencies: {
+          "@clawdbot/lobster": {
+            version: "2026.1.24",
+          },
+        },
+      }),
+      stderr: "",
+    };
+  }
+  if (serialized === "npm install -g @clawdbot/lobster@2026.1.24") {
+    return {
+      command: serialized,
+      exitCode: 0,
+      stdout: "installed lobster",
+      stderr: "",
+    };
+  }
+  return null;
+};
+
 const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
   const writeBotPackage = async (input: {
     id: string;
@@ -279,6 +317,8 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
         capabilities: ["mail-sentinel.scan", "mail-sentinel.feedback", "mail-sentinel.alerts.read"],
         requiredSecretRefs: [],
         requiredConfigKeys: ["agentId", "imapInstanceId", "statePath", "rulesPath"],
+        openclawBundledPlugins: ["lobster", "llm-task"],
+        openclawToolNames: ["lobster", "llm-task"],
         allowedCommands: [
           "<agent-workspace>/bin/mail-sentinel.mjs scan --instance <tool-instance-id> --json",
           "<agent-workspace>/bin/mail-sentinel.mjs list-alerts --instance <tool-instance-id> --view today --json",
@@ -1334,9 +1374,11 @@ describe("RealInstallerService", () => {
       expect(started.job.steps[0]?.state).toBe("succeeded");
       expect(started.job.steps[1]?.id).toBe("openclaw_bootstrap_cli");
       expect(started.job.steps[1]?.state).toBe("succeeded");
-      expect(started.job.steps[2]?.id).toBe("imap_validate");
-      expect(started.job.steps[2]?.state).toBe("warned");
-      expect(started.job.steps[2]?.error?.code).toBe("IMAP_TEST_FAILED");
+      expect(started.job.steps[2]?.id).toBe("lobster_bootstrap_cli");
+      expect(started.job.steps[2]?.state).toBe("succeeded");
+      expect(started.job.steps[3]?.id).toBe("imap_validate");
+      expect(started.job.steps[3]?.state).toBe("warned");
+      expect(started.job.steps[3]?.error?.code).toBe("IMAP_TEST_FAILED");
 
       const stored = await service.getInstallJob(started.job.jobId);
       expect(stored.job.jobId).toBe(started.job.jobId);
@@ -1687,6 +1729,9 @@ describe("RealInstallerService", () => {
             workspace?: string;
             tools?: {
               allow?: string[];
+              elevated?: {
+                enabled?: boolean;
+              };
               exec?: {
                 host?: string;
                 security?: string;
@@ -1696,7 +1741,10 @@ describe("RealInstallerService", () => {
           }>;
           defaults?: { model?: string };
         };
-        plugins?: { entries?: { matrix?: { enabled?: boolean; config?: unknown } } };
+        plugins?: {
+          allow?: string[];
+          entries?: Record<string, { enabled?: boolean; config?: unknown }>;
+        };
         channels?: {
           matrix?: {
             enabled?: boolean;
@@ -1727,8 +1775,13 @@ describe("RealInstallerService", () => {
       expect(openclawConfig.session?.dmScope).toBe("per-channel-peer");
       expect(openclawConfig.cron?.enabled).toBe(true);
       expect(openclawConfig.cron?.jobs).toBeUndefined();
+      expect(openclawConfig.plugins?.allow).toEqual(
+        expect.arrayContaining(["matrix", "lobster", "llm-task"]),
+      );
       expect(openclawConfig.plugins?.entries?.matrix?.enabled).toBe(true);
       expect(openclawConfig.plugins?.entries?.matrix?.config).toBeUndefined();
+      expect(openclawConfig.plugins?.entries?.lobster?.enabled).toBe(true);
+      expect(openclawConfig.plugins?.entries?.["llm-task"]?.enabled).toBe(true);
       expect(openclawConfig.channels?.matrix?.enabled).toBe(true);
       expect(openclawConfig.channels?.matrix?.homeserver).toBe("http://127.0.0.1:8008");
       expect(openclawConfig.channels?.matrix?.userId).toBeUndefined();
@@ -1789,8 +1842,8 @@ describe("RealInstallerService", () => {
           expect.objectContaining({
             id: "mail-sentinel",
             model: "openrouter/qwen/qwen-2.5-32b-instruct",
-            tools: {
-              allow: ["exec"],
+            tools: expect.objectContaining({
+              allow: expect.arrayContaining(["exec", "session_status", "lobster", "llm-task"]),
               elevated: {
                 enabled: true,
               },
@@ -1799,7 +1852,7 @@ describe("RealInstallerService", () => {
                 security: "allowlist",
                 ask: "off",
               },
-            },
+            }),
           }),
         ]),
       );
@@ -1828,6 +1881,8 @@ describe("RealInstallerService", () => {
       expect(mailSentinelToolsRaw).toContain(
         `${join(paths.stateDir, "mail-sentinel", "workspace", "bin", "mail-sentinel.mjs")} list-alerts --instance mail-sentinel-core --view today --json`,
       );
+      expect(mailSentinelToolsRaw).toContain("openclaw-tool: `lobster`");
+      expect(mailSentinelToolsRaw).toContain("openclaw-tool: `llm-task`");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -2733,6 +2788,10 @@ describe("RealInstallerService", () => {
           execCalls.push(input);
           const serialized = [input.command, ...(input.args ?? [])].join(" ");
           commandCalls.push(serialized);
+          const lobsterResult = maybeHandleInstalledLobsterExec(input);
+          if (lobsterResult !== null) {
+            return lobsterResult;
+          }
 
           if (serialized.startsWith("systemctl ")) {
             return {
@@ -3026,6 +3085,10 @@ describe("RealInstallerService", () => {
         run: async (input): Promise<ExecResult> => {
           const serialized = [input.command, ...(input.args ?? [])].join(" ");
           commandCalls.push(serialized);
+          const lobsterResult = maybeHandleInstalledLobsterExec(input);
+          if (lobsterResult !== null) {
+            return lobsterResult;
+          }
 
           if (serialized.startsWith("systemctl ")) {
             if (!serialized.endsWith("daemon-reload")) {
@@ -3240,6 +3303,10 @@ describe("RealInstallerService", () => {
         run: async ({ command, args }): Promise<ExecResult> => {
           const serialized = [command, ...(args ?? [])].join(" ");
           commandCalls.push(serialized);
+          const lobsterResult = maybeHandleInstalledLobsterExec({ command, args });
+          if (lobsterResult !== null) {
+            return lobsterResult;
+          }
 
           if (serialized === "systemctl is-active sovereign-openclaw-gateway.service") {
             return {
@@ -3376,6 +3443,10 @@ describe("RealInstallerService", () => {
         run: async ({ command, args }): Promise<ExecResult> => {
           const serialized = [command, ...(args ?? [])].join(" ");
           commandCalls.push(serialized);
+          const lobsterResult = maybeHandleInstalledLobsterExec({ command, args });
+          if (lobsterResult !== null) {
+            return lobsterResult;
+          }
 
           if (serialized === "systemctl is-active sovereign-openclaw-gateway.service") {
             return {
@@ -4547,6 +4618,110 @@ describe("RealInstallerService", () => {
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
+  });
+
+  it("falls back to JSON list output when plain OpenClaw list output omits the full id", async () => {
+    const paths: SovereignPaths = {
+      configPath: "/tmp/sovereign-node.json5",
+      secretsDir: "/tmp/sovereign-secrets",
+      stateDir: "/tmp/sovereign-state",
+      logsDir: "/tmp/sovereign-logs",
+      installJobsDir: "/tmp/sovereign-install-jobs",
+      openclawServiceHome: "/tmp/sovereign-openclaw-home",
+    };
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "2026.3.13",
+        }),
+        ensureInstalled: async (opts) => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: opts.version,
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      mailSentinelRegistrar: {
+        register: async () => {
+          throw new Error("not used");
+        },
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async () => ({
+          ok: true,
+          host: "imap.example.org",
+          port: 993,
+          tls: true,
+          auth: "ok",
+          mailbox: "INBOX",
+          capabilities: ["IMAP4rev1"],
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async ({ command, args }) => {
+          const serialized = [command, ...(args ?? [])].join(" ");
+          if (serialized === "openclaw agents list") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "Agents:\n- mail-se...",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw agents list --json") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: JSON.stringify([{ id: "mail-sentinel" }]),
+              stderr: "",
+            };
+          }
+          throw new Error(`unexpected command: ${serialized}`);
+        },
+      },
+    });
+
+    const inspect = service as unknown as {
+      inspectOpenClawListContains(baseArgs: string[], expectedId: string): Promise<{
+        present: boolean;
+        verified: boolean;
+      }>;
+    };
+
+    await expect(inspect.inspectOpenClawListContains(["agents", "list"], "mail-sentinel")).resolves.toEqual({
+      present: true,
+      verified: true,
+    });
   });
 
   it("issues a one-time Matrix onboarding code and writes hashed onboarding state", async () => {
