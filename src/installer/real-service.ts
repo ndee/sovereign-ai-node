@@ -207,6 +207,12 @@ type RelayEnrollmentResult = {
 const OPENCLAW_EXEC_TOOL_ID = "exec";
 const OPENCLAW_SESSION_STATUS_TOOL_ID = "session_status";
 const OPENCLAW_STATUS_PROBE_TIMEOUT_MS = 5_000;
+const OPENCLAW_RUNTIME_SETTLE_ATTEMPTS = 6;
+const OPENCLAW_RUNTIME_SETTLE_DELAY_MS = 5_000;
+const LOBSTER_CLI_PROBE_TIMEOUT_MS = 20_000;
+const LOBSTER_CLI_INSTALL_TIMEOUT_MS = 5 * 60_000;
+const SOVEREIGN_PINNED_LOBSTER_PACKAGE_NAME = "@clawdbot/lobster";
+const SOVEREIGN_PINNED_LOBSTER_VERSION = "2026.1.24";
 const SOVEREIGN_EXECUTABLE_PATHS: Record<string, string> = {
   "sovereign-node": "/usr/local/bin/sovereign-node",
   "sovereign-node-api": "/usr/local/bin/sovereign-node-api",
@@ -2289,12 +2295,23 @@ export class RealInstallerService implements InstallerService {
     return dedupeStrings(manifest.openclawToolNames ?? []);
   }
 
+  private listDeclaredOpenClawPluginIds(manifest: ToolTemplateDefinition): string[] {
+    return dedupeStrings([
+      ...(manifest.openclawPlugins ?? []),
+      ...(manifest.openclawBundledPlugins ?? []),
+    ]);
+  }
+
+  private listLoadableOpenClawPluginIds(manifest: ToolTemplateDefinition): string[] {
+    return dedupeStrings(manifest.openclawPlugins ?? []);
+  }
+
   private listRequiredOpenClawPluginIds(botPackages: LoadedBotPackage[]): string[] {
     return dedupeStrings([
       "matrix",
       ...botPackages.flatMap((botPackage) =>
-        botPackage.toolTemplates.flatMap(
-          (toolTemplate) => toolTemplate.manifest.openclawPlugins ?? [],
+        botPackage.toolTemplates.flatMap((toolTemplate) =>
+          this.listDeclaredOpenClawPluginIds(toolTemplate.manifest),
         ),
       ),
     ]);
@@ -2308,7 +2325,25 @@ export class RealInstallerService implements InstallerService {
         agent.toolInstanceIds ?? [],
       )) {
         const manifest = await this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef);
-        for (const pluginId of manifest.openclawPlugins ?? []) {
+        for (const pluginId of this.listDeclaredOpenClawPluginIds(manifest)) {
+          pluginIds.add(pluginId);
+        }
+      }
+    }
+    return Array.from(pluginIds).sort();
+  }
+
+  private async listManagedLoadableOpenClawPluginIds(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<string[]> {
+    const pluginIds = new Set<string>();
+    for (const agent of runtimeConfig.openclawProfile.agents) {
+      for (const tool of this.resolveBoundToolInstances(
+        runtimeConfig,
+        agent.toolInstanceIds ?? [],
+      )) {
+        const manifest = await this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef);
+        for (const pluginId of this.listLoadableOpenClawPluginIds(manifest)) {
           pluginIds.add(pluginId);
         }
       }
@@ -2319,10 +2354,145 @@ export class RealInstallerService implements InstallerService {
   private async listManagedOpenClawPluginLoadPaths(
     runtimeConfig: RuntimeConfig,
   ): Promise<string[]> {
-    const pluginIds = await this.listManagedOpenClawPluginIds(runtimeConfig);
+    const pluginIds = await this.listManagedLoadableOpenClawPluginIds(runtimeConfig);
     return pluginIds.map((pluginId) =>
       join(runtimeConfig.openclaw.openclawHome, "extensions", pluginId),
     );
+  }
+
+  private shouldEnsureLobsterCli(botPackages: LoadedBotPackage[]): boolean {
+    return botPackages.some((botPackage) =>
+      botPackage.toolTemplates.some((toolTemplate) => {
+        const manifest = toolTemplate.manifest;
+        return (
+          this.listDeclaredOpenClawPluginIds(manifest).includes("lobster") ||
+          this.listDocumentedOpenClawToolNames(manifest).includes("lobster")
+        );
+      }),
+    );
+  }
+
+  private async shouldEnsureLobsterCliForRuntime(runtimeConfig: RuntimeConfig): Promise<boolean> {
+    return (
+      runtimeConfig.openclawProfile.agents.some((agent) => agent.id === MAIL_SENTINEL_AGENT_ID) ||
+      (await this.listManagedOpenClawPluginIds(runtimeConfig)).includes("lobster")
+    );
+  }
+
+  private async detectInstalledLobsterCli(): Promise<{
+    binaryPath: string;
+    version: string | null;
+    commands: string[];
+  } | null> {
+    if (this.execRunner === null) {
+      return null;
+    }
+    const probe = await this.execRunner.run({
+      command: "lobster",
+      args: ["commands.list | json"],
+      options: {
+        timeout: LOBSTER_CLI_PROBE_TIMEOUT_MS,
+        env: {
+          CI: "1",
+        },
+      },
+    });
+    if (probe.exitCode !== 0) {
+      return null;
+    }
+    const parsed = parseJsonSafely(probe.stdout);
+    const commands = Array.isArray(parsed)
+      ? parsed.filter((entry): entry is string => typeof entry === "string")
+      : [];
+    const versionResult = await this.execRunner.run({
+      command: "npm",
+      args: ["list", "-g", SOVEREIGN_PINNED_LOBSTER_PACKAGE_NAME, "--json", "--depth=0"],
+      options: {
+        timeout: LOBSTER_CLI_PROBE_TIMEOUT_MS,
+        env: {
+          CI: "1",
+        },
+      },
+    });
+    const versionPayload = parseJsonSafely(versionResult.stdout);
+    const dependencyRecord =
+      isRecord(versionPayload) && isRecord(versionPayload.dependencies)
+        ? versionPayload.dependencies[SOVEREIGN_PINNED_LOBSTER_PACKAGE_NAME]
+        : undefined;
+    const version =
+      isRecord(dependencyRecord) && typeof dependencyRecord.version === "string"
+        ? dependencyRecord.version
+        : null;
+    return {
+      binaryPath: "lobster",
+      version,
+      commands,
+    };
+  }
+
+  private async ensureLobsterCliInstalled(): Promise<void> {
+    if (this.execRunner === null) {
+      throw {
+        code: "LOBSTER_INSTALL_FAILED",
+        message: "Exec runner unavailable; cannot install or probe Lobster CLI",
+        retryable: false,
+      };
+    }
+    const requiredCommands = ["clawd.invoke"];
+    const detected = await this.detectInstalledLobsterCli();
+    if (
+      detected !== null &&
+      (detected.version === null || detected.version === SOVEREIGN_PINNED_LOBSTER_VERSION) &&
+      (detected.commands.length === 0 ||
+        requiredCommands.every((commandName) => detected.commands.includes(commandName)))
+    ) {
+      return;
+    }
+
+    const installResult = await this.execRunner.run({
+      command: "npm",
+      args: [
+        "install",
+        "-g",
+        `${SOVEREIGN_PINNED_LOBSTER_PACKAGE_NAME}@${SOVEREIGN_PINNED_LOBSTER_VERSION}`,
+      ],
+      options: {
+        timeout: LOBSTER_CLI_INSTALL_TIMEOUT_MS,
+        env: {
+          CI: "1",
+        },
+      },
+    });
+    if (installResult.exitCode !== 0) {
+      throw {
+        code: "LOBSTER_INSTALL_FAILED",
+        message: "npm install for Lobster CLI exited with non-zero status",
+        retryable: true,
+        details: {
+          command: installResult.command,
+          exitCode: installResult.exitCode,
+          stdout: truncateText(installResult.stdout, 2000),
+          stderr: truncateText(installResult.stderr, 4000),
+        },
+      };
+    }
+
+    const verified = await this.detectInstalledLobsterCli();
+    if (
+      verified === null ||
+      !requiredCommands.every((commandName) => verified.commands.includes(commandName))
+    ) {
+      throw {
+        code: "LOBSTER_INSTALL_FAILED",
+        message: "Lobster CLI installed but required workflow commands are unavailable",
+        retryable: true,
+        details: {
+          requiredCommands,
+          detectedCommands: verified?.commands ?? [],
+          version: verified?.version ?? null,
+        },
+      };
+    }
   }
 
   private renderGuardedJsonStateWorkspacePluginManifest(): string {
@@ -4019,6 +4189,7 @@ export default function (api) {
     expectedId: string,
   ): Promise<{ present: boolean; verified: boolean }> {
     const attempts = [baseArgs, [...baseArgs, "--json"]];
+    let verified = false;
     for (const args of attempts) {
       const probe = await this.safeExec("openclaw", args, {
         timeoutMs: OPENCLAW_STATUS_PROBE_TIMEOUT_MS,
@@ -4029,17 +4200,76 @@ export default function (api) {
       if (probe.result.exitCode !== 0) {
         continue;
       }
+      verified = true;
       const body = `${probe.result.stdout}\n${probe.result.stderr}`;
-      return {
-        present: textContainsId(body, expectedId),
-        verified: true,
-      };
+      if (textContainsId(body, expectedId)) {
+        return {
+          present: true,
+          verified: true,
+        };
+      }
     }
 
     return {
       present: false,
-      verified: false,
+      verified,
     };
+  }
+
+  private async waitForOpenClawListContains(
+    baseArgs: string[],
+    expectedId: string,
+  ): Promise<{ present: boolean; verified: boolean }> {
+    let last = { present: false, verified: false };
+    for (let attempt = 1; attempt <= OPENCLAW_RUNTIME_SETTLE_ATTEMPTS; attempt += 1) {
+      last = await this.inspectOpenClawListContains(baseArgs, expectedId);
+      if (last.present || !last.verified || attempt === OPENCLAW_RUNTIME_SETTLE_ATTEMPTS) {
+        return last;
+      }
+      await delay(OPENCLAW_RUNTIME_SETTLE_DELAY_MS);
+    }
+    return last;
+  }
+
+  private async readManagedOpenClawRuntimeJson(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<Record<string, unknown> | null> {
+    try {
+      const raw = await readFile(runtimeConfig.openclaw.runtimeConfigPath, "utf8");
+      const parsed = parseJsonSafely(raw);
+      return isRecord(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private managedOpenClawRuntimeHasAgent(
+    runtimeJson: Record<string, unknown> | null,
+    agentId: string,
+  ): boolean {
+    const agents = runtimeJson?.agents;
+    if (!isRecord(agents) || !Array.isArray(agents.list)) {
+      return false;
+    }
+    return agents.list.some((entry) => isRecord(entry) && entry.id === agentId);
+  }
+
+  private managedOpenClawRuntimeHasCron(
+    runtimeJson: Record<string, unknown> | null,
+    cronId: string,
+  ): boolean {
+    const cron = runtimeJson?.cron;
+    if (!isRecord(cron)) {
+      return false;
+    }
+    const jobs = cron.jobs;
+    if (Array.isArray(jobs)) {
+      return jobs.some(
+        (entry) => isRecord(entry) && (entry.id === cronId || entry.name === cronId),
+      );
+    }
+    const singleId = cron.id;
+    return singleId === cronId;
   }
 
   private async inspectMatrixStatus(runtimeConfig: RuntimeConfig | null): Promise<{
@@ -4417,6 +4647,27 @@ export default function (api) {
         },
       },
       {
+        id: "lobster_bootstrap_cli",
+        label: "Install Lobster CLI",
+        run: async () => {
+          if (stepState.selectedBots === undefined) {
+            stepState.selectedBots = (
+              await this.resolveRequestedBots(stepState.effectiveRequest ?? req)
+            ).packages;
+          }
+          if (!this.shouldEnsureLobsterCli(stepState.selectedBots)) {
+            return;
+          }
+          if (this.execRunner === null) {
+            this.logger.warn(
+              "Exec runner unavailable; skipping explicit Lobster CLI capability gate during install",
+            );
+            return;
+          }
+          await this.ensureLobsterCliInstalled();
+        },
+      },
+      {
         id: "imap_validate",
         label: "Validate IMAP",
         softFail: true,
@@ -4677,6 +4928,15 @@ export default function (api) {
           await this.writeOpenClawRuntimeArtifacts(runtimeConfig);
           stepState.runtimeConfig = runtimeConfig;
           this.setManagedOpenClawEnv(runtimeConfig);
+          if (await this.shouldEnsureLobsterCliForRuntime(runtimeConfig)) {
+            if (this.execRunner === null) {
+              this.logger.warn(
+                "Exec runner unavailable; skipping Lobster CLI verification during OpenClaw configure",
+              );
+            } else {
+              await this.ensureLobsterCliInstalled();
+            }
+          }
           if (runtimeConfig.relay?.enabled === true) {
             stepState.relayTunnelServiceInstalled =
               await this.ensureRelayTunnelService(runtimeConfig);
@@ -5849,21 +6109,34 @@ export default function (api) {
       const missingAgentIds: string[] = [];
       let verifiedAgentProbe = false;
       for (const agentId of requiredAgentIds) {
-        const agentProbe = await this.inspectOpenClawListContains(["agents", "list"], agentId);
+        const agentProbe = await this.waitForOpenClawListContains(["agents", "list"], agentId);
         verifiedAgentProbe = verifiedAgentProbe || agentProbe.verified;
         if (agentProbe.verified && !agentProbe.present) {
           missingAgentIds.push(agentId);
         }
       }
       if (verifiedAgentProbe && missingAgentIds.length > 0) {
-        throw {
-          code: "SMOKE_CHECKS_FAILED",
-          message: "One or more managed agents are missing from OpenClaw runtime",
-          retryable: true,
-          details: {
-            missingAgentIds,
-          },
-        };
+        const runtimeJson = await this.readManagedOpenClawRuntimeJson(runtimeConfig);
+        const unresolvedAgentIds = missingAgentIds.filter(
+          (agentId) => !this.managedOpenClawRuntimeHasAgent(runtimeJson, agentId),
+        );
+        if (unresolvedAgentIds.length === 0) {
+          this.logger.warn(
+            {
+              missingAgentIds,
+            },
+            "OpenClaw CLI agent listing did not reflect all managed agents yet, but the managed runtime config already contains them; continuing",
+          );
+        } else {
+          throw {
+            code: "SMOKE_CHECKS_FAILED",
+            message: "One or more managed agents are missing from OpenClaw runtime",
+            retryable: true,
+            details: {
+              missingAgentIds: unresolvedAgentIds,
+            },
+          };
+        }
       }
 
       const expectedCronIds = dedupeStrings(
@@ -5872,21 +6145,39 @@ export default function (api) {
       const missingCronJobIds: string[] = [];
       let verifiedCronProbe = false;
       for (const cronJobId of expectedCronIds) {
-        const cronProbe = await this.inspectOpenClawListContains(["cron", "list"], cronJobId);
+        const cronProbe = await this.waitForOpenClawListContains(["cron", "list"], cronJobId);
         verifiedCronProbe = verifiedCronProbe || cronProbe.verified;
         if (cronProbe.verified && !cronProbe.present) {
           missingCronJobIds.push(cronJobId);
         }
       }
       if (verifiedCronProbe && missingCronJobIds.length > 0) {
-        throw {
-          code: "SMOKE_CHECKS_FAILED",
-          message: "One or more managed cron jobs are missing from OpenClaw runtime",
-          retryable: true,
-          details: {
-            missingCronJobIds,
-          },
-        };
+        const runtimeJson = await this.readManagedOpenClawRuntimeJson(runtimeConfig);
+        const configuredCronIds = new Set(
+          runtimeConfig.openclawProfile.crons.map((entry) => entry.id),
+        );
+        const unresolvedCronJobIds = missingCronJobIds.filter(
+          (cronId) =>
+            !this.managedOpenClawRuntimeHasCron(runtimeJson, cronId) &&
+            !configuredCronIds.has(cronId),
+        );
+        if (unresolvedCronJobIds.length === 0) {
+          this.logger.warn(
+            {
+              missingCronJobIds,
+            },
+            "OpenClaw CLI cron listing did not reflect all managed cron jobs yet, but the managed runtime config already contains them; continuing",
+          );
+        } else {
+          throw {
+            code: "SMOKE_CHECKS_FAILED",
+            message: "One or more managed cron jobs are missing from OpenClaw runtime",
+            retryable: true,
+            details: {
+              missingCronJobIds: unresolvedCronJobIds,
+            },
+          };
+        }
       }
     }
   }
@@ -6708,6 +6999,16 @@ export default function (api) {
     for (const pluginId of await this.listManagedOpenClawPluginIds(runtimeConfig)) {
       pluginEntries[pluginId] = {
         enabled: true,
+        ...(pluginId !== "llm-task"
+          ? {}
+          : {
+              config: {
+                defaultProvider: "openrouter",
+                defaultModel: runtimeConfig.openrouter.model,
+                allowedModels: [`openrouter/${runtimeConfig.openrouter.model}`],
+                timeoutMs: 30_000,
+              },
+            }),
       };
     }
     const managedPluginLoadPaths = await this.listManagedOpenClawPluginLoadPaths(runtimeConfig);

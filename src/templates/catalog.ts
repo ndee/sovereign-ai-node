@@ -17,6 +17,7 @@ export type ToolTemplateManifest = {
   requiredConfigKeys: string[];
   allowedCommands: string[];
   openclawPlugins?: string[];
+  openclawBundledPlugins?: string[];
   openclawToolNames?: string[];
   signature: TemplateSignature;
 };

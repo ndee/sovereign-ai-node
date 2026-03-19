@@ -23,6 +23,7 @@ export const stepStateSchema = z.enum([
 export const jobStepIdSchema = z.enum([
   "preflight",
   "openclaw_bootstrap_cli",
+  "lobster_bootstrap_cli",
   "imap_validate",
   "relay_enroll",
   "matrix_provision",

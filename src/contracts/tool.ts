@@ -33,6 +33,7 @@ export const imapReadMailResultSchema = z.object({
   mailbox: z.string().min(1),
   selectedBy: z.enum(["uid", "message-id"]),
   message: imapMessageSummarySchema.extend({
+    headers: z.record(z.string(), z.string()).default({}),
     text: z.string(),
     textTruncated: z.boolean(),
     htmlAvailable: z.boolean(),
