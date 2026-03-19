@@ -207,6 +207,8 @@ type RelayEnrollmentResult = {
 const OPENCLAW_EXEC_TOOL_ID = "exec";
 const OPENCLAW_SESSION_STATUS_TOOL_ID = "session_status";
 const OPENCLAW_STATUS_PROBE_TIMEOUT_MS = 5_000;
+const OPENCLAW_EMPTY_HEALTH_RETRY_ATTEMPTS = 3;
+const OPENCLAW_EMPTY_HEALTH_RETRY_DELAY_MS = 1_000;
 const OPENCLAW_RUNTIME_SETTLE_ATTEMPTS = 6;
 const OPENCLAW_RUNTIME_SETTLE_DELAY_MS = 5_000;
 const LOBSTER_CLI_PROBE_TIMEOUT_MS = 20_000;
@@ -4163,25 +4165,34 @@ export default function (api) {
     ok: boolean;
     message: string;
   }> {
-    const probe = await this.safeExec("openclaw", ["health"], {
-      timeoutMs: OPENCLAW_STATUS_PROBE_TIMEOUT_MS,
-    });
-    if (!probe.ok) {
-      return {
-        ok: false,
-        message: probe.error,
-      };
-    }
-    const body = `${probe.result.stdout}\n${probe.result.stderr}`;
-    if (probe.result.exitCode === 0 || this.looksLikeHealthyOpenClawHealth(body)) {
-      return {
-        ok: true,
-        message: summarizeText(probe.result.stdout || body, 220) || "openclaw health ok",
-      };
+    for (let attempt = 1; attempt <= OPENCLAW_EMPTY_HEALTH_RETRY_ATTEMPTS; attempt += 1) {
+      const probe = await this.safeExec("openclaw", ["health"], {
+        timeoutMs: OPENCLAW_STATUS_PROBE_TIMEOUT_MS,
+      });
+      if (!probe.ok) {
+        return {
+          ok: false,
+          message: probe.error,
+        };
+      }
+      const body = `${probe.result.stdout}\n${probe.result.stderr}`;
+      if (probe.result.exitCode === 0 || this.looksLikeHealthyOpenClawHealth(body)) {
+        return {
+          ok: true,
+          message: summarizeText(probe.result.stdout || body, 220) || "openclaw health ok",
+        };
+      }
+      if (body.trim().length > 0 || attempt === OPENCLAW_EMPTY_HEALTH_RETRY_ATTEMPTS) {
+        return {
+          ok: false,
+          message: summarizeText(body, 220),
+        };
+      }
+      await delay(OPENCLAW_EMPTY_HEALTH_RETRY_DELAY_MS);
     }
     return {
       ok: false,
-      message: summarizeText(body, 220),
+      message: "",
     };
   }
 
