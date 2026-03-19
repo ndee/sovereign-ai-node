@@ -1749,6 +1749,7 @@ describe("RealInstallerService", () => {
           matrix?: {
             enabled?: boolean;
             homeserver?: string;
+            threadReplies?: string;
             userId?: string;
             defaultAccount?: string;
             groupAllowFrom?: string[];
@@ -1784,6 +1785,7 @@ describe("RealInstallerService", () => {
       expect(openclawConfig.plugins?.entries?.["llm-task"]?.enabled).toBe(true);
       expect(openclawConfig.channels?.matrix?.enabled).toBe(true);
       expect(openclawConfig.channels?.matrix?.homeserver).toBe("http://127.0.0.1:8008");
+      expect(openclawConfig.channels?.matrix?.threadReplies).toBe("always");
       expect(openclawConfig.channels?.matrix?.userId).toBeUndefined();
       expect(openclawConfig.channels?.matrix?.groupAllowFrom).toEqual([
         "@operator:matrix.example.org",
@@ -6506,6 +6508,7 @@ describe("RealInstallerService", () => {
         }>;
         channels?: {
           matrix?: {
+            threadReplies?: string;
             userId?: string;
             defaultAccount?: string;
             accounts?: Record<
@@ -6522,6 +6525,7 @@ describe("RealInstallerService", () => {
         };
       };
       expect(openclawConfig.channels?.matrix?.userId).toBeUndefined();
+      expect(openclawConfig.channels?.matrix?.threadReplies).toBe("always");
       expect(openclawConfig.channels?.matrix?.defaultAccount).toBe("bitcoin-skill-match");
       expect(openclawConfig.bindings).toEqual([
         {

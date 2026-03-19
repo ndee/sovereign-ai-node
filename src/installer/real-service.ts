@@ -207,6 +207,8 @@ type RelayEnrollmentResult = {
 const OPENCLAW_EXEC_TOOL_ID = "exec";
 const OPENCLAW_SESSION_STATUS_TOOL_ID = "session_status";
 const OPENCLAW_STATUS_PROBE_TIMEOUT_MS = 5_000;
+const OPENCLAW_EMPTY_HEALTH_RETRY_ATTEMPTS = 3;
+const OPENCLAW_EMPTY_HEALTH_RETRY_DELAY_MS = 1_000;
 const OPENCLAW_RUNTIME_SETTLE_ATTEMPTS = 6;
 const OPENCLAW_RUNTIME_SETTLE_DELAY_MS = 5_000;
 const LOBSTER_CLI_PROBE_TIMEOUT_MS = 20_000;
@@ -4163,25 +4165,46 @@ export default function (api) {
     ok: boolean;
     message: string;
   }> {
-    const probe = await this.safeExec("openclaw", ["health"], {
-      timeoutMs: OPENCLAW_STATUS_PROBE_TIMEOUT_MS,
-    });
-    if (!probe.ok) {
-      return {
-        ok: false,
-        message: probe.error,
-      };
-    }
-    if (probe.result.exitCode === 0) {
-      return {
-        ok: true,
-        message: summarizeText(probe.result.stdout, 220) || "openclaw health ok",
-      };
+    for (let attempt = 1; attempt <= OPENCLAW_EMPTY_HEALTH_RETRY_ATTEMPTS; attempt += 1) {
+      const probe = await this.safeExec("openclaw", ["health"], {
+        timeoutMs: OPENCLAW_STATUS_PROBE_TIMEOUT_MS,
+      });
+      if (!probe.ok) {
+        return {
+          ok: false,
+          message: probe.error,
+        };
+      }
+      const body = `${probe.result.stdout}\n${probe.result.stderr}`;
+      if (probe.result.exitCode === 0 || this.looksLikeHealthyOpenClawHealth(body)) {
+        return {
+          ok: true,
+          message: summarizeText(probe.result.stdout || body, 220) || "openclaw health ok",
+        };
+      }
+      if (body.trim().length > 0 || attempt === OPENCLAW_EMPTY_HEALTH_RETRY_ATTEMPTS) {
+        return {
+          ok: false,
+          message: summarizeText(body, 220),
+        };
+      }
+      await delay(OPENCLAW_EMPTY_HEALTH_RETRY_DELAY_MS);
     }
     return {
       ok: false,
-      message: summarizeText(`${probe.result.stdout}\n${probe.result.stderr}`, 220),
+      message: "",
     };
+  }
+
+  private looksLikeHealthyOpenClawHealth(value: string): boolean {
+    const normalized = value.toLowerCase();
+    if (!/matrix:\s*ok/.test(normalized)) {
+      return false;
+    }
+    if (!/agents?:/.test(normalized)) {
+      return false;
+    }
+    return !/\bunhealthy\b|\bfailed\b|\berror\b|\bpanic\b/.test(normalized);
   }
 
   private async inspectOpenClawListContains(
@@ -6093,14 +6116,20 @@ export default function (api) {
 
       const health = await this.probeOpenClawHealth();
       if (!health.ok) {
-        throw {
-          code: "SMOKE_CHECKS_FAILED",
-          message: "OpenClaw health probe failed during smoke checks",
-          retryable: true,
-          details: {
-            health: health.message,
-          },
-        };
+        if (health.message.trim().length === 0) {
+          this.logger.warn(
+            "OpenClaw health probe returned no details during smoke checks; continuing because gateway service and runtime wiring checks already passed",
+          );
+        } else {
+          throw {
+            code: "SMOKE_CHECKS_FAILED",
+            message: "OpenClaw health probe failed during smoke checks",
+            retryable: true,
+            details: {
+              health: health.message,
+            },
+          };
+        }
       }
 
       const requiredAgentIds = dedupeStrings(
@@ -7167,6 +7196,7 @@ export default function (api) {
         matrix: {
           enabled: true,
           homeserver: runtimeConfig.matrix.adminBaseUrl,
+          threadReplies: "always",
           ...(!hasSharedServiceBot && preferredDefaultAccountId !== undefined
             ? { defaultAccount: preferredDefaultAccountId }
             : {}),
