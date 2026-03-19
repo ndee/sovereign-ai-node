@@ -3303,7 +3303,9 @@ describe("RealInstallerService", () => {
         run: async ({ command, args }): Promise<ExecResult> => {
           const serialized = [command, ...(args ?? [])].join(" ");
           commandCalls.push(serialized);
-          const lobsterResult = maybeHandleInstalledLobsterExec({ command, args });
+          const lobsterResult = maybeHandleInstalledLobsterExec(
+            args === undefined ? { command } : { command, args },
+          );
           if (lobsterResult !== null) {
             return lobsterResult;
           }
@@ -3443,7 +3445,9 @@ describe("RealInstallerService", () => {
         run: async ({ command, args }): Promise<ExecResult> => {
           const serialized = [command, ...(args ?? [])].join(" ");
           commandCalls.push(serialized);
-          const lobsterResult = maybeHandleInstalledLobsterExec({ command, args });
+          const lobsterResult = maybeHandleInstalledLobsterExec(
+            args === undefined ? { command } : { command, args },
+          );
           if (lobsterResult !== null) {
             return lobsterResult;
           }
@@ -4712,13 +4716,18 @@ describe("RealInstallerService", () => {
     });
 
     const inspect = service as unknown as {
-      inspectOpenClawListContains(baseArgs: string[], expectedId: string): Promise<{
+      inspectOpenClawListContains(
+        baseArgs: string[],
+        expectedId: string,
+      ): Promise<{
         present: boolean;
         verified: boolean;
       }>;
     };
 
-    await expect(inspect.inspectOpenClawListContains(["agents", "list"], "mail-sentinel")).resolves.toEqual({
+    await expect(
+      inspect.inspectOpenClawListContains(["agents", "list"], "mail-sentinel"),
+    ).resolves.toEqual({
       present: true,
       verified: true,
     });

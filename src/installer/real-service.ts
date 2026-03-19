@@ -2310,8 +2310,8 @@ export class RealInstallerService implements InstallerService {
     return dedupeStrings([
       "matrix",
       ...botPackages.flatMap((botPackage) =>
-        botPackage.toolTemplates.flatMap(
-          (toolTemplate) => this.listDeclaredOpenClawPluginIds(toolTemplate.manifest),
+        botPackage.toolTemplates.flatMap((toolTemplate) =>
+          this.listDeclaredOpenClawPluginIds(toolTemplate.manifest),
         ),
       ),
     ]);
@@ -2333,7 +2333,9 @@ export class RealInstallerService implements InstallerService {
     return Array.from(pluginIds).sort();
   }
 
-  private async listManagedLoadableOpenClawPluginIds(runtimeConfig: RuntimeConfig): Promise<string[]> {
+  private async listManagedLoadableOpenClawPluginIds(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<string[]> {
     const pluginIds = new Set<string>();
     for (const agent of runtimeConfig.openclawProfile.agents) {
       for (const tool of this.resolveBoundToolInstances(
@@ -4229,7 +4231,9 @@ export default function (api) {
     return last;
   }
 
-  private async readManagedOpenClawRuntimeJson(runtimeConfig: RuntimeConfig): Promise<Record<string, unknown> | null> {
+  private async readManagedOpenClawRuntimeJson(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<Record<string, unknown> | null> {
     try {
       const raw = await readFile(runtimeConfig.openclaw.runtimeConfigPath, "utf8");
       const parsed = parseJsonSafely(raw);
@@ -4260,7 +4264,9 @@ export default function (api) {
     }
     const jobs = cron.jobs;
     if (Array.isArray(jobs)) {
-      return jobs.some((entry) => isRecord(entry) && (entry.id === cronId || entry.name === cronId));
+      return jobs.some(
+        (entry) => isRecord(entry) && (entry.id === cronId || entry.name === cronId),
+      );
     }
     const singleId = cron.id;
     return singleId === cronId;
@@ -4645,8 +4651,9 @@ export default function (api) {
         label: "Install Lobster CLI",
         run: async () => {
           if (stepState.selectedBots === undefined) {
-            stepState.selectedBots = (await this.resolveRequestedBots(stepState.effectiveRequest ?? req))
-              .packages;
+            stepState.selectedBots = (
+              await this.resolveRequestedBots(stepState.effectiveRequest ?? req)
+            ).packages;
           }
           if (!this.shouldEnsureLobsterCli(stepState.selectedBots)) {
             return;
@@ -6121,14 +6128,14 @@ export default function (api) {
             "OpenClaw CLI agent listing did not reflect all managed agents yet, but the managed runtime config already contains them; continuing",
           );
         } else {
-        throw {
-          code: "SMOKE_CHECKS_FAILED",
-          message: "One or more managed agents are missing from OpenClaw runtime",
-          retryable: true,
-          details: {
-            missingAgentIds: unresolvedAgentIds,
-          },
-        };
+          throw {
+            code: "SMOKE_CHECKS_FAILED",
+            message: "One or more managed agents are missing from OpenClaw runtime",
+            retryable: true,
+            details: {
+              missingAgentIds: unresolvedAgentIds,
+            },
+          };
         }
       }
 
@@ -6146,10 +6153,13 @@ export default function (api) {
       }
       if (verifiedCronProbe && missingCronJobIds.length > 0) {
         const runtimeJson = await this.readManagedOpenClawRuntimeJson(runtimeConfig);
-        const configuredCronIds = new Set(runtimeConfig.openclawProfile.crons.map((entry) => entry.id));
+        const configuredCronIds = new Set(
+          runtimeConfig.openclawProfile.crons.map((entry) => entry.id),
+        );
         const unresolvedCronJobIds = missingCronJobIds.filter(
           (cronId) =>
-            !this.managedOpenClawRuntimeHasCron(runtimeJson, cronId) && !configuredCronIds.has(cronId),
+            !this.managedOpenClawRuntimeHasCron(runtimeJson, cronId) &&
+            !configuredCronIds.has(cronId),
         );
         if (unresolvedCronJobIds.length === 0) {
           this.logger.warn(
@@ -6159,14 +6169,14 @@ export default function (api) {
             "OpenClaw CLI cron listing did not reflect all managed cron jobs yet, but the managed runtime config already contains them; continuing",
           );
         } else {
-        throw {
-          code: "SMOKE_CHECKS_FAILED",
-          message: "One or more managed cron jobs are missing from OpenClaw runtime",
-          retryable: true,
-          details: {
-            missingCronJobIds: unresolvedCronJobIds,
-          },
-        };
+          throw {
+            code: "SMOKE_CHECKS_FAILED",
+            message: "One or more managed cron jobs are missing from OpenClaw runtime",
+            retryable: true,
+            details: {
+              missingCronJobIds: unresolvedCronJobIds,
+            },
+          };
         }
       }
     }

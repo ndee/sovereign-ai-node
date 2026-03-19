@@ -279,9 +279,10 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
 
   private async installViaDirectNpmFallback(desiredVersion: string): Promise<void> {
     const installTarget =
-      desiredVersion === SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS ? SOVEREIGN_PINNED_OPENCLAW_VERSION : desiredVersion;
-    const cacheDir =
-      process.env.NPM_CONFIG_CACHE ?? join(process.env.HOME ?? "/root", ".npm");
+      desiredVersion === SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS
+        ? SOVEREIGN_PINNED_OPENCLAW_VERSION
+        : desiredVersion;
+    const cacheDir = process.env.NPM_CONFIG_CACHE ?? join(process.env.HOME ?? "/root", ".npm");
     const installResult = await this.execRunner.run({
       command: "npm",
       args: ["install", "-g", `openclaw@${installTarget}`],
@@ -345,9 +346,9 @@ const buildInstallShellScript = (args: InstallShellArgs): string => {
 
   return [
     "set -euo pipefail",
-    "if [ \"$(id -u)\" = \"0\" ] && [ -z \"${HOME:-}\" ]; then export HOME=/root; fi",
-    "export NPM_CONFIG_CACHE=\"${NPM_CONFIG_CACHE:-${HOME:-/root}/.npm}\"",
-    "mkdir -p \"$NPM_CONFIG_CACHE\"",
+    'if [ "$(id -u)" = "0" ] && [ -z "${HOME:-}" ]; then export HOME=/root; fi',
+    'export NPM_CONFIG_CACHE="${NPM_CONFIG_CACHE:-${HOME:-/root}/.npm}"',
+    'mkdir -p "$NPM_CONFIG_CACHE"',
     "curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install.sh \\",
     `  | bash ${installArgs.map(shellQuote).join(" ")}`,
   ].join("\n");
