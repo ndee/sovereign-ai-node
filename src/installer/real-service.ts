@@ -4172,16 +4172,28 @@ export default function (api) {
         message: probe.error,
       };
     }
-    if (probe.result.exitCode === 0) {
+    const body = `${probe.result.stdout}\n${probe.result.stderr}`;
+    if (probe.result.exitCode === 0 || this.looksLikeHealthyOpenClawHealth(body)) {
       return {
         ok: true,
-        message: summarizeText(probe.result.stdout, 220) || "openclaw health ok",
+        message: summarizeText(probe.result.stdout || body, 220) || "openclaw health ok",
       };
     }
     return {
       ok: false,
-      message: summarizeText(`${probe.result.stdout}\n${probe.result.stderr}`, 220),
+      message: summarizeText(body, 220),
     };
+  }
+
+  private looksLikeHealthyOpenClawHealth(value: string): boolean {
+    const normalized = value.toLowerCase();
+    if (!/matrix:\s*ok/.test(normalized)) {
+      return false;
+    }
+    if (!/agents?:/.test(normalized)) {
+      return false;
+    }
+    return !/\bunhealthy\b|\bfailed\b|\berror\b|\bpanic\b/.test(normalized);
   }
 
   private async inspectOpenClawListContains(
