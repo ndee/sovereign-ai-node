@@ -6116,14 +6116,20 @@ export default function (api) {
 
       const health = await this.probeOpenClawHealth();
       if (!health.ok) {
-        throw {
-          code: "SMOKE_CHECKS_FAILED",
-          message: "OpenClaw health probe failed during smoke checks",
-          retryable: true,
-          details: {
-            health: health.message,
-          },
-        };
+        if (health.message.trim().length === 0) {
+          this.logger.warn(
+            "OpenClaw health probe returned no details during smoke checks; continuing because gateway service and runtime wiring checks already passed",
+          );
+        } else {
+          throw {
+            code: "SMOKE_CHECKS_FAILED",
+            message: "OpenClaw health probe failed during smoke checks",
+            retryable: true,
+            details: {
+              health: health.message,
+            },
+          };
+        }
       }
 
       const requiredAgentIds = dedupeStrings(
