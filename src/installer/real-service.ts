@@ -7167,6 +7167,7 @@ export default function (api) {
         matrix: {
           enabled: true,
           homeserver: runtimeConfig.matrix.adminBaseUrl,
+          threadReplies: "always",
           ...(!hasSharedServiceBot && preferredDefaultAccountId !== undefined
             ? { defaultAccount: preferredDefaultAccountId }
             : {}),
