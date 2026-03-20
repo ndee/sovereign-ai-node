@@ -39,4 +39,32 @@ describe("installRequestSchema", () => {
       controlUrl: "https://relay.sovereign-ai-node.com",
     });
   });
+
+  it("accepts an optional requested relay node name", () => {
+    const parsed = installRequestSchema.parse({
+      mode: "bundled_matrix",
+      connectivity: {
+        mode: "relay",
+      },
+      relay: {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+        requestedSlug: "pilot-node",
+      },
+      openrouter: {
+        secretRef: "file:/etc/sovereign-node/secrets/openrouter-api-key",
+      },
+      matrix: {
+        homeserverDomain: "relay-pending.invalid",
+        publicBaseUrl: "https://relay-pending.invalid",
+      },
+      operator: {
+        username: "operator",
+      },
+    });
+
+    expect(parsed.relay).toEqual({
+      controlUrl: "https://relay.sovereign-ai-node.com",
+      requestedSlug: "pilot-node",
+    });
+  });
 });

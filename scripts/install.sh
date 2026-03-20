@@ -46,6 +46,8 @@ DEFAULT_FEDERATION_ENABLED="0"
 DEFAULT_MANAGED_RELAY_CONTROL_URL="https://relay.sovereign-ai-node.com"
 DEFAULT_CONNECTIVITY_MODE="relay"
 DEFAULT_RELAY_CONTROL_URL="${SOVEREIGN_NODE_RELAY_CONTROL_URL:-$DEFAULT_MANAGED_RELAY_CONTROL_URL}"
+DEFAULT_RELAY_REQUESTED_SLUG="${SOVEREIGN_NODE_RELAY_REQUESTED_SLUG:-}"
+DEFAULT_RELAY_HOSTNAME=""
 DEFAULT_IMAP_CONFIGURED="0"
 DEFAULT_IMAP_HOST="imap.example.org"
 DEFAULT_IMAP_PORT="993"
@@ -72,6 +74,8 @@ UI_PROGRESS_LINE_OPEN="0"
 INSTALL_COMMAND_OUTPUT=""
 RUNTIME_STATUS_OUTPUT=""
 DOCTOR_REPORT_OUTPUT=""
+PROMPTED_RELAY_REQUESTED_SLUG=""
+PROMPTED_RELAY_REQUESTED_HOSTNAME=""
 declare -a UI_SPINNER_FRAMES=("[    ]" "[=   ]" "[==  ]" "[=== ]" "[ ===]" "[  ==]" "[   =]")
 
 log() {
@@ -1373,6 +1377,131 @@ prompt_required_secret() {
   printf '%s' "$value"
 }
 
+check_relay_requested_slug_availability() {
+  local control_url requested_slug
+  control_url="$1"
+  requested_slug="$2"
+
+  node - "$control_url" "$requested_slug" <<'NODE'
+const [controlUrlRaw, requestedSlugRaw] = process.argv.slice(2);
+
+const summarize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+
+const parsePayload = (value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  if (value.result && typeof value.result === "object" && !Array.isArray(value.result)) {
+    return value.result;
+  }
+  return value;
+};
+
+const main = async () => {
+  try {
+    const endpoint = new URL(
+      "/api/v1/requested-slug-availability",
+      controlUrlRaw.endsWith("/") ? controlUrlRaw : `${controlUrlRaw}/`,
+    );
+    endpoint.searchParams.set("requestedSlug", requestedSlugRaw);
+
+    const response = await fetch(endpoint, {
+      headers: {
+        Accept: "application/json",
+      },
+    });
+    const responseText = await response.text();
+
+    let parsed = null;
+    try {
+      parsed = JSON.parse(responseText);
+    } catch {
+      parsed = null;
+    }
+
+    const payload = parsePayload(parsed);
+    const normalizedSlug =
+      payload && typeof payload.normalizedSlug === "string" ? payload.normalizedSlug.trim() : "";
+    const hostname = payload && typeof payload.hostname === "string" ? payload.hostname.trim() : "";
+    const available = payload && typeof payload.available === "boolean" ? payload.available : null;
+    const errorMessage =
+      parsed && typeof parsed === "object" && !Array.isArray(parsed) && typeof parsed.error === "string"
+        ? summarize(parsed.error)
+        : summarize(responseText);
+
+    if (response.ok && available !== null && normalizedSlug.length > 0 && hostname.length > 0) {
+      process.stdout.write(
+        `${available ? "available" : "unavailable"}\t${normalizedSlug}\t${hostname}\t`,
+      );
+      return;
+    }
+
+    const status = response.status === 400 || response.status === 422 ? "invalid" : "error";
+    process.stdout.write(`${status}\t${normalizedSlug}\t${hostname}\t${errorMessage}`);
+  } catch (error) {
+    process.stdout.write(
+      `error\t\t\t${summarize(error instanceof Error ? error.message : String(error))}`,
+    );
+  }
+};
+
+main();
+NODE
+}
+
+prompt_relay_requested_slug() {
+  local control_url default_slug prompt entered check_result status normalized_slug hostname message
+  control_url="$1"
+  default_slug="${2:-}"
+  prompt="$3"
+
+  PROMPTED_RELAY_REQUESTED_SLUG=""
+  PROMPTED_RELAY_REQUESTED_HOSTNAME=""
+
+  while true; do
+    entered="$(prompt_value "${prompt} (leave blank for auto-generated)" "$default_slug")"
+    if [[ -z "${entered//[[:space:]]/}" ]]; then
+      return 0
+    fi
+
+    check_result="$(check_relay_requested_slug_availability "$control_url" "$entered")"
+    IFS=$'\t' read -r status normalized_slug hostname message <<<"$check_result"
+
+    case "$status" in
+      available)
+        PROMPTED_RELAY_REQUESTED_SLUG="$normalized_slug"
+        PROMPTED_RELAY_REQUESTED_HOSTNAME="$hostname"
+        if [[ "$normalized_slug" != "$entered" ]]; then
+          ui_info "Using normalized node name: ${normalized_slug}"
+        fi
+        ui_success "Node hostname is available: ${hostname}"
+        return 0
+        ;;
+      unavailable)
+        ui_warn "Node hostname is already taken: ${hostname}"
+        default_slug="$normalized_slug"
+        ;;
+      invalid)
+        if [[ -n "$message" ]]; then
+          ui_warn "$message"
+        else
+          ui_warn "Node name is invalid. Use letters, numbers, and hyphens."
+        fi
+        default_slug="$normalized_slug"
+        ;;
+      *)
+        if [[ -n "$message" ]]; then
+          ui_warn "Could not verify node name availability: ${message}"
+        else
+          ui_warn "Could not verify node name availability."
+        fi
+        ui_info "Leave the field blank to let the relay auto-generate a name."
+        default_slug="$entered"
+        ;;
+    esac
+  done
+}
+
 bot_list_contains() {
   local selected bot_id
   selected="$1"
@@ -1842,6 +1971,8 @@ reset_request_defaults() {
   DEFAULT_POLL_INTERVAL="5m"
   DEFAULT_LOOKBACK_WINDOW="15m"
   DEFAULT_FEDERATION_ENABLED="0"
+  DEFAULT_RELAY_REQUESTED_SLUG=""
+  DEFAULT_RELAY_HOSTNAME=""
   DEFAULT_IMAP_CONFIGURED="0"
   DEFAULT_IMAP_HOST="imap.example.org"
   DEFAULT_IMAP_PORT="993"
@@ -1972,6 +2103,13 @@ const legacyMatrixPublicBaseUrls = new Set([
   "http://127.0.0.1:8008",
   "http://matrix.local.test:8008",
 ]);
+const deriveSlugFromHostname = (value) => {
+  const normalized = String(value || "").trim().toLowerCase().replace(/\.+$/g, "");
+  if (normalized.length === 0) {
+    return "";
+  }
+  return normalized.split(".")[0] || "";
+};
 const runtimeMatrixDomain =
   runtimeMatrix && typeof runtimeMatrix === "object" && !Array.isArray(runtimeMatrix)
   && typeof runtimeMatrix.homeserverDomain === "string"
@@ -1996,6 +2134,10 @@ const runtimeRelayHostname =
 const runtimeRelayPublicBaseUrl =
   runtimeRelayEnabled && typeof runtimeRelay.publicBaseUrl === "string"
     ? runtimeRelay.publicBaseUrl
+    : "";
+const requestedRelaySlug =
+  relay && typeof relay === "object" && !Array.isArray(relay) && typeof relay.requestedSlug === "string"
+    ? relay.requestedSlug
     : "";
 const effectiveMatrixDomain = runtimeMatrixDomain || matrix.homeserverDomain || "";
 const effectiveMatrixPublicBaseUrl = runtimeMatrixPublicBaseUrl || matrix.publicBaseUrl || "";
@@ -2024,6 +2166,8 @@ if (runtimeRelayEnabled || connectivity.mode === "relay" || relay.controlUrl) {
   emit("DEFAULT_CONNECTIVITY_MODE", "direct");
 }
 emit("DEFAULT_RELAY_CONTROL_URL", runtimeRelayControlUrl || relay.controlUrl || "");
+emit("DEFAULT_RELAY_REQUESTED_SLUG", requestedRelaySlug || deriveSlugFromHostname(runtimeRelayHostname));
+emit("DEFAULT_RELAY_HOSTNAME", runtimeRelayHostname);
 emit("EXISTING_RELAY_ENROLLMENT_TOKEN", relay.enrollmentToken || "");
 emit(
   "DEFAULT_SELECTED_BOTS",
@@ -2083,6 +2227,12 @@ NODE
         ;;
       DEFAULT_RELAY_CONTROL_URL)
         DEFAULT_RELAY_CONTROL_URL="$value"
+        ;;
+      DEFAULT_RELAY_REQUESTED_SLUG)
+        DEFAULT_RELAY_REQUESTED_SLUG="$value"
+        ;;
+      DEFAULT_RELAY_HOSTNAME)
+        DEFAULT_RELAY_HOSTNAME="$value"
         ;;
       EXISTING_RELAY_ENROLLMENT_TOKEN)
         EXISTING_RELAY_ENROLLMENT_TOKEN="$value"
@@ -2444,6 +2594,9 @@ if (connectivityMode === "relay") {
   if ((process.env.SN_RELAY_ENROLLMENT_TOKEN || "").trim().length > 0) {
     req.relay.enrollmentToken = process.env.SN_RELAY_ENROLLMENT_TOKEN;
   }
+  if ((process.env.SN_RELAY_REQUESTED_SLUG || "").trim().length > 0) {
+    req.relay.requestedSlug = process.env.SN_RELAY_REQUESTED_SLUG;
+  }
 }
 
 if (process.env.SN_IMAP_CONFIGURE === "1") {
@@ -2484,7 +2637,16 @@ review_install_request() {
     else
       ui_info "Relay enrollment: token-based (custom relay)"
     fi
-    ui_info "Node name: auto-generated by relay (immutable)"
+    if [[ -n "${SN_RELAY_REQUESTED_SLUG:-}" ]]; then
+      ui_info "Requested node name: ${SN_RELAY_REQUESTED_SLUG}"
+      if [[ -n "${SN_RELAY_REQUESTED_HOSTNAME:-}" ]]; then
+        ui_info "Requested node hostname: ${SN_RELAY_REQUESTED_HOSTNAME}"
+      fi
+    elif [[ -n "${SN_RELAY_REQUESTED_HOSTNAME:-}" ]]; then
+      ui_info "Node hostname: ${SN_RELAY_REQUESTED_HOSTNAME} (existing assignment)"
+    else
+      ui_info "Node name: auto-generated by relay"
+    fi
     ui_info "Matrix hostname and public URL will be assigned by the relay during install."
   else
     ui_info "Connection mode: direct"
@@ -2535,7 +2697,7 @@ run_install_wizard() {
   local operator_username alert_room_name selected_bots poll_interval lookback_window federation_enabled
   local matrix_tls_mode connectivity_choice connectivity_choice_default connectivity_mode
   local prompted_selected_bots
-  local relay_control_url relay_enrollment_token
+  local relay_control_url relay_enrollment_token relay_requested_slug relay_requested_hostname
   local openrouter_secret_ref openrouter_secret_path openrouter_secret_mode
   local configure_imap imap_choice imap_host imap_port imap_tls imap_username imap_password
   local imap_mailbox imap_secret_ref imap_secret_path imap_secret_mode
@@ -2560,6 +2722,8 @@ run_install_wizard() {
   federation_enabled="$DEFAULT_FEDERATION_ENABLED"
   connectivity_mode="$DEFAULT_CONNECTIVITY_MODE"
   relay_control_url="$DEFAULT_RELAY_CONTROL_URL"
+  relay_requested_slug="$DEFAULT_RELAY_REQUESTED_SLUG"
+  relay_requested_hostname="$DEFAULT_RELAY_HOSTNAME"
   openrouter_secret_ref="$EXISTING_OPENROUTER_SECRET_REF"
   openrouter_secret_mode="replaced"
   matrix_tls_mode="$(infer_matrix_tls_mode_from_url "$matrix_public_base_url")"
@@ -2629,6 +2793,7 @@ run_install_wizard() {
   ui_section "Matrix"
   if [[ "$connectivity_mode" == "relay" ]]; then
     relay_enrollment_token=""
+    relay_requested_hostname="$DEFAULT_RELAY_HOSTNAME"
     if [[ "${relay_control_url%/}" == "$DEFAULT_MANAGED_RELAY_CONTROL_URL" ]]; then
       ui_info "Using Sovereign managed relay: ${relay_control_url}"
     else
@@ -2648,6 +2813,14 @@ run_install_wizard() {
         )"
       fi
     fi
+    if [[ "$INSTALLATION_DETECTED" == "1" ]] && [[ -n "$DEFAULT_RELAY_HOSTNAME" ]]; then
+      ui_info "Existing node hostname: ${DEFAULT_RELAY_HOSTNAME}"
+      ui_info "Node name is already assigned and will be kept."
+    else
+      prompt_relay_requested_slug "$relay_control_url" "$relay_requested_slug" "Preferred node name"
+      relay_requested_slug="$PROMPTED_RELAY_REQUESTED_SLUG"
+      relay_requested_hostname="$PROMPTED_RELAY_REQUESTED_HOSTNAME"
+    fi
     if [[ -z "$matrix_domain" ]]; then
       matrix_domain="relay-pending.invalid"
     fi
@@ -2660,6 +2833,8 @@ run_install_wizard() {
     matrix_domain="$(prompt_value "Matrix homeserver domain" "$matrix_domain")"
     matrix_public_base_url="$(prompt_value "Matrix public base URL" "$matrix_public_base_url")"
     matrix_tls_mode="$(infer_matrix_tls_mode_from_url "$matrix_public_base_url")"
+    relay_requested_slug=""
+    relay_requested_hostname=""
   fi
   operator_username="$(prompt_value "Operator username" "$operator_username")"
   alert_room_name="$(prompt_value "Alert room name" "$alert_room_name")"
@@ -2768,6 +2943,8 @@ run_install_wizard() {
   export SN_OPENROUTER_SECRET_MODE="$openrouter_secret_mode"
   export SN_RELAY_CONTROL_URL="${relay_control_url:-}"
   export SN_RELAY_ENROLLMENT_TOKEN="${relay_enrollment_token:-}"
+  export SN_RELAY_REQUESTED_SLUG="${relay_requested_slug:-}"
+  export SN_RELAY_REQUESTED_HOSTNAME="${relay_requested_hostname:-}"
   export SN_MATRIX_DOMAIN="$matrix_domain"
   export SN_MATRIX_PUBLIC_BASE_URL="$matrix_public_base_url"
   export SN_MATRIX_TLS_MODE="$matrix_tls_mode"

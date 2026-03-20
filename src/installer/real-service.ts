@@ -204,6 +204,11 @@ type RelayEnrollmentResult = {
   tunnel: RelayTunnelConfig;
 };
 
+type RelayRequestedSlugAvailabilityResult = {
+  normalizedSlug: string;
+  hostname: string;
+};
+
 const OPENCLAW_EXEC_TOOL_ID = "exec";
 const OPENCLAW_SESSION_STATUS_TOOL_ID = "session_status";
 const OPENCLAW_STATUS_PROBE_TIMEOUT_MS = 5_000;
@@ -216,6 +221,25 @@ const SOVEREIGN_EXECUTABLE_PATHS: Record<string, string> = {
 
 const DEFAULT_MANAGED_RELAY_CONTROL_URL = "https://relay.sovereign-ai-node.com";
 const DEFAULT_MATRIX_USER_INVITE_TTL_MINUTES = 1_440;
+
+const sanitizeRequestedRelaySlug = (value: string): string =>
+  value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+/g, "")
+    .replace(/-+$/g, "")
+    .replace(/-{2,}/g, "-")
+    .slice(0, 48);
+
+const extractRelaySlugFromHostname = (hostname: string): string => {
+  const normalized = hostname.trim().toLowerCase().replace(/\.+$/g, "");
+  if (normalized.length === 0) {
+    return "";
+  }
+  const [slug = ""] = normalized.split(".");
+  return slug;
+};
 
 const RELAY_NAME_THEMES = [
   "satoshi",
@@ -4779,6 +4803,127 @@ export default function (api) {
     return controlUrl.trim().replace(/\/+$/, "") === DEFAULT_MANAGED_RELAY_CONTROL_URL;
   }
 
+  private resolveRequestedRelaySlug(requestedSlug: string | undefined): string | undefined {
+    if (requestedSlug === undefined || requestedSlug.trim().length === 0) {
+      return undefined;
+    }
+
+    const normalized = sanitizeRequestedRelaySlug(requestedSlug);
+    if (normalized.length === 0) {
+      throw {
+        code: "RELAY_REQUESTED_SLUG_INVALID",
+        message: "Requested relay node name is invalid",
+        retryable: false,
+        details: {
+          requestedSlug,
+        },
+      };
+    }
+
+    return normalized;
+  }
+
+  private async ensureRequestedRelaySlugAvailable(
+    relay: NonNullable<InstallRequest["relay"]>,
+    requestedSlug: string,
+  ): Promise<RelayRequestedSlugAvailabilityResult> {
+    const endpoint = new URL(
+      "/api/v1/requested-slug-availability",
+      ensureTrailingSlash(relay.controlUrl),
+    );
+    endpoint.searchParams.set("requestedSlug", requestedSlug);
+
+    let response: Response;
+    try {
+      response = await this.fetchImpl(endpoint.toString(), {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+        },
+      });
+    } catch (error) {
+      throw {
+        code: "RELAY_REQUESTED_SLUG_CHECK_FAILED",
+        message: "Relay node name availability check failed",
+        retryable: true,
+        details: {
+          controlUrl: relay.controlUrl,
+          requestedSlug,
+          error: describeError(error),
+        },
+      };
+    }
+
+    const responseText = await response.text();
+    const parsed = parseJsonDocument(responseText);
+    const payload =
+      isRecord(parsed) && isRecord(parsed.result)
+        ? parsed.result
+        : isRecord(parsed)
+          ? parsed
+          : null;
+    const normalizedSlug =
+      payload !== null && typeof payload.normalizedSlug === "string"
+        ? payload.normalizedSlug.trim()
+        : "";
+    const hostname =
+      payload !== null && typeof payload.hostname === "string" ? payload.hostname.trim() : "";
+    const available = payload !== null && typeof payload.available === "boolean" ? payload.available : null;
+    const responseError =
+      isRecord(parsed) && typeof parsed.error === "string" ? parsed.error.trim() : undefined;
+
+    if (!response.ok) {
+      const invalidRequestedSlug = response.status === 400 || response.status === 422;
+      throw {
+        code: invalidRequestedSlug
+          ? "RELAY_REQUESTED_SLUG_INVALID"
+          : "RELAY_REQUESTED_SLUG_CHECK_FAILED",
+        message: invalidRequestedSlug
+          ? "Requested relay node name is invalid"
+          : "Relay node name availability check failed",
+        retryable: !invalidRequestedSlug && response.status >= 500,
+        details: {
+          controlUrl: relay.controlUrl,
+          requestedSlug,
+          status: response.status,
+          ...(responseError === undefined || responseError.length === 0 ? {} : { error: responseError }),
+          body: summarizeText(responseText, 1200),
+        },
+      };
+    }
+
+    if (normalizedSlug.length === 0 || hostname.length === 0 || available === null) {
+      throw {
+        code: "RELAY_REQUESTED_SLUG_CHECK_FAILED",
+        message: "Relay node name availability check returned an incomplete response",
+        retryable: false,
+        details: {
+          controlUrl: relay.controlUrl,
+          requestedSlug,
+          response: summarizeText(responseText, 1200),
+        },
+      };
+    }
+
+    if (!available) {
+      throw {
+        code: "RELAY_REQUESTED_SLUG_UNAVAILABLE",
+        message: "Requested relay node name is not available",
+        retryable: false,
+        details: {
+          controlUrl: relay.controlUrl,
+          requestedSlug: normalizedSlug,
+          hostname,
+        },
+      };
+    }
+
+    return {
+      normalizedSlug,
+      hostname,
+    };
+  }
+
   private async tryReuseExistingRelayEnrollment(
     relay: NonNullable<InstallRequest["relay"]>,
   ): Promise<RelayEnrollmentResult | null> {
@@ -4855,13 +5000,21 @@ export default function (api) {
       };
     }
 
+    const explicitRequestedSlug = this.resolveRequestedRelaySlug(relay.requestedSlug);
+    const checkedRequestedSlug =
+      explicitRequestedSlug === undefined
+        ? undefined
+        : await this.ensureRequestedRelaySlugAvailable(relay, explicitRequestedSlug);
+    const preferredRequestedSlug = checkedRequestedSlug?.normalizedSlug ?? explicitRequestedSlug;
+
     const endpoint = new URL(
       usesManagedPublicEnroll ? "/api/v1/enroll-public" : "/api/v1/enroll",
       ensureTrailingSlash(relay.controlUrl),
     ).toString();
     let lastFailure: { status?: number; responseText?: string; error?: unknown } | null = null;
-    for (let attempt = 1; attempt <= 6; attempt += 1) {
-      const requestedSlug = this.generateManagedRelayRequestedSlug();
+    const maxAttempts = preferredRequestedSlug === undefined ? 6 : 1;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const requestedSlug = preferredRequestedSlug ?? this.generateManagedRelayRequestedSlug();
       let response: Response;
       try {
         response = await this.fetchImpl(endpoint, {
@@ -4897,7 +5050,23 @@ export default function (api) {
             (responseTextLower.includes("taken") ||
               responseTextLower.includes("already") ||
               responseTextLower.includes("exists")));
-        if (slugConflict && attempt < 6) {
+        if (slugConflict && preferredRequestedSlug !== undefined) {
+          throw {
+            code: "RELAY_REQUESTED_SLUG_UNAVAILABLE",
+            message: "Requested relay node name is not available",
+            retryable: false,
+            details: {
+              controlUrl: relay.controlUrl,
+              status: response.status,
+              requestedSlug,
+              ...(checkedRequestedSlug === undefined
+                ? {}
+                : { hostname: checkedRequestedSlug.hostname }),
+              body: summarizeText(responseText, 1200),
+            },
+          };
+        }
+        if (slugConflict && attempt < maxAttempts) {
           this.logger.warn(
             {
               requestedSlug,
@@ -4985,6 +5154,22 @@ export default function (api) {
             controlUrl: relay.controlUrl,
             requestedSlug,
             response: summarizeText(responseText, 1200),
+          },
+        };
+      }
+
+      if (
+        preferredRequestedSlug !== undefined &&
+        extractRelaySlugFromHostname(hostname) !== preferredRequestedSlug
+      ) {
+        throw {
+          code: "RELAY_REQUESTED_SLUG_MISMATCH",
+          message: "Relay assigned a different node name than requested",
+          retryable: false,
+          details: {
+            controlUrl: relay.controlUrl,
+            requestedSlug: preferredRequestedSlug,
+            assignedHostname: hostname,
           },
         };
       }

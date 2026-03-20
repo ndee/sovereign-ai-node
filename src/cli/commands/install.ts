@@ -27,6 +27,7 @@ type InstallOptions = {
   connectivityMode?: "direct" | "relay";
   relayControlUrl?: string;
   relayEnrollmentToken?: string;
+  relayNodeName?: string;
   matrixTlsMode?: "auto" | "internal" | "manual" | "local-dev";
   requestFile?: string;
 } & BotCatalogSourceOptions;
@@ -48,6 +49,7 @@ const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => {
             ...(opts.relayEnrollmentToken === undefined
               ? {}
               : { enrollmentToken: opts.relayEnrollmentToken }),
+            ...(opts.relayNodeName === undefined ? {} : { requestedSlug: opts.relayNodeName }),
           },
         }
       : {}),
@@ -115,6 +117,10 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
     .option(
       "--relay-enrollment-token <token>",
       "Custom relay enrollment token (required for non-Sovereign relays)",
+    )
+    .option(
+      "--relay-node-name <name>",
+      "Preferred relay node name / hostname label (availability checked during install)",
     )
     .option(
       "--matrix-tls-mode <mode>",

@@ -108,4 +108,18 @@ describe("resolveInstallRequest", () => {
     expect(req.bots?.selected).toEqual(["mail-sentinel", "node-operator"]);
     expect(req.bots?.config).toBeUndefined();
   });
+
+  it("includes the preferred relay node name in scaffolded relay requests", async () => {
+    const req = await resolveInstallRequest(
+      {
+        relayNodeName: "pilot-node",
+      },
+      join(tmpdir(), "missing-install-request.json"),
+    );
+
+    expect(req.relay).toEqual({
+      controlUrl: "https://relay.sovereign-ai-node.com",
+      requestedSlug: "pilot-node",
+    });
+  });
 });
