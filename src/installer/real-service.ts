@@ -4868,7 +4868,8 @@ export default function (api) {
         : "";
     const hostname =
       payload !== null && typeof payload.hostname === "string" ? payload.hostname.trim() : "";
-    const available = payload !== null && typeof payload.available === "boolean" ? payload.available : null;
+    const available =
+      payload !== null && typeof payload.available === "boolean" ? payload.available : null;
     const responseError =
       isRecord(parsed) && typeof parsed.error === "string" ? parsed.error.trim() : undefined;
 
@@ -4886,7 +4887,9 @@ export default function (api) {
           controlUrl: relay.controlUrl,
           requestedSlug,
           status: response.status,
-          ...(responseError === undefined || responseError.length === 0 ? {} : { error: responseError }),
+          ...(responseError === undefined || responseError.length === 0
+            ? {}
+            : { error: responseError }),
           body: summarizeText(responseText, 1200),
         },
       };

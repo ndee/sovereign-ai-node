@@ -3217,7 +3217,7 @@ wait_for_runtime_ready() {
   frame_index=0
 
   for attempt in $(seq 1 "$max_attempts"); do
-    status_output="$(timeout --foreground 20s sovereign-node status --json || true)"
+    status_output="$(timeout --foreground 35s sovereign-node status --json || true)"
     if [[ -n "$log_path" ]]; then
       {
         printf '%s\n' "--- runtime probe ${attempt}/${max_attempts} ---"
