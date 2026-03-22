@@ -1374,8 +1374,7 @@ describe("RealInstallerService", () => {
       expect(started.job.steps[0]?.state).toBe("succeeded");
       expect(started.job.steps[1]?.id).toBe("openclaw_bootstrap_cli");
       expect(started.job.steps[1]?.state).toBe("succeeded");
-      expect(started.job.steps[2]?.id).toBe("lobster_bootstrap_cli");
-      expect(started.job.steps[2]?.state).toBe("succeeded");
+      expect(started.job.steps[2]?.id).toBe("openclaw_bundled_plugin_tools");
       expect(started.job.steps[3]?.id).toBe("imap_validate");
       expect(started.job.steps[3]?.state).toBe("warned");
       expect(started.job.steps[3]?.error?.code).toBe("IMAP_TEST_FAILED");

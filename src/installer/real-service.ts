@@ -4670,8 +4670,8 @@ export default function (api) {
         },
       },
       {
-        id: "lobster_bootstrap_cli",
-        label: "Install Lobster CLI",
+        id: "openclaw_bundled_plugin_tools",
+        label: "Install bundled plugin CLI tools",
         run: async () => {
           if (stepState.selectedBots === undefined) {
             stepState.selectedBots = (
