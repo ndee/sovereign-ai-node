@@ -3040,7 +3040,7 @@ wait_for_runtime_ready() {
   frame_index=0
 
   for attempt in $(seq 1 "$max_attempts"); do
-    status_output="$(timeout --foreground 20s sovereign-node status --json || true)"
+    status_output="$(timeout --foreground 45s sovereign-node status --json || true)"
     if [[ -n "$log_path" ]]; then
       {
         printf '%s\n' "--- runtime probe ${attempt}/${max_attempts} ---"
@@ -3459,7 +3459,7 @@ run_runtime_readiness_step() {
   fi
 
   if ! ui_is_fancy; then
-    if ! status_output="$(wait_for_runtime_ready 45 2)"; then
+    if ! status_output="$(wait_for_runtime_ready 20 5)"; then
       RUNTIME_STATUS_OUTPUT="$status_output"
       printf '%s\n' "$status_output"
       die "Runtime did not reach healthy state for Matrix/OpenClaw within timeout"
@@ -3472,7 +3472,7 @@ run_runtime_readiness_step() {
   ui_begin_step "Wait for runtime health"
   log_path="$(ui_step_log_path)"
   : > "$log_path"
-  if status_output="$(wait_for_runtime_ready 45 2 "$log_path")"; then
+  if status_output="$(wait_for_runtime_ready 20 5 "$log_path")"; then
     RUNTIME_STATUS_OUTPUT="$status_output"
     ui_complete_step "Matrix and OpenClaw healthy"
     return 0

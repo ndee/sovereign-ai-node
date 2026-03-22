@@ -2353,24 +2353,6 @@ export class RealInstallerService implements InstallerService {
     return Array.from(pluginIds).sort();
   }
 
-  private async listManagedOpenClawBundledPluginIds(
-    runtimeConfig: RuntimeConfig,
-  ): Promise<string[]> {
-    const pluginIds = new Set<string>();
-    for (const agent of runtimeConfig.openclawProfile.agents) {
-      for (const tool of this.resolveBoundToolInstances(
-        runtimeConfig,
-        agent.toolInstanceIds ?? [],
-      )) {
-        const manifest = await this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef);
-        for (const pluginId of manifest.openclawBundledPlugins ?? []) {
-          pluginIds.add(pluginId);
-        }
-      }
-    }
-    return Array.from(pluginIds).sort();
-  }
-
   private async listManagedOpenClawPluginLoadPaths(
     runtimeConfig: RuntimeConfig,
   ): Promise<string[]> {
@@ -7056,11 +7038,6 @@ export default function (api) {
                 timeoutMs: 30_000,
               },
             }),
-      };
-    }
-    for (const pluginId of await this.listManagedOpenClawBundledPluginIds(runtimeConfig)) {
-      pluginEntries[pluginId] = {
-        enabled: true,
       };
     }
     const managedPluginLoadPaths = await this.listManagedOpenClawPluginLoadPaths(runtimeConfig);
