@@ -2848,68 +2848,6 @@ export default function (api) {
     }
   }
 
-  private async ensureBundledPluginCliTools(): Promise<void> {
-    const runtimeConfig = await this.tryReadRuntimeConfig();
-    if (runtimeConfig === null) {
-      return;
-    }
-    const bundledPluginIds = await this.listManagedOpenClawBundledPluginIds(runtimeConfig);
-    if (!bundledPluginIds.includes("lobster")) {
-      return;
-    }
-    const detected = await this.detectLobsterCli();
-    if (detected) {
-      return;
-    }
-    if (this.execRunner === null) {
-      this.logger.warn(
-        "Exec runner unavailable; skipping lobster CLI installation",
-      );
-      return;
-    }
-    this.logger.info("Installing lobster CLI via npm");
-    const result = await this.execRunner.run({
-      command: "npm",
-      args: ["install", "-g", "@clawdbot/lobster"],
-      options: {
-        timeout: 120_000,
-        env: {
-          CI: "1",
-        },
-      },
-    });
-    if (result.exitCode !== 0) {
-      this.logger.warn(
-        {
-          command: result.command,
-          exitCode: result.exitCode,
-          stderr: result.stderr.slice(0, 1200),
-        },
-        "lobster CLI installation failed; semantic review will be unavailable",
-      );
-      return;
-    }
-    this.logger.info("lobster CLI installed successfully");
-  }
-
-  private async detectLobsterCli(): Promise<boolean> {
-    if (this.execRunner === null) {
-      return false;
-    }
-    try {
-      const result = await this.execRunner.run({
-        command: "lobster",
-        args: ["--version"],
-        options: {
-          timeout: 10_000,
-        },
-      });
-      return result.exitCode === 0;
-    } catch {
-      return false;
-    }
-  }
-
   private async listAgentExecAllowlistPatterns(
     runtimeConfig: RuntimeConfig,
     toolInstanceIds: string[],
