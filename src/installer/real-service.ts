@@ -2353,6 +2353,24 @@ export class RealInstallerService implements InstallerService {
     return Array.from(pluginIds).sort();
   }
 
+  private async listManagedOpenClawBundledPluginIds(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<string[]> {
+    const pluginIds = new Set<string>();
+    for (const agent of runtimeConfig.openclawProfile.agents) {
+      for (const tool of this.resolveBoundToolInstances(
+        runtimeConfig,
+        agent.toolInstanceIds ?? [],
+      )) {
+        const manifest = await this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef);
+        for (const pluginId of manifest.openclawBundledPlugins ?? []) {
+          pluginIds.add(pluginId);
+        }
+      }
+    }
+    return Array.from(pluginIds).sort();
+  }
+
   private async listManagedOpenClawPluginLoadPaths(
     runtimeConfig: RuntimeConfig,
   ): Promise<string[]> {
@@ -2827,6 +2845,68 @@ export default function (api) {
     for (const file of files) {
       await writeFile(file.path, `${file.content}\n`, "utf8");
       await this.applyTrustedOpenClawExtensionOwnership(file.path);
+    }
+  }
+
+  private async ensureBundledPluginCliTools(): Promise<void> {
+    const runtimeConfig = await this.tryReadRuntimeConfig();
+    if (runtimeConfig === null) {
+      return;
+    }
+    const bundledPluginIds = await this.listManagedOpenClawBundledPluginIds(runtimeConfig);
+    if (!bundledPluginIds.includes("lobster")) {
+      return;
+    }
+    const detected = await this.detectLobsterCli();
+    if (detected) {
+      return;
+    }
+    if (this.execRunner === null) {
+      this.logger.warn(
+        "Exec runner unavailable; skipping lobster CLI installation",
+      );
+      return;
+    }
+    this.logger.info("Installing lobster CLI via npm");
+    const result = await this.execRunner.run({
+      command: "npm",
+      args: ["install", "-g", "@clawdbot/lobster"],
+      options: {
+        timeout: 120_000,
+        env: {
+          CI: "1",
+        },
+      },
+    });
+    if (result.exitCode !== 0) {
+      this.logger.warn(
+        {
+          command: result.command,
+          exitCode: result.exitCode,
+          stderr: result.stderr.slice(0, 1200),
+        },
+        "lobster CLI installation failed; semantic review will be unavailable",
+      );
+      return;
+    }
+    this.logger.info("lobster CLI installed successfully");
+  }
+
+  private async detectLobsterCli(): Promise<boolean> {
+    if (this.execRunner === null) {
+      return false;
+    }
+    try {
+      const result = await this.execRunner.run({
+        command: "lobster",
+        args: ["--version"],
+        options: {
+          timeout: 10_000,
+        },
+      });
+      return result.exitCode === 0;
+    } catch {
+      return false;
     }
   }
 
@@ -4670,8 +4750,8 @@ export default function (api) {
         },
       },
       {
-        id: "lobster_bootstrap_cli",
-        label: "Install Lobster CLI",
+        id: "openclaw_bundled_plugin_tools",
+        label: "Install bundled plugin CLI tools",
         run: async () => {
           if (stepState.selectedBots === undefined) {
             stepState.selectedBots = (
@@ -7038,6 +7118,11 @@ export default function (api) {
                 timeoutMs: 30_000,
               },
             }),
+      };
+    }
+    for (const pluginId of await this.listManagedOpenClawBundledPluginIds(runtimeConfig)) {
+      pluginEntries[pluginId] = {
+        enabled: true,
       };
     }
     const managedPluginLoadPaths = await this.listManagedOpenClawPluginLoadPaths(runtimeConfig);
