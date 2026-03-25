@@ -578,7 +578,8 @@ EOF
   fi
 
   systemctl daemon-reload
-  systemctl enable --now "${SERVICE_NAME}.service"
+  systemctl enable "${SERVICE_NAME}.service"
+  systemctl restart "${SERVICE_NAME}.service"
 }
 
 install_request_template() {
