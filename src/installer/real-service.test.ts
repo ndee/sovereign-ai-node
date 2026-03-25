@@ -60,8 +60,8 @@ const buildInstallRequest = (): InstallRequest => ({
     username: "operator",
   },
   mailSentinel: {
-    pollInterval: "5m",
-    lookbackWindow: "15m",
+    pollInterval: "30m",
+    lookbackWindow: "1h",
     e2eeAlertRoom: false,
   },
   advanced: {
@@ -392,7 +392,7 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
       cron: {
         id: "mail-sentinel-poll",
         everyConfigKey: "pollInterval",
-        defaultEvery: "5m",
+        defaultEvery: "30m",
         session: "isolated",
         announce: false,
         message:

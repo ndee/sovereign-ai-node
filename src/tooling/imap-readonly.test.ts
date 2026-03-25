@@ -46,8 +46,8 @@ const buildRuntimeConfig = (secretRef: string): RuntimeConfig => ({
     secretRef,
   },
   mailSentinel: {
-    pollInterval: "5m",
-    lookbackWindow: "15m",
+    pollInterval: "30m",
+    lookbackWindow: "1h",
     e2eeAlertRoom: false,
   },
   bots: {
