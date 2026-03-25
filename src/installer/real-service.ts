@@ -2484,10 +2484,11 @@ export class RealInstallerService implements InstallerService {
     }
 
     const verified = await this.detectInstalledLobsterCli();
-    if (
-      verified === null ||
-      !requiredCommands.every((commandName) => verified.commands.includes(commandName))
-    ) {
+    const verifiedByVersion = verified?.version === SOVEREIGN_PINNED_LOBSTER_VERSION;
+    const verifiedByCommands =
+      verified !== null &&
+      requiredCommands.every((commandName) => verified.commands.includes(commandName));
+    if (!verifiedByVersion && !verifiedByCommands) {
       throw {
         code: "LOBSTER_INSTALL_FAILED",
         message: "Lobster CLI installed but required workflow commands are unavailable",
