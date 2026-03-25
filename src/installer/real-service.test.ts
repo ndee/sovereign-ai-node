@@ -2287,6 +2287,10 @@ describe("RealInstallerService", () => {
       execRunner: {
         run: async (input): Promise<ExecResult> => {
           const serialized = [input.command, ...(input.args ?? [])].join(" ");
+          const lobsterResult = maybeHandleInstalledLobsterExec(input);
+          if (lobsterResult !== null) {
+            return lobsterResult;
+          }
           if (serialized === "openclaw plugins enable matrix") {
             pluginEnableCalls += 1;
             return {

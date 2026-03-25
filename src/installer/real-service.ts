@@ -2442,13 +2442,17 @@ export class RealInstallerService implements InstallerService {
     }
     const requiredCommands = ["clawd.invoke"];
     const detected = await this.detectInstalledLobsterCli();
-    if (
-      detected !== null &&
-      (detected.version === null || detected.version === SOVEREIGN_PINNED_LOBSTER_VERSION) &&
-      (detected.commands.length === 0 ||
-        requiredCommands.every((commandName) => detected.commands.includes(commandName)))
-    ) {
-      return;
+    if (detected !== null) {
+      const versionVerified = detected.version === SOVEREIGN_PINNED_LOBSTER_VERSION;
+      const commandsVerified =
+        detected.commands.length > 0 &&
+        requiredCommands.every((commandName) => detected.commands.includes(commandName));
+      if (versionVerified || commandsVerified) {
+        return;
+      }
+      this.logger.info(
+        "Lobster CLI binary found but could not verify version or required commands; reinstalling",
+      );
     }
 
     const installResult = await this.execRunner.run({
@@ -2480,10 +2484,11 @@ export class RealInstallerService implements InstallerService {
     }
 
     const verified = await this.detectInstalledLobsterCli();
-    if (
-      verified === null ||
-      !requiredCommands.every((commandName) => verified.commands.includes(commandName))
-    ) {
+    const verifiedByVersion = verified?.version === SOVEREIGN_PINNED_LOBSTER_VERSION;
+    const verifiedByCommands =
+      verified !== null &&
+      requiredCommands.every((commandName) => verified.commands.includes(commandName));
+    if (!verifiedByVersion && !verifiedByCommands) {
       throw {
         code: "LOBSTER_INSTALL_FAILED",
         message: "Lobster CLI installed but required workflow commands are unavailable",
