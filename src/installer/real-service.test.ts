@@ -428,6 +428,12 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
         content: "{}\n",
       },
       {
+        path: "config/user-policy.json",
+        source: "workspace/config/user-policy.json",
+        content:
+          '{\n  "version": 1,\n  "senderPolicies": [],\n  "domainPolicies": [],\n  "categoryPolicies": [],\n  "contentPolicies": [],\n  "timePolicies": [],\n  "mutePolicies": []\n}\n',
+      },
+      {
         path: "data/README.md",
         source: "workspace/data/README.md",
         content: "Mail Sentinel data.\n",
@@ -2489,6 +2495,190 @@ describe("RealInstallerService", () => {
       expect(installedMailSentinel?.manifestSha256).not.toBe("legacy-core-mail-sentinel-pin");
       expect(installedMailSentinel?.installedAt).toBe("2026-03-01T00:00:00.000Z");
       expect(observedMatrixUrls).not.toHaveLength(0);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves mutable managed workspace files during update installs", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+
+    await writeRuntimeArtifacts(paths);
+
+    const workspaceDir = join(paths.stateDir, "mail-sentinel", "workspace");
+    const userPolicyPath = join(workspaceDir, "config", "user-policy.json");
+    const defaultRulesPath = join(workspaceDir, "config", "default-rules.json");
+    const readmePath = join(workspaceDir, "README.md");
+    const customUserPolicy = [
+      "{",
+      '  "version": 1,',
+      '  "senderPolicies": [',
+      "    {",
+      '      "id": "custom-sender-policy",',
+      '      "match": "alerts@example.org",',
+      '      "minZone": "amber"',
+      "    }",
+      "  ],",
+      '  "domainPolicies": [],',
+      '  "categoryPolicies": [],',
+      '  "contentPolicies": [],',
+      '  "timePolicies": [],',
+      '  "mutePolicies": []',
+      "}",
+      "",
+    ].join("\n");
+    const customDefaultRules = [
+      "{",
+      '  "version": 2,',
+      '  "thresholds": {',
+      '    "candidate": 3,',
+      '    "alert": 4,',
+      '    "category": 4',
+      "  },",
+      '  "zoneThresholds": {',
+      '    "redMinConfidence": 75,',
+      '    "amberMinConfidence": 40,',
+      '    "redMinHeuristicScore": 4,',
+      '    "amberMinHeuristicScore": 3',
+      "  },",
+      '  "rules": [',
+      "    {",
+      '      "id": "custom-important-sender",',
+      '      "field": "from",',
+      '      "pattern": "alerts@example\\\\.org",',
+      '      "weight": 10,',
+      '      "reason": "Local override"',
+      "    }",
+      "  ]",
+      "}",
+      "",
+    ].join("\n");
+
+    await mkdir(join(workspaceDir, "config"), { recursive: true });
+    await writeFile(userPolicyPath, customUserPolicy, "utf8");
+    await writeFile(defaultRulesPath, customDefaultRules, "utf8");
+    await writeFile(readmePath, "custom readme\n", "utf8");
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async (opts) => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: opts.version,
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      mailSentinelRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir,
+          agentCommand: "openclaw agents upsert --id mail-sentinel",
+          cronCommand: "openclaw cron add --name mail-sentinel-poll --every 5m",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+          capabilities: ["IMAP4rev1"],
+        }),
+      },
+      matrixProvisioner: {
+        provision: async (req) => ({
+          projectDir: join(tempRoot, "matrix"),
+          composeFilePath: join(tempRoot, "matrix", "compose.yaml"),
+          accessMode: "direct",
+          homeserverDomain: req.matrix.homeserverDomain,
+          publicBaseUrl: "http://matrix.example.org",
+          adminBaseUrl: "http://127.0.0.1:8008",
+          federationEnabled: req.matrix.federationEnabled ?? false,
+          tlsMode: "local-dev",
+        }),
+        bootstrapAccounts: async () => ({
+          operator: {
+            localpart: "operator",
+            userId: "@operator:matrix.example.org",
+            passwordSecretRef: "file:/tmp/operator.password",
+            accessToken: "operator-token",
+          },
+          bot: {
+            localpart: "mail-sentinel",
+            userId: "@mail-sentinel:matrix.example.org",
+            passwordSecretRef: "file:/tmp/mail-sentinel.password",
+            accessToken: "bot-token",
+          },
+        }),
+        bootstrapRoom: async () => ({
+          roomId: "!alerts:matrix.example.org",
+          roomName: "Sovereign Alerts",
+        }),
+        test: async (req) => ({
+          ok: true,
+          homeserverUrl: req.publicBaseUrl,
+          checks: [],
+        }),
+      },
+      fetchImpl: async (url) => {
+        const provisionResponse = buildManagedAgentMatrixProvisionResponse(url);
+        if (provisionResponse !== null) {
+          return provisionResponse;
+        }
+        return new Response(JSON.stringify({ event_id: "$evt1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+
+    try {
+      const started = await service.startInstall(buildInstallRequest());
+
+      expect(started.job.state).toBe("succeeded");
+      await expect(readFile(userPolicyPath, "utf8")).resolves.toBe(customUserPolicy);
+      await expect(readFile(defaultRulesPath, "utf8")).resolves.toBe(customDefaultRules);
+      await expect(readFile(readmePath, "utf8")).resolves.toBe("# Mail Sentinel\n\n");
+
+      const workspaceStateRaw = await readFile(
+        join(workspaceDir, ".openclaw", "managed-workspace-files.json"),
+        "utf8",
+      );
+      const workspaceState = JSON.parse(workspaceStateRaw) as {
+        version?: number;
+        files?: Record<string, { status?: string; renderedSha256?: string }>;
+      };
+      expect(workspaceState.version).toBe(1);
+      expect(workspaceState.files?.["config/user-policy.json"]?.status).toBe("preserved");
+      expect(workspaceState.files?.["config/default-rules.json"]?.status).toBe("preserved");
+      expect(workspaceState.files?.README).toBeUndefined();
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
