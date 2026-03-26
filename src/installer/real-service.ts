@@ -6055,8 +6055,7 @@ export default function (api) {
     }
 
     const serviceIdentity = this.getConfiguredServiceIdentity(runtimeConfig);
-    const pollInterval =
-      runtimeConfig.bots.config[MAIL_SENTINEL_AGENT_ID]?.pollInterval;
+    const pollInterval = runtimeConfig.bots.config[MAIL_SENTINEL_AGENT_ID]?.pollInterval;
     const systemdInterval = toSystemdDuration(
       typeof pollInterval === "string" && pollInterval.length > 0 ? pollInterval : "30m",
     );
