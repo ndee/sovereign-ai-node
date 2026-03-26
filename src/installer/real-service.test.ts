@@ -2866,11 +2866,8 @@ describe("RealInstallerService", () => {
     const priorGatewayUnitPath = process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH;
     const priorServiceUser = process.env.SOVEREIGN_NODE_SERVICE_USER;
     const priorServiceGroup = process.env.SOVEREIGN_NODE_SERVICE_GROUP;
-    process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH = join(
-      tempRoot,
-      "systemd",
-      "sovereign-openclaw-gateway.service",
-    );
+    const gatewayUnitPath = join(tempRoot, "systemd", "sovereign-openclaw-gateway.service");
+    process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH = gatewayUnitPath;
     process.env.SOVEREIGN_NODE_SERVICE_USER = "sovereign-node";
     process.env.SOVEREIGN_NODE_SERVICE_GROUP = "sovereign-node";
     const paths: SovereignPaths = {
@@ -3115,7 +3112,7 @@ describe("RealInstallerService", () => {
       expect(stepStates.test_alert).toBe("succeeded");
       expect(sentMessageBody).toContain("Hello from Mail Sentinel");
 
-      const unitRaw = await readFile(process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH!, "utf8");
+      const unitRaw = await readFile(gatewayUnitPath, "utf8");
       expect(unitRaw).toContain("User=sovereign-node");
       expect(unitRaw).toContain("Group=sovereign-node");
       expect(unitRaw).toContain(`Environment=TMPDIR=${join(paths.openclawServiceHome, "tmp")}`);
@@ -3702,6 +3699,9 @@ describe("RealInstallerService", () => {
         serviceUser: "sovereign-node",
         serviceGroup: "sovereign-node",
       },
+      matrix: {
+        adminBaseUrl: "http://127.0.0.1:8008",
+      },
     } as RuntimeConfig;
 
     try {
@@ -3717,9 +3717,152 @@ describe("RealInstallerService", () => {
       expect(commandCalls).toContain("systemctl restart sovereign-openclaw-gateway.service");
       expect(commandCalls).toContain("systemctl is-active sovereign-openclaw-gateway.service");
       const unitRaw = await readFile(gatewayUnitPath, "utf8");
+      expect(unitRaw).toContain("After=network-online.target docker.service");
+      expect(unitRaw).toContain("Requires=docker.service");
+      expect(unitRaw).toContain("ExecStartPre=/usr/bin/env sh -lc");
+      expect(unitRaw).toContain("/_matrix/client/versions");
       expect(unitRaw).toContain("User=sovereign-node");
       expect(unitRaw).toContain("Group=sovereign-node");
       expect(unitRaw).toContain("Environment=PATH=");
+    } finally {
+      if (priorGatewayUnitPath === undefined) {
+        delete process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH;
+      } else {
+        process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH = priorGatewayUnitPath;
+      }
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("skips Docker and Matrix readiness gating when the gateway targets a remote homeserver", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const priorGatewayUnitPath = process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH;
+    const gatewayUnitPath = join(tempRoot, "systemd", "sovereign-openclaw-gateway.service");
+    process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH = gatewayUnitPath;
+
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+    };
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => {
+          throw new Error("not used");
+        },
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {
+          throw new Error("not used");
+        },
+        start: async () => {
+          throw new Error("not used");
+        },
+        restart: async () => {
+          throw new Error("not used");
+        },
+      },
+      mailSentinelRegistrar: {
+        register: async () => {
+          throw new Error("not used");
+        },
+      },
+      preflightChecker: {
+        run: async () => {
+          throw new Error("not used");
+        },
+      },
+      imapTester: {
+        test: async () => {
+          throw new Error("not used");
+        },
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async ({ command, args }): Promise<ExecResult> => {
+          const serialized = [command, ...(args ?? [])].join(" ");
+          const lobsterResult = maybeHandleInstalledLobsterExec(
+            args === undefined ? { command } : { command, args },
+          );
+          if (lobsterResult !== null) {
+            return lobsterResult;
+          }
+          if (serialized.startsWith("systemctl ")) {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw health") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+
+          return {
+            command: serialized,
+            exitCode: 1,
+            stdout: "",
+            stderr: "unexpected command",
+          };
+        },
+      },
+    });
+
+    const runtimeConfig = {
+      openclaw: {
+        managedInstallation: true,
+        installMethod: "install_sh",
+        requestedVersion: "0.2.0",
+        openclawHome: join(paths.openclawServiceHome, ".openclaw"),
+        runtimeConfigPath: join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
+        runtimeProfilePath: join(paths.openclawServiceHome, "profiles", "runtime.json5"),
+        gatewayEnvPath: join(paths.openclawServiceHome, "gateway.env"),
+        serviceUser: "sovereign-node",
+        serviceGroup: "sovereign-node",
+      },
+      matrix: {
+        adminBaseUrl: "https://matrix.example.org",
+      },
+    } as RuntimeConfig;
+
+    try {
+      const started = await (
+        service as unknown as {
+          ensureSystemGatewayServiceFallback(config: RuntimeConfig): Promise<boolean>;
+        }
+      ).ensureSystemGatewayServiceFallback(runtimeConfig);
+
+      expect(started).toBe(true);
+      const unitRaw = await readFile(gatewayUnitPath, "utf8");
+      expect(unitRaw).toContain("After=network-online.target");
+      expect(unitRaw).not.toContain("docker.service");
+      expect(unitRaw).not.toContain("ExecStartPre=");
     } finally {
       if (priorGatewayUnitPath === undefined) {
         delete process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH;

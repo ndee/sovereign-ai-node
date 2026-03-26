@@ -225,6 +225,9 @@ const OPENCLAW_EMPTY_HEALTH_RETRY_ATTEMPTS = 3;
 const OPENCLAW_EMPTY_HEALTH_RETRY_DELAY_MS = 1_000;
 const OPENCLAW_RUNTIME_SETTLE_ATTEMPTS = 6;
 const OPENCLAW_RUNTIME_SETTLE_DELAY_MS = 5_000;
+const SYSTEM_GATEWAY_MATRIX_WAIT_ATTEMPTS = 120;
+const SYSTEM_GATEWAY_MATRIX_WAIT_DELAY_SECONDS = 2;
+const SYSTEM_GATEWAY_MATRIX_WAIT_TIMEOUT_SECONDS = 5;
 const LOBSTER_CLI_PROBE_TIMEOUT_MS = 20_000;
 const LOBSTER_CLI_INSTALL_TIMEOUT_MS = 5 * 60_000;
 const SOVEREIGN_PINNED_LOBSTER_PACKAGE_NAME = "@clawdbot/lobster";
@@ -6061,14 +6064,20 @@ export default function (api) {
     const managedTempDir = this.getManagedOpenClawTempDir(runtimeConfig);
     const openclawCommand = (await resolveExecutablePath("openclaw")) ?? "openclaw";
     const unitName = SOVEREIGN_GATEWAY_SYSTEMD_UNIT;
+    const waitsForLocalMatrix = shouldGateSystemGatewayOnLocalMatrix(
+      runtimeConfig.matrix.adminBaseUrl,
+    );
     const unitPath =
       process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH?.trim() ||
       `/etc/systemd/system/${unitName}`;
     const unitContents = [
       "[Unit]",
       "Description=Sovereign OpenClaw Gateway",
-      "After=network-online.target",
+      waitsForLocalMatrix
+        ? "After=network-online.target docker.service"
+        : "After=network-online.target",
       "Wants=network-online.target",
+      ...(waitsForLocalMatrix ? ["Requires=docker.service"] : []),
       "",
       "[Service]",
       "Type=simple",
@@ -6081,6 +6090,11 @@ export default function (api) {
       `Environment=TMP=${managedTempDir}`,
       `Environment=TEMP=${managedTempDir}`,
       `EnvironmentFile=-${runtimeConfig.openclaw.gatewayEnvPath}`,
+      ...(waitsForLocalMatrix
+        ? [
+            `ExecStartPre=${renderSystemGatewayMatrixWaitCommand(runtimeConfig.matrix.adminBaseUrl)}`,
+          ]
+        : []),
       `ExecStart=${openclawCommand} gateway run --allow-unconfigured --bind loopback`,
       "Restart=always",
       "RestartSec=3",
@@ -7993,6 +8007,32 @@ const toSystemdDuration = (value: string): string => {
   }
   const systemdUnit = match[2].toLowerCase() === "m" ? "min" : match[2].toLowerCase();
   return `${match[1]}${systemdUnit}`;
+};
+
+const shouldGateSystemGatewayOnLocalMatrix = (adminBaseUrl: string): boolean => {
+  try {
+    const parsed = new URL(adminBaseUrl);
+    const hostname = parsed.hostname.replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
+    return (
+      parsed.protocol === "http:" &&
+      (hostname === "127.0.0.1" || hostname === "::1" || hostname === "localhost")
+    );
+  } catch {
+    return false;
+  }
+};
+
+const renderSystemGatewayMatrixWaitCommand = (adminBaseUrl: string): string => {
+  const versionsUrl = new URL(
+    "/_matrix/client/versions",
+    ensureTrailingSlash(adminBaseUrl),
+  ).toString();
+  return [
+    "/usr/bin/env",
+    "sh",
+    "-lc",
+    `'attempt=0; while [ "$attempt" -lt ${SYSTEM_GATEWAY_MATRIX_WAIT_ATTEMPTS} ]; do curl -fsS --max-time ${SYSTEM_GATEWAY_MATRIX_WAIT_TIMEOUT_SECONDS} "${versionsUrl}" >/dev/null 2>&1 && exit 0; attempt=$((attempt + 1)); sleep ${SYSTEM_GATEWAY_MATRIX_WAIT_DELAY_SECONDS}; done; exit 1'`,
+  ].join(" ");
 };
 
 const compactBotConfigRecord = (
