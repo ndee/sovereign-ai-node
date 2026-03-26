@@ -32,6 +32,7 @@ export const jobStepIdSchema = z.enum([
   "openclaw_gateway_service_install",
   "openclaw_configure",
   "bots_configure",
+  "mail_sentinel_scan_timer",
   "mail_sentinel_register",
   "smoke_checks",
   "test_alert",
