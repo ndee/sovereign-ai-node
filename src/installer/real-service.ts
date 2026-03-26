@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import {
   access,
@@ -199,6 +199,17 @@ type PersistedInstallJobRecord = {
   updatedAt: string;
 };
 
+type ManagedWorkspaceFilesState = {
+  version: 1;
+  files: Record<
+    string,
+    {
+      status: "managed" | "preserved";
+      renderedSha256: string;
+    }
+  >;
+};
+
 type RelayEnrollmentResult = {
   controlUrl: string;
   hostname: string;
@@ -208,6 +219,7 @@ type RelayEnrollmentResult = {
 
 const OPENCLAW_EXEC_TOOL_ID = "exec";
 const OPENCLAW_SESSION_STATUS_TOOL_ID = "session_status";
+const MANAGED_WORKSPACE_FILES_STATE_BASENAME = "managed-workspace-files.json";
 const OPENCLAW_STATUS_PROBE_TIMEOUT_MS = 5_000;
 const OPENCLAW_EMPTY_HEALTH_RETRY_ATTEMPTS = 3;
 const OPENCLAW_EMPTY_HEALTH_RETRY_DELAY_MS = 1_000;
@@ -3830,6 +3842,13 @@ export default function (api) {
     toolInstanceIds: string[];
   }): Promise<void> {
     const boundTools = this.resolveBoundToolInstances(input.runtimeConfig, input.toolInstanceIds);
+    const workspaceFilesStatePath = this.resolveManagedWorkspaceFilesStatePath(input.workspaceDir);
+    const previousWorkspaceFilesState =
+      await this.readManagedWorkspaceFilesState(workspaceFilesStatePath);
+    const nextWorkspaceFilesState: ManagedWorkspaceFilesState = {
+      version: 1,
+      files: {},
+    };
     const toolLines =
       boundTools.length === 0
         ? ["No bound tool instances."]
@@ -3863,15 +3882,130 @@ export default function (api) {
         matrixOperatorUserId: input.runtimeConfig.matrix.operator.userId,
         toolSection: toolLines.join("\n"),
       });
-      await writeFile(targetPath, `${rendered}\n`, "utf8");
+      const renderedContent = `${rendered}\n`;
+      if (this.shouldPreserveManagedWorkspaceFile(file.path)) {
+        const renderedSha256 = this.hashWorkspaceFileContent(renderedContent);
+        const existingContent = await this.tryReadTextFile(targetPath);
+        const previousFileState = previousWorkspaceFilesState.files[file.path];
+        let status: "managed" | "preserved" = "managed";
+        let shouldWrite = existingContent === null;
+        if (existingContent !== null) {
+          const existingSha256 = this.hashWorkspaceFileContent(existingContent);
+          if (existingSha256 === renderedSha256) {
+            status = "managed";
+          } else if (
+            previousFileState?.status === "managed" &&
+            previousFileState.renderedSha256 === existingSha256
+          ) {
+            shouldWrite = true;
+            status = "managed";
+          } else {
+            status = "preserved";
+            if (previousFileState?.status !== "preserved") {
+              this.logger.info(
+                {
+                  agentId: input.agentId,
+                  workspaceDir: input.workspaceDir,
+                  path: file.path,
+                },
+                "Preserved locally modified managed workspace file",
+              );
+            }
+          }
+        }
+        if (shouldWrite) {
+          await writeFile(targetPath, renderedContent, "utf8");
+        }
+        if (file.mode !== undefined) {
+          await chmod(targetPath, Number.parseInt(file.mode, 8));
+        }
+        await this.applyRuntimeOwnership(targetPath);
+        nextWorkspaceFilesState.files[file.path] = {
+          status,
+          renderedSha256,
+        };
+        continue;
+      }
+      await writeFile(targetPath, renderedContent, "utf8");
       if (file.mode !== undefined) {
         await chmod(targetPath, Number.parseInt(file.mode, 8));
       }
       await this.applyRuntimeOwnership(targetPath);
     }
+    await this.writeInstallerJsonFile(workspaceFilesStatePath, nextWorkspaceFilesState, 0o644);
     await this.writeManagedOpenClawExtensions({
       runtimeConfig: input.runtimeConfig,
     });
+  }
+
+  private resolveManagedWorkspaceFilesStatePath(workspaceDir: string): string {
+    return join(workspaceDir, ".openclaw", MANAGED_WORKSPACE_FILES_STATE_BASENAME);
+  }
+
+  private async readManagedWorkspaceFilesState(path: string): Promise<ManagedWorkspaceFilesState> {
+    let raw = "";
+    try {
+      raw = await readFile(path, "utf8");
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return {
+          version: 1,
+          files: {},
+        };
+      }
+      throw error;
+    }
+    const parsed = parseJsonSafely(raw);
+    if (!isRecord(parsed) || !isRecord(parsed.files)) {
+      return {
+        version: 1,
+        files: {},
+      };
+    }
+    const files: ManagedWorkspaceFilesState["files"] = {};
+    for (const [filePath, entry] of Object.entries(parsed.files)) {
+      if (
+        !isRecord(entry) ||
+        typeof entry.renderedSha256 !== "string" ||
+        (entry.status !== "managed" && entry.status !== "preserved")
+      ) {
+        continue;
+      }
+      files[filePath] = {
+        status: entry.status,
+        renderedSha256: entry.renderedSha256,
+      };
+    }
+    return {
+      version: 1,
+      files,
+    };
+  }
+
+  private shouldPreserveManagedWorkspaceFile(path: string): boolean {
+    const normalized = path.replaceAll("\\", "/").toLowerCase();
+    if (normalized.startsWith("config/")) {
+      return !normalized.endsWith(".md");
+    }
+    if (normalized.startsWith("data/")) {
+      return !normalized.endsWith("/readme.md");
+    }
+    return false;
+  }
+
+  private hashWorkspaceFileContent(content: string): string {
+    return createHash("sha256").update(content).digest("hex");
+  }
+
+  private async tryReadTextFile(path: string): Promise<string | null> {
+    try {
+      return await readFile(path, "utf8");
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return null;
+      }
+      throw error;
+    }
   }
 
   private async tryReadRuntimeConfig(): Promise<RuntimeConfig | null> {
