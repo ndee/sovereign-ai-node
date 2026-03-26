@@ -59,10 +59,14 @@ const buildInstallRequest = (): InstallRequest => ({
   operator: {
     username: "operator",
   },
-  mailSentinel: {
-    pollInterval: "30m",
-    lookbackWindow: "1h",
-    e2eeAlertRoom: false,
+  bots: {
+    config: {
+      "mail-sentinel": {
+        pollInterval: "30m",
+        lookbackWindow: "1h",
+        e2eeAlertRoom: false,
+      },
+    },
   },
   advanced: {
     nonInteractive: true,
@@ -692,10 +696,14 @@ const writeRuntimeArtifacts = async (paths: SovereignPaths): Promise<void> => {
             roomName: "Sovereign Alerts",
           },
         },
-        mailSentinel: {
-          pollInterval: "5m",
-          lookbackWindow: "15m",
-          e2eeAlertRoom: false,
+        bots: {
+          config: {
+            "mail-sentinel": {
+              pollInterval: "30m",
+              lookbackWindow: "1h",
+              e2eeAlertRoom: false,
+            },
+          },
         },
       },
       null,

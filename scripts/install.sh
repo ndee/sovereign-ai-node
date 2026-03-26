@@ -1943,12 +1943,11 @@ const botConfig = bots && typeof bots === "object" && !Array.isArray(bots)
   && bots.config && typeof bots.config === "object" && !Array.isArray(bots.config)
   ? bots.config
   : {};
-const legacyMailSentinel = req.mailSentinel ?? {};
 const mailSentinel =
   botConfig["mail-sentinel"] && typeof botConfig["mail-sentinel"] === "object"
   && !Array.isArray(botConfig["mail-sentinel"])
     ? botConfig["mail-sentinel"]
-    : legacyMailSentinel;
+    : {};
 const imap = req.imap ?? {};
 let runtime = {};
 try {

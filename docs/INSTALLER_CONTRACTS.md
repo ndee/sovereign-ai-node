@@ -529,11 +529,6 @@ type InstallRequest = {
     username: string; // localpart or full matrix user id
     password?: string; // optional if backend generates one
   };
-  mailSentinel?: {
-    pollInterval?: string; // default "5m"
-    lookbackWindow?: string; // default "15m"
-    e2eeAlertRoom?: boolean; // default false
-  };
   advanced?: {
     rollbackPolicy?: "safe_partial" | "manual" | "aggressive_non_destructive";
     skipPreflight?: boolean; // default false
@@ -557,7 +552,6 @@ Constraints:
 - custom relays must provide `relay.enrollmentToken`
 - relay hostname selection is installer-managed; user-provided relay slugs are not part of the public contract
 - `matrix.federationEnabled` defaults to `false`
-- `mailSentinel.e2eeAlertRoom` defaults to `false`
 
 ### `PreflightResult`
 
@@ -932,7 +926,6 @@ Request body:
 type ReconfigureMatrixRequest = {
   matrix: Partial<InstallRequest["matrix"]>;
   operator?: Partial<InstallRequest["operator"]>;
-  mailSentinel?: Pick<NonNullable<InstallRequest["mailSentinel"]>, "e2eeAlertRoom">;
 };
 ```
 

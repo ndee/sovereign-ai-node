@@ -123,12 +123,6 @@ export const botsInstallInputSchema = z.object({
   config: z.record(z.string(), z.record(z.string(), botConfigValueSchema)).optional(),
 });
 
-export const mailSentinelInstallInputSchema = z.object({
-  pollInterval: z.string().min(1).optional(),
-  lookbackWindow: z.string().min(1).optional(),
-  e2eeAlertRoom: z.boolean().optional(),
-});
-
 export const advancedInstallInputSchema = z.object({
   rollbackPolicy: z.enum(["safe_partial", "manual", "aggressive_non_destructive"]).optional(),
   skipPreflight: z.boolean().optional(),
@@ -145,7 +139,6 @@ export const installRequestSchema = z.object({
   matrix: matrixInstallInputSchema,
   operator: operatorInstallInputSchema,
   bots: botsInstallInputSchema.optional(),
-  mailSentinel: mailSentinelInstallInputSchema.optional(),
   advanced: advancedInstallInputSchema.optional(),
 });
 
