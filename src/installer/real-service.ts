@@ -132,6 +132,8 @@ import {
   isRecord,
   looksLikeMissingGateway,
   MAIL_SENTINEL_AGENT_ID,
+  MAIL_SENTINEL_SCAN_SYSTEMD_SERVICE,
+  MAIL_SENTINEL_SCAN_SYSTEMD_TIMER,
   MANAGED_OPENCLAW_DM_SCOPE,
   mapHealthToServiceState,
   normalizeOpenClawAgentModel,
@@ -5007,6 +5009,20 @@ export default function (api) {
         },
       },
       {
+        id: "mail_sentinel_scan_timer",
+        label: "Install mail-sentinel scan timer",
+        softFail: true,
+        run: async () => {
+          if (stepState.runtimeConfig === undefined) {
+            return;
+          }
+          const installed = await this.ensureMailSentinelScanTimer(stepState.runtimeConfig);
+          if (installed) {
+            await this.removeStaleMailSentinelCron(stepState.runtimeConfig);
+          }
+        },
+      },
+      {
         id: "smoke_checks",
         label: "Run smoke checks",
         run: async () => {
@@ -6024,6 +6040,125 @@ export default function (api) {
     }
 
     return false;
+  }
+
+  private async ensureMailSentinelScanTimer(runtimeConfig: RuntimeConfig): Promise<boolean> {
+    if (this.execRunner === null) {
+      return false;
+    }
+
+    const agent = runtimeConfig.openclawProfile.agents.find(
+      (entry) => entry.id === MAIL_SENTINEL_AGENT_ID,
+    );
+    if (agent === undefined) {
+      return false;
+    }
+
+    const serviceIdentity = this.getConfiguredServiceIdentity(runtimeConfig);
+    const pollInterval = runtimeConfig.bots.config[MAIL_SENTINEL_AGENT_ID]?.pollInterval;
+    const systemdInterval = toSystemdDuration(
+      typeof pollInterval === "string" && pollInterval.length > 0 ? pollInterval : "30m",
+    );
+
+    const serviceUnitPath = `/etc/systemd/system/${MAIL_SENTINEL_SCAN_SYSTEMD_SERVICE}`;
+    const timerUnitPath = `/etc/systemd/system/${MAIL_SENTINEL_SCAN_SYSTEMD_TIMER}`;
+
+    const serviceContents = [
+      "[Unit]",
+      "Description=Sovereign Mail Sentinel Scan",
+      "After=network-online.target",
+      "Wants=network-online.target",
+      "",
+      "[Service]",
+      "Type=oneshot",
+      `User=${serviceIdentity.user}`,
+      `Group=${serviceIdentity.group}`,
+      `WorkingDirectory=${agent.workspace}`,
+      `Environment=HOME=${this.paths.openclawServiceHome}`,
+      `Environment=SOVEREIGN_NODE_CONFIG=${this.paths.configPath}`,
+      `Environment=PATH=${process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}`,
+      `ExecStart=/usr/bin/env node ${agent.workspace}/bin/mail-sentinel.mjs scan --instance mail-sentinel-core --json`,
+      "TimeoutStartSec=300",
+      "",
+    ].join("\n");
+
+    const timerContents = [
+      "[Unit]",
+      "Description=Sovereign Mail Sentinel Scan Timer",
+      "",
+      "[Timer]",
+      "OnActiveSec=5min",
+      `OnUnitActiveSec=${systemdInterval}`,
+      "AccuracySec=1min",
+      "Persistent=true",
+      "",
+      "[Install]",
+      "WantedBy=timers.target",
+      "",
+    ].join("\n");
+
+    try {
+      await writeFile(serviceUnitPath, serviceContents, "utf8");
+      await writeFile(timerUnitPath, timerContents, "utf8");
+    } catch (error) {
+      this.logger.warn(
+        {
+          serviceUnitPath,
+          timerUnitPath,
+          error: describeError(error),
+        },
+        "Failed to write mail-sentinel scan timer units",
+      );
+      return false;
+    }
+
+    const commands: string[][] = [
+      ["daemon-reload"],
+      ["enable", "--now", MAIL_SENTINEL_SCAN_SYSTEMD_TIMER],
+    ];
+    for (const args of commands) {
+      const result = await this.safeExec("systemctl", args);
+      if (!result.ok) {
+        this.logger.warn(
+          {
+            command: ["systemctl", ...args].join(" "),
+            error: result.error,
+          },
+          "Mail sentinel scan timer command failed",
+        );
+        return false;
+      }
+      if (result.result.exitCode !== 0) {
+        this.logger.warn(
+          {
+            command: result.result.command,
+            exitCode: result.result.exitCode,
+            stderr: truncateText(result.result.stderr, 1200),
+          },
+          "Mail sentinel scan timer command exited non-zero",
+        );
+        return false;
+      }
+    }
+
+    this.logger.info(
+      { timerUnitPath, interval: systemdInterval },
+      "Mail sentinel scan timer installed and enabled",
+    );
+    return true;
+  }
+
+  private async removeStaleMailSentinelCron(runtimeConfig: RuntimeConfig): Promise<void> {
+    try {
+      await this.withManagedOpenClawServiceIdentityEnv(runtimeConfig, async () => {
+        const result = await this.safeExec("openclaw", ["cron", "rm", "mail-sentinel-poll"]);
+        if (result.ok && result.result.exitCode === 0) {
+          this.logger.info("Removed stale mail-sentinel OpenClaw cron job");
+        }
+      });
+    } catch {
+      this.logger.debug("No stale mail-sentinel OpenClaw cron to remove");
+    }
   }
 
   private async runSmokeChecks(
@@ -7715,6 +7850,15 @@ const resolveExpectedBundledBotLocalpart = (
     "service-bot",
   );
   return operatorLocalpart === desiredLocalpart ? `${desiredLocalpart}-bot` : desiredLocalpart;
+};
+
+const toSystemdDuration = (value: string): string => {
+  const match = value.match(/^(\d+)\s*(m|h|d|s)/i);
+  if (match === null || match[1] === undefined || match[2] === undefined) {
+    return "30min";
+  }
+  const systemdUnit = match[2].toLowerCase() === "m" ? "min" : match[2].toLowerCase();
+  return `${match[1]}${systemdUnit}`;
 };
 
 const compactBotConfigRecord = (
