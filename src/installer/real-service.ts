@@ -6151,9 +6151,27 @@ export default function (api) {
   private async removeStaleMailSentinelCron(runtimeConfig: RuntimeConfig): Promise<void> {
     try {
       await this.withManagedOpenClawServiceIdentityEnv(runtimeConfig, async () => {
-        const result = await this.safeExec("openclaw", ["cron", "rm", "mail-sentinel-poll"]);
-        if (result.ok && result.result.exitCode === 0) {
-          this.logger.info("Removed stale mail-sentinel OpenClaw cron job");
+        const listResult = await this.safeExec("openclaw", ["cron", "list", "--json"]);
+        if (!listResult.ok || listResult.result.exitCode !== 0) {
+          return;
+        }
+        let jobs: { id: string; name?: string }[];
+        try {
+          const parsed = JSON.parse(listResult.result.stdout);
+          jobs = Array.isArray(parsed) ? parsed : (parsed?.jobs ?? parsed?.crons ?? []);
+        } catch {
+          return;
+        }
+        for (const job of jobs) {
+          if (job.name === "mail-sentinel-poll" || job.id === "mail-sentinel-poll") {
+            const rmResult = await this.safeExec("openclaw", ["cron", "rm", job.id]);
+            if (rmResult.ok && rmResult.result.exitCode === 0) {
+              this.logger.info(
+                { cronJobId: job.id },
+                "Removed stale mail-sentinel OpenClaw cron job",
+              );
+            }
+          }
         }
       });
     } catch {
