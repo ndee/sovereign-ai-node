@@ -361,16 +361,6 @@ export class RealInstallerService implements InstallerService {
           ] satisfies [string, BotConfigRecord],
       ),
     );
-    if (req.mailSentinel !== undefined && mergedById["mail-sentinel"] !== undefined) {
-      mergedById["mail-sentinel"] = {
-        ...mergedById["mail-sentinel"],
-        ...compactBotConfigRecord({
-          pollInterval: req.mailSentinel.pollInterval,
-          lookbackWindow: req.mailSentinel.lookbackWindow,
-          e2eeAlertRoom: req.mailSentinel.e2eeAlertRoom,
-        }),
-      };
-    }
     return {
       packages,
       configById: mergedById,
@@ -519,9 +509,6 @@ export class RealInstallerService implements InstallerService {
         .filter((entry: string) => entry.length > 0) ?? [];
     if (selected.length > 0) {
       return dedupeStrings(selected);
-    }
-    if (req.mailSentinel !== undefined) {
-      return ["mail-sentinel"];
     }
     return dedupeStrings(defaultBotIds);
   }

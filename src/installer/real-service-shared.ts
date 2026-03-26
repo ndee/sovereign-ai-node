@@ -104,11 +104,6 @@ export type RuntimeConfig = {
   bots: {
     config: Record<string, Record<string, BotConfigValue>>;
   };
-  mailSentinel?: {
-    pollInterval: string;
-    lookbackWindow: string;
-    e2eeAlertRoom: boolean;
-  };
   matrix: {
     accessMode: "direct" | "relay";
     homeserverDomain: string;
@@ -393,7 +388,6 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
       : [];
   const openrouter = isRecord(parsed.openrouter) ? parsed.openrouter : {};
   const imap = isRecord(parsed.imap) ? parsed.imap : {};
-  const legacyMailSentinel = isRecord(parsed.mailSentinel) ? parsed.mailSentinel : {};
   const bots = isRecord(parsed.bots) ? parsed.bots : {};
   const botConfig = isRecord(bots.config)
     ? Object.fromEntries(
@@ -696,31 +690,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
     },
     ...(relayConfig === undefined ? {} : { relay: relayConfig }),
     bots: {
-      config:
-        Object.keys(botConfig).length > 0
-          ? botConfig
-          : legacyMailSentinel.pollInterval !== undefined ||
-              legacyMailSentinel.lookbackWindow !== undefined ||
-              legacyMailSentinel.e2eeAlertRoom !== undefined
-            ? {
-                [MAIL_SENTINEL_AGENT_ID]: {
-                  pollInterval:
-                    typeof legacyMailSentinel.pollInterval === "string" &&
-                    legacyMailSentinel.pollInterval.length > 0
-                      ? legacyMailSentinel.pollInterval
-                      : "5m",
-                  lookbackWindow:
-                    typeof legacyMailSentinel.lookbackWindow === "string" &&
-                    legacyMailSentinel.lookbackWindow.length > 0
-                      ? legacyMailSentinel.lookbackWindow
-                      : "15m",
-                  e2eeAlertRoom:
-                    typeof legacyMailSentinel.e2eeAlertRoom === "boolean"
-                      ? legacyMailSentinel.e2eeAlertRoom
-                      : false,
-                },
-              }
-            : {},
+      config: botConfig,
     },
     templates: {
       installed: templateInstalledEntries,

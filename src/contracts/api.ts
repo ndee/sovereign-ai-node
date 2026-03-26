@@ -41,11 +41,6 @@ export const reconfigureMatrixRequestSchema = z.object({
   matrix: installRequestSchema.shape.matrix.partial().optional(),
   operator: installRequestSchema.shape.operator.partial().optional(),
   bots: botsInstallInputSchema.partial().optional(),
-  mailSentinel: z
-    .object({
-      e2eeAlertRoom: z.boolean().optional(),
-    })
-    .optional(),
 });
 
 export const reconfigureOpenrouterRequestSchema = z.object({
