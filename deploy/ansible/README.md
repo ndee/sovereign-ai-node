@@ -1,34 +1,32 @@
-# Sovereign Node Ansible Wrapper
+# Sovereign Node Installer Ansible Support
 
-This Ansible layer wraps the existing Sovereign Node installer instead of replacing it.
+These Ansible assets are internal support for the existing installer.
 
-Lifecycle split:
+Users still install and update a node through the normal entrypoints:
 
-- bootstrap: check out the requested `sovereign-ai-node` and `sovereign-ai-bots` refs
-- configure: render `/etc/sovereign-node/install-request.json`
-- apply: run `scripts/install.sh` in explicit `install` or `update` mode
-- reconcile: remove stale Mail Sentinel OpenClaw cron jobs and enforce the systemd timer
-- verify: run focused health checks after the installer completes
+- the `curl` installer
+- `scripts/install.sh`
+- `sovereign-node update`
 
-Quick start:
+Ansible is only used behind the scenes for post-install reconciliation and verification so the operator still experiences a single install/update path.
+
+Current responsibilities:
+
+- reconcile Mail Sentinel scheduler state after install/update
+- verify `sovereign-node doctor`, `sovereign-node status`, and the Mail Sentinel systemd timer
+- provide Molecule coverage for the legacy OpenClaw cron cleanup path
+
+Relevant files:
+
+- `playbooks/post-install-local.yml`: local-only playbook invoked by `scripts/install.sh`
+- `roles/sovereign_node_mail_sentinel_reconcile/`: removes stale Mail Sentinel OpenClaw cron jobs and enforces the systemd timer
+- `roles/sovereign_node_verify/`: asserts post-install runtime health
+- `molecule/upgrade_mail_sentinel_scheduler/`: local test scenario for the scheduler migration
+
+Local validation:
 
 ```bash
 cd deploy/ansible
-ansible-playbook playbooks/site.yml -l my-node
+ansible-playbook --syntax-check playbooks/post-install-local.yml
+molecule test -s upgrade_mail_sentinel_scheduler
 ```
-
-Useful entrypoints:
-
-- `playbooks/site.yml`: auto-select `install` vs `update`
-- `playbooks/install.yml`: force install mode
-- `playbooks/update.yml`: force update mode
-
-Test scaffolding:
-
-- `molecule/upgrade_mail_sentinel_scheduler/`: exercises the legacy Mail Sentinel cron cleanup path with fake `openclaw`, `systemctl`, and `sovereign-node` shims
-
-Before running against a real host:
-
-- fill in `inventories/prod/hosts.yml`
-- update values in `inventories/prod/group_vars/all.yml`
-- point secret refs like `sovereign_openrouter_secret_ref` and `sovereign_imap_secret_ref` at real secrets

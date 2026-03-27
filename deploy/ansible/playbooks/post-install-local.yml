@@ -1,0 +1,23 @@
+- name: Reconcile and verify a local Sovereign install
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars:
+    sovereign_node_request_file: "{{ sovereign_node_request_file | default('/etc/sovereign-node/install-request.json') }}"
+  pre_tasks:
+    - name: Read install request file
+      ansible.builtin.slurp:
+        src: "{{ sovereign_node_request_file }}"
+      register: sovereign_node_request_file_raw
+
+    - name: Determine selected bots from install request
+      ansible.builtin.set_fact:
+        sovereign_selected_bots: >-
+          {{
+            (((sovereign_node_request_file_raw.content | b64decode | from_json).bots | default({})).selected | default([]))
+          }}
+
+  roles:
+    - sovereign_node_mail_sentinel_reconcile
+    - sovereign_node_verify

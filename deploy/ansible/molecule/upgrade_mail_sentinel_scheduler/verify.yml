@@ -2,8 +2,6 @@
   hosts: localhost
   gather_facts: false
   become: false
-  vars_files:
-    - vars/scenario.yml
   vars:
     scenario_dir: "{{ molecule_ephemeral_directory }}/upgrade_mail_sentinel_scheduler"
   tasks:
@@ -38,9 +36,8 @@
       ansible.builtin.assert:
         that:
           - scenario_request.bots.selected == ['mail-sentinel']
-          - scenario_request.bots.config['mail-sentinel'].pollInterval == '30m'
           - (scenario_cron_jobs | selectattr('name', 'equalto', 'mail-sentinel-poll') | list | length) == 0
           - scenario_timer_state.enabled | bool
           - scenario_timer_state.active == 'active'
         fail_msg: Molecule upgrade scenario did not converge to the expected Mail Sentinel scheduler state.
-        success_msg: Molecule upgrade scenario rendered the request and removed the legacy Mail Sentinel cron.
+        success_msg: Molecule upgrade scenario removed the legacy Mail Sentinel cron and enabled the timer.

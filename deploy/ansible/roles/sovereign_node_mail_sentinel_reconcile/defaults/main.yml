@@ -2,3 +2,6 @@ sovereign_mail_sentinel_timer_manage_with_systemd_module: true
 sovereign_systemctl_bin: systemctl
 sovereign_openclaw_bin: openclaw
 sovereign_python3_bin: python3
+sovereign_selected_bots: []
+sovereign_mail_sentinel_openclaw_legacy_cron_name: mail-sentinel-poll
+sovereign_mail_sentinel_scan_timer_unit: sovereign-mail-sentinel-scan.timer

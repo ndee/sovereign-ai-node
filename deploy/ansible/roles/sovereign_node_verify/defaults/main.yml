@@ -2,3 +2,8 @@ sovereign_node_bin: sovereign-node
 sovereign_bash_bin: bash
 sovereign_systemctl_bin: systemctl
 sovereign_node_verify_require_mail_sentinel_status: true
+sovereign_selected_bots: []
+sovereign_mail_sentinel_scan_timer_unit: sovereign-mail-sentinel-scan.timer
+sovereign_node_verify_accepted_doctor_states:
+  - pass
+  - warn

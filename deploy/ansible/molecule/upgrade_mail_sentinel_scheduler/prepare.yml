@@ -56,3 +56,15 @@
             "enabled": false,
             "active": "inactive"
           }
+
+    - name: Seed install request file
+      ansible.builtin.copy:
+        dest: "{{ scenario_config_dir }}/install-request.json"
+        mode: "0644"
+        content: |
+          {
+            "mode": "bundled_matrix",
+            "bots": {
+              "selected": ["mail-sentinel"]
+            }
+          }

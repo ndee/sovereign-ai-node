@@ -1,9 +1,4 @@
-- name: Converge Mail Sentinel scheduler upgrade scenario
-  hosts: localhost
-  gather_facts: false
-  become: false
-  vars_files:
-    - vars/scenario.yml
+- import_playbook: ../../playbooks/post-install-local.yml
   vars:
     scenario_dir: "{{ molecule_ephemeral_directory }}/upgrade_mail_sentinel_scheduler"
     sovereign_node_request_file: "{{ scenario_dir }}/etc/sovereign-node/install-request.json"
@@ -13,7 +8,3 @@
     sovereign_openclaw_bin: "{{ scenario_dir }}/bin/openclaw"
     sovereign_python3_bin: python3
     sovereign_node_bin: "{{ scenario_dir }}/bin/sovereign-node"
-  roles:
-    - sovereign_node_request
-    - sovereign_node_mail_sentinel_reconcile
-    - sovereign_node_verify
