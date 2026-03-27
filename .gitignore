@@ -7,3 +7,4 @@ coverage/
 .sovereign-node-dev/
 .molecule/
 *.retry
+__pycache__/
