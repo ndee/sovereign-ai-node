@@ -4469,6 +4469,152 @@ describe("RealInstallerService", () => {
     }
   });
 
+  it("treats disabled systemd host resources as healthy when they match desired state", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+    };
+    await writeRuntimeArtifacts(paths);
+
+    const raw = await readFile(paths.configPath, "utf8");
+    const parsed = JSON.parse(raw) as {
+      hostResources?: {
+        planPath?: string;
+        resources?: Array<Record<string, unknown>>;
+        botStatus?: Array<Record<string, unknown>>;
+      };
+    };
+    parsed.hostResources = {
+      planPath: join(dirname(paths.configPath), "host-resources.json"),
+      resources: [
+        {
+          id: "scan-service",
+          botId: "mail-sentinel",
+          kind: "systemdService",
+          name: "sovereign-mail-sentinel-scan.service",
+          content: "[Unit]\nDescription=test\n",
+          desiredState: {
+            enabled: false,
+            active: false,
+          },
+          checks: [],
+        },
+      ],
+      botStatus: [],
+    };
+    await writeFile(paths.configPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async ({ command, args }) => {
+          const serialized = [command, ...(args ?? [])].join(" ");
+          if (serialized === "openclaw gateway status") {
+            return { command: serialized, exitCode: 0, stdout: "running", stderr: "" };
+          }
+          if (serialized === "openclaw health") {
+            return { command: serialized, exitCode: 0, stdout: "ok", stderr: "" };
+          }
+          if (serialized === "openclaw agents list") {
+            return { command: serialized, exitCode: 0, stdout: "mail-sentinel", stderr: "" };
+          }
+          if (serialized === "openclaw cron list") {
+            return { command: serialized, exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (serialized === "systemctl is-enabled sovereign-mail-sentinel-scan.service") {
+            return { command: serialized, exitCode: 1, stdout: "disabled", stderr: "" };
+          }
+          if (serialized === "systemctl is-active sovereign-mail-sentinel-scan.service") {
+            return { command: serialized, exitCode: 3, stdout: "inactive", stderr: "" };
+          }
+          return {
+            command: serialized,
+            exitCode: 1,
+            stdout: "",
+            stderr: "unexpected command",
+          };
+        },
+      },
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ joined: {} }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    });
+
+    try {
+      const status = await service.getStatus();
+      expect(status.bots["mail-sentinel"]?.health).toBe("healthy");
+      expect(status.hostResources.find((entry) => entry.id === "scan-service")?.health).toBe(
+        "healthy",
+      );
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("treats OpenClaw agent and cron probes as satisfied when none are configured", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {

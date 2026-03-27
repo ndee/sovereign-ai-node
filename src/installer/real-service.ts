@@ -2555,8 +2555,9 @@ export class RealInstallerService implements InstallerService {
         case "systemdTimer": {
           const enabled = await this.inspectSystemdBool(resource.name, "is-enabled");
           const active = await this.inspectSystemdActive(resource.name);
-          const health: ComponentHealth =
-            enabled === true && active === true ? "healthy" : "unhealthy";
+          const matchesDesiredState =
+            enabled === resource.desiredState.enabled && active === resource.desiredState.active;
+          const health: ComponentHealth = matchesDesiredState ? "healthy" : "unhealthy";
           resources.push({
             id: resource.id,
             botId: resource.botId,
