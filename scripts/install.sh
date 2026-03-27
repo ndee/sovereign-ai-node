@@ -3372,6 +3372,7 @@ run_install_command() {
     set +e
     install_output="$(
       timeout --foreground 30m env \
+        "SOVEREIGN_INTERNAL_INSTALL=1" \
         "SOVEREIGN_NODE_SERVICE_USER=$SERVICE_USER" \
         "SOVEREIGN_NODE_SERVICE_GROUP=$SERVICE_GROUP" \
         sovereign-node install --request-file "$REQUEST_FILE" --json
@@ -3386,6 +3387,7 @@ run_install_command() {
     : > "$log_path"
     set +e
     timeout --foreground 30m env \
+      "SOVEREIGN_INTERNAL_INSTALL=1" \
       "SOVEREIGN_NODE_SERVICE_USER=$SERVICE_USER" \
       "SOVEREIGN_NODE_SERVICE_GROUP=$SERVICE_GROUP" \
       sovereign-node install --request-file "$REQUEST_FILE" --json >"$log_path" 2>&1 &
