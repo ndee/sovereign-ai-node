@@ -27,6 +27,11 @@
       - --json
   register: sovereign_host_resources_doctor_raw
   changed_when: false
+  retries: 6
+  delay: 10
+  until: >-
+    (sovereign_host_resources_doctor_raw.stdout | from_json).result.overall
+    in ['pass', 'warn']
 
 - name: Parse sovereign-node doctor
   ansible.builtin.set_fact:
