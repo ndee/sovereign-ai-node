@@ -121,6 +121,7 @@ import {
   type GatewayState,
   generateAgentPassword,
   INSTALLER_EXEC_TIMEOUT_MS,
+  type InstallProvenance,
   isAlreadyExistsOutput,
   isAlreadyJoinedOrInvitedRoomError,
   isCoreAgentBindingBestEffortSkippable,
@@ -142,6 +143,7 @@ import {
   now,
   parseEnvFile,
   parseGatewayState,
+  parseInstallProvenance,
   parseJsonDocument,
   parseJsonSafely,
   parseRuntimeConfigDocument,
@@ -667,6 +669,7 @@ export class RealInstallerService implements InstallerService {
 
   async getStatus(): Promise<SovereignStatus> {
     const runtimeConfig = await this.tryReadRuntimeConfig();
+    const provenance = await this.tryReadInstallProvenance();
     const detectedOpenClaw = await this.safeDetectOpenClaw();
     const expectedAgentIds = runtimeConfig?.openclawProfile.agents.map((entry) => entry.id) ?? [];
     const expectedCronIds = runtimeConfig?.openclawProfile.crons.map((entry) => entry.id) ?? [];
@@ -853,6 +856,7 @@ export class RealInstallerService implements InstallerService {
                 pluginIds.map((pluginId) => [pluginId, "managed-by-sovereign"]),
               ),
             }),
+        ...(provenance === null ? {} : { provenance }),
       },
     };
   }
@@ -989,6 +993,18 @@ export class RealInstallerService implements InstallerService {
         matrixStatus.health === "healthy"
           ? "Matrix homeserver probe succeeded"
           : (matrixStatus.message ?? "Matrix homeserver probe failed"),
+      ),
+    );
+
+    const provenance = await this.tryReadInstallProvenance();
+    checks.push(
+      check(
+        "install-provenance",
+        "Install provenance",
+        provenance !== null ? "pass" : "warn",
+        provenance !== null
+          ? `Install provenance recorded (${provenance.installSource}, ${provenance.nodeRef}@${provenance.nodeCommitSha.slice(0, 8)})`
+          : "Install provenance file is missing; run install.sh to generate it",
       ),
     );
 
@@ -4025,6 +4041,25 @@ export default function (api) {
           error: error instanceof Error ? error.message : String(error),
         },
         "Failed to read runtime config for status/doctor probes",
+      );
+      return null;
+    }
+  }
+
+  private async tryReadInstallProvenance(): Promise<InstallProvenance | null> {
+    try {
+      const raw = await readFile(this.paths.provenancePath, "utf8");
+      return parseInstallProvenance(raw);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return null;
+      }
+      this.logger.warn(
+        {
+          provenancePath: this.paths.provenancePath,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Failed to read install provenance",
       );
       return null;
     }

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { isCoreAgentBindingBestEffortSkippable } from "./real-service-shared.js";
+import {
+  isCoreAgentBindingBestEffortSkippable,
+  parseInstallProvenance,
+} from "./real-service-shared.js";
 
 describe("isCoreAgentBindingBestEffortSkippable", () => {
   it("treats legacy command gaps as skippable for managed agents", () => {
@@ -56,5 +59,78 @@ describe("isCoreAgentBindingBestEffortSkippable", () => {
     };
 
     expect(isCoreAgentBindingBestEffortSkippable(error)).toBe(false);
+  });
+});
+
+describe("parseInstallProvenance", () => {
+  const validProvenance = {
+    nodeRepoUrl: "https://github.com/ndee/sovereign-ai-node",
+    nodeRef: "main",
+    nodeCommitSha: "abc123def456",
+    botsRepoUrl: "https://github.com/ndee/sovereign-ai-bots",
+    botsRef: "main",
+    botsCommitSha: "789xyz000111",
+    installedAt: "2026-03-27T10:00:00Z",
+    installSource: "git-clone",
+  };
+
+  it("parses a valid provenance JSON", () => {
+    const result = parseInstallProvenance(JSON.stringify(validProvenance));
+    expect(result).not.toBeNull();
+    expect(result!.nodeCommitSha).toBe("abc123def456");
+    expect(result!.installSource).toBe("git-clone");
+    expect(result!.installedAt).toBe("2026-03-27T10:00:00Z");
+  });
+
+  it("returns null for empty input", () => {
+    expect(parseInstallProvenance("")).toBeNull();
+    expect(parseInstallProvenance("  ")).toBeNull();
+  });
+
+  it("returns null for invalid JSON", () => {
+    expect(parseInstallProvenance("{broken")).toBeNull();
+  });
+
+  it("returns null when required fields are missing", () => {
+    expect(parseInstallProvenance(JSON.stringify({ nodeRepoUrl: "x" }))).toBeNull();
+  });
+
+  it("returns null for invalid installSource value", () => {
+    expect(
+      parseInstallProvenance(
+        JSON.stringify({ ...validProvenance, installSource: "unknown-source" }),
+      ),
+    ).toBeNull();
+  });
+
+  it("parses local-copy provenance with unknown SHA", () => {
+    const localCopy = {
+      ...validProvenance,
+      nodeRepoUrl: "local-copy",
+      nodeRef: "unknown",
+      nodeCommitSha: "unknown",
+      botsRepoUrl: "local-copy",
+      botsRef: "unknown",
+      botsCommitSha: "unknown",
+      installSource: "local-copy",
+    };
+    const result = parseInstallProvenance(JSON.stringify(localCopy));
+    expect(result).not.toBeNull();
+    expect(result!.installSource).toBe("local-copy");
+    expect(result!.nodeRepoUrl).toBe("local-copy");
+  });
+
+  it("accepts curl-installer as installSource", () => {
+    const curlInstall = { ...validProvenance, installSource: "curl-installer" };
+    const result = parseInstallProvenance(JSON.stringify(curlInstall));
+    expect(result).not.toBeNull();
+    expect(result!.installSource).toBe("curl-installer");
+  });
+
+  it("returns null for non-object values", () => {
+    expect(parseInstallProvenance(JSON.stringify([1, 2, 3]))).toBeNull();
+    expect(parseInstallProvenance(JSON.stringify("string"))).toBeNull();
+    expect(parseInstallProvenance(JSON.stringify(42))).toBeNull();
+    expect(parseInstallProvenance(JSON.stringify(null))).toBeNull();
   });
 });

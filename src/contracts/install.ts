@@ -291,6 +291,18 @@ export const sovereignStatusSchema = z.object({
     contractVersion: z.string().min(1),
     openclaw: z.string().min(1).optional(),
     plugins: z.record(z.string(), z.string()).optional(),
+    provenance: z
+      .object({
+        nodeRepoUrl: z.string().min(1),
+        nodeRef: z.string().min(1),
+        nodeCommitSha: z.string().min(1),
+        botsRepoUrl: z.string().min(1),
+        botsRef: z.string().min(1),
+        botsCommitSha: z.string().min(1),
+        installedAt: z.string().min(1),
+        installSource: z.enum(["curl-installer", "local-copy", "git-clone"]),
+      })
+      .optional(),
   }),
 });
 
