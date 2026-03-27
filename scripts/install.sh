@@ -19,6 +19,7 @@ ENV_FILE="${SOVEREIGN_NODE_ENV_FILE:-/etc/default/sovereign-node-api}"
 API_HOST="${SOVEREIGN_NODE_API_HOST:-127.0.0.1}"
 API_PORT="${SOVEREIGN_NODE_API_PORT:-8787}"
 REQUEST_FILE="${SOVEREIGN_NODE_REQUEST_FILE:-/etc/sovereign-node/install-request.json}"
+PROVENANCE_FILE="/etc/sovereign-node/install-provenance.json"
 RUNTIME_CONFIG_FILE="${SOVEREIGN_NODE_CONFIG_FILE:-/etc/sovereign-node/sovereign-node.json5}"
 RUN_INSTALL="${SOVEREIGN_NODE_RUN_INSTALL:-1}"
 NON_INTERACTIVE="${SOVEREIGN_NODE_NON_INTERACTIVE:-0}"
@@ -497,6 +498,62 @@ sync_bots_source() {
     git clone "$BOTS_REPO_URL" "$BOTS_DIR"
     git -C "$BOTS_DIR" checkout "$BOTS_REF"
   }
+}
+
+write_install_provenance() {
+  local node_commit_sha="unknown"
+  local node_ref_resolved="$REF"
+  local node_repo="$REPO_URL"
+  local bots_commit_sha="unknown"
+  local bots_ref_resolved="$BOTS_REF"
+  local bots_repo="$BOTS_REPO_URL"
+  local install_source="git-clone"
+
+  if [[ -n "$SOURCE_DIR" ]]; then
+    install_source="local-copy"
+    node_repo="local-copy"
+    if [[ -d "${SOURCE_DIR}/.git" ]]; then
+      node_commit_sha="$(git -C "$SOURCE_DIR" rev-parse HEAD 2>/dev/null || echo "unknown")"
+      node_ref_resolved="$(git -C "$SOURCE_DIR" symbolic-ref --short HEAD 2>/dev/null || echo "$REF")"
+    fi
+  elif [[ -d "${APP_DIR}/.git" ]]; then
+    node_commit_sha="$(git -C "$APP_DIR" rev-parse HEAD 2>/dev/null || echo "unknown")"
+  fi
+
+  if [[ -n "$BOTS_SOURCE_DIR" ]]; then
+    bots_repo="local-copy"
+    if [[ -d "${BOTS_SOURCE_DIR}/.git" ]]; then
+      bots_commit_sha="$(git -C "$BOTS_SOURCE_DIR" rev-parse HEAD 2>/dev/null || echo "unknown")"
+      bots_ref_resolved="$(git -C "$BOTS_SOURCE_DIR" symbolic-ref --short HEAD 2>/dev/null || echo "$BOTS_REF")"
+    fi
+  elif [[ -d "${BOTS_DIR}/.git" ]]; then
+    bots_commit_sha="$(git -C "$BOTS_DIR" rev-parse HEAD 2>/dev/null || echo "unknown")"
+  fi
+
+  # Detect curl-installer mode: when piped from stdin there is no SOURCE_DIR
+  if [[ -z "$SOURCE_DIR" && "$REPO_URL" == *"github.com"* ]]; then
+    install_source="curl-installer"
+  fi
+
+  local installed_at
+  installed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  cat > "$PROVENANCE_FILE" <<PROVENANCE_EOF
+{
+  "nodeRepoUrl": "${node_repo}",
+  "nodeRef": "${node_ref_resolved}",
+  "nodeCommitSha": "${node_commit_sha}",
+  "botsRepoUrl": "${bots_repo}",
+  "botsRef": "${bots_ref_resolved}",
+  "botsCommitSha": "${bots_commit_sha}",
+  "installedAt": "${installed_at}",
+  "installSource": "${install_source}"
+}
+PROVENANCE_EOF
+
+  chmod 0644 "$PROVENANCE_FILE"
+  chown "${SERVICE_USER}:${SERVICE_GROUP}" "$PROVENANCE_FILE" 2>/dev/null || true
+  log "Install provenance written to $PROVENANCE_FILE"
 }
 
 build_app() {
@@ -3553,6 +3610,7 @@ main() {
   ui_run_step_captured "Prepare runtime directories" ensure_runtime_directories
   ui_run_step_captured "Sync application source" sync_app_source
   ui_run_step_captured "Sync bot package source" sync_bots_source
+  ui_run_step_captured "Write install provenance" write_install_provenance
   ui_run_step_foreground "Load bot catalog" load_available_bot_catalog
   ui_run_step_captured "Build application" build_app
   ui_run_step_captured "Install CLI wrappers" install_wrappers
@@ -3597,6 +3655,7 @@ ${completion_label}
 Request file: ${REQUEST_FILE}
 
 Useful commands:
+- sovereign-node update --request-file ${REQUEST_FILE} --json
 - sovereign-node install --request-file ${REQUEST_FILE} --json
 - sovereign-node status --json
 - sovereign-node doctor --json

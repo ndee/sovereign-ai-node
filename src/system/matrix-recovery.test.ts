@@ -53,6 +53,7 @@ const buildPaths = (root: string): SovereignPaths => ({
   logsDir: join(root, "logs"),
   installJobsDir: join(root, "install-jobs"),
   openclawServiceHome: join(root, "openclaw-home"),
+  provenancePath: join(root, "install-provenance.json"),
 });
 
 const jsonResponse = (body: unknown, status = 200): Response =>

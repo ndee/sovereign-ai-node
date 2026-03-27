@@ -5,6 +5,7 @@ export type SovereignPaths = {
   logsDir: string;
   installJobsDir: string;
   openclawServiceHome: string;
+  provenancePath: string;
 };
 
 export const DEFAULT_PATHS: SovereignPaths = {
@@ -14,4 +15,5 @@ export const DEFAULT_PATHS: SovereignPaths = {
   logsDir: "/var/log/sovereign-node",
   installJobsDir: "/var/lib/sovereign-node/install-jobs",
   openclawServiceHome: "/var/lib/sovereign-node/openclaw-home",
+  provenancePath: "/etc/sovereign-node/install-provenance.json",
 };

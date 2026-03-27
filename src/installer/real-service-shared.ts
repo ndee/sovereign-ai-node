@@ -159,6 +159,63 @@ export type RuntimeConfig = {
 
 export type RuntimeAgentEntry = RuntimeConfig["openclawProfile"]["agents"][number];
 
+export type InstallProvenance = {
+  nodeRepoUrl: string;
+  nodeRef: string;
+  nodeCommitSha: string;
+  botsRepoUrl: string;
+  botsRef: string;
+  botsCommitSha: string;
+  installedAt: string;
+  installSource: "curl-installer" | "local-copy" | "git-clone";
+};
+
+const INSTALL_SOURCE_VALUES = new Set(["curl-installer", "local-copy", "git-clone"]);
+
+export const parseInstallProvenance = (raw: string): InstallProvenance | null => {
+  if (raw.trim().length === 0) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  const record = parsed as Record<string, unknown>;
+  const fields = [
+    "nodeRepoUrl",
+    "nodeRef",
+    "nodeCommitSha",
+    "botsRepoUrl",
+    "botsRef",
+    "botsCommitSha",
+    "installedAt",
+    "installSource",
+  ] as const;
+  for (const field of fields) {
+    if (typeof record[field] !== "string" || (record[field] as string).length === 0) {
+      return null;
+    }
+  }
+  if (!INSTALL_SOURCE_VALUES.has(record.installSource as string)) {
+    return null;
+  }
+  return {
+    nodeRepoUrl: record.nodeRepoUrl as string,
+    nodeRef: record.nodeRef as string,
+    nodeCommitSha: record.nodeCommitSha as string,
+    botsRepoUrl: record.botsRepoUrl as string,
+    botsRef: record.botsRef as string,
+    botsCommitSha: record.botsCommitSha as string,
+    installedAt: record.installedAt as string,
+    installSource: record.installSource as InstallProvenance["installSource"],
+  };
+};
+
 export type GatewayState = "running" | "stopped" | "failed" | "unknown";
 
 export const MAIL_SENTINEL_AGENT_ID = "mail-sentinel";

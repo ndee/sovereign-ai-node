@@ -12,6 +12,7 @@ import { registerStatusCommand } from "./commands/status.js";
 import { registerTemplatesCommand } from "./commands/templates.js";
 import { registerTestAlertCommand } from "./commands/test-alert.js";
 import { registerToolsCommand } from "./commands/tools.js";
+import { registerUpdateCommand } from "./commands/update.js";
 import { registerUsersCommand } from "./commands/users.js";
 
 export const createCliProgram = (app: AppContainer): Command => {
@@ -36,6 +37,7 @@ export const createCliProgram = (app: AppContainer): Command => {
   registerLogsCommand(program);
   registerTestAlertCommand(program, app);
   registerReconfigureCommand(program, app);
+  registerUpdateCommand(program, app);
 
   return program;
 };
