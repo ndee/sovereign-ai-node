@@ -1,6 +1,6 @@
 - name: Read compiled host resources plan
   ansible.builtin.slurp:
-    src: "{{ sovereign_host_resources_plan_file }}"
+    src: "{{ sovereign_host_resources_plan_file | default('/etc/sovereign-node/host-resources.json') }}"
   register: sovereign_host_resources_plan_raw
 
 - name: Parse compiled host resources plan
