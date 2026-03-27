@@ -1,0 +1,12 @@
+- name: Force Sovereign Node update mode
+  hosts: sovereign_nodes
+  gather_facts: true
+  become: true
+  vars:
+    sovereign_node_apply_mode_override: update
+  roles:
+    - sovereign_node_source
+    - sovereign_node_request
+    - sovereign_node_apply
+    - sovereign_node_mail_sentinel_reconcile
+    - sovereign_node_verify

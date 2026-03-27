@@ -1,0 +1,134 @@
+- name: Reconcile Mail Sentinel scheduler state
+  when: "'mail-sentinel' in sovereign_selected_bots"
+  block:
+    - name: Ensure Mail Sentinel scan timer is enabled and started with systemd
+      ansible.builtin.systemd:
+        name: "{{ sovereign_mail_sentinel_scan_timer_unit }}"
+        enabled: true
+        state: started
+      when: sovereign_mail_sentinel_timer_manage_with_systemd_module | bool
+
+    - name: Ensure Mail Sentinel scan timer is enabled and started with systemctl
+      ansible.builtin.command:
+        argv:
+          - "{{ sovereign_systemctl_bin }}"
+          - enable
+          - --now
+          - "{{ sovereign_mail_sentinel_scan_timer_unit }}"
+      when: not sovereign_mail_sentinel_timer_manage_with_systemd_module | bool
+      register: sovereign_mail_sentinel_timer_enable_result
+      changed_when: true
+
+    - name: Confirm Mail Sentinel scan timer is enabled
+      ansible.builtin.command:
+        argv:
+          - "{{ sovereign_systemctl_bin }}"
+          - is-enabled
+          - "{{ sovereign_mail_sentinel_scan_timer_unit }}"
+      register: sovereign_mail_sentinel_scan_timer_enabled
+      changed_when: false
+
+    - name: Confirm Mail Sentinel scan timer is active
+      ansible.builtin.command:
+        argv:
+          - "{{ sovereign_systemctl_bin }}"
+          - is-active
+          - "{{ sovereign_mail_sentinel_scan_timer_unit }}"
+      register: sovereign_mail_sentinel_scan_timer_active
+      changed_when: false
+
+    - name: List OpenClaw cron jobs before cleanup
+      ansible.builtin.command:
+        argv:
+          - "{{ sovereign_openclaw_bin }}"
+          - cron
+          - list
+          - --json
+      register: sovereign_mail_sentinel_openclaw_cron_list
+      changed_when: false
+
+    - name: Normalize OpenClaw cron list payload
+      ansible.builtin.command:
+        argv:
+          - "{{ sovereign_python3_bin }}"
+          - -c
+          - |
+            import json
+            import sys
+
+            raw = json.load(sys.stdin)
+            if isinstance(raw, list):
+                jobs = raw
+            else:
+                jobs = raw.get("jobs") or raw.get("crons") or []
+            json.dump(jobs, sys.stdout)
+        stdin: "{{ sovereign_mail_sentinel_openclaw_cron_list.stdout }}"
+      register: sovereign_mail_sentinel_openclaw_cron_jobs_normalized
+      changed_when: false
+
+    - name: Select stale Mail Sentinel OpenClaw cron jobs
+      ansible.builtin.set_fact:
+        sovereign_mail_sentinel_stale_cron_jobs: >-
+          {{
+            (sovereign_mail_sentinel_openclaw_cron_jobs_normalized.stdout | from_json)
+            | selectattr('name', 'equalto', sovereign_mail_sentinel_openclaw_legacy_cron_name)
+            | list
+          }}
+
+    - name: Remove stale Mail Sentinel OpenClaw cron jobs by ID
+      ansible.builtin.command:
+        argv:
+          - "{{ sovereign_openclaw_bin }}"
+          - cron
+          - rm
+          - "{{ item.id }}"
+      loop: "{{ sovereign_mail_sentinel_stale_cron_jobs }}"
+      loop_control:
+        label: "{{ item.id }}"
+      when: item.id is defined
+      register: sovereign_mail_sentinel_remove_stale_cron_jobs
+      changed_when: true
+
+    - name: List OpenClaw cron jobs after cleanup
+      ansible.builtin.command:
+        argv:
+          - "{{ sovereign_openclaw_bin }}"
+          - cron
+          - list
+          - --json
+      register: sovereign_mail_sentinel_openclaw_cron_list_after_cleanup
+      changed_when: false
+
+    - name: Normalize OpenClaw cron list payload after cleanup
+      ansible.builtin.command:
+        argv:
+          - "{{ sovereign_python3_bin }}"
+          - -c
+          - |
+            import json
+            import sys
+
+            raw = json.load(sys.stdin)
+            if isinstance(raw, list):
+                jobs = raw
+            else:
+                jobs = raw.get("jobs") or raw.get("crons") or []
+            json.dump(jobs, sys.stdout)
+        stdin: "{{ sovereign_mail_sentinel_openclaw_cron_list_after_cleanup.stdout }}"
+      register: sovereign_mail_sentinel_openclaw_cron_jobs_after_cleanup
+      changed_when: false
+
+    - name: Assert stale Mail Sentinel OpenClaw cron jobs are gone
+      ansible.builtin.assert:
+        that:
+          - >-
+            (
+              (sovereign_mail_sentinel_openclaw_cron_jobs_after_cleanup.stdout | from_json)
+              | selectattr('name', 'equalto', sovereign_mail_sentinel_openclaw_legacy_cron_name)
+              | list
+              | length
+            ) == 0
+          - sovereign_mail_sentinel_scan_timer_enabled.stdout == 'enabled'
+          - sovereign_mail_sentinel_scan_timer_active.stdout == 'active'
+        fail_msg: Mail Sentinel scheduler reconciliation failed.
+        success_msg: Mail Sentinel systemd timer is enabled, active, and no stale OpenClaw cron remains.

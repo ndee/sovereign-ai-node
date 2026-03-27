@@ -1,0 +1,4 @@
+sovereign_mail_sentinel_timer_manage_with_systemd_module: true
+sovereign_systemctl_bin: systemctl
+sovereign_openclaw_bin: openclaw
+sovereign_python3_bin: python3

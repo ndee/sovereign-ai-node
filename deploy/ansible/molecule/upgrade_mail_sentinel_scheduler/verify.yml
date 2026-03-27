@@ -1,0 +1,43 @@
+- name: Verify Mail Sentinel scheduler upgrade scenario
+  hosts: localhost
+  gather_facts: false
+  vars:
+    scenario_dir: "{{ molecule_ephemeral_directory }}/upgrade_mail_sentinel_scheduler"
+  tasks:
+    - name: Read rendered install request file
+      ansible.builtin.slurp:
+        src: "{{ scenario_dir }}/etc/sovereign-node/install-request.json"
+      register: scenario_request_file
+
+    - name: Parse rendered install request
+      ansible.builtin.set_fact:
+        scenario_request: "{{ scenario_request_file.content | b64decode | from_json }}"
+
+    - name: Read remaining cron jobs
+      ansible.builtin.slurp:
+        src: "{{ scenario_dir }}/state/cron_jobs.json"
+      register: scenario_cron_jobs_file
+
+    - name: Parse remaining cron jobs
+      ansible.builtin.set_fact:
+        scenario_cron_jobs: "{{ scenario_cron_jobs_file.content | b64decode | from_json }}"
+
+    - name: Read timer state
+      ansible.builtin.slurp:
+        src: "{{ scenario_dir }}/state/timer_state.json"
+      register: scenario_timer_state_file
+
+    - name: Parse timer state
+      ansible.builtin.set_fact:
+        scenario_timer_state: "{{ scenario_timer_state_file.content | b64decode | from_json }}"
+
+    - name: Assert rendered request and reconciled scheduler state
+      ansible.builtin.assert:
+        that:
+          - scenario_request.bots.selected == ['mail-sentinel']
+          - scenario_request.bots.config['mail-sentinel'].pollInterval == '30m'
+          - (scenario_cron_jobs | selectattr('name', 'equalto', 'mail-sentinel-poll') | list | length) == 0
+          - scenario_timer_state.enabled | bool
+          - scenario_timer_state.active == 'active'
+        fail_msg: Molecule upgrade scenario did not converge to the expected Mail Sentinel scheduler state.
+        success_msg: Molecule upgrade scenario rendered the request and removed the legacy Mail Sentinel cron.

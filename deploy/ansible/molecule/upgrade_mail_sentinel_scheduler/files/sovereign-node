@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+import json
+import sys
+
+
+def doctor_payload():
+    return {
+        "result": {
+            "overall": "pass",
+            "checks": [],
+            "suggestedCommands": [],
+        }
+    }
+
+
+def status_payload():
+    return {
+        "result": {
+            "mode": "bundled_matrix",
+            "services": [],
+            "matrix": {
+                "health": "healthy",
+                "roomReachable": True,
+                "federationEnabled": False,
+            },
+            "openclaw": {
+                "managedBySovereign": True,
+                "cliInstalled": True,
+                "health": "healthy",
+                "serviceInstalled": True,
+                "agentPresent": True,
+                "cronPresent": False,
+            },
+            "mailSentinel": {
+                "agentId": "mail-sentinel",
+                "consecutiveFailures": 0,
+            },
+            "imap": {
+                "authStatus": "unknown",
+            },
+            "version": {
+                "contractVersion": "1.0.0",
+            },
+        }
+    }
+
+
+def main():
+    args = sys.argv[1:]
+    if args == ["doctor", "--json"]:
+        json.dump(doctor_payload(), sys.stdout)
+        sys.stdout.write("\n")
+        return 0
+    if args == ["status", "--json"]:
+        json.dump(status_payload(), sys.stdout)
+        sys.stdout.write("\n")
+        return 0
+    sys.stderr.write(f"unsupported sovereign-node args: {args}\n")
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

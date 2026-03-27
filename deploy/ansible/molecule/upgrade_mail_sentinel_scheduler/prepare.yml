@@ -1,0 +1,57 @@
+- name: Prepare Molecule fixture for Mail Sentinel scheduler upgrade
+  hosts: localhost
+  gather_facts: false
+  vars:
+    scenario_dir: "{{ molecule_ephemeral_directory }}/upgrade_mail_sentinel_scheduler"
+    scenario_bin_dir: "{{ scenario_dir }}/bin"
+    scenario_state_dir: "{{ scenario_dir }}/state"
+    scenario_config_dir: "{{ scenario_dir }}/etc/sovereign-node"
+  tasks:
+    - name: Ensure Molecule scenario directories exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ scenario_dir }}"
+        - "{{ scenario_bin_dir }}"
+        - "{{ scenario_state_dir }}"
+        - "{{ scenario_config_dir }}"
+
+    - name: Install fake command shims
+      ansible.builtin.copy:
+        src: "files/{{ item }}"
+        dest: "{{ scenario_bin_dir }}/{{ item }}"
+        mode: "0755"
+      loop:
+        - openclaw
+        - sovereign-node
+        - systemctl
+
+    - name: Seed legacy Mail Sentinel cron state
+      ansible.builtin.copy:
+        dest: "{{ scenario_state_dir }}/cron_jobs.json"
+        mode: "0644"
+        content: |
+          [
+            {
+              "id": "cron-123",
+              "name": "mail-sentinel-poll",
+              "agentId": "mail-sentinel"
+            },
+            {
+              "id": "cron-keep",
+              "name": "other-job",
+              "agentId": "other-agent"
+            }
+          ]
+
+    - name: Seed Mail Sentinel timer state
+      ansible.builtin.copy:
+        dest: "{{ scenario_state_dir }}/timer_state.json"
+        mode: "0644"
+        content: |
+          {
+            "enabled": false,
+            "active": "inactive"
+          }

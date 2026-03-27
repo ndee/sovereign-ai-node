@@ -1,0 +1,92 @@
+- name: Run sovereign-node doctor
+  ansible.builtin.command:
+    argv:
+      - "{{ sovereign_node_bin }}"
+      - doctor
+      - --json
+  register: sovereign_node_doctor_result_raw
+  changed_when: false
+
+- name: Parse sovereign-node doctor output
+  ansible.builtin.set_fact:
+    sovereign_node_doctor_result: "{{ sovereign_node_doctor_result_raw.stdout | from_json }}"
+
+- name: Assert doctor result is acceptable
+  ansible.builtin.assert:
+    that:
+      - sovereign_node_doctor_result.result.overall in sovereign_node_verify_accepted_doctor_states
+    fail_msg: sovereign-node doctor reported a failing overall state.
+    success_msg: sovereign-node doctor reported an acceptable overall state.
+
+- name: Run sovereign-node status
+  ansible.builtin.command:
+    argv:
+      - "{{ sovereign_node_bin }}"
+      - status
+      - --json
+  register: sovereign_node_status_result_raw
+  changed_when: false
+
+- name: Parse sovereign-node status output
+  ansible.builtin.set_fact:
+    sovereign_node_status_result: "{{ sovereign_node_status_result_raw.stdout | from_json }}"
+
+- name: Assert status result contains a result payload
+  ansible.builtin.assert:
+    that:
+      - sovereign_node_status_result.result is defined
+    fail_msg: sovereign-node status did not return a result payload.
+    success_msg: sovereign-node status returned a result payload.
+
+- name: Assert Mail Sentinel status is healthy enough
+  ansible.builtin.assert:
+    that:
+      - sovereign_node_status_result.result.openclaw.cliInstalled | bool
+      - sovereign_node_status_result.result.openclaw.agentPresent | bool
+      - sovereign_node_status_result.result.mailSentinel.agentId == 'mail-sentinel'
+  when:
+    - sovereign_node_verify_require_mail_sentinel_status | bool
+    - "'mail-sentinel' in sovereign_selected_bots"
+  fail_msg: sovereign-node status does not show the expected Mail Sentinel runtime state.
+  success_msg: sovereign-node status shows the expected Mail Sentinel runtime state.
+
+- name: Verify Mail Sentinel scan timer is enabled
+  ansible.builtin.command:
+    argv:
+      - "{{ sovereign_systemctl_bin }}"
+      - is-enabled
+      - "{{ sovereign_mail_sentinel_scan_timer_unit }}"
+  when: "'mail-sentinel' in sovereign_selected_bots"
+  register: sovereign_node_verify_mail_sentinel_timer_enabled
+  changed_when: false
+
+- name: Verify Mail Sentinel scan timer is active
+  ansible.builtin.command:
+    argv:
+      - "{{ sovereign_systemctl_bin }}"
+      - is-active
+      - "{{ sovereign_mail_sentinel_scan_timer_unit }}"
+  when: "'mail-sentinel' in sovereign_selected_bots"
+  register: sovereign_node_verify_mail_sentinel_timer_active
+  changed_when: false
+
+- name: Assert Mail Sentinel scan timer state
+  ansible.builtin.assert:
+    that:
+      - sovereign_node_verify_mail_sentinel_timer_enabled.stdout == 'enabled'
+      - sovereign_node_verify_mail_sentinel_timer_active.stdout == 'active'
+  when: "'mail-sentinel' in sovereign_selected_bots"
+  fail_msg: Mail Sentinel scan timer is not enabled and active after apply.
+  success_msg: Mail Sentinel scan timer is enabled and active after apply.
+
+- name: Run Mail Sentinel end-to-end verification
+  ansible.builtin.command:
+    argv:
+      - "{{ sovereign_bash_bin }}"
+      - scripts/e2e/mail-sentinel-e2e.sh
+      - --json
+  args:
+    chdir: "{{ sovereign_node_checkout_path }}"
+  when: sovereign_node_verify_run_mail_sentinel_e2e | bool
+  register: sovereign_mail_sentinel_e2e_result
+  changed_when: false

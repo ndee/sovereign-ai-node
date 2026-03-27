@@ -1,0 +1,4 @@
+sovereign_node_bin: sovereign-node
+sovereign_bash_bin: bash
+sovereign_systemctl_bin: systemctl
+sovereign_node_verify_require_mail_sentinel_status: true

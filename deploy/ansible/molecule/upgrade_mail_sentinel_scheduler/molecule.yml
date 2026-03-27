@@ -1,0 +1,26 @@
+dependency:
+  name: galaxy
+
+driver:
+  name: delegated
+
+platforms:
+  - name: localhost
+
+provisioner:
+  name: ansible
+  inventory:
+    host_vars:
+      localhost:
+        ansible_connection: local
+  playbooks:
+    prepare: prepare.yml
+    converge: converge.yml
+    verify: verify.yml
+
+scenario:
+  name: upgrade_mail_sentinel_scheduler
+  test_sequence:
+    - prepare
+    - converge
+    - verify

@@ -5,3 +5,5 @@ dist/
 coverage/
 *.log
 .sovereign-node-dev/
+.molecule/
+*.retry
