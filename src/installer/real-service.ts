@@ -690,12 +690,12 @@ export class RealInstallerService implements InstallerService {
     const healthProbe = await this.probeOpenClawHealth();
     const agentProbes = await Promise.all(
       expectedAgentIds.map(
-        async (id) => await this.inspectOpenClawListContains(["agents", "list"], id),
+        async (id) => await this.inspectManagedOpenClawListContains(runtimeConfig, ["agents", "list"], id),
       ),
     );
     const cronProbes = await Promise.all(
       expectedCronIds.map(
-        async (id) => await this.inspectOpenClawListContains(["cron", "list"], id),
+        async (id) => await this.inspectManagedOpenClawListContains(runtimeConfig, ["cron", "list"], id),
       ),
     );
     const matrixStatus = await this.inspectMatrixStatus(runtimeConfig);
@@ -842,12 +842,12 @@ export class RealInstallerService implements InstallerService {
     const expectedCronIds = runtimeConfig?.openclawProfile.crons.map((entry) => entry.id) ?? [];
     const agentProbes = await Promise.all(
       expectedAgentIds.map(
-        async (id) => await this.inspectOpenClawListContains(["agents", "list"], id),
+        async (id) => await this.inspectManagedOpenClawListContains(runtimeConfig, ["agents", "list"], id),
       ),
     );
     const cronProbes = await Promise.all(
       expectedCronIds.map(
-        async (id) => await this.inspectOpenClawListContains(["cron", "list"], id),
+        async (id) => await this.inspectManagedOpenClawListContains(runtimeConfig, ["cron", "list"], id),
       ),
     );
     const agentPresent = agentProbes.every((probe) => !probe.verified || probe.present);
@@ -5043,6 +5043,22 @@ export default function (api) {
       present: false,
       verified,
     };
+  }
+
+  private async inspectManagedOpenClawListContains(
+    runtimeConfig: RuntimeConfig | null,
+    baseArgs: string[],
+    expectedId: string,
+  ): Promise<{ present: boolean; verified: boolean }> {
+    if (runtimeConfig === null) {
+      return await this.inspectOpenClawListContains(baseArgs, expectedId);
+    }
+
+    let result: { present: boolean; verified: boolean } = { present: false, verified: false };
+    await this.withManagedOpenClawServiceIdentityEnv(runtimeConfig, async () => {
+      result = await this.inspectOpenClawListContains(baseArgs, expectedId);
+    });
+    return result;
   }
 
   private async waitForOpenClawListContains(
