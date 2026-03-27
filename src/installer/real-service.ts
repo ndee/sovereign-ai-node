@@ -287,7 +287,6 @@ type RealInstallerServiceDeps = {
   openclawBootstrapper: OpenClawBootstrapper;
   openclawGatewayServiceManager: OpenClawGatewayServiceManager;
   managedAgentRegistrar?: OpenClawManagedAgentRegistrar;
-  mailSentinelRegistrar?: OpenClawManagedAgentRegistrar;
   botCatalog?: BotCatalog;
   preflightChecker: HostPreflightChecker;
   imapTester: ImapTester;
@@ -333,7 +332,7 @@ export class RealInstallerService implements InstallerService {
     this.openclawBootstrapper = deps.openclawBootstrapper;
     this.openclawGatewayServiceManager = deps.openclawGatewayServiceManager;
     this.managedAgentRegistrar = deps.managedAgentRegistrar ??
-      deps.mailSentinelRegistrar ?? {
+      deps.managedAgentRegistrar ?? {
         register: async () => {
           throw new Error("RealInstallerService requires a managed agent registrar");
         },

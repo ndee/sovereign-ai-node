@@ -102,7 +102,7 @@ Options:
   --api-port <port>        API bind port (default: 8787)
   --request-file <path>    Install request output path (default: /etc/sovereign-node/install-request.json)
   --install                Force Install mode (new install / reconfigure)
-  --update                 Deprecated: treated as --install (use 'sovereign-node update' instead)
+  --update                 Deprecated alias for --install
   --skip-install-run       Only bootstrap host; do not run sovereign-node install
   --non-interactive        Do not prompt; use explicit or inferred action
   -h, --help               Show help
@@ -173,7 +173,7 @@ parse_args() {
         shift
         ;;
       --update)
-        log "WARNING: --update is deprecated. Use 'sovereign-node update' for application updates."
+        log "WARNING: --update is deprecated. Use scripts/install.sh as the only public install/update path."
         log "WARNING: Treating --update as --install."
         ACTION="install"
         shift

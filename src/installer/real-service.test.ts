@@ -1022,7 +1022,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -1175,7 +1175,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -1392,7 +1392,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => {
           throw new Error("unexpected mail-sentinel register call");
         },
@@ -1474,7 +1474,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -1624,7 +1624,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -1969,11 +1969,6 @@ describe("RealInstallerService", () => {
               }),
         }),
       },
-      mailSentinelRegistrar: {
-        register: async () => {
-          throw new Error("unexpected mail-sentinel register call");
-        },
-      },
       preflightChecker: {
         run: async () => ({
           mode: "bundled_matrix",
@@ -2261,7 +2256,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -2419,7 +2414,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -2612,7 +2607,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -2747,7 +2742,7 @@ describe("RealInstallerService", () => {
           gatewayRestartCalls += 1;
         },
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => {
           registrarCalls += 1;
           throw {
@@ -2934,7 +2929,7 @@ describe("RealInstallerService", () => {
           gatewayRestartCalls += 1;
         },
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => {
           registrarCalls += 1;
           return {
@@ -3233,7 +3228,7 @@ describe("RealInstallerService", () => {
           throw new Error("gateway restart returned before the service was healthy");
         },
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => {
           registrarCalls += 1;
           return {
@@ -3487,7 +3482,7 @@ describe("RealInstallerService", () => {
           gatewayRestartCalls += 1;
         },
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => {
           throw new Error("not used");
         },
@@ -3630,7 +3625,7 @@ describe("RealInstallerService", () => {
           throw new Error("not used");
         },
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => {
           throw new Error("not used");
         },
@@ -3788,7 +3783,7 @@ describe("RealInstallerService", () => {
           throw new Error("not used");
         },
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => {
           throw new Error("not used");
         },
@@ -4140,7 +4135,7 @@ describe("RealInstallerService", () => {
             throw new Error("not used");
           },
         },
-        mailSentinelRegistrar: {
+        managedAgentRegistrar: {
           register: async () => {
             throw new Error("not used");
           },
@@ -4260,7 +4255,7 @@ describe("RealInstallerService", () => {
             throw new Error("not used");
           },
         },
-        mailSentinelRegistrar: {
+        managedAgentRegistrar: {
           register: async () => {
             throw new Error("not used");
           },
@@ -4362,7 +4357,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -4518,7 +4513,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -4642,7 +4637,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -4781,7 +4776,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -4901,7 +4896,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -5027,7 +5022,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => {
           throw new Error("not used");
         },
@@ -5136,7 +5131,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -5242,7 +5237,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -5395,7 +5390,7 @@ describe("RealInstallerService", () => {
           gatewayRestartCalls += 1;
         },
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -5629,7 +5624,7 @@ describe("RealInstallerService", () => {
           gatewayRestartCalls += 1;
         },
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -5809,7 +5804,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -5899,7 +5894,7 @@ describe("RealInstallerService", () => {
           gatewayRestartCalls += 1;
         },
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -6040,7 +6035,7 @@ describe("RealInstallerService", () => {
           gatewayRestartCalls += 1;
         },
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -6218,7 +6213,7 @@ describe("RealInstallerService", () => {
           gatewayRestartCalls += 1;
         },
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -7072,7 +7067,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
