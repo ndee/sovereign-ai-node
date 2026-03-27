@@ -698,13 +698,25 @@ export class RealInstallerService implements InstallerService {
         async (id) => await this.inspectManagedOpenClawListContains(runtimeConfig, ["cron", "list"], id),
       ),
     );
+    const managedRuntimeJson =
+      runtimeConfig === null ? null : await this.readManagedOpenClawRuntimeJson(runtimeConfig);
     const matrixStatus = await this.inspectMatrixStatus(runtimeConfig);
 
     const cliInstalled = detectedOpenClaw !== null;
     const managedBySovereign = runtimeConfig?.openclaw.managedInstallation ?? true;
     const pluginIds = runtimeConfig?.openclawProfile.plugins.allow;
-    const agentPresent = agentProbes.every((probe) => !probe.verified || probe.present);
-    const cronPresent = cronProbes.every((probe) => !probe.verified || probe.present);
+    const agentPresent = expectedAgentIds.every(
+      (id, index) =>
+        !(agentProbes[index]?.verified ?? false) ||
+        agentProbes[index]?.present === true ||
+        this.managedOpenClawRuntimeHasAgent(managedRuntimeJson, id),
+    );
+    const cronPresent = expectedCronIds.every(
+      (id, index) =>
+        !(cronProbes[index]?.verified ?? false) ||
+        cronProbes[index]?.present === true ||
+        this.managedOpenClawRuntimeHasCron(managedRuntimeJson, id),
+    );
     const openclawHealth = deriveOpenClawHealth({
       cliInstalled,
       gatewayState: gateway.state,
@@ -850,8 +862,20 @@ export class RealInstallerService implements InstallerService {
         async (id) => await this.inspectManagedOpenClawListContains(runtimeConfig, ["cron", "list"], id),
       ),
     );
-    const agentPresent = agentProbes.every((probe) => !probe.verified || probe.present);
-    const cronPresent = cronProbes.every((probe) => !probe.verified || probe.present);
+    const managedRuntimeJson =
+      runtimeConfig === null ? null : await this.readManagedOpenClawRuntimeJson(runtimeConfig);
+    const agentPresent = expectedAgentIds.every(
+      (id, index) =>
+        !(agentProbes[index]?.verified ?? false) ||
+        agentProbes[index]?.present === true ||
+        this.managedOpenClawRuntimeHasAgent(managedRuntimeJson, id),
+    );
+    const cronPresent = expectedCronIds.every(
+      (id, index) =>
+        !(cronProbes[index]?.verified ?? false) ||
+        cronProbes[index]?.present === true ||
+        this.managedOpenClawRuntimeHasCron(managedRuntimeJson, id),
+    );
     const wiringCheck = await this.inspectOpenClawRuntimeWiring(runtimeConfig);
     const hostResourceStatus =
       runtimeConfig === null
