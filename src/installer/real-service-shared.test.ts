@@ -77,9 +77,12 @@ describe("parseInstallProvenance", () => {
   it("parses a valid provenance JSON", () => {
     const result = parseInstallProvenance(JSON.stringify(validProvenance));
     expect(result).not.toBeNull();
-    expect(result!.nodeCommitSha).toBe("abc123def456");
-    expect(result!.installSource).toBe("git-clone");
-    expect(result!.installedAt).toBe("2026-03-27T10:00:00Z");
+    if (result === null) {
+      throw new Error("expected valid provenance result");
+    }
+    expect(result.nodeCommitSha).toBe("abc123def456");
+    expect(result.installSource).toBe("git-clone");
+    expect(result.installedAt).toBe("2026-03-27T10:00:00Z");
   });
 
   it("returns null for empty input", () => {
@@ -116,15 +119,21 @@ describe("parseInstallProvenance", () => {
     };
     const result = parseInstallProvenance(JSON.stringify(localCopy));
     expect(result).not.toBeNull();
-    expect(result!.installSource).toBe("local-copy");
-    expect(result!.nodeRepoUrl).toBe("local-copy");
+    if (result === null) {
+      throw new Error("expected local-copy provenance result");
+    }
+    expect(result.installSource).toBe("local-copy");
+    expect(result.nodeRepoUrl).toBe("local-copy");
   });
 
   it("accepts curl-installer as installSource", () => {
     const curlInstall = { ...validProvenance, installSource: "curl-installer" };
     const result = parseInstallProvenance(JSON.stringify(curlInstall));
     expect(result).not.toBeNull();
-    expect(result!.installSource).toBe("curl-installer");
+    if (result === null) {
+      throw new Error("expected curl-installer provenance result");
+    }
+    expect(result.installSource).toBe("curl-installer");
   });
 
   it("returns null for non-object values", () => {

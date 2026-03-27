@@ -179,7 +179,14 @@ export const testAlertResultSchema = z.object({
 const hostResourceStateSchema = z.object({
   id: z.string().min(1),
   botId: z.string().min(1),
-  kind: z.enum(["directory", "managedFile", "stateFile", "systemdService", "systemdTimer", "openclawCron"]),
+  kind: z.enum([
+    "directory",
+    "managedFile",
+    "stateFile",
+    "systemdService",
+    "systemdTimer",
+    "openclawCron",
+  ]),
   target: z.string().min(1),
   present: z.boolean().optional(),
   enabled: z.boolean().optional(),
@@ -189,7 +196,12 @@ const hostResourceStateSchema = z.object({
 });
 
 const botRuntimeStatusSchema = z.object({
-  fields: z.record(z.string(), z.union([z.string(), z.number().int(), z.boolean(), z.record(z.string(), z.unknown())])).default({}),
+  fields: z
+    .record(
+      z.string(),
+      z.union([z.string(), z.number().int(), z.boolean(), z.record(z.string(), z.unknown())]),
+    )
+    .default({}),
   health: componentHealthSchema,
 });
 

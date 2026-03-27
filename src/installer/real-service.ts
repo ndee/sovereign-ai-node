@@ -1,5 +1,5 @@
-import { createHash, randomUUID } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { type Dirent, constants as fsConstants } from "node:fs";
 import {
   access,
   chmod,
@@ -12,19 +12,19 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import type {
   BotCatalog,
   BotConfigRecord,
   BotConfigValue,
   LoadedBotPackage,
 } from "../bots/catalog.js";
+import { FilesystemBotCatalog } from "../bots/catalog.js";
 import type {
   HostResourceValueExpr,
   SovereignBotHostResource,
   SovereignBotHostStateCheck,
 } from "../bots/host-resources.js";
-import { FilesystemBotCatalog } from "../bots/catalog.js";
 import type { SovereignPaths } from "../config/paths.js";
 import type {
   PreflightRequest,
@@ -110,9 +110,11 @@ import {
   areStringListsEqual,
   areStringRecordsEqual,
   buildSuggestedCommands,
+  type CompiledBotStatus,
+  type CompiledHostResource,
+  type CompiledHostResourceCheck,
   check,
   DEFAULT_INSTALL_REQUEST_FILE,
-  DEFAULT_HOST_RESOURCES_PLAN_FILE,
   DEFAULT_OPENROUTER_MODEL,
   DEFAULT_SERVICE_GROUP,
   DEFAULT_SERVICE_USER,
@@ -121,9 +123,6 @@ import {
   deriveOpenClawHealth,
   describeError,
   describeVersionPin,
-  type CompiledBotStatus,
-  type CompiledHostResource,
-  type CompiledHostResourceCheck,
   ensureCoreManagedAgents,
   ensureTrailingSlash,
   type FetchLike,
@@ -333,7 +332,12 @@ export class RealInstallerService implements InstallerService {
     this.stubService = new StubInstallerService(logger);
     this.openclawBootstrapper = deps.openclawBootstrapper;
     this.openclawGatewayServiceManager = deps.openclawGatewayServiceManager;
-    this.managedAgentRegistrar = deps.managedAgentRegistrar ?? deps.mailSentinelRegistrar!;
+    this.managedAgentRegistrar = deps.managedAgentRegistrar ??
+      deps.mailSentinelRegistrar ?? {
+        register: async () => {
+          throw new Error("RealInstallerService requires a managed agent registrar");
+        },
+      };
     this.botCatalog = deps.botCatalog ?? new FilesystemBotCatalog();
     this.preflightChecker = deps.preflightChecker;
     this.imapTester = deps.imapTester;
@@ -438,7 +442,7 @@ export class RealInstallerService implements InstallerService {
   }
 
   private async listInvitedHumanMatrixUserIds(runtimeConfig: RuntimeConfig): Promise<string[]> {
-    let entries;
+    let entries: Dirent[];
     try {
       entries = await readdir(this.paths.secretsDir, { withFileTypes: true });
     } catch (error) {
@@ -690,12 +694,14 @@ export class RealInstallerService implements InstallerService {
     const healthProbe = await this.probeOpenClawHealth();
     const agentProbes = await Promise.all(
       expectedAgentIds.map(
-        async (id) => await this.inspectManagedOpenClawListContains(runtimeConfig, ["agents", "list"], id),
+        async (id) =>
+          await this.inspectManagedOpenClawListContains(runtimeConfig, ["agents", "list"], id),
       ),
     );
     const cronProbes = await Promise.all(
       expectedCronIds.map(
-        async (id) => await this.inspectManagedOpenClawListContains(runtimeConfig, ["cron", "list"], id),
+        async (id) =>
+          await this.inspectManagedOpenClawListContains(runtimeConfig, ["cron", "list"], id),
       ),
     );
     const managedRuntimeJson =
@@ -854,12 +860,14 @@ export class RealInstallerService implements InstallerService {
     const expectedCronIds = runtimeConfig?.openclawProfile.crons.map((entry) => entry.id) ?? [];
     const agentProbes = await Promise.all(
       expectedAgentIds.map(
-        async (id) => await this.inspectManagedOpenClawListContains(runtimeConfig, ["agents", "list"], id),
+        async (id) =>
+          await this.inspectManagedOpenClawListContains(runtimeConfig, ["agents", "list"], id),
       ),
     );
     const cronProbes = await Promise.all(
       expectedCronIds.map(
-        async (id) => await this.inspectManagedOpenClawListContains(runtimeConfig, ["cron", "list"], id),
+        async (id) =>
+          await this.inspectManagedOpenClawListContains(runtimeConfig, ["cron", "list"], id),
       ),
     );
     const managedRuntimeJson =
@@ -1953,7 +1961,9 @@ export class RealInstallerService implements InstallerService {
       botStatus: hostPlan.botStatus,
     };
     runtimeConfig.openclawProfile.crons = hostPlan.resources.flatMap((resource) =>
-      resource.kind !== "openclawCron" || resource.desiredState !== "present" || resource.spec === undefined
+      resource.kind !== "openclawCron" ||
+      resource.desiredState !== "present" ||
+      resource.spec === undefined
         ? []
         : [
             {
@@ -2026,7 +2036,11 @@ export class RealInstallerService implements InstallerService {
       case "managedFile":
       case "stateFile": {
         const path = this.resolveHostResourceString(context, resource.spec.path);
-        const content = await this.compileHostResourceContent(context, resource.spec.source, resource.spec.inlineContent);
+        const content = await this.compileHostResourceContent(
+          context,
+          resource.spec.source,
+          resource.spec.inlineContent,
+        );
         const compiledFile: CompiledHostResource = {
           id: resource.id,
           botId: context.botPackage.manifest.id,
@@ -2143,7 +2157,9 @@ export class RealInstallerService implements InstallerService {
           match: {
             ...(superseded.match.id === undefined ? {} : { id: superseded.match.id }),
             ...(superseded.match.name === undefined ? {} : { name: superseded.match.name }),
-            ...(superseded.match.agentId === undefined ? {} : { agentId: superseded.match.agentId }),
+            ...(superseded.match.agentId === undefined
+              ? {}
+              : { agentId: superseded.match.agentId }),
           },
           checks: [],
         });
@@ -2296,7 +2312,10 @@ export class RealInstallerService implements InstallerService {
       source !== undefined
         ? await readFile(join(context.botPackage.rootDir, source), "utf8")
         : (inlineContent ?? "");
-    const toolSection = await this.buildManagedBotToolSection(context.runtimeConfig, context.toolInstanceIds);
+    const toolSection = await this.buildManagedBotToolSection(
+      context.runtimeConfig,
+      context.toolInstanceIds,
+    );
     return `${renderTemplateWorkspaceContent({
       content: stripSingleTrailingNewline(raw),
       agentId: context.agent.id,
@@ -2341,8 +2360,12 @@ export class RealInstallerService implements InstallerService {
     const lines = [
       "[Unit]",
       `Description=${this.resolveHostResourceString(context, resource.spec.description)}`,
-      ...resource.spec.after.map((entry) => `After=${this.resolveHostResourceString(context, entry)}`),
-      ...resource.spec.wants.map((entry) => `Wants=${this.resolveHostResourceString(context, entry)}`),
+      ...resource.spec.after.map(
+        (entry) => `After=${this.resolveHostResourceString(context, entry)}`,
+      ),
+      ...resource.spec.wants.map(
+        (entry) => `Wants=${this.resolveHostResourceString(context, entry)}`,
+      ),
       "",
       "[Service]",
       `Type=${resource.spec.type}`,
@@ -2421,7 +2444,13 @@ export class RealInstallerService implements InstallerService {
     resources: Array<{
       id: string;
       botId: string;
-      kind: "directory" | "managedFile" | "stateFile" | "systemdService" | "systemdTimer" | "openclawCron";
+      kind:
+        | "directory"
+        | "managedFile"
+        | "stateFile"
+        | "systemdService"
+        | "systemdTimer"
+        | "openclawCron";
       target: string;
       present?: boolean;
       enabled?: boolean;
@@ -2440,7 +2469,13 @@ export class RealInstallerService implements InstallerService {
     const resources: Array<{
       id: string;
       botId: string;
-      kind: "directory" | "managedFile" | "stateFile" | "systemdService" | "systemdTimer" | "openclawCron";
+      kind:
+        | "directory"
+        | "managedFile"
+        | "stateFile"
+        | "systemdService"
+        | "systemdTimer"
+        | "openclawCron";
       target: string;
       present?: boolean;
       enabled?: boolean;
@@ -2458,7 +2493,10 @@ export class RealInstallerService implements InstallerService {
     const cronJobs = await this.listOpenClawCronJobsForStatus(runtimeConfig);
 
     for (const resource of runtimeConfig.hostResources?.resources ?? []) {
-      const currentBot = bots[resource.botId] ?? { fields: {}, health: "healthy" as ComponentHealth };
+      const currentBot = bots[resource.botId] ?? {
+        fields: {},
+        health: "healthy" as ComponentHealth,
+      };
       bots[resource.botId] = currentBot;
       switch (resource.kind) {
         case "directory":
@@ -2470,7 +2508,8 @@ export class RealInstallerService implements InstallerService {
             const info = await stat(resource.path);
             present = resource.kind === "directory" ? info.isDirectory() : info.isFile();
             if (!present) {
-              message = resource.kind === "directory" ? "Path is not a directory" : "Path is not a file";
+              message =
+                resource.kind === "directory" ? "Path is not a directory" : "Path is not a file";
             }
           } catch (error) {
             if (!isNodeError(error) || error.code !== "ENOENT") {
@@ -2493,7 +2532,9 @@ export class RealInstallerService implements InstallerService {
               for (const [fieldName, fieldSpec] of Object.entries(resource.statusFields)) {
                 const raw = this.extractNestedValue(parsed, fieldSpec.path);
                 const nextValue =
-                  raw === undefined ? fieldSpec.default : this.coerceBotStatusValue(raw, fieldSpec.type);
+                  raw === undefined
+                    ? fieldSpec.default
+                    : this.coerceBotStatusValue(raw, fieldSpec.type);
                 if (nextValue !== undefined) {
                   currentBot.fields[fieldName] = nextValue;
                 }
@@ -2515,7 +2556,8 @@ export class RealInstallerService implements InstallerService {
         case "systemdTimer": {
           const enabled = await this.inspectSystemdBool(resource.name, "is-enabled");
           const active = await this.inspectSystemdActive(resource.name);
-          const health: ComponentHealth = enabled === true && active === true ? "healthy" : "unhealthy";
+          const health: ComponentHealth =
+            enabled === true && active === true ? "healthy" : "unhealthy";
           resources.push({
             id: resource.id,
             botId: resource.botId,
@@ -2533,7 +2575,9 @@ export class RealInstallerService implements InstallerService {
         case "openclawCron": {
           const matches = cronJobs.filter(
             (entry) =>
-              (resource.match.id === undefined || entry.id === resource.match.id || entry.name === resource.match.id) &&
+              (resource.match.id === undefined ||
+                entry.id === resource.match.id ||
+                entry.name === resource.match.id) &&
               (resource.match.name === undefined || entry.name === resource.match.name) &&
               (resource.match.agentId === undefined || entry.agentId === resource.match.agentId),
           );
@@ -2585,9 +2629,9 @@ export class RealInstallerService implements InstallerService {
     return result.result.stdout.trim().toLowerCase() === "active";
   }
 
-  private async listOpenClawCronJobsForStatus(runtimeConfig: RuntimeConfig): Promise<
-    Array<{ id: string; name: string; agentId?: string }>
-  > {
+  private async listOpenClawCronJobsForStatus(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<Array<{ id: string; name: string; agentId?: string }>> {
     try {
       let stdout = "";
       await this.withManagedOpenClawServiceIdentityEnv(runtimeConfig, async () => {
@@ -3047,70 +3091,6 @@ export class RealInstallerService implements InstallerService {
       ];
     }
     return [];
-  }
-
-  private resolveMailSentinelStatePath(runtimeConfig: RuntimeConfig): string | null {
-    const agent = runtimeConfig.openclawProfile.agents.find(
-      (entry) => entry.id === MAIL_SENTINEL_AGENT_ID,
-    );
-    if (agent === undefined) {
-      return null;
-    }
-    const configured = runtimeConfig.bots.config[MAIL_SENTINEL_AGENT_ID]?.statePath;
-    const statePath =
-      typeof configured === "string" && configured.trim().length > 0
-        ? configured
-        : "data/mail-sentinel-state.json";
-    return isAbsolute(statePath) ? statePath : resolve(agent.workspace, statePath);
-  }
-
-  private async readMailSentinelStatusSummary(statePath: string): Promise<{
-    lastPollAt?: string;
-    lastAlertAt?: string;
-    lastError?: {
-      code: string;
-      message: string;
-      retryable: boolean;
-    };
-    consecutiveFailures: number;
-  } | null> {
-    try {
-      const raw = await readFile(statePath, "utf8");
-      const parsed = JSON.parse(raw) as {
-        lastPollAt?: unknown;
-        lastAlertAt?: unknown;
-        lastError?: {
-          code?: unknown;
-          message?: unknown;
-          retryable?: unknown;
-        };
-        consecutiveFailures?: unknown;
-      };
-      return {
-        ...(typeof parsed.lastPollAt === "string" ? { lastPollAt: parsed.lastPollAt } : {}),
-        ...(typeof parsed.lastAlertAt === "string" ? { lastAlertAt: parsed.lastAlertAt } : {}),
-        ...(typeof parsed.lastError?.code === "string" &&
-        typeof parsed.lastError?.message === "string"
-          ? {
-              lastError: {
-                code: parsed.lastError.code,
-                message: parsed.lastError.message,
-                retryable: parsed.lastError.retryable === true,
-              },
-            }
-          : {}),
-        consecutiveFailures:
-          typeof parsed.consecutiveFailures === "number" &&
-          Number.isInteger(parsed.consecutiveFailures)
-            ? parsed.consecutiveFailures
-            : 0,
-      };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
-        return null;
-      }
-      throw error;
-    }
   }
 
   private listDocumentedOpenClawToolNames(manifest: ToolTemplateDefinition): string[] {
@@ -4047,7 +4027,7 @@ export default function (api) {
         ...(validated.toolInstanceIds.length === 0
           ? {}
           : { toolInstanceIds: validated.toolInstanceIds }),
-        },
+      },
     ]);
     await this.refreshRuntimeHostResources(runtimeConfig);
     await this.ensureManagedAgentWorkspace({
@@ -4226,7 +4206,7 @@ export default function (api) {
     agentId: string,
   ): Promise<void> {
     const sessionsDir = this.resolveManagedAgentSessionsDir(runtimeConfig, agentId);
-    let sessionsStat;
+    let sessionsStat: Awaited<ReturnType<typeof stat>>;
     try {
       sessionsStat = await stat(sessionsDir);
     } catch (error) {
@@ -6466,7 +6446,9 @@ export default function (api) {
             await this.managedAgentRegistrar.register({
               agentId: agent.id,
               workspaceDir: agent.workspace,
-              ...(cronEntry === undefined || compiledCron?.kind !== "openclawCron" || compiledCron.spec === undefined
+              ...(cronEntry === undefined ||
+              compiledCron?.kind !== "openclawCron" ||
+              compiledCron.spec === undefined
                 ? {}
                 : {
                     cron: {
@@ -7686,7 +7668,9 @@ export default function (api) {
       botStatus: hostPlan.botStatus,
     };
     runtimeConfig.openclawProfile.crons = hostPlan.resources.flatMap((resource) =>
-      resource.kind !== "openclawCron" || resource.desiredState !== "present" || resource.spec === undefined
+      resource.kind !== "openclawCron" ||
+      resource.desiredState !== "present" ||
+      resource.spec === undefined
         ? []
         : [
             {
@@ -7828,7 +7812,11 @@ export default function (api) {
       await rename(tempPath, this.paths.configPath);
       await this.applyRuntimeOwnership(this.paths.configPath);
       if (runtimeConfig.hostResources !== undefined) {
-        await this.writeInstallerJsonFile(runtimeConfig.hostResources.planPath, runtimeConfig.hostResources, 0o644);
+        await this.writeInstallerJsonFile(
+          runtimeConfig.hostResources.planPath,
+          runtimeConfig.hostResources,
+          0o644,
+        );
         await this.applyRuntimeOwnership(runtimeConfig.hostResources.planPath);
       }
     } catch (error) {
@@ -8611,19 +8599,6 @@ const renderSystemGatewayMatrixWaitCommand = (adminBaseUrl: string): string => {
     `'attempt=0; while [ "$attempt" -lt ${SYSTEM_GATEWAY_MATRIX_WAIT_ATTEMPTS} ]; do curl -fsS --max-time ${SYSTEM_GATEWAY_MATRIX_WAIT_TIMEOUT_SECONDS} "${versionsUrl}" >/dev/null 2>&1 && exit 0; attempt=$((attempt + 1)); sleep ${SYSTEM_GATEWAY_MATRIX_WAIT_DELAY_SECONDS}; done; exit 1'`,
   ].join(" ");
 };
-
-const compactBotConfigRecord = (
-  value: Record<string, BotConfigValue | undefined>,
-): BotConfigRecord =>
-  Object.fromEntries(
-    Object.entries(value).filter(
-      (entry): entry is [string, BotConfigValue] =>
-        entry[1] !== undefined &&
-        (typeof entry[1] === "string" ||
-          typeof entry[1] === "number" ||
-          typeof entry[1] === "boolean"),
-    ),
-  );
 
 const isBotConfigRecordMap = (value: unknown): value is Record<string, BotConfigRecord> => {
   if (!isRecord(value)) {

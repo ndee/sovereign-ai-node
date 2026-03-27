@@ -59,57 +59,57 @@ const writeBotPackage = async (
   await writeFile(
     join(packageDir, "sovereign-bot.json"),
     JSON.stringify(
-        {
-          kind: "sovereign-bot-package",
-          manifestVersion: 2,
-          id: input.id,
-          version: "2.0.0",
-          displayName: input.displayName,
+      {
+        kind: "sovereign-bot-package",
+        manifestVersion: 2,
+        id: input.id,
+        version: "2.0.0",
+        displayName: input.displayName,
         description: `${input.displayName} bot`,
         defaultInstall: input.defaultInstall,
         matrixIdentity: {
           mode: "service-account",
           localpartPrefix: input.id,
         },
-          ...(input.matrixRouting === undefined ? {} : { matrixRouting: input.matrixRouting }),
-          configDefaults: {},
-          toolInstances: [],
-          hostResources: [
-            {
-              id: "workspace-readme",
-              kind: "managedFile",
-              spec: {
-                path: {
-                  join: [{ from: "agent.workspace" }, "/README.md"],
-                },
-                source: "workspace/README.md",
-                writePolicy: "always",
+        ...(input.matrixRouting === undefined ? {} : { matrixRouting: input.matrixRouting }),
+        configDefaults: {},
+        toolInstances: [],
+        hostResources: [
+          {
+            id: "workspace-readme",
+            kind: "managedFile",
+            spec: {
+              path: {
+                join: [{ from: "agent.workspace" }, "/README.md"],
               },
+              source: "workspace/README.md",
+              writePolicy: "always",
             },
-            {
-              id: "workspace-agents",
-              kind: "managedFile",
-              spec: {
-                path: {
-                  join: [{ from: "agent.workspace" }, "/AGENTS.md"],
-                },
-                source: "workspace/AGENTS.md",
-                writePolicy: "always",
-              },
-            },
-          ],
-          agentTemplate: {
-            id: input.id,
-            version: "2.0.0",
-            description: `${input.displayName} template`,
-            ...(input.agentTemplateModel === undefined ? {} : { model: input.agentTemplateModel }),
-            matrix: {
-              localpartPrefix: input.id,
-            },
-            requiredToolTemplates: [],
-            optionalToolTemplates: [],
           },
+          {
+            id: "workspace-agents",
+            kind: "managedFile",
+            spec: {
+              path: {
+                join: [{ from: "agent.workspace" }, "/AGENTS.md"],
+              },
+              source: "workspace/AGENTS.md",
+              writePolicy: "always",
+            },
+          },
+        ],
+        agentTemplate: {
+          id: input.id,
+          version: "2.0.0",
+          description: `${input.displayName} template`,
+          ...(input.agentTemplateModel === undefined ? {} : { model: input.agentTemplateModel }),
+          matrix: {
+            localpartPrefix: input.id,
+          },
+          requiredToolTemplates: [],
+          optionalToolTemplates: [],
         },
+      },
       null,
       2,
     ),

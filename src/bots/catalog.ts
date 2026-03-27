@@ -6,13 +6,12 @@ import { fileURLToPath } from "node:url";
 
 import { execa } from "execa";
 import { z } from "zod";
-
-import { enabledWhenSchema, hostResourcesSchema } from "./host-resources.js";
 import {
   type AgentTemplateManifest,
   formatTemplateRef,
   type ToolTemplateDefinition,
 } from "../templates/catalog.js";
+import { enabledWhenSchema, hostResourcesSchema } from "./host-resources.js";
 
 export type BotConfigValue = string | number | boolean;
 export type BotConfigRecord = Record<string, BotConfigValue>;

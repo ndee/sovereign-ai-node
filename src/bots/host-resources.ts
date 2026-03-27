@@ -67,13 +67,18 @@ const hostDirectoryResourceSchema = z.object({
   supersedes: z.array(hostSupersedeMatcherSchema).default([]),
   spec: z.object({
     path: hostValueExprSchema,
-    mode: z.string().regex(/^[0-7]{3,4}$/).optional(),
+    mode: z
+      .string()
+      .regex(/^[0-7]{3,4}$/)
+      .optional(),
     owner: hostValueExprSchema.optional(),
     group: hostValueExprSchema.optional(),
   }),
-  status: z.object({
-    reportAs: z.string().min(1).optional(),
-  }).optional(),
+  status: z
+    .object({
+      reportAs: z.string().min(1).optional(),
+    })
+    .optional(),
   checks: z.array(hostStateCheckSchema).default([]),
 });
 
@@ -87,14 +92,19 @@ const hostManagedFileResourceSchema = z.object({
     path: hostValueExprSchema,
     source: z.string().min(1).optional(),
     inlineContent: z.string().optional(),
-    mode: z.string().regex(/^[0-7]{3,4}$/).optional(),
+    mode: z
+      .string()
+      .regex(/^[0-7]{3,4}$/)
+      .optional(),
     owner: hostValueExprSchema.optional(),
     group: hostValueExprSchema.optional(),
     writePolicy: hostWritePolicySchema.default("always"),
   }),
-  status: z.object({
-    reportAs: z.string().min(1).optional(),
-  }).optional(),
+  status: z
+    .object({
+      reportAs: z.string().min(1).optional(),
+    })
+    .optional(),
   checks: z.array(hostStateCheckSchema).default([]),
 });
 
@@ -108,14 +118,19 @@ const hostStateFileResourceSchema = z.object({
     path: hostValueExprSchema,
     source: z.string().min(1).optional(),
     inlineContent: z.string().optional(),
-    mode: z.string().regex(/^[0-7]{3,4}$/).optional(),
+    mode: z
+      .string()
+      .regex(/^[0-7]{3,4}$/)
+      .optional(),
     owner: hostValueExprSchema.optional(),
     group: hostValueExprSchema.optional(),
     writePolicy: hostWritePolicySchema.default("ifMissing"),
   }),
-  status: z.object({
-    fields: z.record(z.string(), hostStateFieldSchema).default({}),
-  }).default({ fields: {} }),
+  status: z
+    .object({
+      fields: z.record(z.string(), hostStateFieldSchema).default({}),
+    })
+    .default({ fields: {} }),
   checks: z.array(hostStateCheckSchema).default([]),
 });
 

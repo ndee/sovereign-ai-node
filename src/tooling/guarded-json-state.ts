@@ -17,8 +17,6 @@ type RuntimeConfigLoader = (configPath: string) => Promise<RuntimeConfig>;
 type ScalarFields = Record<string, string>;
 type ArrayFields = Record<string, string[]>;
 
-type FieldType = "string" | "string[]";
-
 type ResolvedToolInstance = {
   instanceId: string;
   configPath: string;
@@ -194,7 +192,15 @@ const setPathValue = (root: Record<string, unknown>, path: string, value: unknow
     }
     current = ensureRecord(current[segment], `State path '${path}' could not be created`);
   }
-  current[segments[segments.length - 1]!] = value;
+  const lastSegment = segments.at(-1);
+  if (lastSegment === undefined) {
+    throw new GuardedJsonStateToolError(
+      "STATE_PATH_INVALID",
+      `State path '${path}' is invalid`,
+      false,
+    );
+  }
+  current[lastSegment] = value;
 };
 
 const renderTemplateString = (
@@ -398,7 +404,18 @@ const parseFieldAssignments = (
           },
         );
       }
-      payload[key] = value[0]!;
+      const firstValue = value[0];
+      if (firstValue === undefined) {
+        throw new GuardedJsonStateToolError(
+          "STATE_INPUT_FIELD_TYPE_INVALID",
+          `Field '${key}' expects a scalar input`,
+          false,
+          {
+            field: key,
+          },
+        );
+      }
+      payload[key] = firstValue;
       continue;
     }
     if (expected !== "string[]") {
@@ -795,8 +812,20 @@ export class GuardedJsonStateToolService {
     );
     const existingIndex = childArray.findIndex((record) => record[entity.keyField] === childId);
     if (existingIndex >= 0) {
+      const existingChild = childArray[existingIndex];
+      if (existingChild === undefined) {
+        throw new GuardedJsonStateToolError(
+          "STATE_CHILD_RECORD_MISSING",
+          `Child record '${childId}' could not be loaded`,
+          false,
+          {
+            childId,
+            childArrayField: entity.childArrayField,
+          },
+        );
+      }
       const next = {
-        ...cloneRecord(childArray[existingIndex]!),
+        ...cloneRecord(existingChild),
         ...context.input,
       };
       applyChildMetadata(next, entity, context);

@@ -247,7 +247,9 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
                           : "5m",
                     session: cron.session === "isolated" ? "isolated" : "isolated",
                     message: typeof cron.message === "string" ? cron.message : "hello",
-                    ...(cron.announce === false ? {} : { announceRoomId: { from: "matrix.alertRoomId" } }),
+                    ...(cron.announce === false
+                      ? {}
+                      : { announceRoomId: { from: "matrix.alertRoomId" } }),
                     desiredState: "present",
                   },
                 },
@@ -1383,13 +1385,10 @@ describe("RealInstallerService", () => {
         checks: [],
       }),
     };
-    let gatewayInstallCalls = 0;
     const service = new RealInstallerService(createLogger(), paths, {
       openclawBootstrapper: fakeBootstrapper,
       openclawGatewayServiceManager: {
-        install: async () => {
-          gatewayInstallCalls += 1;
-        },
+        install: async () => {},
         start: async () => {},
         restart: async () => {},
       },

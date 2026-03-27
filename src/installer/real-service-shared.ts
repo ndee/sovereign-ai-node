@@ -740,9 +740,9 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
       parsedFields[fieldName] = {
         path: fieldValue.path,
         type: fieldValue.type,
-        ...((typeof fieldValue.default === "string" ||
-          typeof fieldValue.default === "number" ||
-          typeof fieldValue.default === "boolean")
+        ...(typeof fieldValue.default === "string" ||
+        typeof fieldValue.default === "number" ||
+        typeof fieldValue.default === "boolean"
           ? { default: fieldValue.default }
           : {}),
       };
@@ -785,7 +785,9 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
           ...(typeof entry.owner === "string" ? { owner: entry.owner } : {}),
           ...(typeof entry.group === "string" ? { group: entry.group } : {}),
           writePolicy: entry.writePolicy,
-          ...(statusFields === null || Object.keys(statusFields).length === 0 ? {} : { statusFields }),
+          ...(statusFields === null || Object.keys(statusFields).length === 0
+            ? {}
+            : { statusFields }),
           checks,
         });
         continue;

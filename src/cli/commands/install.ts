@@ -140,7 +140,9 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
           writeCliSuccess(command, result, startInstallResultSchema, Boolean(opts.json));
           return;
         }
-        throw new Error("Use scripts/install.sh or the curl installer for Sovereign Node v2 installs.");
+        throw new Error(
+          "Use scripts/install.sh or the curl installer for Sovereign Node v2 installs.",
+        );
       } catch (error) {
         writeCliError(command, error, Boolean(opts.json));
         process.exitCode = 1;

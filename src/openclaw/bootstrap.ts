@@ -53,7 +53,7 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
   ) {}
 
   async detectInstalled(): Promise<DetectedOpenClaw | null> {
-    let result;
+    let result: Awaited<ReturnType<ExecRunner["run"]>>;
     try {
       result = await this.execRunner.run({
         command: "openclaw",
@@ -343,11 +343,12 @@ const buildInstallShellScript = (args: InstallShellArgs): string => {
   if (args.noPrompt) {
     installArgs.push("--no-prompt");
   }
+  const dollar = "$";
 
   return [
     "set -euo pipefail",
-    'if [ "$(id -u)" = "0" ] && [ -z "${HOME:-}" ]; then export HOME=/root; fi',
-    'export NPM_CONFIG_CACHE="${NPM_CONFIG_CACHE:-${HOME:-/root}/.npm}"',
+    `if [ "$(id -u)" = "0" ] && [ -z "${dollar}{HOME:-}" ]; then export HOME=/root; fi`,
+    `export NPM_CONFIG_CACHE="${dollar}{NPM_CONFIG_CACHE:-${dollar}{HOME:-/root}/.npm}"`,
     'mkdir -p "$NPM_CONFIG_CACHE"',
     "curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install.sh \\",
     `  | bash ${installArgs.map(shellQuote).join(" ")}`,
@@ -410,7 +411,7 @@ const hardenBundledExtensionDirectories = async (packageRoot: string): Promise<v
       continue;
     }
 
-    let info;
+    let info: Awaited<ReturnType<typeof stat>>;
     try {
       info = await stat(currentPath);
     } catch {
