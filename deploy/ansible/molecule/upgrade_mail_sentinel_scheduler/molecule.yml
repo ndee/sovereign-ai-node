@@ -2,17 +2,17 @@ dependency:
   name: galaxy
 
 driver:
-  name: delegated
-
-platforms:
-  - name: localhost
+  name: default
 
 provisioner:
   name: ansible
+  env:
+    ANSIBLE_ROLES_PATH: ../../roles
   inventory:
     host_vars:
       localhost:
         ansible_connection: local
+        ansible_become: false
   playbooks:
     prepare: prepare.yml
     converge: converge.yml

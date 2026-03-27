@@ -44,11 +44,11 @@
       - sovereign_node_status_result.result.openclaw.cliInstalled | bool
       - sovereign_node_status_result.result.openclaw.agentPresent | bool
       - sovereign_node_status_result.result.mailSentinel.agentId == 'mail-sentinel'
+    fail_msg: sovereign-node status does not show the expected Mail Sentinel runtime state.
+    success_msg: sovereign-node status shows the expected Mail Sentinel runtime state.
   when:
     - sovereign_node_verify_require_mail_sentinel_status | bool
     - "'mail-sentinel' in sovereign_selected_bots"
-  fail_msg: sovereign-node status does not show the expected Mail Sentinel runtime state.
-  success_msg: sovereign-node status shows the expected Mail Sentinel runtime state.
 
 - name: Verify Mail Sentinel scan timer is enabled
   ansible.builtin.command:
@@ -75,9 +75,9 @@
     that:
       - sovereign_node_verify_mail_sentinel_timer_enabled.stdout == 'enabled'
       - sovereign_node_verify_mail_sentinel_timer_active.stdout == 'active'
+    fail_msg: Mail Sentinel scan timer is not enabled and active after apply.
+    success_msg: Mail Sentinel scan timer is enabled and active after apply.
   when: "'mail-sentinel' in sovereign_selected_bots"
-  fail_msg: Mail Sentinel scan timer is not enabled and active after apply.
-  success_msg: Mail Sentinel scan timer is enabled and active after apply.
 
 - name: Run Mail Sentinel end-to-end verification
   ansible.builtin.command:

@@ -1,0 +1,47 @@
+sovereign_node_connectivity_mode: relay
+sovereign_node_relay_control_url: https://relay.sovereign-ai-node.com
+sovereign_node_relay_enrollment_token: ""
+
+sovereign_openclaw_manage_installation: true
+sovereign_openclaw_install_method: install_sh
+sovereign_openclaw_version: "2026.3.13"
+sovereign_openclaw_skip_if_compatible_installed: true
+sovereign_openclaw_force_reinstall: false
+sovereign_openclaw_run_onboard: false
+
+sovereign_openrouter_model: qwen/qwen3.5-9b
+sovereign_openrouter_secret_ref: file:/etc/sovereign-node/secrets/openrouter-api-key
+
+sovereign_imap_enabled: false
+sovereign_imap_host: imap.example.org
+sovereign_imap_port: 993
+sovereign_imap_tls: true
+sovereign_imap_username: operator@example.org
+sovereign_imap_secret_ref: ""
+sovereign_imap_mailbox: INBOX
+
+sovereign_matrix_homeserver_domain: relay-pending.invalid
+sovereign_matrix_public_base_url: https://relay-pending.invalid
+sovereign_matrix_federation_enabled: false
+sovereign_matrix_tls_mode: auto
+sovereign_matrix_alert_room_name: Sovereign Alerts
+
+sovereign_operator_username: operator
+sovereign_selected_bots:
+  - mail-sentinel
+
+sovereign_mail_sentinel_poll_interval: 30m
+sovereign_mail_sentinel_lookback_window: 1h
+sovereign_mail_sentinel_default_reminder_delay: 4h
+sovereign_mail_sentinel_digest_interval: 12h
+sovereign_mail_sentinel_e2ee_alert_room: false
+
+sovereign_node_advanced_non_interactive: true
+sovereign_node_advanced_skip_preflight: false
+sovereign_node_advanced_rollback_policy: safe_partial
+
+sovereign_mail_sentinel_openclaw_legacy_cron_name: mail-sentinel-poll
+sovereign_mail_sentinel_scan_timer_unit: sovereign-mail-sentinel-scan.timer
+sovereign_node_verify_accepted_doctor_states:
+  - pass
+  - warn

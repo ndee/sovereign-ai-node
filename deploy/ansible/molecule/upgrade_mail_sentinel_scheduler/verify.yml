@@ -1,6 +1,9 @@
 - name: Verify Mail Sentinel scheduler upgrade scenario
   hosts: localhost
   gather_facts: false
+  become: false
+  vars_files:
+    - vars/scenario.yml
   vars:
     scenario_dir: "{{ molecule_ephemeral_directory }}/upgrade_mail_sentinel_scheduler"
   tasks:

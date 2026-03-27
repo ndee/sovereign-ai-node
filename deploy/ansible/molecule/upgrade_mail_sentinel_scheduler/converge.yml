@@ -1,8 +1,9 @@
 - name: Converge Mail Sentinel scheduler upgrade scenario
   hosts: localhost
   gather_facts: false
+  become: false
   vars_files:
-    - ../../inventories/prod/group_vars/all.yml
+    - vars/scenario.yml
   vars:
     scenario_dir: "{{ molecule_ephemeral_directory }}/upgrade_mail_sentinel_scheduler"
     sovereign_node_request_file: "{{ scenario_dir }}/etc/sovereign-node/install-request.json"

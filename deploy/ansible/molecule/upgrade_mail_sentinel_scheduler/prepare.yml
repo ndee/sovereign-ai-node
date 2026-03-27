@@ -1,6 +1,7 @@
 - name: Prepare Molecule fixture for Mail Sentinel scheduler upgrade
   hosts: localhost
   gather_facts: false
+  become: false
   vars:
     scenario_dir: "{{ molecule_ephemeral_directory }}/upgrade_mail_sentinel_scheduler"
     scenario_bin_dir: "{{ scenario_dir }}/bin"
