@@ -819,7 +819,7 @@ ui_setup_runtime() {
 }
 
 ui_configure_progress_plan() {
-  UI_TOTAL_STEPS=19
+  UI_TOTAL_STEPS=18
 }
 
 detect_terminal_width() {
@@ -3618,12 +3618,10 @@ main() {
   if [[ "$RUN_INSTALL" == "1" ]]; then
     run_install_command
     ui_run_step_captured "Apply host resources" run_post_install_ansible_step
-    run_runtime_readiness_step
     run_post_install_diagnostics_step
   else
     ui_skip_step "Apply ${ACTION:-install}" "--skip-install-run"
     ui_skip_step "Apply host resources" "install run skipped"
-    ui_skip_step "Wait for runtime health" "install run skipped"
     ui_skip_step "Run post-install diagnostics" "install run skipped"
   fi
 
