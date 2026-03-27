@@ -133,10 +133,8 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
     .action(async (opts: InstallOptions) => {
       const command = "install";
       try {
-        applyBotCatalogSourceOptions(opts);
-        const req = await resolveInstallRequest(opts);
-        const result = await app.installerService.startInstall(req);
-        writeCliSuccess(command, result, startInstallResultSchema, Boolean(opts.json));
+        void opts;
+        throw new Error("Use scripts/install.sh or the curl installer for Sovereign Node v2 installs.");
       } catch (error) {
         writeCliError(command, error, Boolean(opts.json));
         process.exitCode = 1;

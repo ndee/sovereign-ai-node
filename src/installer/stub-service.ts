@@ -212,15 +212,20 @@ export class StubInstallerService implements InstallerService {
         agentPresent: false,
         cronPresent: false,
       },
-      mailSentinel: {
-        agentId: "mail-sentinel",
-        consecutiveFailures: 0,
+      bots: {
+        "mail-sentinel": {
+          fields: {
+            consecutiveFailures: 0,
+          },
+          health: "unknown",
+        },
       },
+      hostResources: [],
       imap: {
         authStatus: "unknown",
       },
       version: {
-        sovereignNode: "0.1.0",
+        sovereignNode: "2.0.0",
         contractVersion: CONTRACT_VERSION,
       },
     };

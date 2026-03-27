@@ -241,6 +241,31 @@ install_base_packages() {
     qrencode
 }
 
+ansible_playbook_available() {
+  command -v ansible-playbook >/dev/null 2>&1
+}
+
+install_ansible_if_needed() {
+  if [[ "$RUN_INSTALL" != "1" ]]; then
+    log "Install run skipped, skipping Ansible runtime"
+    return 0
+  fi
+
+  if ansible_playbook_available; then
+    log "Ansible runtime detected, skipping install"
+    return 0
+  fi
+
+  log "Installing Ansible runtime"
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y
+  if ! apt-get install -y ansible-core; then
+    apt-get install -y ansible
+  fi
+
+  ansible_playbook_available || die "Failed to install ansible-playbook"
+}
+
 docker_cli_available() {
   command -v docker >/dev/null 2>&1
 }
@@ -777,7 +802,7 @@ ui_setup_runtime() {
 }
 
 ui_configure_progress_plan() {
-  UI_TOTAL_STEPS=17
+  UI_TOTAL_STEPS=19
 }
 
 detect_terminal_width() {
@@ -3509,6 +3534,32 @@ run_post_install_diagnostics_step() {
   fi
 }
 
+run_post_install_ansible_step() {
+  local playbook ansible_exit_code
+
+  if [[ "$RUN_INSTALL" != "1" ]]; then
+    return 0
+  fi
+
+  playbook="$APP_DIR/deploy/ansible/playbooks/post-install-local.yml"
+  [[ -f "$playbook" ]] || die "Missing internal host resource playbook: $playbook"
+
+  set +e
+  timeout --foreground 15m env \
+    "ANSIBLE_CONFIG=$APP_DIR/deploy/ansible/ansible.cfg" \
+    "ANSIBLE_ROLES_PATH=$APP_DIR/deploy/ansible/roles" \
+    ansible-playbook -i localhost, -c local "$playbook"
+  ansible_exit_code=$?
+  set -e
+
+  if [[ "$ansible_exit_code" -eq 124 ]]; then
+    die "Internal host resource reconciliation timed out after 15 minutes"
+  fi
+  if [[ "$ansible_exit_code" -ne 0 ]]; then
+    die "Internal host resource reconciliation failed"
+  fi
+}
+
 main() {
   local completion_label
 
@@ -3526,6 +3577,7 @@ main() {
 
   ui_run_step_foreground "Check source inputs" resolve_source_mode
   ui_run_step_captured "Install base packages" install_base_packages
+  ui_run_step_captured "Prepare Ansible runtime" install_ansible_if_needed
   ui_run_step_captured "Prepare Docker runtime" install_docker_if_needed
   ui_run_step_captured "Prepare Node runtime" install_node22_if_needed
   ui_run_step_captured "Ensure service account" ensure_service_account
@@ -3546,10 +3598,12 @@ main() {
 
   if [[ "$RUN_INSTALL" == "1" ]]; then
     run_install_command
+    ui_run_step_captured "Apply host resources" run_post_install_ansible_step
     run_runtime_readiness_step
     run_post_install_diagnostics_step
   else
     ui_skip_step "Apply ${ACTION:-install}" "--skip-install-run"
+    ui_skip_step "Apply host resources" "install run skipped"
     ui_skip_step "Wait for runtime health" "install run skipped"
     ui_skip_step "Run post-install diagnostics" "install run skipped"
   fi
@@ -3575,8 +3629,7 @@ ${completion_label}
 Request file: ${REQUEST_FILE}
 
 Useful commands:
-- sovereign-node update --request-file ${REQUEST_FILE} --json
-- sovereign-node install --request-file ${REQUEST_FILE} --json
+- bash ${APP_DIR}/scripts/install.sh --request-file ${REQUEST_FILE} --install --non-interactive
 - sovereign-node status --json
 - sovereign-node doctor --json
 - sovereign-node onboarding issue --json

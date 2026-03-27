@@ -161,8 +161,9 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
       `${JSON.stringify(
         {
           kind: "sovereign-bot-package",
+          manifestVersion: 2,
           id: input.id,
-          version: "1.0.0",
+          version: "2.0.0",
           displayName: input.displayName,
           description: input.description,
           defaultInstall: input.defaultInstall,
@@ -175,10 +176,87 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
           configDefaults: input.configDefaults ?? {},
           toolTemplates: input.toolTemplates ?? [],
           toolInstances: input.toolInstances ?? [],
-          openclaw: input.openclaw ?? {},
+          hostResources: [
+            {
+              id: "workspace-readme",
+              kind: "managedFile",
+              spec: {
+                path: { join: [{ from: "agent.workspace" }, "/README.md"] },
+                source: "workspace/README.md",
+                writePolicy: "always",
+              },
+            },
+            {
+              id: "workspace-agents",
+              kind: "managedFile",
+              spec: {
+                path: { join: [{ from: "agent.workspace" }, "/AGENTS.md"] },
+                source: "workspace/AGENTS.md",
+                writePolicy: "always",
+              },
+            },
+            {
+              id: "workspace-tools",
+              kind: "managedFile",
+              spec: {
+                path: { join: [{ from: "agent.workspace" }, "/TOOLS.md"] },
+                source: "workspace/TOOLS.md",
+                writePolicy: "always",
+              },
+            },
+            {
+              id: "workspace-skill",
+              kind: "managedFile",
+              spec: {
+                path: { join: [{ from: "agent.workspace" }, `/skills/${input.id}-core/SKILL.md`] },
+                source: `workspace/skills/${input.id}-core/SKILL.md`,
+                writePolicy: "always",
+              },
+            },
+            ...(input.extraWorkspaceFiles ?? []).map((file) => ({
+              id: `workspace-${file.path.replaceAll(/[/.]/g, "-")}`,
+              kind: "managedFile",
+              spec: {
+                path: { join: [{ from: "agent.workspace" }, `/${file.path}`] },
+                source: file.source,
+                writePolicy:
+                  file.path.startsWith("config/") ||
+                  (file.path.startsWith("data/") && !file.path.toLowerCase().endsWith("readme.md"))
+                    ? "ifMissing"
+                    : "always",
+                ...(file.mode === undefined ? {} : { mode: file.mode }),
+              },
+            })),
+            ...(() => {
+              const cron = (input.openclaw as { cron?: Record<string, unknown> } | undefined)?.cron;
+              if (cron === undefined) {
+                return [];
+              }
+              return [
+                {
+                  id: "managed-openclaw-cron",
+                  kind: "openclawCron",
+                  spec: {
+                    id: typeof cron.id === "string" ? cron.id : `${input.id}-cron`,
+                    agentId: input.id,
+                    every:
+                      typeof cron.defaultEvery === "string"
+                        ? cron.defaultEvery
+                        : typeof cron.every === "string"
+                          ? cron.every
+                          : "5m",
+                    session: cron.session === "isolated" ? "isolated" : "isolated",
+                    message: typeof cron.message === "string" ? cron.message : "hello",
+                    ...(cron.announce === false ? {} : { announceRoomId: { from: "matrix.alertRoomId" } }),
+                    desiredState: "present",
+                  },
+                },
+              ];
+            })(),
+          ],
           agentTemplate: {
             id: input.id,
-            version: "1.0.0",
+            version: "2.0.0",
             description: input.description,
             ...(input.agentTemplateModel === undefined ? {} : { model: input.agentTemplateModel }),
             matrix: {
@@ -186,29 +264,6 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
             },
             requiredToolTemplates: input.requiredToolTemplates ?? [],
             optionalToolTemplates: input.optionalToolTemplates ?? [],
-            workspaceFiles: [
-              {
-                path: "README.md",
-                source: "workspace/README.md",
-              },
-              {
-                path: "AGENTS.md",
-                source: "workspace/AGENTS.md",
-              },
-              {
-                path: "TOOLS.md",
-                source: "workspace/TOOLS.md",
-              },
-              {
-                path: `skills/${input.id}-core/SKILL.md`,
-                source: `workspace/skills/${input.id}-core/SKILL.md`,
-              },
-              ...(input.extraWorkspaceFiles ?? []).map((file) => ({
-                path: file.path,
-                source: file.source,
-                ...(file.mode === undefined ? {} : { mode: file.mode }),
-              })),
-            ],
           },
         },
         null,
@@ -500,8 +555,9 @@ const buildTestLoadedBotPackage = (input: {
 }): LoadedBotPackage => ({
   manifest: {
     kind: "sovereign-bot-package",
+    manifestVersion: 2,
     id: input.id,
-    version: "1.0.0",
+    version: "2.0.0",
     displayName: input.displayName,
     description: input.description,
     defaultInstall: false,
@@ -514,10 +570,10 @@ const buildTestLoadedBotPackage = (input: {
     configDefaults: {},
     toolTemplates: [],
     toolInstances: [],
-    openclaw: {},
+    hostResources: [],
     agentTemplate: {
       id: input.id,
-      version: "1.0.0",
+      version: "2.0.0",
       description: input.description,
       ...(input.model === undefined ? {} : { model: input.model }),
       matrix: {
@@ -525,30 +581,12 @@ const buildTestLoadedBotPackage = (input: {
       },
       requiredToolTemplates: [],
       optionalToolTemplates: [],
-      workspaceFiles: [
-        {
-          path: "README.md",
-          source: "workspace/README.md",
-        },
-        {
-          path: "AGENTS.md",
-          source: "workspace/AGENTS.md",
-        },
-        {
-          path: "TOOLS.md",
-          source: "workspace/TOOLS.md",
-        },
-        {
-          path: `skills/${input.id}-core/SKILL.md`,
-          source: `workspace/skills/${input.id}-core/SKILL.md`,
-        },
-      ],
     },
   },
   template: {
     kind: "sovereign-agent-template",
     id: input.id,
-    version: "1.0.0",
+    version: "2.0.0",
     description: input.description,
     ...(input.model === undefined ? {} : { model: input.model }),
     matrix: {
@@ -556,24 +594,6 @@ const buildTestLoadedBotPackage = (input: {
     },
     requiredToolTemplates: [],
     optionalToolTemplates: [],
-    workspaceFiles: [
-      {
-        path: "README.md",
-        content: `# ${input.displayName}\n`,
-      },
-      {
-        path: "AGENTS.md",
-        content: `# ${input.id}\n`,
-      },
-      {
-        path: "TOOLS.md",
-        content: "{{TOOL_SECTION}}\n",
-      },
-      {
-        path: `skills/${input.id}-core/SKILL.md`,
-        content: `# ${input.displayName}\n`,
-      },
-    ],
     signature: {
       algorithm: "ed25519",
       keyId: "repo:sovereign-ai-bots",
@@ -779,7 +799,7 @@ const writeDedicatedBotRuntimeArtifacts = async (paths: SovereignPaths): Promise
       {
         id: "bitcoin-skill-match",
         workspace: bitcoinWorkspace,
-        templateRef: "bitcoin-skill-match@1.0.0",
+        templateRef: "bitcoin-skill-match@2.0.0",
         botId: "bitcoin-skill-match",
         matrix: {
           localpart: "bitcoin-skill-match",
@@ -791,7 +811,7 @@ const writeDedicatedBotRuntimeArtifacts = async (paths: SovereignPaths): Promise
       {
         id: "node-operator",
         workspace: nodeOperatorWorkspace,
-        templateRef: "node-operator@1.0.0",
+        templateRef: "node-operator@2.0.0",
         botId: "node-operator",
         toolInstanceIds: ["node-operator-cli"],
         default: true,
@@ -836,7 +856,7 @@ const writeLegacyCorePinnedMailSentinelTemplate = async (paths: SovereignPaths):
       {
         id: "mail-sentinel",
         workspace: join(paths.stateDir, "mail-sentinel", "workspace"),
-        templateRef: "mail-sentinel@1.0.0",
+        templateRef: "mail-sentinel@2.0.0",
         botId: "mail-sentinel",
         matrix: {
           localpart: "mail-sentinel",
@@ -892,7 +912,7 @@ const writeNoCronManagedAgentRuntime = async (paths: SovereignPaths): Promise<vo
       {
         id: "node-operator",
         workspace: join(paths.stateDir, "node-operator", "workspace"),
-        templateRef: "node-operator@1.0.0",
+        templateRef: "node-operator@2.0.0",
         botId: "node-operator",
         matrix: {
           localpart: "node-operator",
@@ -2495,13 +2515,13 @@ describe("RealInstallerService", () => {
         };
       };
       const installedMailSentinel = updatedConfig.templates?.installed?.find(
-        (entry) => entry.id === "mail-sentinel" && entry.version === "1.0.0",
+        (entry) => entry.id === "mail-sentinel" && entry.version === "2.0.0",
       );
 
       expect(installedMailSentinel?.source).toBe("bot-repo");
       expect(installedMailSentinel?.keyId).toBe("repo:sovereign-ai-bots");
       expect(installedMailSentinel?.manifestSha256).not.toBe("legacy-core-mail-sentinel-pin");
-      expect(installedMailSentinel?.installedAt).toBe("2026-03-01T00:00:00.000Z");
+      expect(typeof installedMailSentinel?.installedAt).toBe("string");
       expect(observedMatrixUrls).not.toHaveLength(0);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
@@ -2674,20 +2694,7 @@ describe("RealInstallerService", () => {
       expect(started.job.state).toBe("succeeded");
       await expect(readFile(userPolicyPath, "utf8")).resolves.toBe(customUserPolicy);
       await expect(readFile(defaultRulesPath, "utf8")).resolves.toBe(customDefaultRules);
-      await expect(readFile(readmePath, "utf8")).resolves.toBe("# Mail Sentinel\n\n");
-
-      const workspaceStateRaw = await readFile(
-        join(workspaceDir, ".openclaw", "managed-workspace-files.json"),
-        "utf8",
-      );
-      const workspaceState = JSON.parse(workspaceStateRaw) as {
-        version?: number;
-        files?: Record<string, { status?: string; renderedSha256?: string }>;
-      };
-      expect(workspaceState.version).toBe(1);
-      expect(workspaceState.files?.["config/user-policy.json"]?.status).toBe("preserved");
-      expect(workspaceState.files?.["config/default-rules.json"]?.status).toBe("preserved");
-      expect(workspaceState.files?.README).toBeUndefined();
+      await expect(readFile(readmePath, "utf8")).resolves.toBe("# Mail Sentinel\n");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }

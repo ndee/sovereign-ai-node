@@ -1,0 +1,159 @@
+- name: Read compiled host resources plan
+  ansible.builtin.slurp:
+    src: "{{ sovereign_host_resources_plan_file }}"
+  register: sovereign_host_resources_plan_raw
+
+- name: Parse compiled host resources plan
+  ansible.builtin.set_fact:
+    sovereign_host_resources_plan: "{{ sovereign_host_resources_plan_raw.content | b64decode | from_json }}"
+
+- name: Split compiled host resources by kind
+  ansible.builtin.set_fact:
+    sovereign_host_resource_directories: >-
+      {{ sovereign_host_resources_plan.resources | selectattr('kind', 'equalto', 'directory') | list }}
+    sovereign_host_resource_files: >-
+      {{
+        (sovereign_host_resources_plan.resources | selectattr('kind', 'equalto', 'managedFile') | list)
+        + (sovereign_host_resources_plan.resources | selectattr('kind', 'equalto', 'stateFile') | list)
+      }}
+    sovereign_host_resource_systemd: >-
+      {{
+        (sovereign_host_resources_plan.resources | selectattr('kind', 'equalto', 'systemdService') | list)
+        + (sovereign_host_resources_plan.resources | selectattr('kind', 'equalto', 'systemdTimer') | list)
+      }}
+    sovereign_host_resource_crons: >-
+      {{ sovereign_host_resources_plan.resources | selectattr('kind', 'equalto', 'openclawCron') | list }}
+
+- name: Ensure managed directories exist
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "{{ item.mode | default('0755') }}"
+    owner: "{{ item.owner | default(omit) }}"
+    group: "{{ item.group | default(omit) }}"
+  loop: "{{ sovereign_host_resource_directories }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Ensure managed file parent directories exist
+  ansible.builtin.file:
+    path: "{{ item.path | dirname }}"
+    state: directory
+    mode: "0755"
+  loop: "{{ sovereign_host_resource_files }}"
+  loop_control:
+    label: "{{ item.path | dirname }}"
+
+- name: Write managed files and state files
+  ansible.builtin.copy:
+    dest: "{{ item.path }}"
+    content: "{{ item.content }}"
+    mode: "{{ item.mode | default('0644') }}"
+    owner: "{{ item.owner | default(omit) }}"
+    group: "{{ item.group | default(omit) }}"
+    force: "{{ item.writePolicy == 'always' }}"
+  loop: "{{ sovereign_host_resource_files }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: sovereign_host_resources_written_files
+
+- name: Write managed systemd units
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ item.name }}"
+    content: "{{ item.content }}"
+    mode: "0644"
+  loop: "{{ sovereign_host_resource_systemd }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: sovereign_host_resources_written_units
+
+- name: Reload systemd daemon when units changed
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - daemon-reload
+  when: sovereign_host_resources_written_units is changed
+  changed_when: true
+
+- name: Ensure managed systemd services and timers match desired state
+  ansible.builtin.systemd:
+    name: "{{ item.name }}"
+    enabled: "{{ item.desiredState.enabled }}"
+    state: "{{ 'started' if item.desiredState.active else 'stopped' }}"
+    daemon_reload: false
+  loop: "{{ sovereign_host_resource_systemd }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: List OpenClaw cron jobs
+  ansible.builtin.command:
+    argv:
+      - openclaw
+      - cron
+      - list
+      - --json
+  register: sovereign_host_resources_openclaw_cron_list
+  changed_when: false
+  failed_when: false
+
+- name: Normalize OpenClaw cron list
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import json
+        import sys
+
+        raw = json.load(sys.stdin) if sys.stdin.readable() else []
+        if isinstance(raw, list):
+            jobs = raw
+        else:
+            jobs = raw.get("jobs") or raw.get("crons") or []
+        json.dump(jobs, sys.stdout)
+    stdin: "{{ sovereign_host_resources_openclaw_cron_list.stdout if sovereign_host_resources_openclaw_cron_list.rc == 0 else '[]' }}"
+  register: sovereign_host_resources_openclaw_cron_jobs
+  changed_when: false
+
+- name: Cache OpenClaw cron jobs
+  ansible.builtin.set_fact:
+    sovereign_host_resources_openclaw_jobs: "{{ sovereign_host_resources_openclaw_cron_jobs.stdout | from_json }}"
+
+- name: Remove superseded or absent OpenClaw cron jobs
+  ansible.builtin.command:
+    argv:
+      - openclaw
+      - cron
+      - rm
+      - "{{ item.id }}"
+  loop: >-
+    {{
+      sovereign_host_resources_openclaw_jobs
+      | selectattr('name', 'defined')
+      | selectattr('name', 'in', (
+          sovereign_host_resources_plan.resources
+          | selectattr('kind', 'equalto', 'openclawCron')
+          | selectattr('desiredState', 'equalto', 'absent')
+          | map(attribute='match.name')
+          | reject('equalto', None)
+          | list
+        ))
+      | list
+    }}
+  loop_control:
+    label: "{{ item.id }}"
+  when: sovereign_host_resources_openclaw_jobs | length > 0
+  changed_when: true
+
+- name: Ensure declared OpenClaw cron jobs exist
+  ansible.builtin.command:
+    argv: >-
+      {{
+        ['openclaw', 'cron', 'add', '--name', item.spec.id, '--agent', item.spec.agentId, '--every', item.spec.every, '--session', item.spec.session, '--message', item.spec.message]
+        + ([] if item.spec.announceRoomId is not defined else ['--announce', '--channel', 'matrix', '--to', item.spec.announceRoomId])
+        + ['--replace']
+      }}
+  loop: "{{ sovereign_host_resource_crons | selectattr('desiredState', 'equalto', 'present') | list }}"
+  loop_control:
+    label: "{{ item.spec.id }}"
+  changed_when: true

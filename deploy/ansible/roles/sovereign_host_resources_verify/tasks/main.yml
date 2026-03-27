@@ -1,0 +1,40 @@
+- name: Run sovereign-node status
+  ansible.builtin.command:
+    argv:
+      - sovereign-node
+      - status
+      - --json
+  register: sovereign_host_resources_status_raw
+  changed_when: false
+
+- name: Parse sovereign-node status
+  ansible.builtin.set_fact:
+    sovereign_host_resources_status: "{{ sovereign_host_resources_status_raw.stdout | from_json }}"
+
+- name: Assert status includes host resources
+  ansible.builtin.assert:
+    that:
+      - sovereign_host_resources_status.result.hostResources is defined
+      - sovereign_host_resources_status.result.bots is defined
+    fail_msg: sovereign-node status did not report generic host resources and bot status.
+    success_msg: sovereign-node status reported generic host resources and bot status.
+
+- name: Run sovereign-node doctor
+  ansible.builtin.command:
+    argv:
+      - sovereign-node
+      - doctor
+      - --json
+  register: sovereign_host_resources_doctor_raw
+  changed_when: false
+
+- name: Parse sovereign-node doctor
+  ansible.builtin.set_fact:
+    sovereign_host_resources_doctor: "{{ sovereign_host_resources_doctor_raw.stdout | from_json }}"
+
+- name: Assert doctor overall is not fail
+  ansible.builtin.assert:
+    that:
+      - sovereign_host_resources_doctor.result.overall in ['pass', 'warn']
+    fail_msg: sovereign-node doctor reported a failing overall state.
+    success_msg: sovereign-node doctor reported a passing or warning overall state.

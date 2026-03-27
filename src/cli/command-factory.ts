@@ -21,7 +21,7 @@ export const createCliProgram = (app: AppContainer): Command => {
   program
     .name("sovereign-node")
     .description("Sovereign Node operator CLI (TypeScript scaffold)")
-    .version("0.1.0")
+    .version("2.0.0")
     .option("--config <path>", "Path to sovereign-node config")
     .option("--verbose", "Enable verbose output");
 
