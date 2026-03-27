@@ -231,8 +231,8 @@ ensure_supported_os() {
 install_base_packages() {
   log "Installing base packages"
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y
-  apt-get install -y \
+  apt_get_locked update -y
+  apt_get_locked install -y \
     ca-certificates \
     curl \
     git \
@@ -243,6 +243,23 @@ install_base_packages() {
 
 ansible_playbook_available() {
   command -v ansible-playbook >/dev/null 2>&1
+}
+
+wait_for_apt_lock() {
+  local attempt
+  for attempt in $(seq 1 180); do
+    if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/dpkg/lock >/dev/null 2>&1; then
+      sleep 5
+      continue
+    fi
+    return 0
+  done
+  die "Timed out waiting for apt/dpkg lock"
+}
+
+apt_get_locked() {
+  wait_for_apt_lock
+  apt-get "$@"
 }
 
 install_ansible_if_needed() {
@@ -258,9 +275,9 @@ install_ansible_if_needed() {
 
   log "Installing Ansible runtime"
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y
-  if ! apt-get install -y ansible-core; then
-    apt-get install -y ansible
+  apt_get_locked update -y
+  if ! apt_get_locked install -y ansible-core; then
+    apt_get_locked install -y ansible
   fi
 
   ansible_playbook_available || die "Failed to install ansible-playbook"
@@ -326,18 +343,18 @@ install_docker_if_needed() {
   configure_docker_apt_repo
 
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y
+  apt_get_locked update -y
 
-  if ! apt-get install -y \
+  if ! apt_get_locked install -y \
     docker-ce \
     docker-ce-cli \
     containerd.io \
     docker-buildx-plugin \
     docker-compose-plugin; then
     log "Docker CE package install failed, falling back to distro docker packages"
-    apt-get install -y docker.io docker-compose-v2 \
-      || apt-get install -y docker.io docker-compose-plugin \
-      || apt-get install -y docker.io docker-compose
+    apt_get_locked install -y docker.io docker-compose-v2 \
+      || apt_get_locked install -y docker.io docker-compose-plugin \
+      || apt_get_locked install -y docker.io docker-compose
   fi
 
   ensure_docker_daemon
@@ -374,8 +391,8 @@ install_node22_if_needed() {
     > /etc/apt/sources.list.d/nodesource.list
 
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y
-  apt-get install -y nodejs
+  apt_get_locked update -y
+  apt_get_locked install -y nodejs
 }
 
 ensure_service_account() {
