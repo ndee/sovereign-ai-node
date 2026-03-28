@@ -1,4 +1,5 @@
 # Sovereign AI Node
+[![Mail Sentinel Live E2E](https://github.com/ndee/sovereign-ai-node-pro/actions/workflows/mail-sentinel-e2e-live.yml/badge.svg)](https://github.com/ndee/sovereign-ai-node-pro/actions/workflows/mail-sentinel-e2e-live.yml)
 
 Open-core, local-first multi-bot infrastructure for sovereign digital control.
 
