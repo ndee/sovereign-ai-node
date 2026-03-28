@@ -102,7 +102,7 @@ Options:
   --api-port <port>        API bind port (default: 8787)
   --request-file <path>    Install request output path (default: /etc/sovereign-node/install-request.json)
   --install                Force Install mode (new install / reconfigure)
-  --update                 Deprecated: treated as --install (use 'sovereign-node update' instead)
+  --update                 Deprecated alias for --install
   --skip-install-run       Only bootstrap host; do not run sovereign-node install
   --non-interactive        Do not prompt; use explicit or inferred action
   -h, --help               Show help
@@ -173,7 +173,7 @@ parse_args() {
         shift
         ;;
       --update)
-        log "WARNING: --update is deprecated. Use 'sovereign-node update' for application updates."
+        log "WARNING: --update is deprecated. Use scripts/install.sh as the only public install/update path."
         log "WARNING: Treating --update as --install."
         ACTION="install"
         shift
@@ -231,14 +231,56 @@ ensure_supported_os() {
 install_base_packages() {
   log "Installing base packages"
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y
-  apt-get install -y \
+  apt_get_locked update -y
+  apt_get_locked install -y \
     ca-certificates \
     curl \
     git \
     build-essential \
     gnupg \
     qrencode
+}
+
+ansible_playbook_available() {
+  command -v ansible-playbook >/dev/null 2>&1
+}
+
+wait_for_apt_lock() {
+  local attempt
+  for attempt in $(seq 1 180); do
+    if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/dpkg/lock >/dev/null 2>&1; then
+      sleep 5
+      continue
+    fi
+    return 0
+  done
+  die "Timed out waiting for apt/dpkg lock"
+}
+
+apt_get_locked() {
+  wait_for_apt_lock
+  apt-get "$@"
+}
+
+install_ansible_if_needed() {
+  if [[ "$RUN_INSTALL" != "1" ]]; then
+    log "Install run skipped, skipping Ansible runtime"
+    return 0
+  fi
+
+  if ansible_playbook_available; then
+    log "Ansible runtime detected, skipping install"
+    return 0
+  fi
+
+  log "Installing Ansible runtime"
+  export DEBIAN_FRONTEND=noninteractive
+  apt_get_locked update -y
+  if ! apt_get_locked install -y ansible-core; then
+    apt_get_locked install -y ansible
+  fi
+
+  ansible_playbook_available || die "Failed to install ansible-playbook"
 }
 
 docker_cli_available() {
@@ -301,18 +343,18 @@ install_docker_if_needed() {
   configure_docker_apt_repo
 
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y
+  apt_get_locked update -y
 
-  if ! apt-get install -y \
+  if ! apt_get_locked install -y \
     docker-ce \
     docker-ce-cli \
     containerd.io \
     docker-buildx-plugin \
     docker-compose-plugin; then
     log "Docker CE package install failed, falling back to distro docker packages"
-    apt-get install -y docker.io docker-compose-v2 \
-      || apt-get install -y docker.io docker-compose-plugin \
-      || apt-get install -y docker.io docker-compose
+    apt_get_locked install -y docker.io docker-compose-v2 \
+      || apt_get_locked install -y docker.io docker-compose-plugin \
+      || apt_get_locked install -y docker.io docker-compose
   fi
 
   ensure_docker_daemon
@@ -349,8 +391,8 @@ install_node22_if_needed() {
     > /etc/apt/sources.list.d/nodesource.list
 
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y
-  apt-get install -y nodejs
+  apt_get_locked update -y
+  apt_get_locked install -y nodejs
 }
 
 ensure_service_account() {
@@ -777,7 +819,7 @@ ui_setup_runtime() {
 }
 
 ui_configure_progress_plan() {
-  UI_TOTAL_STEPS=17
+  UI_TOTAL_STEPS=18
 }
 
 detect_terminal_width() {
@@ -3347,6 +3389,7 @@ run_install_command() {
     set +e
     install_output="$(
       timeout --foreground 30m env \
+        "SOVEREIGN_INTERNAL_INSTALL=1" \
         "SOVEREIGN_NODE_SERVICE_USER=$SERVICE_USER" \
         "SOVEREIGN_NODE_SERVICE_GROUP=$SERVICE_GROUP" \
         sovereign-node install --request-file "$REQUEST_FILE" --json
@@ -3361,6 +3404,7 @@ run_install_command() {
     : > "$log_path"
     set +e
     timeout --foreground 30m env \
+      "SOVEREIGN_INTERNAL_INSTALL=1" \
       "SOVEREIGN_NODE_SERVICE_USER=$SERVICE_USER" \
       "SOVEREIGN_NODE_SERVICE_GROUP=$SERVICE_GROUP" \
       sovereign-node install --request-file "$REQUEST_FILE" --json >"$log_path" 2>&1 &
@@ -3509,6 +3553,32 @@ run_post_install_diagnostics_step() {
   fi
 }
 
+run_post_install_ansible_step() {
+  local playbook ansible_exit_code
+
+  if [[ "$RUN_INSTALL" != "1" ]]; then
+    return 0
+  fi
+
+  playbook="$APP_DIR/deploy/ansible/playbooks/post-install-local.yml"
+  [[ -f "$playbook" ]] || die "Missing internal host resource playbook: $playbook"
+
+  set +e
+  timeout --foreground 15m env \
+    "ANSIBLE_CONFIG=$APP_DIR/deploy/ansible/ansible.cfg" \
+    "ANSIBLE_ROLES_PATH=$APP_DIR/deploy/ansible/roles" \
+    ansible-playbook -i localhost, -c local "$playbook"
+  ansible_exit_code=$?
+  set -e
+
+  if [[ "$ansible_exit_code" -eq 124 ]]; then
+    die "Internal host resource reconciliation timed out after 15 minutes"
+  fi
+  if [[ "$ansible_exit_code" -ne 0 ]]; then
+    die "Internal host resource reconciliation failed"
+  fi
+}
+
 main() {
   local completion_label
 
@@ -3526,6 +3596,7 @@ main() {
 
   ui_run_step_foreground "Check source inputs" resolve_source_mode
   ui_run_step_captured "Install base packages" install_base_packages
+  ui_run_step_captured "Prepare Ansible runtime" install_ansible_if_needed
   ui_run_step_captured "Prepare Docker runtime" install_docker_if_needed
   ui_run_step_captured "Prepare Node runtime" install_node22_if_needed
   ui_run_step_captured "Ensure service account" ensure_service_account
@@ -3546,11 +3617,11 @@ main() {
 
   if [[ "$RUN_INSTALL" == "1" ]]; then
     run_install_command
-    run_runtime_readiness_step
+    ui_run_step_captured "Apply host resources" run_post_install_ansible_step
     run_post_install_diagnostics_step
   else
     ui_skip_step "Apply ${ACTION:-install}" "--skip-install-run"
-    ui_skip_step "Wait for runtime health" "install run skipped"
+    ui_skip_step "Apply host resources" "install run skipped"
     ui_skip_step "Run post-install diagnostics" "install run skipped"
   fi
 
@@ -3575,8 +3646,7 @@ ${completion_label}
 Request file: ${REQUEST_FILE}
 
 Useful commands:
-- sovereign-node update --request-file ${REQUEST_FILE} --json
-- sovereign-node install --request-file ${REQUEST_FILE} --json
+- bash ${APP_DIR}/scripts/install.sh --request-file ${REQUEST_FILE} --install --non-interactive
 - sovereign-node status --json
 - sovereign-node doctor --json
 - sovereign-node onboarding issue --json

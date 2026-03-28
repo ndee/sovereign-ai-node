@@ -41,11 +41,6 @@ export type AgentTemplateManifest = {
     id: string;
     version: string;
   }>;
-  workspaceFiles: Array<{
-    path: string;
-    content: string;
-    mode?: string;
-  }>;
   signature: TemplateSignature;
 };
 

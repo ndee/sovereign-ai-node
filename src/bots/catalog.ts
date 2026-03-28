@@ -6,12 +6,12 @@ import { fileURLToPath } from "node:url";
 
 import { execa } from "execa";
 import { z } from "zod";
-
 import {
   type AgentTemplateManifest,
   formatTemplateRef,
   type ToolTemplateDefinition,
 } from "../templates/catalog.js";
+import { enabledWhenSchema, hostResourcesSchema } from "./host-resources.js";
 
 export type BotConfigValue = string | number | boolean;
 export type BotConfigRecord = Record<string, BotConfigValue>;
@@ -30,26 +30,12 @@ const toolValueBindingSchema = z.object({
   stringify: z.boolean().optional(),
 });
 
-const enabledWhenSchema = z.object({
-  path: z.string().min(1),
-  equals: botConfigValueSchema.optional(),
-});
-
 const toolInstanceSchema = z.object({
   id: z.string().min(1),
   templateRef: z.string().min(1),
   enabledWhen: enabledWhenSchema.optional(),
   config: z.record(z.string(), toolValueBindingSchema).default({}),
   secretRefs: z.record(z.string(), toolValueBindingSchema).default({}),
-});
-
-const botCronSchema = z.object({
-  id: z.string().min(1),
-  everyConfigKey: z.string().min(1).optional(),
-  defaultEvery: z.string().min(1).optional(),
-  session: z.enum(["isolated"]).optional(),
-  announce: z.boolean().optional(),
-  message: z.string().min(1),
 });
 
 const matrixRoutingSchema = z.object({
@@ -64,15 +50,6 @@ const matrixRoutingSchema = z.object({
       autoReply: z.boolean().optional(),
       requireMention: z.boolean().optional(),
     })
-    .optional(),
-});
-
-const workspaceFileSchema = z.object({
-  path: z.string().min(1),
-  source: z.string().min(1),
-  mode: z
-    .string()
-    .regex(/^[0-7]{3,4}$/)
     .optional(),
 });
 
@@ -114,11 +91,11 @@ const agentTemplateSchema = z.object({
       }),
     )
     .default([]),
-  workspaceFiles: z.array(workspaceFileSchema).min(1),
 });
 
 const botPackageSchema = z.object({
   kind: z.literal("sovereign-bot-package"),
+  manifestVersion: z.literal(2),
   id: z.string().min(1),
   version: z.string().min(1),
   displayName: z.string().min(1),
@@ -133,11 +110,7 @@ const botPackageSchema = z.object({
   configDefaults: z.record(z.string(), botConfigValueSchema).default({}),
   toolTemplates: z.array(toolTemplateSchema).default([]),
   toolInstances: z.array(toolInstanceSchema).default([]),
-  openclaw: z
-    .object({
-      cron: botCronSchema.optional(),
-    })
-    .default({}),
+  hostResources: hostResourcesSchema,
   agentTemplate: agentTemplateSchema,
 });
 
@@ -240,15 +213,6 @@ export class FilesystemBotCatalog implements BotCatalog {
     const manifestPath = join(packageDir, BOT_MANIFEST_FILE);
     const raw = await readFile(manifestPath, "utf8");
     const manifest = botPackageSchema.parse(JSON.parse(raw) as unknown);
-    const workspaceFiles = await Promise.all(
-      manifest.agentTemplate.workspaceFiles.map(
-        async (file: SovereignBotPackageManifest["agentTemplate"]["workspaceFiles"][number]) => ({
-          path: file.path,
-          content: await readFile(join(packageDir, file.source), "utf8"),
-          ...(file.mode === undefined ? {} : { mode: file.mode }),
-        }),
-      ),
-    );
     const template: AgentTemplateManifest = {
       kind: "sovereign-agent-template",
       id: manifest.agentTemplate.id,
@@ -272,7 +236,6 @@ export class FilesystemBotCatalog implements BotCatalog {
           version: entry.version,
         }),
       ),
-      workspaceFiles,
       signature: {
         algorithm: "ed25519",
         keyId: BOT_PACKAGE_KEY_ID,

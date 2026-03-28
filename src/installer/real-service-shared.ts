@@ -43,6 +43,112 @@ export type RelayRuntimeConfig = {
   };
 };
 
+export type CompiledHostResourceCheck =
+  | {
+      kind: "field-threshold";
+      id: string;
+      field: string;
+      warnGte?: number;
+      failGte?: number;
+    }
+  | {
+      kind: "resource-state";
+      id: string;
+      property: "present" | "enabled" | "active" | "absent";
+      equals: boolean | string;
+      severity: "warn" | "fail";
+    };
+
+export type CompiledHostResource =
+  | {
+      id: string;
+      botId: string;
+      kind: "directory";
+      path: string;
+      mode?: string;
+      owner?: string;
+      group?: string;
+      checks: CompiledHostResourceCheck[];
+    }
+  | {
+      id: string;
+      botId: string;
+      kind: "managedFile" | "stateFile";
+      path: string;
+      content: string;
+      mode?: string;
+      owner?: string;
+      group?: string;
+      writePolicy: "always" | "ifMissing";
+      statusFields?: Record<
+        string,
+        {
+          path: string;
+          type: "string" | "int" | "boolean" | "timestamp" | "object";
+          default?: string | number | boolean | undefined;
+        }
+      >;
+      checks: CompiledHostResourceCheck[];
+    }
+  | {
+      id: string;
+      botId: string;
+      kind: "systemdService";
+      name: string;
+      content: string;
+      desiredState: {
+        enabled: boolean;
+        active: boolean;
+      };
+      checks: CompiledHostResourceCheck[];
+    }
+  | {
+      id: string;
+      botId: string;
+      kind: "systemdTimer";
+      name: string;
+      content: string;
+      desiredState: {
+        enabled: boolean;
+        active: boolean;
+      };
+      checks: CompiledHostResourceCheck[];
+    }
+  | {
+      id: string;
+      botId: string;
+      kind: "openclawCron";
+      desiredState: "present" | "absent";
+      match: {
+        id?: string;
+        name?: string;
+        agentId?: string;
+      };
+      spec?: {
+        id: string;
+        agentId: string;
+        every: string;
+        session: "isolated";
+        message: string;
+        announceRoomId?: string;
+      };
+      checks: CompiledHostResourceCheck[];
+    };
+
+export type CompiledBotStatus = {
+  botId: string;
+  resourceId: string;
+  path: string;
+  fields: Record<
+    string,
+    {
+      path: string;
+      type: "string" | "int" | "boolean" | "timestamp" | "object";
+      default?: string | number | boolean | undefined;
+    }
+  >;
+};
+
 export type RuntimeConfig = {
   openrouter: {
     model: string;
@@ -154,6 +260,11 @@ export type RuntimeConfig = {
       updatedAt: string;
     }>;
   };
+  hostResources?: {
+    planPath: string;
+    resources: CompiledHostResource[];
+    botStatus: CompiledBotStatus[];
+  };
   relay?: RelayRuntimeConfig;
 };
 
@@ -227,8 +338,8 @@ export const NODE_OPERATOR_HELLO_MESSAGE =
   "Hello from Node Operator. DM me for Sovereign Node status, install health, and system checks.";
 export const NODE_CLI_OPS_TEMPLATE_REF = "node-cli-ops@1.0.0";
 export const IMAP_READONLY_TEMPLATE_REF = "imap-readonly@1.0.0";
-export const MAIL_SENTINEL_TEMPLATE_REF = "mail-sentinel@1.0.0";
-export const NODE_OPERATOR_TEMPLATE_REF = "node-operator@1.0.0";
+export const MAIL_SENTINEL_TEMPLATE_REF = "mail-sentinel@2.0.0";
+export const NODE_OPERATOR_TEMPLATE_REF = "node-operator@2.0.0";
 export const NODE_OPERATOR_TOOL_INSTANCE_ID = "node-operator-cli";
 export const MAIL_SENTINEL_TOOL_INSTANCE_ID = "mail-sentinel-core";
 export const INSTALLER_EXEC_TIMEOUT_MS = 60_000;
@@ -236,11 +347,10 @@ export const SOVEREIGN_GATEWAY_SYSTEMD_UNIT = "sovereign-openclaw-gateway.servic
 export const DEFAULT_OPENROUTER_MODEL = "qwen/qwen3.5-9b";
 export const MANAGED_OPENCLAW_DM_SCOPE = "per-channel-peer";
 export const DEFAULT_INSTALL_REQUEST_FILE = "/etc/sovereign-node/install-request.json";
+export const DEFAULT_HOST_RESOURCES_PLAN_FILE = "/etc/sovereign-node/host-resources.json";
 export const DEFAULT_SERVICE_USER = "root";
 export const DEFAULT_SERVICE_GROUP = "root";
 export const RELAY_TUNNEL_SYSTEMD_UNIT = "sovereign-matrix-relay-tunnel.service";
-export const MAIL_SENTINEL_SCAN_SYSTEMD_SERVICE = "sovereign-mail-sentinel-scan.service";
-export const MAIL_SENTINEL_SCAN_SYSTEMD_TIMER = "sovereign-mail-sentinel-scan.timer";
 export const RELAY_TUNNEL_DEFAULT_IMAGE = "ghcr.io/fatedier/frpc:v0.61.1";
 export const RELAY_LOCAL_EDGE_PORT = 18080;
 export const RESERVED_AGENT_IDS = new Set<string>();
@@ -431,20 +541,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
           },
         ];
       })
-    : isRecord(openclawProfile.cron) &&
-        typeof openclawProfile.cron.id === "string" &&
-        openclawProfile.cron.id.length > 0 &&
-        typeof openclawProfile.cron.every === "string" &&
-        openclawProfile.cron.every.length > 0
-      ? [
-          {
-            id: openclawProfile.cron.id,
-            every: openclawProfile.cron.every,
-            agentId: MAIL_SENTINEL_AGENT_ID,
-            botId: MAIL_SENTINEL_AGENT_ID,
-          },
-        ]
-      : [];
+    : [];
   const openrouter = isRecord(parsed.openrouter) ? parsed.openrouter : {};
   const imap = isRecord(parsed.imap) ? parsed.imap : {};
   const bots = isRecord(parsed.bots) ? parsed.bots : {};
@@ -563,6 +660,220 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
         ];
       })
     : [];
+  const hostResources = isRecord(parsed.hostResources) ? parsed.hostResources : {};
+  const compiledHostResources: CompiledHostResource[] = [];
+  const parseHostChecks = (value: unknown): CompiledHostResourceCheck[] => {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    const parsedChecks: CompiledHostResourceCheck[] = [];
+    for (const check of value) {
+      if (!isRecord(check) || typeof check.kind !== "string" || typeof check.id !== "string") {
+        continue;
+      }
+      if (check.kind === "field-threshold" && typeof check.field === "string") {
+        const parsedCheck: CompiledHostResourceCheck = {
+          kind: "field-threshold",
+          id: check.id,
+          field: check.field,
+          ...(typeof check.warnGte === "number" ? { warnGte: check.warnGte } : {}),
+          ...(typeof check.failGte === "number" ? { failGte: check.failGte } : {}),
+        };
+        parsedChecks.push(parsedCheck);
+        continue;
+      }
+      if (
+        check.kind === "resource-state" &&
+        (check.property === "present" ||
+          check.property === "enabled" ||
+          check.property === "active" ||
+          check.property === "absent") &&
+        (typeof check.equals === "boolean" || typeof check.equals === "string") &&
+        (check.severity === "warn" || check.severity === "fail")
+      ) {
+        parsedChecks.push({
+          kind: "resource-state",
+          id: check.id,
+          property: check.property,
+          equals: check.equals,
+          severity: check.severity,
+        });
+      }
+    }
+    return parsedChecks;
+  };
+  const parseStatusFields = (
+    value: unknown,
+  ): Record<
+    string,
+    {
+      path: string;
+      type: "string" | "int" | "boolean" | "timestamp" | "object";
+      default?: string | number | boolean | undefined;
+    }
+  > | null => {
+    if (!isRecord(value)) {
+      return null;
+    }
+    const parsedFields: Record<
+      string,
+      {
+        path: string;
+        type: "string" | "int" | "boolean" | "timestamp" | "object";
+        default?: string | number | boolean | undefined;
+      }
+    > = {};
+    for (const [fieldName, fieldValue] of Object.entries(value)) {
+      if (
+        !isRecord(fieldValue) ||
+        typeof fieldValue.path !== "string" ||
+        (fieldValue.type !== "string" &&
+          fieldValue.type !== "int" &&
+          fieldValue.type !== "boolean" &&
+          fieldValue.type !== "timestamp" &&
+          fieldValue.type !== "object")
+      ) {
+        continue;
+      }
+      parsedFields[fieldName] = {
+        path: fieldValue.path,
+        type: fieldValue.type,
+        ...(typeof fieldValue.default === "string" ||
+        typeof fieldValue.default === "number" ||
+        typeof fieldValue.default === "boolean"
+          ? { default: fieldValue.default }
+          : {}),
+      };
+    }
+    return parsedFields;
+  };
+  if (Array.isArray(hostResources.resources)) {
+    for (const entry of hostResources.resources) {
+      if (!isRecord(entry) || typeof entry.id !== "string" || typeof entry.botId !== "string") {
+        continue;
+      }
+      const checks = parseHostChecks(entry.checks);
+      if (entry.kind === "directory" && typeof entry.path === "string") {
+        compiledHostResources.push({
+          id: entry.id,
+          botId: entry.botId,
+          kind: "directory",
+          path: entry.path,
+          ...(typeof entry.mode === "string" ? { mode: entry.mode } : {}),
+          ...(typeof entry.owner === "string" ? { owner: entry.owner } : {}),
+          ...(typeof entry.group === "string" ? { group: entry.group } : {}),
+          checks,
+        });
+        continue;
+      }
+      if (
+        (entry.kind === "managedFile" || entry.kind === "stateFile") &&
+        typeof entry.path === "string" &&
+        typeof entry.content === "string" &&
+        (entry.writePolicy === "always" || entry.writePolicy === "ifMissing")
+      ) {
+        const statusFields = parseStatusFields(entry.statusFields);
+        compiledHostResources.push({
+          id: entry.id,
+          botId: entry.botId,
+          kind: entry.kind,
+          path: entry.path,
+          content: entry.content,
+          ...(typeof entry.mode === "string" ? { mode: entry.mode } : {}),
+          ...(typeof entry.owner === "string" ? { owner: entry.owner } : {}),
+          ...(typeof entry.group === "string" ? { group: entry.group } : {}),
+          writePolicy: entry.writePolicy,
+          ...(statusFields === null || Object.keys(statusFields).length === 0
+            ? {}
+            : { statusFields }),
+          checks,
+        });
+        continue;
+      }
+      if (
+        (entry.kind === "systemdService" || entry.kind === "systemdTimer") &&
+        typeof entry.name === "string" &&
+        typeof entry.content === "string" &&
+        isRecord(entry.desiredState) &&
+        typeof entry.desiredState.enabled === "boolean" &&
+        typeof entry.desiredState.active === "boolean"
+      ) {
+        compiledHostResources.push({
+          id: entry.id,
+          botId: entry.botId,
+          kind: entry.kind,
+          name: entry.name,
+          content: entry.content,
+          desiredState: {
+            enabled: entry.desiredState.enabled,
+            active: entry.desiredState.active,
+          },
+          checks,
+        });
+        continue;
+      }
+      if (
+        entry.kind === "openclawCron" &&
+        (entry.desiredState === "present" || entry.desiredState === "absent") &&
+        isRecord(entry.match)
+      ) {
+        compiledHostResources.push({
+          id: entry.id,
+          botId: entry.botId,
+          kind: "openclawCron",
+          desiredState: entry.desiredState,
+          match: {
+            ...(typeof entry.match.id === "string" ? { id: entry.match.id } : {}),
+            ...(typeof entry.match.name === "string" ? { name: entry.match.name } : {}),
+            ...(typeof entry.match.agentId === "string" ? { agentId: entry.match.agentId } : {}),
+          },
+          ...(entry.desiredState === "present" &&
+          isRecord(entry.spec) &&
+          typeof entry.spec.id === "string" &&
+          typeof entry.spec.agentId === "string" &&
+          typeof entry.spec.every === "string" &&
+          typeof entry.spec.message === "string"
+            ? {
+                spec: {
+                  id: entry.spec.id,
+                  agentId: entry.spec.agentId,
+                  every: entry.spec.every,
+                  session: entry.spec.session === "isolated" ? "isolated" : "isolated",
+                  message: entry.spec.message,
+                  ...(typeof entry.spec.announceRoomId === "string"
+                    ? { announceRoomId: entry.spec.announceRoomId }
+                    : {}),
+                },
+              }
+            : {}),
+          checks,
+        });
+      }
+    }
+  }
+  const compiledBotStatus: CompiledBotStatus[] = [];
+  if (Array.isArray(hostResources.botStatus)) {
+    for (const entry of hostResources.botStatus) {
+      if (
+        !isRecord(entry) ||
+        typeof entry.botId !== "string" ||
+        typeof entry.resourceId !== "string" ||
+        typeof entry.path !== "string"
+      ) {
+        continue;
+      }
+      const fields = parseStatusFields(entry.fields);
+      if (fields === null) {
+        continue;
+      }
+      compiledBotStatus.push({
+        botId: entry.botId,
+        resourceId: entry.resourceId,
+        path: entry.path,
+        fields,
+      });
+    }
+  }
   const relay = isRecord(parsed.relay) ? parsed.relay : {};
   const operator = isRecord(matrix.operator) ? matrix.operator : {};
   const homeserverDomain =
@@ -756,6 +1067,14 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
     },
     sovereignTools: {
       instances: sovereignToolInstances,
+    },
+    hostResources: {
+      planPath:
+        typeof hostResources.planPath === "string" && hostResources.planPath.length > 0
+          ? hostResources.planPath
+          : DEFAULT_HOST_RESOURCES_PLAN_FILE,
+      resources: compiledHostResources,
+      botStatus: compiledBotStatus,
     },
   };
 };

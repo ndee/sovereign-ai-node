@@ -94,9 +94,12 @@ export const registerToolsCommand = (program: Command, app: AppContainer): void 
     .action(async (id: string, opts: ToolOptions) => {
       const command = "tools create";
       try {
+        if (opts.template === undefined) {
+          throw new Error("Missing required option --template");
+        }
         const result = await app.installerService.createSovereignToolInstance({
           id,
-          templateRef: opts.template!,
+          templateRef: opts.template,
           config: parseKeyValueEntries(opts.config, "config"),
           secretRefs: parseKeyValueEntries(opts.secretRef, "secretRef"),
         });

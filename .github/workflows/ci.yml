@@ -97,7 +97,13 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Clone bot catalog repo
-        run: git clone --depth 1 https://github.com/ndee/sovereign-ai-bots /tmp/sovereign-ai-bots
+        run: |
+          BOT_REF="${GITHUB_HEAD_REF:-main}"
+          if git ls-remote --exit-code --heads https://github.com/ndee/sovereign-ai-bots "$BOT_REF" >/dev/null 2>&1; then
+            git clone --depth 1 --branch "$BOT_REF" https://github.com/ndee/sovereign-ai-bots /tmp/sovereign-ai-bots
+          else
+            git clone --depth 1 https://github.com/ndee/sovereign-ai-bots /tmp/sovereign-ai-bots
+          fi
 
       - name: Pre-pull Docker images
         run: |
@@ -160,7 +166,13 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Clone bot catalog repo
-        run: git clone --depth 1 https://github.com/ndee/sovereign-ai-bots /tmp/sovereign-ai-bots
+        run: |
+          BOT_REF="${GITHUB_HEAD_REF:-main}"
+          if git ls-remote --exit-code --heads https://github.com/ndee/sovereign-ai-bots "$BOT_REF" >/dev/null 2>&1; then
+            git clone --depth 1 --branch "$BOT_REF" https://github.com/ndee/sovereign-ai-bots /tmp/sovereign-ai-bots
+          else
+            git clone --depth 1 https://github.com/ndee/sovereign-ai-bots /tmp/sovereign-ai-bots
+          fi
 
       - name: Pre-pull Docker images
         run: |

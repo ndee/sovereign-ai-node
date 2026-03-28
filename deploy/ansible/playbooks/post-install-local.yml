@@ -1,0 +1,8 @@
+- name: Apply compiled Sovereign host resources locally
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  roles:
+    - sovereign_host_resources_apply
+    - sovereign_host_resources_verify

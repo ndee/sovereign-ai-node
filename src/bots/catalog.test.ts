@@ -61,8 +61,9 @@ const writeBotPackage = async (
     JSON.stringify(
       {
         kind: "sovereign-bot-package",
+        manifestVersion: 2,
         id: input.id,
-        version: "1.0.0",
+        version: "2.0.0",
         displayName: input.displayName,
         description: `${input.displayName} bot`,
         defaultInstall: input.defaultInstall,
@@ -73,10 +74,33 @@ const writeBotPackage = async (
         ...(input.matrixRouting === undefined ? {} : { matrixRouting: input.matrixRouting }),
         configDefaults: {},
         toolInstances: [],
-        openclaw: {},
+        hostResources: [
+          {
+            id: "workspace-readme",
+            kind: "managedFile",
+            spec: {
+              path: {
+                join: [{ from: "agent.workspace" }, "/README.md"],
+              },
+              source: "workspace/README.md",
+              writePolicy: "always",
+            },
+          },
+          {
+            id: "workspace-agents",
+            kind: "managedFile",
+            spec: {
+              path: {
+                join: [{ from: "agent.workspace" }, "/AGENTS.md"],
+              },
+              source: "workspace/AGENTS.md",
+              writePolicy: "always",
+            },
+          },
+        ],
         agentTemplate: {
           id: input.id,
-          version: "1.0.0",
+          version: "2.0.0",
           description: `${input.displayName} template`,
           ...(input.agentTemplateModel === undefined ? {} : { model: input.agentTemplateModel }),
           matrix: {
@@ -84,16 +108,6 @@ const writeBotPackage = async (
           },
           requiredToolTemplates: [],
           optionalToolTemplates: [],
-          workspaceFiles: [
-            {
-              path: "README.md",
-              source: "workspace/README.md",
-            },
-            {
-              path: "AGENTS.md",
-              source: "workspace/AGENTS.md",
-            },
-          ],
         },
       },
       null,
@@ -131,19 +145,10 @@ describe("FilesystemBotCatalog", () => {
     const packages = await catalog.listPackages();
 
     expect(packages.map((entry) => entry.manifest.id)).toEqual(["mail-sentinel", "node-operator"]);
-    expect(packages[0]?.templateRef).toBe("mail-sentinel@1.0.0");
+    expect(packages[0]?.templateRef).toBe("mail-sentinel@2.0.0");
     expect(packages[0]?.manifest.matrixRouting).toBeUndefined();
     expect(packages[0]?.template.model).toBe("qwen/qwen-2.5-32b-instruct");
-    expect(packages[0]?.template.workspaceFiles).toEqual([
-      {
-        path: "README.md",
-        content: "# Mail Sentinel\n",
-      },
-      {
-        path: "AGENTS.md",
-        content: "# mail-sentinel\n",
-      },
-    ]);
+    expect(packages[0]?.manifest.hostResources).toHaveLength(2);
   });
 
   it("returns default-selected IDs and resolves packages by template ref", async () => {
@@ -163,7 +168,7 @@ describe("FilesystemBotCatalog", () => {
     const catalog = new FilesystemBotCatalog(tempRoot);
 
     await expect(catalog.getDefaultSelectedIds()).resolves.toEqual(["mail-sentinel"]);
-    await expect(catalog.findPackageByTemplateRef("node-operator@1.0.0")).resolves.toMatchObject({
+    await expect(catalog.findPackageByTemplateRef("node-operator@2.0.0")).resolves.toMatchObject({
       manifest: {
         id: "node-operator",
       },

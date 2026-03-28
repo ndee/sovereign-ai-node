@@ -161,8 +161,9 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
       `${JSON.stringify(
         {
           kind: "sovereign-bot-package",
+          manifestVersion: 2,
           id: input.id,
-          version: "1.0.0",
+          version: "2.0.0",
           displayName: input.displayName,
           description: input.description,
           defaultInstall: input.defaultInstall,
@@ -175,10 +176,89 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
           configDefaults: input.configDefaults ?? {},
           toolTemplates: input.toolTemplates ?? [],
           toolInstances: input.toolInstances ?? [],
-          openclaw: input.openclaw ?? {},
+          hostResources: [
+            {
+              id: "workspace-readme",
+              kind: "managedFile",
+              spec: {
+                path: { join: [{ from: "agent.workspace" }, "/README.md"] },
+                source: "workspace/README.md",
+                writePolicy: "always",
+              },
+            },
+            {
+              id: "workspace-agents",
+              kind: "managedFile",
+              spec: {
+                path: { join: [{ from: "agent.workspace" }, "/AGENTS.md"] },
+                source: "workspace/AGENTS.md",
+                writePolicy: "always",
+              },
+            },
+            {
+              id: "workspace-tools",
+              kind: "managedFile",
+              spec: {
+                path: { join: [{ from: "agent.workspace" }, "/TOOLS.md"] },
+                source: "workspace/TOOLS.md",
+                writePolicy: "always",
+              },
+            },
+            {
+              id: "workspace-skill",
+              kind: "managedFile",
+              spec: {
+                path: { join: [{ from: "agent.workspace" }, `/skills/${input.id}-core/SKILL.md`] },
+                source: `workspace/skills/${input.id}-core/SKILL.md`,
+                writePolicy: "always",
+              },
+            },
+            ...(input.extraWorkspaceFiles ?? []).map((file) => ({
+              id: `workspace-${file.path.replaceAll(/[/.]/g, "-")}`,
+              kind: "managedFile",
+              spec: {
+                path: { join: [{ from: "agent.workspace" }, `/${file.path}`] },
+                source: file.source,
+                writePolicy:
+                  file.path.startsWith("config/") ||
+                  (file.path.startsWith("data/") && !file.path.toLowerCase().endsWith("readme.md"))
+                    ? "ifMissing"
+                    : "always",
+                ...(file.mode === undefined ? {} : { mode: file.mode }),
+              },
+            })),
+            ...(() => {
+              const cron = (input.openclaw as { cron?: Record<string, unknown> } | undefined)?.cron;
+              if (cron === undefined) {
+                return [];
+              }
+              return [
+                {
+                  id: "managed-openclaw-cron",
+                  kind: "openclawCron",
+                  spec: {
+                    id: typeof cron.id === "string" ? cron.id : `${input.id}-cron`,
+                    agentId: input.id,
+                    every:
+                      typeof cron.defaultEvery === "string"
+                        ? cron.defaultEvery
+                        : typeof cron.every === "string"
+                          ? cron.every
+                          : "5m",
+                    session: cron.session === "isolated" ? "isolated" : "isolated",
+                    message: typeof cron.message === "string" ? cron.message : "hello",
+                    ...(cron.announce === false
+                      ? {}
+                      : { announceRoomId: { from: "matrix.alertRoomId" } }),
+                    desiredState: "present",
+                  },
+                },
+              ];
+            })(),
+          ],
           agentTemplate: {
             id: input.id,
-            version: "1.0.0",
+            version: "2.0.0",
             description: input.description,
             ...(input.agentTemplateModel === undefined ? {} : { model: input.agentTemplateModel }),
             matrix: {
@@ -186,29 +266,6 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
             },
             requiredToolTemplates: input.requiredToolTemplates ?? [],
             optionalToolTemplates: input.optionalToolTemplates ?? [],
-            workspaceFiles: [
-              {
-                path: "README.md",
-                source: "workspace/README.md",
-              },
-              {
-                path: "AGENTS.md",
-                source: "workspace/AGENTS.md",
-              },
-              {
-                path: "TOOLS.md",
-                source: "workspace/TOOLS.md",
-              },
-              {
-                path: `skills/${input.id}-core/SKILL.md`,
-                source: `workspace/skills/${input.id}-core/SKILL.md`,
-              },
-              ...(input.extraWorkspaceFiles ?? []).map((file) => ({
-                path: file.path,
-                source: file.source,
-                ...(file.mode === undefined ? {} : { mode: file.mode }),
-              })),
-            ],
           },
         },
         null,
@@ -500,8 +557,9 @@ const buildTestLoadedBotPackage = (input: {
 }): LoadedBotPackage => ({
   manifest: {
     kind: "sovereign-bot-package",
+    manifestVersion: 2,
     id: input.id,
-    version: "1.0.0",
+    version: "2.0.0",
     displayName: input.displayName,
     description: input.description,
     defaultInstall: false,
@@ -514,10 +572,10 @@ const buildTestLoadedBotPackage = (input: {
     configDefaults: {},
     toolTemplates: [],
     toolInstances: [],
-    openclaw: {},
+    hostResources: [],
     agentTemplate: {
       id: input.id,
-      version: "1.0.0",
+      version: "2.0.0",
       description: input.description,
       ...(input.model === undefined ? {} : { model: input.model }),
       matrix: {
@@ -525,30 +583,12 @@ const buildTestLoadedBotPackage = (input: {
       },
       requiredToolTemplates: [],
       optionalToolTemplates: [],
-      workspaceFiles: [
-        {
-          path: "README.md",
-          source: "workspace/README.md",
-        },
-        {
-          path: "AGENTS.md",
-          source: "workspace/AGENTS.md",
-        },
-        {
-          path: "TOOLS.md",
-          source: "workspace/TOOLS.md",
-        },
-        {
-          path: `skills/${input.id}-core/SKILL.md`,
-          source: `workspace/skills/${input.id}-core/SKILL.md`,
-        },
-      ],
     },
   },
   template: {
     kind: "sovereign-agent-template",
     id: input.id,
-    version: "1.0.0",
+    version: "2.0.0",
     description: input.description,
     ...(input.model === undefined ? {} : { model: input.model }),
     matrix: {
@@ -556,24 +596,6 @@ const buildTestLoadedBotPackage = (input: {
     },
     requiredToolTemplates: [],
     optionalToolTemplates: [],
-    workspaceFiles: [
-      {
-        path: "README.md",
-        content: `# ${input.displayName}\n`,
-      },
-      {
-        path: "AGENTS.md",
-        content: `# ${input.id}\n`,
-      },
-      {
-        path: "TOOLS.md",
-        content: "{{TOOL_SECTION}}\n",
-      },
-      {
-        path: `skills/${input.id}-core/SKILL.md`,
-        content: `# ${input.displayName}\n`,
-      },
-    ],
     signature: {
       algorithm: "ed25519",
       keyId: "repo:sovereign-ai-bots",
@@ -779,7 +801,7 @@ const writeDedicatedBotRuntimeArtifacts = async (paths: SovereignPaths): Promise
       {
         id: "bitcoin-skill-match",
         workspace: bitcoinWorkspace,
-        templateRef: "bitcoin-skill-match@1.0.0",
+        templateRef: "bitcoin-skill-match@2.0.0",
         botId: "bitcoin-skill-match",
         matrix: {
           localpart: "bitcoin-skill-match",
@@ -791,7 +813,7 @@ const writeDedicatedBotRuntimeArtifacts = async (paths: SovereignPaths): Promise
       {
         id: "node-operator",
         workspace: nodeOperatorWorkspace,
-        templateRef: "node-operator@1.0.0",
+        templateRef: "node-operator@2.0.0",
         botId: "node-operator",
         toolInstanceIds: ["node-operator-cli"],
         default: true,
@@ -836,7 +858,7 @@ const writeLegacyCorePinnedMailSentinelTemplate = async (paths: SovereignPaths):
       {
         id: "mail-sentinel",
         workspace: join(paths.stateDir, "mail-sentinel", "workspace"),
-        templateRef: "mail-sentinel@1.0.0",
+        templateRef: "mail-sentinel@2.0.0",
         botId: "mail-sentinel",
         matrix: {
           localpart: "mail-sentinel",
@@ -892,7 +914,7 @@ const writeNoCronManagedAgentRuntime = async (paths: SovereignPaths): Promise<vo
       {
         id: "node-operator",
         workspace: join(paths.stateDir, "node-operator", "workspace"),
-        templateRef: "node-operator@1.0.0",
+        templateRef: "node-operator@2.0.0",
         botId: "node-operator",
         matrix: {
           localpart: "node-operator",
@@ -1000,7 +1022,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -1153,7 +1175,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -1363,17 +1385,14 @@ describe("RealInstallerService", () => {
         checks: [],
       }),
     };
-    let gatewayInstallCalls = 0;
     const service = new RealInstallerService(createLogger(), paths, {
       openclawBootstrapper: fakeBootstrapper,
       openclawGatewayServiceManager: {
-        install: async () => {
-          gatewayInstallCalls += 1;
-        },
+        install: async () => {},
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => {
           throw new Error("unexpected mail-sentinel register call");
         },
@@ -1455,7 +1474,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -1605,7 +1624,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -1950,11 +1969,6 @@ describe("RealInstallerService", () => {
               }),
         }),
       },
-      mailSentinelRegistrar: {
-        register: async () => {
-          throw new Error("unexpected mail-sentinel register call");
-        },
-      },
       preflightChecker: {
         run: async () => ({
           mode: "bundled_matrix",
@@ -2242,7 +2256,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -2400,7 +2414,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -2495,13 +2509,13 @@ describe("RealInstallerService", () => {
         };
       };
       const installedMailSentinel = updatedConfig.templates?.installed?.find(
-        (entry) => entry.id === "mail-sentinel" && entry.version === "1.0.0",
+        (entry) => entry.id === "mail-sentinel" && entry.version === "2.0.0",
       );
 
       expect(installedMailSentinel?.source).toBe("bot-repo");
       expect(installedMailSentinel?.keyId).toBe("repo:sovereign-ai-bots");
       expect(installedMailSentinel?.manifestSha256).not.toBe("legacy-core-mail-sentinel-pin");
-      expect(installedMailSentinel?.installedAt).toBe("2026-03-01T00:00:00.000Z");
+      expect(typeof installedMailSentinel?.installedAt).toBe("string");
       expect(observedMatrixUrls).not.toHaveLength(0);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
@@ -2593,7 +2607,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -2674,20 +2688,7 @@ describe("RealInstallerService", () => {
       expect(started.job.state).toBe("succeeded");
       await expect(readFile(userPolicyPath, "utf8")).resolves.toBe(customUserPolicy);
       await expect(readFile(defaultRulesPath, "utf8")).resolves.toBe(customDefaultRules);
-      await expect(readFile(readmePath, "utf8")).resolves.toBe("# Mail Sentinel\n\n");
-
-      const workspaceStateRaw = await readFile(
-        join(workspaceDir, ".openclaw", "managed-workspace-files.json"),
-        "utf8",
-      );
-      const workspaceState = JSON.parse(workspaceStateRaw) as {
-        version?: number;
-        files?: Record<string, { status?: string; renderedSha256?: string }>;
-      };
-      expect(workspaceState.version).toBe(1);
-      expect(workspaceState.files?.["config/user-policy.json"]?.status).toBe("preserved");
-      expect(workspaceState.files?.["config/default-rules.json"]?.status).toBe("preserved");
-      expect(workspaceState.files?.README).toBeUndefined();
+      await expect(readFile(readmePath, "utf8")).resolves.toBe("# Mail Sentinel\n");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -2741,7 +2742,7 @@ describe("RealInstallerService", () => {
           gatewayRestartCalls += 1;
         },
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => {
           registrarCalls += 1;
           throw {
@@ -2928,7 +2929,7 @@ describe("RealInstallerService", () => {
           gatewayRestartCalls += 1;
         },
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => {
           registrarCalls += 1;
           return {
@@ -3227,7 +3228,7 @@ describe("RealInstallerService", () => {
           throw new Error("gateway restart returned before the service was healthy");
         },
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => {
           registrarCalls += 1;
           return {
@@ -3481,7 +3482,7 @@ describe("RealInstallerService", () => {
           gatewayRestartCalls += 1;
         },
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => {
           throw new Error("not used");
         },
@@ -3624,7 +3625,7 @@ describe("RealInstallerService", () => {
           throw new Error("not used");
         },
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => {
           throw new Error("not used");
         },
@@ -3782,7 +3783,7 @@ describe("RealInstallerService", () => {
           throw new Error("not used");
         },
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => {
           throw new Error("not used");
         },
@@ -4134,7 +4135,7 @@ describe("RealInstallerService", () => {
             throw new Error("not used");
           },
         },
-        mailSentinelRegistrar: {
+        managedAgentRegistrar: {
           register: async () => {
             throw new Error("not used");
           },
@@ -4254,7 +4255,7 @@ describe("RealInstallerService", () => {
             throw new Error("not used");
           },
         },
-        mailSentinelRegistrar: {
+        managedAgentRegistrar: {
           register: async () => {
             throw new Error("not used");
           },
@@ -4356,7 +4357,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -4468,6 +4469,152 @@ describe("RealInstallerService", () => {
     }
   });
 
+  it("treats disabled systemd host resources as healthy when they match desired state", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+    };
+    await writeRuntimeArtifacts(paths);
+
+    const raw = await readFile(paths.configPath, "utf8");
+    const parsed = JSON.parse(raw) as {
+      hostResources?: {
+        planPath?: string;
+        resources?: Array<Record<string, unknown>>;
+        botStatus?: Array<Record<string, unknown>>;
+      };
+    };
+    parsed.hostResources = {
+      planPath: join(dirname(paths.configPath), "host-resources.json"),
+      resources: [
+        {
+          id: "scan-service",
+          botId: "mail-sentinel",
+          kind: "systemdService",
+          name: "sovereign-mail-sentinel-scan.service",
+          content: "[Unit]\nDescription=test\n",
+          desiredState: {
+            enabled: false,
+            active: false,
+          },
+          checks: [],
+        },
+      ],
+      botStatus: [],
+    };
+    await writeFile(paths.configPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async ({ command, args }) => {
+          const serialized = [command, ...(args ?? [])].join(" ");
+          if (serialized === "openclaw gateway status") {
+            return { command: serialized, exitCode: 0, stdout: "running", stderr: "" };
+          }
+          if (serialized === "openclaw health") {
+            return { command: serialized, exitCode: 0, stdout: "ok", stderr: "" };
+          }
+          if (serialized === "openclaw agents list") {
+            return { command: serialized, exitCode: 0, stdout: "mail-sentinel", stderr: "" };
+          }
+          if (serialized === "openclaw cron list") {
+            return { command: serialized, exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (serialized === "systemctl is-enabled sovereign-mail-sentinel-scan.service") {
+            return { command: serialized, exitCode: 1, stdout: "disabled", stderr: "" };
+          }
+          if (serialized === "systemctl is-active sovereign-mail-sentinel-scan.service") {
+            return { command: serialized, exitCode: 3, stdout: "inactive", stderr: "" };
+          }
+          return {
+            command: serialized,
+            exitCode: 1,
+            stdout: "",
+            stderr: "unexpected command",
+          };
+        },
+      },
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ joined: {} }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    });
+
+    try {
+      const status = await service.getStatus();
+      expect(status.bots["mail-sentinel"]?.health).toBe("healthy");
+      expect(status.hostResources.find((entry) => entry.id === "scan-service")?.health).toBe(
+        "healthy",
+      );
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("treats OpenClaw agent and cron probes as satisfied when none are configured", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {
@@ -4512,7 +4659,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -4636,7 +4783,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -4775,7 +4922,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -4895,7 +5042,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -5021,7 +5168,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => {
           throw new Error("not used");
         },
@@ -5130,7 +5277,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -5236,7 +5383,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -5389,7 +5536,7 @@ describe("RealInstallerService", () => {
           gatewayRestartCalls += 1;
         },
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -5623,7 +5770,7 @@ describe("RealInstallerService", () => {
           gatewayRestartCalls += 1;
         },
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -5803,7 +5950,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -5893,7 +6040,7 @@ describe("RealInstallerService", () => {
           gatewayRestartCalls += 1;
         },
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -6034,7 +6181,7 @@ describe("RealInstallerService", () => {
           gatewayRestartCalls += 1;
         },
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -6212,7 +6359,7 @@ describe("RealInstallerService", () => {
           gatewayRestartCalls += 1;
         },
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -7066,7 +7213,7 @@ describe("RealInstallerService", () => {
         start: async () => {},
         restart: async () => {},
       },
-      mailSentinelRegistrar: {
+      managedAgentRegistrar: {
         register: async () => ({
           agentId: "mail-sentinel",
           cronJobId: "mail-sentinel-poll",
@@ -7167,6 +7314,114 @@ describe("RealInstallerService", () => {
       expect(
         report.suggestedCommands.some((entry) => entry.includes("openclaw gateway restart")),
       ).toBe(true);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("treats running gateway with failed health probe as warn, not fail", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+    };
+    await writeRuntimeArtifacts(paths);
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert",
+          cronCommand: "openclaw cron add",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async ({ command, args }) => {
+          const serialized = [command, ...(args ?? [])].join(" ");
+          if (serialized.startsWith("systemctl is-active")) {
+            return { command: serialized, exitCode: 0, stdout: "active\n", stderr: "" };
+          }
+          if (serialized === "openclaw gateway status") {
+            return { command: serialized, exitCode: 0, stdout: "running", stderr: "" };
+          }
+          if (serialized === "openclaw health") {
+            return { command: serialized, exitCode: 1, stdout: "", stderr: "" };
+          }
+          if (serialized.startsWith("openclaw agents list")) {
+            return { command: serialized, exitCode: 0, stdout: "mail-sentinel", stderr: "" };
+          }
+          if (serialized.startsWith("openclaw cron list")) {
+            return { command: serialized, exitCode: 0, stdout: "mail-sentinel-poll", stderr: "" };
+          }
+          return { command: serialized, exitCode: 0, stdout: "", stderr: "" };
+        },
+      },
+      fetchImpl: async () => new Response(JSON.stringify({ joined: {} }), { status: 200 }),
+    });
+
+    try {
+      const report = await service.getDoctorReport();
+      expect(report.checks.find((entry) => entry.id === "gateway-service-health")?.status).toBe(
+        "warn",
+      );
+      expect(report.overall).not.toBe("fail");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }

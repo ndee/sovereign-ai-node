@@ -176,6 +176,35 @@ export const testAlertResultSchema = z.object({
   error: errorDetailSchema.optional(),
 });
 
+const hostResourceStateSchema = z.object({
+  id: z.string().min(1),
+  botId: z.string().min(1),
+  kind: z.enum([
+    "directory",
+    "managedFile",
+    "stateFile",
+    "systemdService",
+    "systemdTimer",
+    "openclawCron",
+  ]),
+  target: z.string().min(1),
+  present: z.boolean().optional(),
+  enabled: z.boolean().optional(),
+  active: z.boolean().optional(),
+  health: componentHealthSchema,
+  message: z.string().min(1).optional(),
+});
+
+const botRuntimeStatusSchema = z.object({
+  fields: z
+    .record(
+      z.string(),
+      z.union([z.string(), z.number().int(), z.boolean(), z.record(z.string(), z.unknown())]),
+    )
+    .default({}),
+  health: componentHealthSchema,
+});
+
 export const installResultSchema = z.object({
   installationId: idSchema,
   job: installJobSummarySchema,
@@ -208,12 +237,13 @@ export const installResultSchema = z.object({
     openclawHome: z.string().min(1),
     gatewayServiceInstalled: z.boolean(),
     gatewayServiceName: z.string().min(1).optional(),
-    agentId: z.literal("mail-sentinel"),
-    cronJobId: z.string().min(1),
+    managedAgentIds: z.array(z.string().min(1)),
+    managedCronIds: z.array(z.string().min(1)),
     pluginIds: z.array(z.string().min(1)),
   }),
   paths: z.object({
     configPath: z.string().min(1),
+    hostResourcesPlanPath: z.string().min(1),
     secretsDir: z.string().min(1),
     stateDir: z.string().min(1),
     logsDir: z.string().min(1),
@@ -273,13 +303,8 @@ export const sovereignStatusSchema = z.object({
     cronPresent: z.boolean(),
     pluginIds: z.array(z.string().min(1)).optional(),
   }),
-  mailSentinel: z.object({
-    agentId: z.literal("mail-sentinel"),
-    lastPollAt: isoTimestampSchema.optional(),
-    lastAlertAt: isoTimestampSchema.optional(),
-    lastError: errorDetailSchema.optional(),
-    consecutiveFailures: z.number().int().min(0),
-  }),
+  bots: z.record(z.string().min(1), botRuntimeStatusSchema),
+  hostResources: z.array(hostResourceStateSchema),
   imap: z.object({
     lastCredentialTestAt: isoTimestampSchema.optional(),
     authStatus: z.enum(["ok", "failed", "unknown"]),
