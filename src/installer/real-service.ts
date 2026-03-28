@@ -933,12 +933,14 @@ export class RealInstallerService implements InstallerService {
           ? "fail"
           : gateway.state === "running" && healthProbe.ok
             ? "pass"
-            : gateway.state === "failed" || !healthProbe.ok
-              ? "fail"
-              : "warn",
+            : gateway.state === "running" && !healthProbe.ok
+              ? "warn"
+              : "fail",
         gateway.state === "running" && healthProbe.ok
           ? "OpenClaw gateway service is running and health probe succeeded"
-          : "OpenClaw gateway service health probe failed or service is not running",
+          : gateway.state === "running" && !healthProbe.ok
+            ? "OpenClaw gateway service is running but health probe did not succeed"
+            : "OpenClaw gateway service health probe failed or service is not running",
         {
           state: gateway.state,
           healthProbe: healthProbe.message,
