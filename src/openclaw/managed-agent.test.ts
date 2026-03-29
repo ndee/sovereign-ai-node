@@ -227,6 +227,89 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
     expect(calls.at(-1)).toContain("openclaw cron add --name mail-sentinel-poll");
   });
 
+  it("removes orphaned cron jobs when registering without a cron", async () => {
+    const calls: string[] = [];
+    const execRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        const serialized = [input.command, ...(input.args ?? [])].join(" ");
+        calls.push(serialized);
+        if (serialized === "openclaw cron list --json") {
+          return {
+            command: serialized,
+            exitCode: 0,
+            stdout: JSON.stringify({
+              jobs: [
+                {
+                  id: "aaaa1111-1111-1111-1111-111111111111",
+                  name: "mail-sentinel-poll",
+                  agentId: "mail-sentinel",
+                },
+                {
+                  id: "bbbb2222-2222-2222-2222-222222222222",
+                  name: "other-job",
+                  agentId: "other-agent",
+                },
+              ],
+            }),
+            stderr: "",
+          };
+        }
+        return {
+          command: serialized,
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        };
+      },
+    };
+
+    const registrar = new ShellOpenClawManagedAgentRegistrar(execRunner, createLogger());
+    const result = await registrar.register({
+      agentId: "mail-sentinel",
+      workspaceDir: "/tmp/ws",
+    });
+
+    expect(result.agentId).toBe("mail-sentinel");
+    expect(result.cronJobId).toBeUndefined();
+    expect(calls).toContain("openclaw cron rm aaaa1111-1111-1111-1111-111111111111");
+    expect(calls).not.toContain("openclaw cron rm bbbb2222-2222-2222-2222-222222222222");
+    expect(calls.every((entry) => !entry.includes("cron add"))).toBe(true);
+  });
+
+  it("skips orphan cleanup silently when cron listing fails", async () => {
+    const calls: string[] = [];
+    const execRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        const serialized = [input.command, ...(input.args ?? [])].join(" ");
+        calls.push(serialized);
+        if (serialized.includes("cron list")) {
+          return {
+            command: serialized,
+            exitCode: 1,
+            stdout: "",
+            stderr: "internal error: cron subsystem unavailable",
+          };
+        }
+        return {
+          command: serialized,
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        };
+      },
+    };
+
+    const registrar = new ShellOpenClawManagedAgentRegistrar(execRunner, createLogger());
+    const result = await registrar.register({
+      agentId: "mail-sentinel",
+      workspaceDir: "/tmp/ws",
+    });
+
+    expect(result.agentId).toBe("mail-sentinel");
+    expect(result.cronJobId).toBeUndefined();
+    expect(calls.every((entry) => !entry.includes("cron rm"))).toBe(true);
+  });
+
   it("retries cron listing when OpenClaw gateway is temporarily unavailable", async () => {
     const calls: string[] = [];
     let jsonListAttempts = 0;

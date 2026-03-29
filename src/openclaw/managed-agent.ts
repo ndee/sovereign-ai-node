@@ -84,6 +84,8 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
         commands: buildCronCommands(input),
         allowAlreadyExists: true,
       });
+    } else {
+      await this.removeOrphanedCronJobsForAgent(input.agentId);
     }
 
     this.logger.info(
@@ -136,6 +138,31 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
             stdout: truncateText(result.stdout, 1200),
           },
         };
+      }
+    }
+  }
+
+  private async removeOrphanedCronJobsForAgent(agentId: string): Promise<void> {
+    let jobs: CronListJob[];
+    try {
+      jobs = await this.listCronJobs();
+    } catch {
+      return;
+    }
+    const orphanedJobs = jobs.filter((job) => job.agentId === agentId);
+    for (const job of orphanedJobs) {
+      const result = await this.execRunner.run({
+        command: "openclaw",
+        args: ["cron", "rm", job.id],
+        options: {
+          timeout: OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS,
+          env: {
+            CI: "1",
+          },
+        },
+      });
+      if (result.exitCode === 0 || isNotFoundResult(result)) {
+        this.logger.info({ agentId, cronJobId: job.id }, "Removed orphaned OpenClaw cron job");
       }
     }
   }
