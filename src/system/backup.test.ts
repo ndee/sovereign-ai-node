@@ -158,8 +158,7 @@ describe("RealBackupService", () => {
       const itemKeys = result.manifest.items.map((i) => i.key);
       expect(itemKeys).toContain("postgres_dump");
       expect(itemKeys).toContain("synapse_signing_key");
-      expect(itemKeys).toContain("sovereign_config");
-      expect(itemKeys).toContain("secrets");
+      expect(itemKeys).toContain("sovereign_config_dir");
 
       const pgDumpCall = calls.find((c) => c.args?.includes("pg_dump"));
       expect(pgDumpCall).toBeDefined();

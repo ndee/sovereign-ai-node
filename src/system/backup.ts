@@ -109,39 +109,16 @@ export class RealBackupService implements BackupService {
         this.logger.warn("No bundled Matrix project directory found; skipping Matrix backup items");
       }
 
-      await this.collectFile(
-        stagingDir,
-        this.paths.configPath,
-        "config/sovereign-node.json5",
-        "sovereign_config",
-        "Sovereign Node configuration",
-        items,
-      );
       await this.collectDir(
         stagingDir,
-        this.paths.secretsDir,
-        "config/secrets",
-        "secrets",
-        "Secrets directory (passwords, API keys)",
-        items,
-      );
-      await this.collectFile(
-        stagingDir,
-        DEFAULT_INSTALL_REQUEST_FILE,
-        "config/install-request.json",
-        "install_request",
-        "Installation request parameters",
-        items,
-      );
-      await this.collectFile(
-        stagingDir,
-        this.paths.provenancePath,
-        "config/install-provenance.json",
-        "install_provenance",
-        "Installation provenance audit trail",
+        dirname(this.paths.configPath),
+        "config/sovereign-node",
+        "sovereign_config_dir",
+        "Sovereign Node configuration directory (/etc/sovereign-node)",
         items,
       );
       await this.collectAgentState(stagingDir, items);
+      await this.collectSystemdUnits(stagingDir, items);
       await this.collectDir(
         stagingDir,
         this.paths.openclawServiceHome,
@@ -230,6 +207,7 @@ export class RealBackupService implements BackupService {
 
       await this.restoreAgentState(extractDir, manifest, warnings);
       await this.restoreOpenclawHome(extractDir, manifest, warnings);
+      await this.restoreSystemdUnits(extractDir, manifest, warnings);
 
       if (projectDir !== null) {
         await this.restorePostgres(extractDir, projectDir, manifest, warnings);
@@ -512,6 +490,39 @@ export class RealBackupService implements BackupService {
     }
   }
 
+  private async collectSystemdUnits(
+    stagingDir: string,
+    items: BackupManifestItem[],
+  ): Promise<void> {
+    const systemdDir = "/etc/systemd/system";
+    try {
+      const entries = await readdir(systemdDir);
+      const sovereignUnits = entries.filter(
+        (e) => e.startsWith("sovereign-") && (e.endsWith(".service") || e.endsWith(".timer")),
+      );
+
+      if (sovereignUnits.length === 0) {
+        return;
+      }
+
+      const targetDir = join(stagingDir, "systemd");
+      await mkdir(targetDir, { recursive: true });
+
+      for (const unit of sovereignUnits) {
+        const content = await readFile(join(systemdDir, unit));
+        await writeFile(join(targetDir, unit), content);
+      }
+
+      items.push({
+        key: "systemd_units",
+        relativePath: "systemd",
+        description: "Sovereign systemd service and timer units",
+      });
+    } catch {
+      this.logger.info("No sovereign systemd units found");
+    }
+  }
+
   private async stopServices(projectDir: string | null, warnings: string[]): Promise<void> {
     const apiStop = await this.execRunner.run({
       command: "systemctl",
@@ -548,6 +559,18 @@ export class RealBackupService implements BackupService {
     manifest: BackupManifest,
     warnings: string[],
   ): Promise<void> {
+    const configDirItem = manifest.items.find((i) => i.key === "sovereign_config_dir");
+    if (configDirItem !== undefined && !configDirItem.optional) {
+      await this.restoreDir(
+        join(extractDir, configDirItem.relativePath),
+        dirname(this.paths.configPath),
+        warnings,
+        "sovereign config directory",
+      );
+      return;
+    }
+
+    // Backward compatibility: restore individual config files from older backups
     const configItem = manifest.items.find((i) => i.key === "sovereign_config");
     if (configItem !== undefined && !configItem.optional) {
       await this.restoreFile(
@@ -713,6 +736,37 @@ export class RealBackupService implements BackupService {
       warnings,
       "OpenClaw home",
     );
+  }
+
+  private async restoreSystemdUnits(
+    extractDir: string,
+    manifest: BackupManifest,
+    warnings: string[],
+  ): Promise<void> {
+    const item = manifest.items.find((i) => i.key === "systemd_units");
+    if (item === undefined || item.optional) return;
+
+    const source = join(extractDir, item.relativePath);
+    try {
+      await access(source, fsConstants.R_OK);
+    } catch {
+      return;
+    }
+
+    const systemdDir = "/etc/systemd/system";
+    const entries = await readdir(source);
+    for (const entry of entries) {
+      const content = await readFile(join(source, entry));
+      await writeFile(join(systemdDir, entry), content);
+    }
+
+    const reloadResult = await this.execRunner.run({
+      command: "systemctl",
+      args: ["daemon-reload"],
+    });
+    if (reloadResult.exitCode !== 0) {
+      warnings.push(`systemctl daemon-reload failed: ${reloadResult.stderr}`);
+    }
   }
 
   private async restorePostgres(
