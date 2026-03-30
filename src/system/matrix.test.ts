@@ -80,6 +80,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       installJobsDir: join(tempRoot, "install-jobs"),
       openclawServiceHome: join(tempRoot, "openclaw-home"),
       provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
     };
 
     const provisioner = new DockerComposeBundledMatrixProvisioner(
@@ -163,6 +164,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       installJobsDir: join(tempRoot, "install-jobs"),
       openclawServiceHome: join(tempRoot, "openclaw-home"),
       provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
     };
 
     const provisioner = new DockerComposeBundledMatrixProvisioner(
@@ -216,6 +218,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       installJobsDir: join(tempRoot, "install-jobs"),
       openclawServiceHome: join(tempRoot, "openclaw-home"),
       provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
     };
 
     const provisioner = new DockerComposeBundledMatrixProvisioner(
@@ -423,6 +426,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       installJobsDir: join(tempRoot, "install-jobs"),
       openclawServiceHome: join(tempRoot, "openclaw-home"),
       provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
     };
 
     const provisioner = new DockerComposeBundledMatrixProvisioner(
@@ -999,6 +1003,7 @@ const buildPaths = (tempRoot: string): SovereignPaths => ({
   installJobsDir: join(tempRoot, "install-jobs"),
   openclawServiceHome: join(tempRoot, "openclaw-home"),
   provenancePath: join(tempRoot, "install-provenance.json"),
+  backupsDir: join(tempRoot, "backups"),
 });
 
 const jsonResponse = (payload: unknown, status = 200): Response =>
