@@ -4469,6 +4469,270 @@ describe("RealInstallerService", () => {
     }
   });
 
+  it("repairs stale Matrix tokens during status and rewrites the OpenClaw runtime", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+    };
+    const priorOpenrouterApiKey = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "sk-or-test";
+
+    let gatewayRestarts = 0;
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async (opts) => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: opts.version,
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {
+          gatewayRestarts += 1;
+        },
+      },
+      managedAgentRegistrar: {
+        register: async (input) => ({
+          agentId: input.agentId,
+          workspaceDir: input.workspaceDir,
+          agentCommand: `openclaw agents upsert --id ${input.agentId}`,
+          ...(input.cron === undefined ? {} : { cronJobId: input.cron.id }),
+          ...(input.cron === undefined
+            ? {}
+            : { cronCommand: `openclaw cron add --name ${input.cron.id}` }),
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async (req) => ({
+          projectDir: join(tempRoot, "matrix"),
+          composeFilePath: join(tempRoot, "matrix", "compose.yaml"),
+          accessMode: "direct",
+          homeserverDomain: req.matrix.homeserverDomain,
+          publicBaseUrl: req.matrix.publicBaseUrl,
+          adminBaseUrl: "http://127.0.0.1:8008",
+          federationEnabled: req.matrix.federationEnabled ?? false,
+          tlsMode: "local-dev",
+        }),
+        bootstrapAccounts: async () => {
+          const operatorPasswordPath = join(paths.secretsDir, "matrix-operator.password");
+          const botPasswordPath = join(paths.secretsDir, "matrix-mail-sentinel.password");
+          await mkdir(paths.secretsDir, { recursive: true });
+          await writeFile(operatorPasswordPath, "operator-password\n", "utf8");
+          await writeFile(botPasswordPath, "mail-sentinel-password\n", "utf8");
+          return {
+            operator: {
+              localpart: "operator",
+              userId: "@operator:matrix.example.org",
+              passwordSecretRef: `file:${operatorPasswordPath}`,
+              accessToken: "operator-token",
+            },
+            bot: {
+              localpart: "mail-sentinel",
+              userId: "@mail-sentinel:matrix.example.org",
+              passwordSecretRef: `file:${botPasswordPath}`,
+              accessToken: "mail-sentinel-bootstrap-token",
+            },
+          };
+        },
+        bootstrapRoom: async () => ({
+          roomId: "!alerts:matrix.example.org",
+          roomName: "Sovereign Alerts",
+        }),
+        test: async (req) => ({
+          ok: true,
+          homeserverUrl: req.publicBaseUrl,
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async (input): Promise<ExecResult> => {
+          const lobster = maybeHandleInstalledLobsterExec(input);
+          if (lobster !== null) {
+            return lobster;
+          }
+          const serialized = [input.command, ...(input.args ?? [])].join(" ");
+          if (serialized === "openclaw health") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw gateway status") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "Service: systemd\nState: running",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw agents list") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "mail-sentinel",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw cron list") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "mail-sentinel-poll",
+              stderr: "",
+            };
+          }
+          if (serialized.startsWith("openclaw ")) {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+          return {
+            command: serialized,
+            exitCode: 1,
+            stdout: "",
+            stderr: "unexpected command",
+          };
+        },
+      },
+      fetchImpl: async (url, init) => {
+        const provisionResponse = buildManagedAgentMatrixProvisionResponse(url, init);
+        if (provisionResponse !== null) {
+          return provisionResponse;
+        }
+        const authorization = new Headers(init?.headers).get("Authorization") ?? "";
+        const token = authorization.replace(/^Bearer\s+/u, "");
+        const validTokens = new Set(["mail-sentinel-bootstrap-token", "mail-sentinel-token"]);
+        if (url.endsWith("/_matrix/client/v3/account/whoami")) {
+          return new Response(JSON.stringify({ user_id: "@mail-sentinel:matrix.example.org" }), {
+            status: validTokens.has(token) ? 200 : 401,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (url.includes("/joined_members")) {
+          return new Response(JSON.stringify({ joined: {} }), {
+            status: validTokens.has(token) ? 200 : 401,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (url.includes("/send/m.room.message/")) {
+          return new Response(JSON.stringify({ event_id: "$evt1" }), {
+            status: validTokens.has(token) ? 200 : 401,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+
+    try {
+      const req = buildInstallRequest();
+      req.openrouter = {
+        model: "qwen/qwen3.5-9b",
+        secretRef: "env:OPENROUTER_API_KEY",
+      };
+      req.bots = {
+        selected: ["mail-sentinel"],
+      };
+
+      const started = await service.startInstall(req);
+      expect(started.job.state).toBe("succeeded");
+
+      const runtimeConfigRaw = await readFile(paths.configPath, "utf8");
+      const runtimeConfig = JSON.parse(runtimeConfigRaw) as {
+        matrix?: {
+          bot?: {
+            accessTokenSecretRef?: string;
+          };
+        };
+        openclawProfile?: {
+          agents?: Array<{
+            id?: string;
+            matrix?: {
+              accessTokenSecretRef?: string;
+            };
+          }>;
+        };
+      };
+      const botTokenPath =
+        runtimeConfig.matrix?.bot?.accessTokenSecretRef?.startsWith("file:") === true
+          ? runtimeConfig.matrix.bot.accessTokenSecretRef.slice("file:".length)
+          : "";
+      const agentTokenPath =
+        runtimeConfig.openclawProfile?.agents
+          ?.find((agent) => agent.id === "mail-sentinel")
+          ?.matrix?.accessTokenSecretRef?.startsWith("file:") === true
+          ? (runtimeConfig.openclawProfile.agents
+              .find((agent) => agent.id === "mail-sentinel")
+              ?.matrix?.accessTokenSecretRef?.slice("file:".length) ?? "")
+          : "";
+      const openclawConfigPath = join(paths.openclawServiceHome, ".openclaw", "openclaw.json5");
+      const initialOpenClawConfig = await readFile(openclawConfigPath, "utf8");
+      expect(botTokenPath.length).toBeGreaterThan(0);
+      expect(agentTokenPath.length).toBeGreaterThan(0);
+      expect(initialOpenClawConfig).toContain("mail-sentinel-token");
+      const restartCountBeforeRepair = gatewayRestarts;
+
+      await writeFile(botTokenPath, "stale-primary-token\n", "utf8");
+      await writeFile(agentTokenPath, "stale-agent-token\n", "utf8");
+      await writeFile(
+        openclawConfigPath,
+        initialOpenClawConfig.replaceAll("mail-sentinel-token", "stale-agent-token"),
+        "utf8",
+      );
+      delete process.env.OPENROUTER_API_KEY;
+
+      const status = await service.getStatus();
+
+      expect(status.matrix.roomReachable).toBe(true);
+      expect((await readFile(botTokenPath, "utf8")).trim()).toBe("mail-sentinel-token");
+      expect((await readFile(agentTokenPath, "utf8")).trim()).toBe("mail-sentinel-token");
+      expect(await readFile(openclawConfigPath, "utf8")).toBe(initialOpenClawConfig);
+      expect(gatewayRestarts).toBe(restartCountBeforeRepair + 1);
+    } finally {
+      if (priorOpenrouterApiKey === undefined) {
+        delete process.env.OPENROUTER_API_KEY;
+      } else {
+        process.env.OPENROUTER_API_KEY = priorOpenrouterApiKey;
+      }
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("treats disabled systemd host resources as healthy when they match desired state", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {
