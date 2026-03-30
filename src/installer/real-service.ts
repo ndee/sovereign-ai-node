@@ -5224,6 +5224,77 @@ export default function (api) {
     }
   }
 
+  private async validateAndRefreshBotToken(runtimeConfig: RuntimeConfig): Promise<void> {
+    const tokenRef = runtimeConfig.matrix.bot.accessTokenSecretRef;
+    const passwordRef = runtimeConfig.matrix.bot.passwordSecretRef;
+    if (tokenRef === undefined || passwordRef === undefined) {
+      return;
+    }
+
+    let currentToken: string;
+    try {
+      currentToken = await this.resolveSecretRef(tokenRef);
+    } catch {
+      this.logger.warn("Bot access token file is missing or empty; will attempt re-login");
+      currentToken = "";
+    }
+
+    if (currentToken.length > 0) {
+      const whoamiEndpoint = new URL(
+        "/_matrix/client/v3/account/whoami",
+        ensureTrailingSlash(runtimeConfig.matrix.adminBaseUrl),
+      ).toString();
+      try {
+        const response = await this.fetchImpl(whoamiEndpoint, {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${currentToken}`,
+            Accept: "application/json",
+          },
+        });
+        if (response.ok) {
+          return;
+        }
+      } catch {
+        // Network error — proceed to re-login
+      }
+      this.logger.warn("Bot Matrix access token is invalid; re-logging in to refresh");
+    }
+
+    const localpart = runtimeConfig.matrix.bot.localpart;
+    if (localpart === undefined || localpart.length === 0) {
+      this.logger.warn("Bot localpart is not set; cannot refresh token");
+      return;
+    }
+    let password: string;
+    try {
+      password = await this.resolveSecretRef(passwordRef);
+    } catch {
+      this.logger.warn("Bot password secret is missing; cannot refresh token");
+      return;
+    }
+
+    const expectedUserId = runtimeConfig.matrix.bot.userId;
+    const session = await this.loginMatrixUser({
+      adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+      localpart,
+      password,
+      expectedUserId,
+    });
+
+    await this.writeManagedSecretFile(
+      tokenRef.startsWith("file:")
+        ? (tokenRef.slice("file:".length).split("/").pop() ?? "matrix-bot-access-token")
+        : "matrix-bot-access-token",
+      session.accessToken,
+    );
+
+    this.logger.info(
+      { userId: session.userId },
+      "Refreshed bot Matrix access token after detecting stale token",
+    );
+  }
+
   private async probeMatrixRoomReachable(runtimeConfig: RuntimeConfig): Promise<boolean> {
     try {
       const accessToken = await this.resolveSecretRef(
@@ -5741,6 +5812,7 @@ export default function (api) {
               ? {}
               : { relayEnrollment: stepState.relayEnrollment }),
           });
+          await this.validateAndRefreshBotToken(runtimeConfig);
           if (stepState.selectedBots === undefined) {
             stepState.selectedBots = (
               await this.resolveRequestedBots(stepState.effectiveRequest ?? req)
