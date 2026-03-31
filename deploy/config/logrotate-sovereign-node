@@ -1,0 +1,9 @@
+/var/log/sovereign-node/*.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0644 sovereign-node sovereign-node
+}

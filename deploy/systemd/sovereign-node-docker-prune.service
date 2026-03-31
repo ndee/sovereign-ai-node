@@ -1,0 +1,6 @@
+[Unit]
+Description=Sovereign Node Docker image prune
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker image prune -f
