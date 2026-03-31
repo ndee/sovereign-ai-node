@@ -7254,9 +7254,10 @@ export default function (api) {
 
       const health = await this.probeOpenClawHealth();
       if (!health.ok) {
-        if (health.message.trim().length === 0) {
+        if (gateway.state === "running") {
           this.logger.warn(
-            "OpenClaw health probe returned no details during smoke checks; continuing because gateway service and runtime wiring checks already passed",
+            { health: health.message },
+            "OpenClaw health probe failed during smoke checks but gateway service is running; continuing",
           );
         } else {
           throw {
