@@ -88,6 +88,7 @@ import type {
   BundledMatrixRoomBootstrapResult,
 } from "../system/matrix.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
+import { formatGiB, parseDfAvailableBytes } from "../system/preflight.js";
 import {
   type AgentTemplateManifest,
   CORE_TEMPLATE_MANIFESTS,
@@ -233,6 +234,8 @@ const OPENCLAW_RUNTIME_SETTLE_DELAY_MS = 5_000;
 const SYSTEM_GATEWAY_MATRIX_WAIT_ATTEMPTS = 120;
 const SYSTEM_GATEWAY_MATRIX_WAIT_DELAY_SECONDS = 2;
 const SYSTEM_GATEWAY_MATRIX_WAIT_TIMEOUT_SECONDS = 5;
+const DOCTOR_DISK_WARN_BYTES = 2 * 1024 * 1024 * 1024;
+const DOCTOR_DISK_FAIL_BYTES = 500 * 1024 * 1024;
 const LOBSTER_CLI_PROBE_TIMEOUT_MS = 20_000;
 const LOBSTER_CLI_INSTALL_TIMEOUT_MS = 5 * 60_000;
 const SOVEREIGN_PINNED_LOBSTER_PACKAGE_NAME = "@clawdbot/lobster";
@@ -1080,6 +1083,35 @@ export class RealInstallerService implements InstallerService {
         }
       }
     }
+    const dfResult = await this.safeExec("df", ["-Pk", "/"]);
+    if (dfResult.ok && dfResult.result.exitCode === 0) {
+      const parsed = parseDfAvailableBytes(dfResult.result.stdout);
+      if (parsed !== null) {
+        const diskStatus: CheckResult["status"] =
+          parsed.availableBytes < DOCTOR_DISK_FAIL_BYTES
+            ? "fail"
+            : parsed.availableBytes < DOCTOR_DISK_WARN_BYTES
+              ? "warn"
+              : "pass";
+        checks.push(
+          check(
+            "disk-space-root",
+            "Root filesystem free space",
+            diskStatus,
+            diskStatus === "pass"
+              ? `Sufficient disk space on / (${formatGiB(parsed.availableBytes)} GiB free)`
+              : `Low disk space on / (${formatGiB(parsed.availableBytes)} GiB free)`,
+            {
+              availableBytes: parsed.availableBytes,
+              warnThresholdBytes: DOCTOR_DISK_WARN_BYTES,
+              failThresholdBytes: DOCTOR_DISK_FAIL_BYTES,
+              mountPoint: parsed.mountPoint,
+            },
+          ),
+        );
+      }
+    }
+
     checks.push(
       check(
         "install-provenance",
