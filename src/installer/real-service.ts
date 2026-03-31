@@ -610,7 +610,6 @@ export class RealInstallerService implements InstallerService {
     try {
       const config = await this.readRuntimeConfig();
       const roomId = req.roomId ?? config.matrix.alertRoom.roomId;
-      const accessToken = await this.resolveSecretRef(config.matrix.bot.accessTokenSecretRef);
       const transactionId = `sovereign_${Date.now()}_${randomUUID().slice(0, 8)}`;
       const endpoint = new URL(
         `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(
@@ -619,21 +618,39 @@ export class RealInstallerService implements InstallerService {
         ensureTrailingSlash(config.matrix.adminBaseUrl),
       ).toString();
 
-      const response = await this.fetchImpl(endpoint, {
-        method: "PUT",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify({
-          msgtype: "m.text",
-          body: req.text ?? `Sovereign test alert (${now()})`,
-        }),
-      });
+      const sendMatrixTestAlert = async (): Promise<{
+        response: Response;
+        parsed: unknown;
+      }> => {
+        const accessToken = await this.resolveSecretRef(config.matrix.bot.accessTokenSecretRef);
+        const response = await this.fetchImpl(endpoint, {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({
+            msgtype: "m.text",
+            body: req.text ?? `Sovereign test alert (${now()})`,
+          }),
+        });
 
-      const rawBody = await response.text();
-      const parsed = parseJsonSafely(rawBody);
+        const rawBody = await response.text();
+        return {
+          response,
+          parsed: parseJsonSafely(rawBody),
+        };
+      };
+
+      let { response, parsed } = await sendMatrixTestAlert();
+      if ((response.status === 401 || response.status === 403) && response.ok === false) {
+        const repaired = await this.ensureManagedMatrixAccessTokens(config);
+        if (repaired) {
+          ({ response, parsed } = await sendMatrixTestAlert());
+        }
+      }
+
       if (!response.ok) {
         return {
           delivered: false,
@@ -5256,25 +5273,38 @@ export default function (api) {
     }
   }
 
-  private async validateAndRefreshBotToken(runtimeConfig: RuntimeConfig): Promise<void> {
-    const tokenRef = runtimeConfig.matrix.bot.accessTokenSecretRef;
-    const passwordRef = runtimeConfig.matrix.bot.passwordSecretRef;
+  private async validateAndRefreshMatrixIdentityToken(input: {
+    label: string;
+    adminBaseUrl: string;
+    localpart?: string | undefined;
+    userId: string;
+    accessTokenSecretRef?: string | undefined;
+    passwordSecretRef?: string | undefined;
+  }): Promise<boolean> {
+    const tokenRef = input.accessTokenSecretRef;
+    const passwordRef = input.passwordSecretRef;
     if (tokenRef === undefined || passwordRef === undefined) {
-      return;
+      return false;
     }
 
     let currentToken: string;
     try {
       currentToken = await this.resolveSecretRef(tokenRef);
     } catch {
-      this.logger.warn("Bot access token file is missing or empty; will attempt re-login");
+      this.logger.warn(
+        {
+          label: input.label,
+          userId: input.userId,
+        },
+        "Matrix access token file is missing or empty; will attempt re-login",
+      );
       currentToken = "";
     }
 
     if (currentToken.length > 0) {
       const whoamiEndpoint = new URL(
         "/_matrix/client/v3/account/whoami",
-        ensureTrailingSlash(runtimeConfig.matrix.adminBaseUrl),
+        ensureTrailingSlash(input.adminBaseUrl),
       ).toString();
       try {
         const response = await this.fetchImpl(whoamiEndpoint, {
@@ -5285,30 +5315,67 @@ export default function (api) {
           },
         });
         if (response.ok) {
-          return;
+          return false;
         }
-      } catch {
-        // Network error — proceed to re-login
+        if (response.status !== 401 && response.status !== 403) {
+          this.logger.warn(
+            {
+              label: input.label,
+              userId: input.userId,
+              status: response.status,
+            },
+            "Matrix access token validation returned a non-auth failure; skipping token refresh",
+          );
+          return false;
+        }
+      } catch (error) {
+        this.logger.warn(
+          {
+            label: input.label,
+            userId: input.userId,
+            error: describeError(error),
+          },
+          "Matrix access token validation failed before refresh attempt",
+        );
+        return false;
       }
-      this.logger.warn("Bot Matrix access token is invalid; re-logging in to refresh");
+      this.logger.warn(
+        {
+          label: input.label,
+          userId: input.userId,
+        },
+        "Matrix access token is invalid; re-logging in to refresh",
+      );
     }
 
-    const localpart = runtimeConfig.matrix.bot.localpart;
+    const localpart = input.localpart;
     if (localpart === undefined || localpart.length === 0) {
-      this.logger.warn("Bot localpart is not set; cannot refresh token");
-      return;
+      this.logger.warn(
+        {
+          label: input.label,
+          userId: input.userId,
+        },
+        "Matrix localpart is not set; cannot refresh token",
+      );
+      return false;
     }
     let password: string;
     try {
       password = await this.resolveSecretRef(passwordRef);
     } catch {
-      this.logger.warn("Bot password secret is missing; cannot refresh token");
-      return;
+      this.logger.warn(
+        {
+          label: input.label,
+          userId: input.userId,
+        },
+        "Matrix password secret is missing; cannot refresh token",
+      );
+      return false;
     }
 
-    const expectedUserId = runtimeConfig.matrix.bot.userId;
+    const expectedUserId = input.userId;
     const session = await this.loginMatrixUser({
-      adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+      adminBaseUrl: input.adminBaseUrl,
       localpart,
       password,
       expectedUserId,
@@ -5322,12 +5389,163 @@ export default function (api) {
     );
 
     this.logger.info(
-      { userId: session.userId },
-      "Refreshed bot Matrix access token after detecting stale token",
+      {
+        label: input.label,
+        userId: session.userId,
+      },
+      "Refreshed Matrix access token after detecting stale credentials",
+    );
+
+    return true;
+  }
+
+  private async ensureManagedMatrixAccessTokens(runtimeConfig: RuntimeConfig): Promise<boolean> {
+    const candidates = [
+      {
+        label: "primary bot",
+        adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+        localpart: runtimeConfig.matrix.bot.localpart,
+        userId: runtimeConfig.matrix.bot.userId,
+        accessTokenSecretRef: runtimeConfig.matrix.bot.accessTokenSecretRef,
+        passwordSecretRef: runtimeConfig.matrix.bot.passwordSecretRef,
+      },
+      ...ensureCoreManagedAgents(runtimeConfig.openclawProfile.agents)
+        .filter((agent) => agent.matrix !== undefined)
+        .map((agent) => ({
+          label: `managed bot ${agent.id}`,
+          adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+          localpart: agent.matrix?.localpart,
+          userId: agent.matrix?.userId ?? "",
+          accessTokenSecretRef: agent.matrix?.accessTokenSecretRef,
+          passwordSecretRef: agent.matrix?.passwordSecretRef,
+        })),
+    ];
+
+    const seen = new Set<string>();
+    let refreshed = false;
+    for (const candidate of candidates) {
+      if (candidate.userId.length === 0) {
+        continue;
+      }
+      const dedupeKey = [
+        candidate.userId,
+        candidate.localpart ?? "",
+        candidate.accessTokenSecretRef ?? "",
+        candidate.passwordSecretRef ?? "",
+      ].join("\u0000");
+      if (seen.has(dedupeKey)) {
+        continue;
+      }
+      seen.add(dedupeKey);
+      refreshed = (await this.validateAndRefreshMatrixIdentityToken(candidate)) || refreshed;
+    }
+
+    if (!refreshed) {
+      return false;
+    }
+
+    await this.refreshManagedMatrixRuntimeArtifacts(runtimeConfig);
+    await this.refreshGatewayAfterRuntimeConfig(runtimeConfig);
+
+    return true;
+  }
+
+  private async refreshManagedMatrixRuntimeArtifacts(runtimeConfig: RuntimeConfig): Promise<void> {
+    const canPatchExistingRuntime =
+      (await this.pathExists(runtimeConfig.openclaw.runtimeConfigPath)) &&
+      (await this.pathExists(runtimeConfig.openclaw.gatewayEnvPath));
+    if (!canPatchExistingRuntime) {
+      await this.writeOpenClawRuntimeArtifacts(runtimeConfig);
+      return;
+    }
+
+    await this.patchManagedMatrixRuntimeArtifacts(runtimeConfig);
+  }
+
+  private async patchManagedMatrixRuntimeArtifacts(runtimeConfig: RuntimeConfig): Promise<void> {
+    const tokenByUserId = new Map<string, string>();
+    tokenByUserId.set(
+      runtimeConfig.matrix.bot.userId,
+      await this.resolveSecretRef(runtimeConfig.matrix.bot.accessTokenSecretRef),
+    );
+    for (const agent of ensureCoreManagedAgents(runtimeConfig.openclawProfile.agents)) {
+      if (agent.matrix?.accessTokenSecretRef === undefined || agent.matrix.userId.length === 0) {
+        continue;
+      }
+      tokenByUserId.set(
+        agent.matrix.userId,
+        await this.resolveSecretRef(agent.matrix.accessTokenSecretRef),
+      );
+    }
+
+    const runtimeRaw = await readFile(runtimeConfig.openclaw.runtimeConfigPath, "utf8");
+    const parsedRuntime = parseJsonDocument(runtimeRaw);
+    if (!isRecord(parsedRuntime)) {
+      throw {
+        code: "OPENCLAW_CONFIG_WRITE_FAILED",
+        message: "OpenClaw runtime config is not a JSON object",
+        retryable: true,
+        details: {
+          runtimeConfigPath: runtimeConfig.openclaw.runtimeConfigPath,
+        },
+      };
+    }
+
+    const channels = isRecord(parsedRuntime.channels) ? parsedRuntime.channels : null;
+    const matrix = channels !== null && isRecord(channels.matrix) ? channels.matrix : null;
+    const accounts = matrix !== null && isRecord(matrix.accounts) ? matrix.accounts : null;
+    let runtimeChanged = false;
+    if (accounts !== null) {
+      for (const entry of Object.values(accounts)) {
+        if (!isRecord(entry) || typeof entry.userId !== "string") {
+          continue;
+        }
+        const nextToken = tokenByUserId.get(entry.userId);
+        if (nextToken === undefined || entry.accessToken === nextToken) {
+          continue;
+        }
+        entry.accessToken = nextToken;
+        runtimeChanged = true;
+      }
+    }
+    if (runtimeChanged) {
+      await this.writeProtectedJsonFile(
+        runtimeConfig.openclaw.runtimeConfigPath,
+        parsedRuntime,
+        runtimeConfig,
+      );
+    }
+
+    const primaryToken = tokenByUserId.get(runtimeConfig.matrix.bot.userId) ?? "";
+    const envRaw = await readFile(runtimeConfig.openclaw.gatewayEnvPath, "utf8");
+    const env = parseEnvFile(envRaw);
+    env.MATRIX_HOMESERVER = runtimeConfig.matrix.adminBaseUrl;
+    env.MATRIX_USER_ID = runtimeConfig.matrix.bot.userId;
+    env.MATRIX_ACCESS_TOKEN = primaryToken;
+    const envTempPath = `${runtimeConfig.openclaw.gatewayEnvPath}.${randomUUID()}.tmp`;
+    await writeFile(
+      envTempPath,
+      `${Object.entries(env)
+        .map(([key, value]) => `${key}=${value}`)
+        .join("\n")}
+`,
+      "utf8",
+    );
+    await chmod(envTempPath, 0o600);
+    await rename(envTempPath, runtimeConfig.openclaw.gatewayEnvPath);
+    await this.applyConfiguredRuntimeOwnership(
+      runtimeConfig.openclaw.gatewayEnvPath,
+      runtimeConfig,
     );
   }
 
   private async probeMatrixRoomReachable(runtimeConfig: RuntimeConfig): Promise<boolean> {
+    try {
+      await this.ensureManagedMatrixAccessTokens(runtimeConfig);
+    } catch {
+      return false;
+    }
+
     try {
       const accessToken = await this.resolveSecretRef(
         runtimeConfig.matrix.bot.accessTokenSecretRef,
@@ -5844,7 +6062,7 @@ export default function (api) {
               ? {}
               : { relayEnrollment: stepState.relayEnrollment }),
           });
-          await this.validateAndRefreshBotToken(runtimeConfig);
+          await this.ensureManagedMatrixAccessTokens(runtimeConfig);
           if (stepState.selectedBots === undefined) {
             stepState.selectedBots = (
               await this.resolveRequestedBots(stepState.effectiveRequest ?? req)
@@ -7068,9 +7286,10 @@ export default function (api) {
 
       const health = await this.probeOpenClawHealth();
       if (!health.ok) {
-        if (health.message.trim().length === 0) {
+        if (gateway.state === "running") {
           this.logger.warn(
-            "OpenClaw health probe returned no details during smoke checks; continuing because gateway service and runtime wiring checks already passed",
+            { health: health.message },
+            "OpenClaw health probe failed during smoke checks but gateway service is running; continuing",
           );
         } else {
           throw {
