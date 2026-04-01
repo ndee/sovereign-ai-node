@@ -1094,7 +1094,105 @@ export class RealInstallerService implements InstallerService {
   }
 
   async reconfigureMatrix(req: ReconfigureMatrixRequest): Promise<ReconfigureResult> {
-    return this.stubService.reconfigureMatrix(req);
+    const requestedFederation = req.matrix?.federationEnabled;
+    if (requestedFederation === undefined) {
+      return this.stubService.reconfigureMatrix(req);
+    }
+
+    const runtimeConfig = await this.readRuntimeConfig();
+
+    if (requestedFederation && runtimeConfig.matrix.accessMode === "relay") {
+      throw {
+        code: "MATRIX_RELAY_FEDERATION_UNSUPPORTED",
+        message: "Managed relay mode does not support Matrix federation in v1",
+        retryable: false,
+      };
+    }
+
+    const federationChanged = requestedFederation !== runtimeConfig.matrix.federationEnabled;
+    const changed: string[] = [];
+    let gatewayRestarted = false;
+
+    if (federationChanged) {
+      changed.push("matrix.federationEnabled");
+
+      const raw = await readFile(this.paths.configPath, "utf8");
+      const parsed = parseJsonDocument(raw);
+      if (!isRecord(parsed)) {
+        throw {
+          code: "CONFIG_INVALID",
+          message: "Sovereign runtime config does not match expected shape",
+          retryable: false,
+          details: { configPath: this.paths.configPath },
+        };
+      }
+
+      const matrixConfig = isRecord(parsed.matrix) ? parsed.matrix : {};
+      matrixConfig.federationEnabled = requestedFederation;
+      parsed.matrix = matrixConfig;
+      parsed.generatedAt = now();
+      await this.writeInstallerJsonFile(this.paths.configPath, parsed, 0o644);
+
+      const nextRuntimeConfig: RuntimeConfig = {
+        ...runtimeConfig,
+        matrix: {
+          ...runtimeConfig.matrix,
+          federationEnabled: requestedFederation,
+        },
+      };
+
+      if (
+        runtimeConfig.matrix.projectDir !== undefined &&
+        this.matrixProvisioner.updateFederationConfig !== undefined
+      ) {
+        const projectDir = runtimeConfig.matrix.projectDir;
+        await this.matrixProvisioner.updateFederationConfig({
+          federationEnabled: requestedFederation,
+          projectDir,
+          composeFilePath: join(projectDir, "compose.yaml"),
+        });
+      }
+
+      await this.writeOpenClawRuntimeArtifacts(nextRuntimeConfig);
+      this.setManagedOpenClawEnv(nextRuntimeConfig);
+      await this.refreshGatewayAfterRuntimeConfig(nextRuntimeConfig);
+      gatewayRestarted = true;
+    }
+
+    const requestUpdate = await this.updateInstallRequestFederation({
+      federationEnabled: requestedFederation,
+      changed: federationChanged,
+    });
+    changed.push(...requestUpdate.changed);
+
+    return {
+      target: "matrix",
+      changed,
+      restartRequiredServices: gatewayRestarted
+        ? ["openclaw-gateway", ...(federationChanged ? ["synapse"] : [])]
+        : [],
+      validation: [
+        check(
+          "matrix-federation",
+          "Matrix federation config",
+          "pass",
+          federationChanged
+            ? `Matrix federation ${requestedFederation ? "enabled" : "disabled"}`
+            : "Matrix federation config already matched the requested value",
+        ),
+        ...(gatewayRestarted
+          ? [
+              check(
+                "openclaw-gateway-restart",
+                "OpenClaw gateway restart",
+                "pass",
+                "OpenClaw gateway restarted with updated federation settings",
+              ),
+            ]
+          : []),
+        ...requestUpdate.validation,
+      ],
+    };
   }
 
   async reconfigureOpenrouter(req: ReconfigureOpenrouterRequest): Promise<ReconfigureResult> {
@@ -7348,6 +7446,101 @@ export default function (api) {
     };
   }
 
+  private async updateInstallRequestFederation(input: {
+    federationEnabled: boolean;
+    changed: boolean;
+  }): Promise<{ changed: string[]; validation: CheckResult[] }> {
+    const requestPath = this.getInstallRequestPath();
+    let raw = "";
+    try {
+      raw = await readFile(requestPath, "utf8");
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return {
+          changed: [],
+          validation: [
+            check(
+              "install-request-sync",
+              "Saved install request sync",
+              "warn",
+              "Saved install request file was not found; future installer updates will keep the previous federation settings until the request file is refreshed",
+              { requestFile: requestPath },
+            ),
+          ],
+        };
+      }
+      throw {
+        code: "REQUEST_UPDATE_FAILED",
+        message: "Failed to read the saved install request file",
+        retryable: false,
+        details: { requestFile: requestPath, error: describeError(error) },
+      };
+    }
+
+    const parsed = parseJsonDocument(raw);
+    const validated = installRequestSchema.safeParse(parsed);
+    if (!validated.success) {
+      return {
+        changed: [],
+        validation: [
+          check(
+            "install-request-sync",
+            "Saved install request sync",
+            "warn",
+            "Saved install request could not be updated because it is invalid",
+            { requestFile: requestPath },
+          ),
+        ],
+      };
+    }
+
+    const requestPayload = validated.data;
+    const changed: string[] = [];
+    if (input.changed && requestPayload.matrix.federationEnabled !== input.federationEnabled) {
+      requestPayload.matrix.federationEnabled = input.federationEnabled;
+      changed.push("request.matrix.federationEnabled");
+    }
+
+    if (changed.length === 0) {
+      return {
+        changed,
+        validation: [
+          check(
+            "install-request-sync",
+            "Saved install request sync",
+            "pass",
+            "Saved install request already matched the current federation settings",
+            { requestFile: requestPath },
+          ),
+        ],
+      };
+    }
+
+    try {
+      await this.writeInstallerJsonFile(requestPath, requestPayload, 0o640);
+    } catch (error) {
+      throw {
+        code: "REQUEST_UPDATE_FAILED",
+        message: "Failed to write the saved install request file",
+        retryable: false,
+        details: { requestFile: requestPath, error: describeError(error) },
+      };
+    }
+
+    return {
+      changed,
+      validation: [
+        check(
+          "install-request-sync",
+          "Saved install request sync",
+          "pass",
+          "Saved install request updated to match the new federation settings",
+          { requestFile: requestPath },
+        ),
+      ],
+    };
+  }
+
   private async refreshGatewayAfterRuntimeConfig(runtimeConfig: RuntimeConfig): Promise<void> {
     if (this.shouldPreferSystemGatewayService(runtimeConfig)) {
       const started = await this.ensureSystemGatewayServiceFallback(runtimeConfig);
@@ -7934,6 +8127,7 @@ export default function (api) {
       ...operatorAllowlist,
       ...(await this.listInvitedHumanMatrixUserIds(runtimeConfig)),
     ]);
+    const federationOpen = runtimeConfig.matrix.federationEnabled;
     const pluginEntries: Record<string, unknown> = {
       matrix: {
         enabled: true,
@@ -7963,8 +8157,8 @@ export default function (api) {
         accessToken: string;
         dm?: {
           enabled: boolean;
-          policy: "allowlist";
-          allowFrom: string[];
+          policy?: "allowlist";
+          allowFrom?: string[];
         };
         groupPolicy?: "allowlist";
         groupAllowFrom?: string[];
@@ -8053,18 +8247,22 @@ export default function (api) {
         homeserver: runtimeConfig.matrix.adminBaseUrl,
         userId: agent.matrix.userId,
         accessToken: await this.resolveSecretRef(agent.matrix.accessTokenSecretRef),
-        dm: {
-          enabled: routing.dmEnabled,
-          policy: "allowlist",
-          allowFrom: matrixParticipantAllowlist,
-        },
-        groupPolicy: "allowlist",
-        groupAllowFrom: matrixParticipantAllowlist,
-        groups: buildMatrixGroupEntries({
-          users: matrixParticipantAllowlist,
-          autoReply: routing.alertRoom.autoReply,
-          requireMention: routing.alertRoom.requireMention,
-        }),
+        ...(federationOpen
+          ? { dm: { enabled: routing.dmEnabled } }
+          : {
+              dm: {
+                enabled: routing.dmEnabled,
+                policy: "allowlist" as const,
+                allowFrom: matrixParticipantAllowlist,
+              },
+              groupPolicy: "allowlist" as const,
+              groupAllowFrom: matrixParticipantAllowlist,
+              groups: buildMatrixGroupEntries({
+                users: matrixParticipantAllowlist,
+                autoReply: routing.alertRoom.autoReply,
+                requireMention: routing.alertRoom.requireMention,
+              }),
+            }),
       };
     }
     if (hasSharedServiceBot || Object.keys(matrixAccounts).length === 0) {
@@ -8072,18 +8270,22 @@ export default function (api) {
         homeserver: runtimeConfig.matrix.adminBaseUrl,
         userId: runtimeConfig.matrix.bot.userId,
         accessToken: await this.resolveSecretRef(runtimeConfig.matrix.bot.accessTokenSecretRef),
-        dm: {
-          enabled: true,
-          policy: "allowlist",
-          allowFrom: matrixParticipantAllowlist,
-        },
-        groupPolicy: "allowlist",
-        groupAllowFrom: matrixParticipantAllowlist,
-        groups: buildMatrixGroupEntries({
-          users: matrixParticipantAllowlist,
-          autoReply: true,
-          requireMention: false,
-        }),
+        ...(federationOpen
+          ? { dm: { enabled: true } }
+          : {
+              dm: {
+                enabled: true,
+                policy: "allowlist" as const,
+                allowFrom: matrixParticipantAllowlist,
+              },
+              groupPolicy: "allowlist" as const,
+              groupAllowFrom: matrixParticipantAllowlist,
+              groups: buildMatrixGroupEntries({
+                users: matrixParticipantAllowlist,
+                autoReply: true,
+                requireMention: false,
+              }),
+            }),
       };
     }
 
@@ -8119,17 +8321,21 @@ export default function (api) {
             : {
                 accounts: matrixAccounts,
               }),
-          dm: {
-            policy: "allowlist" as const,
-            allowFrom: matrixParticipantAllowlist,
-          },
-          groupPolicy: "allowlist" as const,
-          groupAllowFrom: matrixParticipantAllowlist,
-          groups: buildMatrixGroupEntries({
-            users: matrixParticipantAllowlist,
-            autoReply: true,
-            requireMention: false,
-          }),
+          ...(federationOpen
+            ? {}
+            : {
+                dm: {
+                  policy: "allowlist" as const,
+                  allowFrom: matrixParticipantAllowlist,
+                },
+                groupPolicy: "allowlist" as const,
+                groupAllowFrom: matrixParticipantAllowlist,
+                groups: buildMatrixGroupEntries({
+                  users: matrixParticipantAllowlist,
+                  autoReply: true,
+                  requireMention: false,
+                }),
+              }),
         },
       },
       agents: {

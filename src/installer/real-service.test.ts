@@ -7426,4 +7426,384 @@ describe("RealInstallerService", () => {
       await rm(tempRoot, { recursive: true, force: true });
     }
   });
+
+  it("omits DM and group allowlists from OpenClaw config when federation is enabled", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+    };
+    await writeDedicatedBotRuntimeArtifacts(paths);
+
+    // Set federationEnabled: true in the runtime config
+    const raw = await readFile(paths.configPath, "utf8");
+    const parsed = JSON.parse(raw) as { matrix?: { federationEnabled?: boolean } };
+    parsed.matrix = { ...parsed.matrix, federationEnabled: true };
+    await writeFile(paths.configPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+
+    const priorOpenrouterApiKey = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "sk-or-test";
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert",
+          cronCommand: "openclaw cron add",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      fetchImpl: async (input, init) => {
+        const url = String(input);
+        return (
+          buildManagedAgentMatrixProvisionResponse(url, init) ??
+          new Response("{}", { status: 404, headers: { "Content-Type": "application/json" } })
+        );
+      },
+    });
+
+    try {
+      // Trigger an invite which regenerates the OpenClaw config with the current federationEnabled=true
+      const issued = await service.inviteMatrixUser({ username: "satoshi" });
+      expect(issued.username).toBe("@satoshi:matrix.example.org");
+
+      const openclawConfigRaw = await readFile(
+        join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
+        "utf8",
+      );
+      const openclawConfig = JSON.parse(openclawConfigRaw) as {
+        channels?: {
+          matrix?: {
+            dm?: { policy?: string; allowFrom?: string[] };
+            groupPolicy?: string;
+            groupAllowFrom?: string[];
+            groups?: Record<string, { users?: string[] }>;
+            accounts?: Record<
+              string,
+              {
+                dm?: { enabled?: boolean; policy?: string; allowFrom?: string[] };
+                groupPolicy?: string;
+                groupAllowFrom?: string[];
+                groups?: Record<string, { users?: string[] }>;
+              }
+            >;
+          };
+        };
+      };
+
+      // Channel-level: no DM policy, no group policy when federation is open
+      expect(openclawConfig.channels?.matrix?.dm).toBeUndefined();
+      expect(openclawConfig.channels?.matrix?.groupPolicy).toBeUndefined();
+      expect(openclawConfig.channels?.matrix?.groupAllowFrom).toBeUndefined();
+      expect(openclawConfig.channels?.matrix?.groups).toBeUndefined();
+
+      // Per-account: DM enabled but no policy/allowFrom, no group policy
+      const btcAccount = openclawConfig.channels?.matrix?.accounts?.["bitcoin-skill-match"];
+      expect(btcAccount?.dm?.enabled).toBe(true);
+      expect(btcAccount?.dm?.policy).toBeUndefined();
+      expect(btcAccount?.dm?.allowFrom).toBeUndefined();
+      expect(btcAccount?.groupPolicy).toBeUndefined();
+      expect(btcAccount?.groupAllowFrom).toBeUndefined();
+      expect(btcAccount?.groups).toBeUndefined();
+
+      const opAccount = openclawConfig.channels?.matrix?.accounts?.["node-operator"];
+      expect(opAccount?.dm?.enabled).toBe(true);
+      expect(opAccount?.dm?.policy).toBeUndefined();
+      expect(opAccount?.dm?.allowFrom).toBeUndefined();
+      expect(opAccount?.groupPolicy).toBeUndefined();
+    } finally {
+      if (priorOpenrouterApiKey === undefined) {
+        delete process.env.OPENROUTER_API_KEY;
+      } else {
+        process.env.OPENROUTER_API_KEY = priorOpenrouterApiKey;
+      }
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reconfigures matrix federation from disabled to enabled", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+    };
+    await writeDedicatedBotRuntimeArtifacts(paths);
+
+    // Write a matching install request so updateInstallRequestFederation can update it
+    const installRequestPath = join(dirname(paths.configPath), "install-request.json");
+    await writeFile(
+      installRequestPath,
+      JSON.stringify({
+        mode: "bundled_matrix",
+        openrouter: { model: "qwen/qwen3.5-9b", secretRef: "env:OPENROUTER_API_KEY" },
+        matrix: {
+          homeserverDomain: "matrix.example.org",
+          publicBaseUrl: "https://matrix.example.org",
+          federationEnabled: false,
+        },
+        operator: { username: "operator" },
+      }),
+      "utf8",
+    );
+
+    const priorOpenrouterApiKey = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "sk-or-test";
+    let gatewayRestartCalls = 0;
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {
+          gatewayRestartCalls += 1;
+        },
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert",
+          cronCommand: "openclaw cron add",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      fetchImpl: async () =>
+        new Response("{}", { status: 404, headers: { "Content-Type": "application/json" } }),
+    });
+
+    try {
+      const result = await service.reconfigureMatrix({
+        matrix: { federationEnabled: true },
+      });
+      expect(result.changed).toContain("matrix.federationEnabled");
+      expect(gatewayRestartCalls).toBe(1);
+
+      // Runtime config should reflect the change
+      const configRaw = await readFile(paths.configPath, "utf8");
+      const config = JSON.parse(configRaw) as { matrix?: { federationEnabled?: boolean } };
+      expect(config.matrix?.federationEnabled).toBe(true);
+
+      // OpenClaw config should have no allowlists
+      const openclawRaw = await readFile(
+        join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
+        "utf8",
+      );
+      const openclawConfig = JSON.parse(openclawRaw) as {
+        channels?: {
+          matrix?: {
+            dm?: { policy?: string; allowFrom?: string[] };
+            groupPolicy?: string;
+          };
+        };
+      };
+      expect(openclawConfig.channels?.matrix?.dm).toBeUndefined();
+      expect(openclawConfig.channels?.matrix?.groupPolicy).toBeUndefined();
+    } finally {
+      if (priorOpenrouterApiKey === undefined) {
+        delete process.env.OPENROUTER_API_KEY;
+      } else {
+        process.env.OPENROUTER_API_KEY = priorOpenrouterApiKey;
+      }
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects enabling federation in relay mode", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+    };
+    await writeDedicatedBotRuntimeArtifacts(paths);
+
+    // Set access mode to relay
+    const raw = await readFile(paths.configPath, "utf8");
+    const parsed = JSON.parse(raw) as { matrix?: { accessMode?: string } };
+    parsed.matrix = { ...parsed.matrix, accessMode: "relay" };
+    await writeFile(paths.configPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+
+    const priorOpenrouterApiKey = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "sk-or-test";
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert",
+          cronCommand: "openclaw cron add",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      fetchImpl: async () =>
+        new Response("{}", { status: 404, headers: { "Content-Type": "application/json" } }),
+    });
+
+    try {
+      await expect(
+        service.reconfigureMatrix({ matrix: { federationEnabled: true } }),
+      ).rejects.toMatchObject({
+        code: "MATRIX_RELAY_FEDERATION_UNSUPPORTED",
+      });
+    } finally {
+      if (priorOpenrouterApiKey === undefined) {
+        delete process.env.OPENROUTER_API_KEY;
+      } else {
+        process.env.OPENROUTER_API_KEY = priorOpenrouterApiKey;
+      }
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
 });
