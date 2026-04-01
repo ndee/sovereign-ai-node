@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly Docker image prune for Sovereign Node
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+RandomizedDelaySec=3600
+
+[Install]
+WantedBy=timers.target

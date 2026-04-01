@@ -28,6 +28,7 @@ type InstallOptions = {
   relayControlUrl?: string;
   relayEnrollmentToken?: string;
   matrixTlsMode?: "auto" | "internal" | "manual" | "local-dev";
+  federation?: boolean;
   requestFile?: string;
 } & BotCatalogSourceOptions;
 
@@ -70,7 +71,7 @@ const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => {
         connectivityMode === "relay"
           ? "https://relay-pending.invalid"
           : "https://matrix.example.org",
-      federationEnabled: false,
+      federationEnabled: opts.federation ?? false,
       tlsMode: connectivityMode === "relay" ? "auto" : (opts.matrixTlsMode ?? "auto"),
       alertRoomName: "Sovereign Alerts",
     },
@@ -120,6 +121,7 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
       "--matrix-tls-mode <mode>",
       "Matrix TLS mode (auto|internal|manual|local-dev) (scaffold/dev)",
     )
+    .option("--federation", "Enable Matrix federation (allows users from other homeservers)")
     .option(
       "--request-file <path>",
       "Path to an InstallRequest JSON file (overrides scaffold defaults)",

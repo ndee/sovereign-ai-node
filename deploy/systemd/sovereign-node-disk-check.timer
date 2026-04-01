@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily disk space check for Sovereign Node
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=1800
+
+[Install]
+WantedBy=timers.target

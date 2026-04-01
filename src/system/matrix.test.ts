@@ -993,6 +993,125 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       await rm(tempRoot, { recursive: true, force: true });
     }
   });
+
+  it("removes federation_domain_whitelist from homeserver.yaml when enabling federation", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-test-"));
+    const paths = buildPaths(tempRoot);
+    const synapseDir = join(tempRoot, "project", "synapse");
+    const projectDir = join(tempRoot, "project");
+    const composeFilePath = join(projectDir, "compose.yaml");
+
+    await mkdir(synapseDir, { recursive: true });
+    await writeFile(
+      join(synapseDir, "homeserver.yaml"),
+      [
+        'server_name: "matrix.example.org"',
+        "report_stats: false",
+        "federation_domain_whitelist: []",
+        'log_config: "/data/log.config"',
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      join(projectDir, ".env"),
+      [
+        "POSTGRES_PASSWORD=secret",
+        "MATRIX_FEDERATION_ENABLED=false",
+        "MATRIX_HOMESERVER_DOMAIN=matrix.example.org",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(composeFilePath, "version: '3'\nservices:\n  synapse: {}", "utf8");
+
+    const execRunner: ExecRunner = {
+      run: async () => ({
+        command: "docker compose restart synapse",
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      }),
+    };
+    const provisioner = new DockerComposeBundledMatrixProvisioner(
+      execRunner,
+      createLogger(),
+      paths,
+    );
+
+    try {
+      await provisioner.updateFederationConfig({
+        federationEnabled: true,
+        projectDir,
+        composeFilePath,
+      });
+
+      const yaml = await readFile(join(synapseDir, "homeserver.yaml"), "utf8");
+      expect(yaml).not.toContain("federation_domain_whitelist");
+
+      const env = await readFile(join(projectDir, ".env"), "utf8");
+      expect(env).toContain("MATRIX_FEDERATION_ENABLED=true");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("adds federation_domain_whitelist to homeserver.yaml when disabling federation", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-test-"));
+    const paths = buildPaths(tempRoot);
+    const synapseDir = join(tempRoot, "project", "synapse");
+    const projectDir = join(tempRoot, "project");
+    const composeFilePath = join(projectDir, "compose.yaml");
+
+    await mkdir(synapseDir, { recursive: true });
+    await writeFile(
+      join(synapseDir, "homeserver.yaml"),
+      [
+        'server_name: "matrix.example.org"',
+        "report_stats: false",
+        'log_config: "/data/log.config"',
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      join(projectDir, ".env"),
+      [
+        "POSTGRES_PASSWORD=secret",
+        "MATRIX_FEDERATION_ENABLED=true",
+        "MATRIX_HOMESERVER_DOMAIN=matrix.example.org",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(composeFilePath, "version: '3'\nservices:\n  synapse: {}", "utf8");
+
+    const execRunner: ExecRunner = {
+      run: async () => ({
+        command: "docker compose restart synapse",
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      }),
+    };
+    const provisioner = new DockerComposeBundledMatrixProvisioner(
+      execRunner,
+      createLogger(),
+      paths,
+    );
+
+    try {
+      await provisioner.updateFederationConfig({
+        federationEnabled: false,
+        projectDir,
+        composeFilePath,
+      });
+
+      const yaml = await readFile(join(synapseDir, "homeserver.yaml"), "utf8");
+      expect(yaml).toContain("federation_domain_whitelist: []");
+
+      const env = await readFile(join(projectDir, ".env"), "utf8");
+      expect(env).toContain("MATRIX_FEDERATION_ENABLED=false");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 const buildPaths = (tempRoot: string): SovereignPaths => ({

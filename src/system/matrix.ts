@@ -88,6 +88,11 @@ export interface BundledMatrixProvisioner {
     },
   ): Promise<BundledMatrixRoomBootstrapResult>;
   test(req: TestMatrixRequest): Promise<TestMatrixResult>;
+  updateFederationConfig?(params: {
+    federationEnabled: boolean;
+    projectDir: string;
+    composeFilePath: string;
+  }): Promise<void>;
 }
 
 export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvisioner {
@@ -1214,6 +1219,46 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     } catch {
       return null;
     }
+  }
+
+  async updateFederationConfig(params: {
+    federationEnabled: boolean;
+    projectDir: string;
+    composeFilePath: string;
+  }): Promise<void> {
+    const synapseDir = join(params.projectDir, "synapse");
+    const homeserverPath = join(synapseDir, "homeserver.yaml");
+    const envFilePath = join(params.projectDir, ".env");
+
+    const homeserverYaml = await readFile(homeserverPath, "utf8");
+    const whitelistLine = "federation_domain_whitelist: []";
+    const hasWhitelist = homeserverYaml.includes(whitelistLine);
+
+    let updatedYaml: string;
+    if (params.federationEnabled && hasWhitelist) {
+      updatedYaml = homeserverYaml
+        .split("\n")
+        .filter((line) => line.trim() !== whitelistLine)
+        .join("\n");
+    } else if (!params.federationEnabled && !hasWhitelist) {
+      updatedYaml = `${homeserverYaml.trimEnd()}\n${whitelistLine}\n`;
+    } else {
+      updatedYaml = homeserverYaml;
+    }
+    if (updatedYaml !== homeserverYaml) {
+      await writeFile(homeserverPath, updatedYaml, "utf8");
+    }
+
+    const envContent = await readFile(envFilePath, "utf8");
+    const updatedEnv = envContent.replace(
+      /^MATRIX_FEDERATION_ENABLED=.*/m,
+      `MATRIX_FEDERATION_ENABLED=${params.federationEnabled ? "true" : "false"}`,
+    );
+    if (updatedEnv !== envContent) {
+      await writeFile(envFilePath, updatedEnv, "utf8");
+    }
+
+    await this.runComposeCommand(params.projectDir, params.composeFilePath, ["restart", "synapse"]);
   }
 
   private async runComposeCommand(

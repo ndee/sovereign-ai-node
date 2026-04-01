@@ -88,6 +88,7 @@ import type {
   BundledMatrixRoomBootstrapResult,
 } from "../system/matrix.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
+import { formatGiB, parseDfAvailableBytes } from "../system/preflight.js";
 import {
   type AgentTemplateManifest,
   CORE_TEMPLATE_MANIFESTS,
@@ -233,6 +234,8 @@ const OPENCLAW_RUNTIME_SETTLE_DELAY_MS = 5_000;
 const SYSTEM_GATEWAY_MATRIX_WAIT_ATTEMPTS = 120;
 const SYSTEM_GATEWAY_MATRIX_WAIT_DELAY_SECONDS = 2;
 const SYSTEM_GATEWAY_MATRIX_WAIT_TIMEOUT_SECONDS = 5;
+const DOCTOR_DISK_WARN_BYTES = 2 * 1024 * 1024 * 1024;
+const DOCTOR_DISK_FAIL_BYTES = 500 * 1024 * 1024;
 const LOBSTER_CLI_PROBE_TIMEOUT_MS = 20_000;
 const LOBSTER_CLI_INSTALL_TIMEOUT_MS = 5 * 60_000;
 const SOVEREIGN_PINNED_LOBSTER_PACKAGE_NAME = "@clawdbot/lobster";
@@ -607,7 +610,6 @@ export class RealInstallerService implements InstallerService {
     try {
       const config = await this.readRuntimeConfig();
       const roomId = req.roomId ?? config.matrix.alertRoom.roomId;
-      const accessToken = await this.resolveSecretRef(config.matrix.bot.accessTokenSecretRef);
       const transactionId = `sovereign_${Date.now()}_${randomUUID().slice(0, 8)}`;
       const endpoint = new URL(
         `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(
@@ -616,21 +618,39 @@ export class RealInstallerService implements InstallerService {
         ensureTrailingSlash(config.matrix.adminBaseUrl),
       ).toString();
 
-      const response = await this.fetchImpl(endpoint, {
-        method: "PUT",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify({
-          msgtype: "m.text",
-          body: req.text ?? `Sovereign test alert (${now()})`,
-        }),
-      });
+      const sendMatrixTestAlert = async (): Promise<{
+        response: Response;
+        parsed: unknown;
+      }> => {
+        const accessToken = await this.resolveSecretRef(config.matrix.bot.accessTokenSecretRef);
+        const response = await this.fetchImpl(endpoint, {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({
+            msgtype: "m.text",
+            body: req.text ?? `Sovereign test alert (${now()})`,
+          }),
+        });
 
-      const rawBody = await response.text();
-      const parsed = parseJsonSafely(rawBody);
+        const rawBody = await response.text();
+        return {
+          response,
+          parsed: parseJsonSafely(rawBody),
+        };
+      };
+
+      let { response, parsed } = await sendMatrixTestAlert();
+      if ((response.status === 401 || response.status === 403) && response.ok === false) {
+        const repaired = await this.ensureManagedMatrixAccessTokens(config);
+        if (repaired) {
+          ({ response, parsed } = await sendMatrixTestAlert());
+        }
+      }
+
       if (!response.ok) {
         return {
           delivered: false,
@@ -1063,6 +1083,35 @@ export class RealInstallerService implements InstallerService {
         }
       }
     }
+    const dfResult = await this.safeExec("df", ["-Pk", "/"]);
+    if (dfResult.ok && dfResult.result.exitCode === 0) {
+      const parsed = parseDfAvailableBytes(dfResult.result.stdout);
+      if (parsed !== null) {
+        const diskStatus: CheckResult["status"] =
+          parsed.availableBytes < DOCTOR_DISK_FAIL_BYTES
+            ? "fail"
+            : parsed.availableBytes < DOCTOR_DISK_WARN_BYTES
+              ? "warn"
+              : "pass";
+        checks.push(
+          check(
+            "disk-space-root",
+            "Root filesystem free space",
+            diskStatus,
+            diskStatus === "pass"
+              ? `Sufficient disk space on / (${formatGiB(parsed.availableBytes)} GiB free)`
+              : `Low disk space on / (${formatGiB(parsed.availableBytes)} GiB free)`,
+            {
+              availableBytes: parsed.availableBytes,
+              warnThresholdBytes: DOCTOR_DISK_WARN_BYTES,
+              failThresholdBytes: DOCTOR_DISK_FAIL_BYTES,
+              mountPoint: parsed.mountPoint,
+            },
+          ),
+        );
+      }
+    }
+
     checks.push(
       check(
         "install-provenance",
@@ -1094,7 +1143,105 @@ export class RealInstallerService implements InstallerService {
   }
 
   async reconfigureMatrix(req: ReconfigureMatrixRequest): Promise<ReconfigureResult> {
-    return this.stubService.reconfigureMatrix(req);
+    const requestedFederation = req.matrix?.federationEnabled;
+    if (requestedFederation === undefined) {
+      return this.stubService.reconfigureMatrix(req);
+    }
+
+    const runtimeConfig = await this.readRuntimeConfig();
+
+    if (requestedFederation && runtimeConfig.matrix.accessMode === "relay") {
+      throw {
+        code: "MATRIX_RELAY_FEDERATION_UNSUPPORTED",
+        message: "Managed relay mode does not support Matrix federation in v1",
+        retryable: false,
+      };
+    }
+
+    const federationChanged = requestedFederation !== runtimeConfig.matrix.federationEnabled;
+    const changed: string[] = [];
+    let gatewayRestarted = false;
+
+    if (federationChanged) {
+      changed.push("matrix.federationEnabled");
+
+      const raw = await readFile(this.paths.configPath, "utf8");
+      const parsed = parseJsonDocument(raw);
+      if (!isRecord(parsed)) {
+        throw {
+          code: "CONFIG_INVALID",
+          message: "Sovereign runtime config does not match expected shape",
+          retryable: false,
+          details: { configPath: this.paths.configPath },
+        };
+      }
+
+      const matrixConfig = isRecord(parsed.matrix) ? parsed.matrix : {};
+      matrixConfig.federationEnabled = requestedFederation;
+      parsed.matrix = matrixConfig;
+      parsed.generatedAt = now();
+      await this.writeInstallerJsonFile(this.paths.configPath, parsed, 0o644);
+
+      const nextRuntimeConfig: RuntimeConfig = {
+        ...runtimeConfig,
+        matrix: {
+          ...runtimeConfig.matrix,
+          federationEnabled: requestedFederation,
+        },
+      };
+
+      if (
+        runtimeConfig.matrix.projectDir !== undefined &&
+        this.matrixProvisioner.updateFederationConfig !== undefined
+      ) {
+        const projectDir = runtimeConfig.matrix.projectDir;
+        await this.matrixProvisioner.updateFederationConfig({
+          federationEnabled: requestedFederation,
+          projectDir,
+          composeFilePath: join(projectDir, "compose.yaml"),
+        });
+      }
+
+      await this.writeOpenClawRuntimeArtifacts(nextRuntimeConfig);
+      this.setManagedOpenClawEnv(nextRuntimeConfig);
+      await this.refreshGatewayAfterRuntimeConfig(nextRuntimeConfig);
+      gatewayRestarted = true;
+    }
+
+    const requestUpdate = await this.updateInstallRequestFederation({
+      federationEnabled: requestedFederation,
+      changed: federationChanged,
+    });
+    changed.push(...requestUpdate.changed);
+
+    return {
+      target: "matrix",
+      changed,
+      restartRequiredServices: gatewayRestarted
+        ? ["openclaw-gateway", ...(federationChanged ? ["synapse"] : [])]
+        : [],
+      validation: [
+        check(
+          "matrix-federation",
+          "Matrix federation config",
+          "pass",
+          federationChanged
+            ? `Matrix federation ${requestedFederation ? "enabled" : "disabled"}`
+            : "Matrix federation config already matched the requested value",
+        ),
+        ...(gatewayRestarted
+          ? [
+              check(
+                "openclaw-gateway-restart",
+                "OpenClaw gateway restart",
+                "pass",
+                "OpenClaw gateway restarted with updated federation settings",
+              ),
+            ]
+          : []),
+        ...requestUpdate.validation,
+      ],
+    };
   }
 
   async reconfigureOpenrouter(req: ReconfigureOpenrouterRequest): Promise<ReconfigureResult> {
@@ -5224,7 +5371,279 @@ export default function (api) {
     }
   }
 
+  private async validateAndRefreshMatrixIdentityToken(input: {
+    label: string;
+    adminBaseUrl: string;
+    localpart?: string | undefined;
+    userId: string;
+    accessTokenSecretRef?: string | undefined;
+    passwordSecretRef?: string | undefined;
+  }): Promise<boolean> {
+    const tokenRef = input.accessTokenSecretRef;
+    const passwordRef = input.passwordSecretRef;
+    if (tokenRef === undefined || passwordRef === undefined) {
+      return false;
+    }
+
+    let currentToken: string;
+    try {
+      currentToken = await this.resolveSecretRef(tokenRef);
+    } catch {
+      this.logger.warn(
+        {
+          label: input.label,
+          userId: input.userId,
+        },
+        "Matrix access token file is missing or empty; will attempt re-login",
+      );
+      currentToken = "";
+    }
+
+    if (currentToken.length > 0) {
+      const whoamiEndpoint = new URL(
+        "/_matrix/client/v3/account/whoami",
+        ensureTrailingSlash(input.adminBaseUrl),
+      ).toString();
+      try {
+        const response = await this.fetchImpl(whoamiEndpoint, {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${currentToken}`,
+            Accept: "application/json",
+          },
+        });
+        if (response.ok) {
+          return false;
+        }
+        if (response.status !== 401 && response.status !== 403) {
+          this.logger.warn(
+            {
+              label: input.label,
+              userId: input.userId,
+              status: response.status,
+            },
+            "Matrix access token validation returned a non-auth failure; skipping token refresh",
+          );
+          return false;
+        }
+      } catch (error) {
+        this.logger.warn(
+          {
+            label: input.label,
+            userId: input.userId,
+            error: describeError(error),
+          },
+          "Matrix access token validation failed before refresh attempt",
+        );
+        return false;
+      }
+      this.logger.warn(
+        {
+          label: input.label,
+          userId: input.userId,
+        },
+        "Matrix access token is invalid; re-logging in to refresh",
+      );
+    }
+
+    const localpart = input.localpart;
+    if (localpart === undefined || localpart.length === 0) {
+      this.logger.warn(
+        {
+          label: input.label,
+          userId: input.userId,
+        },
+        "Matrix localpart is not set; cannot refresh token",
+      );
+      return false;
+    }
+    let password: string;
+    try {
+      password = await this.resolveSecretRef(passwordRef);
+    } catch {
+      this.logger.warn(
+        {
+          label: input.label,
+          userId: input.userId,
+        },
+        "Matrix password secret is missing; cannot refresh token",
+      );
+      return false;
+    }
+
+    const expectedUserId = input.userId;
+    const session = await this.loginMatrixUser({
+      adminBaseUrl: input.adminBaseUrl,
+      localpart,
+      password,
+      expectedUserId,
+    });
+
+    await this.writeManagedSecretFile(
+      tokenRef.startsWith("file:")
+        ? (tokenRef.slice("file:".length).split("/").pop() ?? "matrix-bot-access-token")
+        : "matrix-bot-access-token",
+      session.accessToken,
+    );
+
+    this.logger.info(
+      {
+        label: input.label,
+        userId: session.userId,
+      },
+      "Refreshed Matrix access token after detecting stale credentials",
+    );
+
+    return true;
+  }
+
+  private async ensureManagedMatrixAccessTokens(runtimeConfig: RuntimeConfig): Promise<boolean> {
+    const candidates = [
+      {
+        label: "primary bot",
+        adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+        localpart: runtimeConfig.matrix.bot.localpart,
+        userId: runtimeConfig.matrix.bot.userId,
+        accessTokenSecretRef: runtimeConfig.matrix.bot.accessTokenSecretRef,
+        passwordSecretRef: runtimeConfig.matrix.bot.passwordSecretRef,
+      },
+      ...ensureCoreManagedAgents(runtimeConfig.openclawProfile.agents)
+        .filter((agent) => agent.matrix !== undefined)
+        .map((agent) => ({
+          label: `managed bot ${agent.id}`,
+          adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+          localpart: agent.matrix?.localpart,
+          userId: agent.matrix?.userId ?? "",
+          accessTokenSecretRef: agent.matrix?.accessTokenSecretRef,
+          passwordSecretRef: agent.matrix?.passwordSecretRef,
+        })),
+    ];
+
+    const seen = new Set<string>();
+    let refreshed = false;
+    for (const candidate of candidates) {
+      if (candidate.userId.length === 0) {
+        continue;
+      }
+      const dedupeKey = [
+        candidate.userId,
+        candidate.localpart ?? "",
+        candidate.accessTokenSecretRef ?? "",
+        candidate.passwordSecretRef ?? "",
+      ].join("\u0000");
+      if (seen.has(dedupeKey)) {
+        continue;
+      }
+      seen.add(dedupeKey);
+      refreshed = (await this.validateAndRefreshMatrixIdentityToken(candidate)) || refreshed;
+    }
+
+    if (!refreshed) {
+      return false;
+    }
+
+    await this.refreshManagedMatrixRuntimeArtifacts(runtimeConfig);
+    await this.refreshGatewayAfterRuntimeConfig(runtimeConfig);
+
+    return true;
+  }
+
+  private async refreshManagedMatrixRuntimeArtifacts(runtimeConfig: RuntimeConfig): Promise<void> {
+    const canPatchExistingRuntime =
+      (await this.pathExists(runtimeConfig.openclaw.runtimeConfigPath)) &&
+      (await this.pathExists(runtimeConfig.openclaw.gatewayEnvPath));
+    if (!canPatchExistingRuntime) {
+      await this.writeOpenClawRuntimeArtifacts(runtimeConfig);
+      return;
+    }
+
+    await this.patchManagedMatrixRuntimeArtifacts(runtimeConfig);
+  }
+
+  private async patchManagedMatrixRuntimeArtifacts(runtimeConfig: RuntimeConfig): Promise<void> {
+    const tokenByUserId = new Map<string, string>();
+    tokenByUserId.set(
+      runtimeConfig.matrix.bot.userId,
+      await this.resolveSecretRef(runtimeConfig.matrix.bot.accessTokenSecretRef),
+    );
+    for (const agent of ensureCoreManagedAgents(runtimeConfig.openclawProfile.agents)) {
+      if (agent.matrix?.accessTokenSecretRef === undefined || agent.matrix.userId.length === 0) {
+        continue;
+      }
+      tokenByUserId.set(
+        agent.matrix.userId,
+        await this.resolveSecretRef(agent.matrix.accessTokenSecretRef),
+      );
+    }
+
+    const runtimeRaw = await readFile(runtimeConfig.openclaw.runtimeConfigPath, "utf8");
+    const parsedRuntime = parseJsonDocument(runtimeRaw);
+    if (!isRecord(parsedRuntime)) {
+      throw {
+        code: "OPENCLAW_CONFIG_WRITE_FAILED",
+        message: "OpenClaw runtime config is not a JSON object",
+        retryable: true,
+        details: {
+          runtimeConfigPath: runtimeConfig.openclaw.runtimeConfigPath,
+        },
+      };
+    }
+
+    const channels = isRecord(parsedRuntime.channels) ? parsedRuntime.channels : null;
+    const matrix = channels !== null && isRecord(channels.matrix) ? channels.matrix : null;
+    const accounts = matrix !== null && isRecord(matrix.accounts) ? matrix.accounts : null;
+    let runtimeChanged = false;
+    if (accounts !== null) {
+      for (const entry of Object.values(accounts)) {
+        if (!isRecord(entry) || typeof entry.userId !== "string") {
+          continue;
+        }
+        const nextToken = tokenByUserId.get(entry.userId);
+        if (nextToken === undefined || entry.accessToken === nextToken) {
+          continue;
+        }
+        entry.accessToken = nextToken;
+        runtimeChanged = true;
+      }
+    }
+    if (runtimeChanged) {
+      await this.writeProtectedJsonFile(
+        runtimeConfig.openclaw.runtimeConfigPath,
+        parsedRuntime,
+        runtimeConfig,
+      );
+    }
+
+    const primaryToken = tokenByUserId.get(runtimeConfig.matrix.bot.userId) ?? "";
+    const envRaw = await readFile(runtimeConfig.openclaw.gatewayEnvPath, "utf8");
+    const env = parseEnvFile(envRaw);
+    env.MATRIX_HOMESERVER = runtimeConfig.matrix.adminBaseUrl;
+    env.MATRIX_USER_ID = runtimeConfig.matrix.bot.userId;
+    env.MATRIX_ACCESS_TOKEN = primaryToken;
+    const envTempPath = `${runtimeConfig.openclaw.gatewayEnvPath}.${randomUUID()}.tmp`;
+    await writeFile(
+      envTempPath,
+      `${Object.entries(env)
+        .map(([key, value]) => `${key}=${value}`)
+        .join("\n")}
+`,
+      "utf8",
+    );
+    await chmod(envTempPath, 0o600);
+    await rename(envTempPath, runtimeConfig.openclaw.gatewayEnvPath);
+    await this.applyConfiguredRuntimeOwnership(
+      runtimeConfig.openclaw.gatewayEnvPath,
+      runtimeConfig,
+    );
+  }
+
   private async probeMatrixRoomReachable(runtimeConfig: RuntimeConfig): Promise<boolean> {
+    try {
+      await this.ensureManagedMatrixAccessTokens(runtimeConfig);
+    } catch {
+      return false;
+    }
+
     try {
       const accessToken = await this.resolveSecretRef(
         runtimeConfig.matrix.bot.accessTokenSecretRef,
@@ -5741,6 +6160,7 @@ export default function (api) {
               ? {}
               : { relayEnrollment: stepState.relayEnrollment }),
           });
+          await this.ensureManagedMatrixAccessTokens(runtimeConfig);
           if (stepState.selectedBots === undefined) {
             stepState.selectedBots = (
               await this.resolveRequestedBots(stepState.effectiveRequest ?? req)
@@ -6964,9 +7384,10 @@ export default function (api) {
 
       const health = await this.probeOpenClawHealth();
       if (!health.ok) {
-        if (health.message.trim().length === 0) {
+        if (gateway.state === "running") {
           this.logger.warn(
-            "OpenClaw health probe returned no details during smoke checks; continuing because gateway service and runtime wiring checks already passed",
+            { health: health.message },
+            "OpenClaw health probe failed during smoke checks but gateway service is running; continuing",
           );
         } else {
           throw {
@@ -7271,6 +7692,101 @@ export default function (api) {
           {
             requestFile: requestPath,
           },
+        ),
+      ],
+    };
+  }
+
+  private async updateInstallRequestFederation(input: {
+    federationEnabled: boolean;
+    changed: boolean;
+  }): Promise<{ changed: string[]; validation: CheckResult[] }> {
+    const requestPath = this.getInstallRequestPath();
+    let raw = "";
+    try {
+      raw = await readFile(requestPath, "utf8");
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return {
+          changed: [],
+          validation: [
+            check(
+              "install-request-sync",
+              "Saved install request sync",
+              "warn",
+              "Saved install request file was not found; future installer updates will keep the previous federation settings until the request file is refreshed",
+              { requestFile: requestPath },
+            ),
+          ],
+        };
+      }
+      throw {
+        code: "REQUEST_UPDATE_FAILED",
+        message: "Failed to read the saved install request file",
+        retryable: false,
+        details: { requestFile: requestPath, error: describeError(error) },
+      };
+    }
+
+    const parsed = parseJsonDocument(raw);
+    const validated = installRequestSchema.safeParse(parsed);
+    if (!validated.success) {
+      return {
+        changed: [],
+        validation: [
+          check(
+            "install-request-sync",
+            "Saved install request sync",
+            "warn",
+            "Saved install request could not be updated because it is invalid",
+            { requestFile: requestPath },
+          ),
+        ],
+      };
+    }
+
+    const requestPayload = validated.data;
+    const changed: string[] = [];
+    if (input.changed && requestPayload.matrix.federationEnabled !== input.federationEnabled) {
+      requestPayload.matrix.federationEnabled = input.federationEnabled;
+      changed.push("request.matrix.federationEnabled");
+    }
+
+    if (changed.length === 0) {
+      return {
+        changed,
+        validation: [
+          check(
+            "install-request-sync",
+            "Saved install request sync",
+            "pass",
+            "Saved install request already matched the current federation settings",
+            { requestFile: requestPath },
+          ),
+        ],
+      };
+    }
+
+    try {
+      await this.writeInstallerJsonFile(requestPath, requestPayload, 0o640);
+    } catch (error) {
+      throw {
+        code: "REQUEST_UPDATE_FAILED",
+        message: "Failed to write the saved install request file",
+        retryable: false,
+        details: { requestFile: requestPath, error: describeError(error) },
+      };
+    }
+
+    return {
+      changed,
+      validation: [
+        check(
+          "install-request-sync",
+          "Saved install request sync",
+          "pass",
+          "Saved install request updated to match the new federation settings",
+          { requestFile: requestPath },
         ),
       ],
     };
@@ -7862,6 +8378,7 @@ export default function (api) {
       ...operatorAllowlist,
       ...(await this.listInvitedHumanMatrixUserIds(runtimeConfig)),
     ]);
+    const federationOpen = runtimeConfig.matrix.federationEnabled;
     const pluginEntries: Record<string, unknown> = {
       matrix: {
         enabled: true,
@@ -7891,8 +8408,8 @@ export default function (api) {
         accessToken: string;
         dm?: {
           enabled: boolean;
-          policy: "allowlist";
-          allowFrom: string[];
+          policy?: "allowlist";
+          allowFrom?: string[];
         };
         groupPolicy?: "allowlist";
         groupAllowFrom?: string[];
@@ -7981,18 +8498,22 @@ export default function (api) {
         homeserver: runtimeConfig.matrix.adminBaseUrl,
         userId: agent.matrix.userId,
         accessToken: await this.resolveSecretRef(agent.matrix.accessTokenSecretRef),
-        dm: {
-          enabled: routing.dmEnabled,
-          policy: "allowlist",
-          allowFrom: matrixParticipantAllowlist,
-        },
-        groupPolicy: "allowlist",
-        groupAllowFrom: matrixParticipantAllowlist,
-        groups: buildMatrixGroupEntries({
-          users: matrixParticipantAllowlist,
-          autoReply: routing.alertRoom.autoReply,
-          requireMention: routing.alertRoom.requireMention,
-        }),
+        ...(federationOpen
+          ? { dm: { enabled: routing.dmEnabled } }
+          : {
+              dm: {
+                enabled: routing.dmEnabled,
+                policy: "allowlist" as const,
+                allowFrom: matrixParticipantAllowlist,
+              },
+              groupPolicy: "allowlist" as const,
+              groupAllowFrom: matrixParticipantAllowlist,
+              groups: buildMatrixGroupEntries({
+                users: matrixParticipantAllowlist,
+                autoReply: routing.alertRoom.autoReply,
+                requireMention: routing.alertRoom.requireMention,
+              }),
+            }),
       };
     }
     if (hasSharedServiceBot || Object.keys(matrixAccounts).length === 0) {
@@ -8000,18 +8521,22 @@ export default function (api) {
         homeserver: runtimeConfig.matrix.adminBaseUrl,
         userId: runtimeConfig.matrix.bot.userId,
         accessToken: await this.resolveSecretRef(runtimeConfig.matrix.bot.accessTokenSecretRef),
-        dm: {
-          enabled: true,
-          policy: "allowlist",
-          allowFrom: matrixParticipantAllowlist,
-        },
-        groupPolicy: "allowlist",
-        groupAllowFrom: matrixParticipantAllowlist,
-        groups: buildMatrixGroupEntries({
-          users: matrixParticipantAllowlist,
-          autoReply: true,
-          requireMention: false,
-        }),
+        ...(federationOpen
+          ? { dm: { enabled: true } }
+          : {
+              dm: {
+                enabled: true,
+                policy: "allowlist" as const,
+                allowFrom: matrixParticipantAllowlist,
+              },
+              groupPolicy: "allowlist" as const,
+              groupAllowFrom: matrixParticipantAllowlist,
+              groups: buildMatrixGroupEntries({
+                users: matrixParticipantAllowlist,
+                autoReply: true,
+                requireMention: false,
+              }),
+            }),
       };
     }
 
@@ -8047,17 +8572,21 @@ export default function (api) {
             : {
                 accounts: matrixAccounts,
               }),
-          dm: {
-            policy: "allowlist" as const,
-            allowFrom: matrixParticipantAllowlist,
-          },
-          groupPolicy: "allowlist" as const,
-          groupAllowFrom: matrixParticipantAllowlist,
-          groups: buildMatrixGroupEntries({
-            users: matrixParticipantAllowlist,
-            autoReply: true,
-            requireMention: false,
-          }),
+          ...(federationOpen
+            ? {}
+            : {
+                dm: {
+                  policy: "allowlist" as const,
+                  allowFrom: matrixParticipantAllowlist,
+                },
+                groupPolicy: "allowlist" as const,
+                groupAllowFrom: matrixParticipantAllowlist,
+                groups: buildMatrixGroupEntries({
+                  users: matrixParticipantAllowlist,
+                  autoReply: true,
+                  requireMention: false,
+                }),
+              }),
         },
       },
       agents: {

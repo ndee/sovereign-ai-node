@@ -677,6 +677,59 @@ EOF
   systemctl restart "${SERVICE_NAME}.service"
 }
 
+configure_system_hygiene() {
+  # --- journald size limit ---
+  local journald_dropin="/etc/systemd/journald.conf.d/sovereign-node.conf"
+  install -d -m 0755 /etc/systemd/journald.conf.d
+  cp "$APP_DIR/deploy/config/journald-sovereign-node.conf" "$journald_dropin"
+  chmod 0644 "$journald_dropin"
+  systemctl restart systemd-journald 2>/dev/null || true
+
+  # --- logrotate for sovereign-node logs ---
+  cp "$APP_DIR/deploy/config/logrotate-sovereign-node" /etc/logrotate.d/sovereign-node
+  chmod 0644 /etc/logrotate.d/sovereign-node
+
+  # --- snap retention limit (no-op if snap is absent) ---
+  if command -v snap >/dev/null 2>&1; then
+    snap set system refresh.retain=2 2>/dev/null || true
+  fi
+
+  # --- docker image prune timer ---
+  if docker_cli_available; then
+    cp "$APP_DIR/deploy/systemd/sovereign-node-docker-prune.service" \
+      /etc/systemd/system/sovereign-node-docker-prune.service
+    cp "$APP_DIR/deploy/systemd/sovereign-node-docker-prune.timer" \
+      /etc/systemd/system/sovereign-node-docker-prune.timer
+    systemctl daemon-reload
+    systemctl enable --now sovereign-node-docker-prune.timer 2>/dev/null || true
+  fi
+
+  # --- reduce reserved blocks on small disks ---
+  if command -v tune2fs >/dev/null 2>&1; then
+    local root_dev total_kb reserved_pct
+    root_dev="$(df -P / | tail -1 | awk '{print $1}')"
+    total_kb="$(df -Pk / | tail -1 | awk '{print $2}')"
+    if [[ "$total_kb" -lt $((64 * 1024 * 1024)) ]]; then
+      reserved_pct="$(tune2fs -l "$root_dev" 2>/dev/null \
+        | awk '/Reserved block count/ {rc=$NF} /Block count/ {bc=$NF} END {if (bc>0) printf "%d", rc*100/bc}' || true)"
+      if [[ -n "$reserved_pct" ]] && [[ "$reserved_pct" -gt 1 ]]; then
+        tune2fs -m 1 "$root_dev" 2>/dev/null || true
+        log "Reduced reserved blocks on $root_dev from ${reserved_pct}% to 1%"
+      fi
+    fi
+  fi
+
+  # --- disk space check timer ---
+  chmod +x "$APP_DIR/deploy/scripts/sovereign-node-disk-check.sh"
+  sed -e "s|__SCRIPTS_DIR__|${APP_DIR}/deploy/scripts|g" \
+    "$APP_DIR/deploy/systemd/sovereign-node-disk-check.service" \
+    > /etc/systemd/system/sovereign-node-disk-check.service
+  cp "$APP_DIR/deploy/systemd/sovereign-node-disk-check.timer" \
+    /etc/systemd/system/sovereign-node-disk-check.timer
+  systemctl daemon-reload
+  systemctl enable --now sovereign-node-disk-check.timer 2>/dev/null || true
+}
+
 install_request_template() {
   local src dst selected_bots
   src="$APP_DIR/deploy/install-request.example.json"
@@ -819,7 +872,7 @@ ui_setup_runtime() {
 }
 
 ui_configure_progress_plan() {
-  UI_TOTAL_STEPS=18
+  UI_TOTAL_STEPS=19
 }
 
 detect_terminal_width() {
@@ -3608,6 +3661,7 @@ main() {
   ui_run_step_captured "Build application" build_app
   ui_run_step_captured "Install CLI wrappers" install_wrappers
   ui_run_step_captured "Install systemd service" install_systemd_unit
+  ui_run_step_captured "Configure system hygiene" configure_system_hygiene
   ui_run_step_captured "Write request template" install_request_template
   if [[ "$NON_INTERACTIVE" == "1" ]] || ! has_tty; then
     ui_run_step_foreground "Configure request file" prepare_request_file
