@@ -102,7 +102,7 @@ Options:
   --api-port <port>        API bind port (default: 8787)
   --request-file <path>    Install request output path (default: /etc/sovereign-node/install-request.json)
   --install                Force Install mode (new install / reconfigure)
-  --update                 Deprecated alias for --install
+  --update                 Force Update mode (reuse existing request/config)
   --skip-install-run       Only bootstrap host; do not run sovereign-node install
   --non-interactive        Do not prompt; use explicit or inferred action
   -h, --help               Show help
@@ -169,13 +169,17 @@ parse_args() {
         shift 2
         ;;
       --install)
+        if [[ "$ACTION" == "update" ]]; then
+          die "Cannot use --install and --update together"
+        fi
         ACTION="install"
         shift
         ;;
       --update)
-        log "WARNING: --update is deprecated. Use scripts/install.sh as the only public install/update path."
-        log "WARNING: Treating --update as --install."
-        ACTION="install"
+        if [[ "$ACTION" == "install" ]]; then
+          die "Cannot use --install and --update together"
+        fi
+        ACTION="update"
         shift
         ;;
       --skip-install-run)
@@ -200,7 +204,7 @@ parse_args() {
     ""|install|update)
       ;;
     *)
-      die "Unsupported action '${ACTION}'."
+      die "Unsupported action '${ACTION}'. Use install or update."
       ;;
   esac
 }
@@ -1237,7 +1241,11 @@ ui_run_step_interactive() {
 
 ui_print_banner() {
   local subtitle
-  subtitle="Provision and configure a Sovereign node from the terminal."
+  if [[ "${ACTION:-install}" == "update" ]]; then
+    subtitle="Upgrade the existing Sovereign node in place."
+  else
+    subtitle="Provision and configure a Sovereign node from the terminal."
+  fi
 
   ui_print "\n"
   if supports_color; then
@@ -2429,41 +2437,60 @@ NODE
 }
 
 resolve_action() {
-  local selected_choice subtitle
+  local default_choice selected_choice subtitle
 
   if [[ -n "$ACTION" ]]; then
+    if [[ "$ACTION" == "update" && "$CONFIGURED_INSTALLATION" != "1" ]]; then
+      die "Update mode requires an existing readable request file: $REQUEST_FILE"
+    fi
     return
   fi
 
-  ACTION="install"
-
   if [[ "$NON_INTERACTIVE" == "1" ]] || ! has_tty; then
+    if [[ "$CONFIGURED_INSTALLATION" == "1" ]]; then
+      ACTION="update"
+    else
+      ACTION="install"
+    fi
     return
   fi
 
   if [[ "$INSTALLATION_DETECTED" == "1" ]]; then
-    subtitle="Existing installation detected — will reuse ${REQUEST_FILE}"
+    default_choice="2"
+    subtitle="Existing installation detected"
   else
+    default_choice="1"
     subtitle="No existing installation detected"
   fi
 
-  ui_title "Sovereign Node Setup" "$subtitle"
-  selected_choice="$(
-    ui_choice_menu \
-      "Choose an action:" \
-      "1" \
-      "Install / update" \
-      "Exit"
-  )"
-  case "$selected_choice" in
-    1)
-      return
-      ;;
-    2)
-      ui_info "Installer exited."
-      exit 0
-      ;;
-  esac
+  while true; do
+    ui_title "Sovereign Node Setup" "$subtitle"
+    selected_choice="$(
+      ui_choice_menu \
+        "Choose an action:" \
+        "$default_choice" \
+        "Install (new / reconfigure)" \
+        "Update (keep current settings)" \
+        "Exit"
+    )"
+    case "$selected_choice" in
+      1)
+        ACTION="install"
+        return
+        ;;
+      2)
+        if [[ "$CONFIGURED_INSTALLATION" == "1" ]]; then
+          ACTION="update"
+          return
+        fi
+        ui_warn "Update is not available because no readable existing request file was found."
+        ;;
+      3)
+        ui_info "Installer exited."
+        exit 0
+        ;;
+    esac
+  done
 }
 
 write_secret_file() {
@@ -2956,8 +2983,49 @@ prepare_install_request_for_install() {
   run_install_wizard
 }
 
+prepare_install_request_for_update() {
+  if [[ "$CONFIGURED_INSTALLATION" != "1" ]]; then
+    die "Update mode requires an existing readable request file: $REQUEST_FILE"
+  fi
+
+  if ! load_existing_defaults; then
+    die "${LAST_REQUEST_LOAD_ERROR}"
+  fi
+  if [[ "$LEGACY_OPENROUTER_MODEL_DETECTED" == "1" ]]; then
+    migrate_legacy_openrouter_model_request \
+      || die "Failed to migrate the saved request file to ${RECOMMENDED_OPENROUTER_MODEL}"
+  fi
+
+  if [[ "$NON_INTERACTIVE" == "1" ]] || ! has_tty; then
+    return
+  fi
+
+  ui_title "Sovereign Node Update" "Reuse the current configuration and update in place."
+  ui_section "Update"
+  ui_info "Will update application code."
+  ui_info "Will preserve /etc/sovereign-node, /etc/sovereign-node/secrets, and /var/lib/sovereign-node."
+  ui_info "Will reuse request file: ${REQUEST_FILE}"
+  if [[ "$DEFAULT_CONNECTIVITY_MODE" == "relay" ]]; then
+    ui_info "Managed relay mode is enabled."
+    ui_info "Relay control URL: ${DEFAULT_RELAY_CONTROL_URL}"
+  fi
+  warn_if_missing_secret_ref "OpenRouter" "$EXISTING_OPENROUTER_SECRET_REF" || true
+  warn_if_missing_secret_ref "IMAP" "$EXISTING_IMAP_SECRET_REF" || true
+  if ! ui_confirm "Continue with update?" "y"; then
+    ui_info "Update cancelled."
+    exit 0
+  fi
+}
+
 prepare_request_file() {
-  prepare_install_request_for_install
+  case "$ACTION" in
+    update)
+      prepare_install_request_for_update
+      ;;
+    *)
+      prepare_install_request_for_install
+      ;;
+  esac
 }
 
 parse_install_result() {
@@ -3436,9 +3504,13 @@ run_install_command() {
     die "Install request file not found: $REQUEST_FILE"
   fi
 
-  action_label="install"
+  action_label="${ACTION:-install}"
   if ! ui_is_fancy; then
-    log "Running Sovereign Node install"
+    if [[ "$action_label" == "update" ]]; then
+      log "Running Sovereign Node update"
+    else
+      log "Running Sovereign Node install"
+    fi
     set +e
     install_output="$(
       timeout --foreground 30m env \
@@ -3464,7 +3536,11 @@ run_install_command() {
     pid=$!
     frame_index=0
     while kill -0 "$pid" 2>/dev/null; do
-      ui_update_step "provisioning services" "$frame_index"
+      if [[ "$action_label" == "update" ]]; then
+        ui_update_step "reconciling services" "$frame_index"
+      else
+        ui_update_step "provisioning services" "$frame_index"
+      fi
       frame_index=$((frame_index + 1))
       sleep 0.12
     done
@@ -3681,6 +3757,8 @@ main() {
 
   if [[ "$RUN_INSTALL" != "1" ]]; then
     completion_label="Bootstrap completed. Install run skipped."
+  elif [[ "${ACTION:-install}" == "update" ]]; then
+    completion_label="Update completed."
   else
     completion_label="Install completed."
   fi

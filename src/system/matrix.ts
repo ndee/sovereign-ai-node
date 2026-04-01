@@ -1051,7 +1051,48 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     }
   }
 
+  private async backupPostgresDataBeforeReset(
+    provision: BundledMatrixProvisionResult,
+  ): Promise<void> {
+    const postgresDir = join(provision.projectDir, "postgres-data");
+    try {
+      await access(postgresDir, fsConstants.R_OK);
+      const entries = await readdir(postgresDir);
+      if (entries.length === 0) {
+        return;
+      }
+    } catch {
+      return;
+    }
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const backupDir = join(provision.projectDir, `postgres-data-backup-${timestamp}`);
+    this.logger.warn(
+      { source: postgresDir, destination: backupDir },
+      "Backing up Postgres data before reset",
+    );
+    try {
+      const result = await this.execRunner.run({
+        command: "cp",
+        args: ["-a", postgresDir, backupDir],
+        options: { timeout: 300_000 },
+      });
+      if (result.exitCode !== 0) {
+        this.logger.warn(
+          { exitCode: result.exitCode, stderr: result.stderr },
+          "Postgres data backup failed (best-effort); proceeding with reset",
+        );
+      }
+    } catch (error) {
+      this.logger.warn(
+        { error },
+        "Postgres data backup threw (best-effort); proceeding with reset",
+      );
+    }
+  }
+
   private async resetBundledPostgresState(provision: BundledMatrixProvisionResult): Promise<void> {
+    await this.backupPostgresDataBeforeReset(provision);
     await this.runComposeCommand(provision.projectDir, provision.composeFilePath, [
       "down",
       "--remove-orphans",

@@ -28,15 +28,11 @@ export const registerUpdateCommand = (program: Command, app: AppContainer): void
     .action(async (opts: UpdateOptions) => {
       const command = "update";
       try {
-        if (process.env.SOVEREIGN_INTERNAL_INSTALL === "1") {
-          const requestPath = opts.requestFile ?? DEFAULT_INSTALL_REQUEST_FILE;
-          const raw = await readFile(requestPath, "utf8");
-          const req: InstallRequest = installRequestSchema.parse(JSON.parse(raw) as unknown);
-          const result = await app.installerService.startInstall(req);
-          writeCliSuccess(command, result, startInstallResultSchema, Boolean(opts.json));
-          return;
-        }
-        throw new Error("Use scripts/install.sh for Sovereign Node v2 updates.");
+        const requestPath = opts.requestFile ?? DEFAULT_INSTALL_REQUEST_FILE;
+        const raw = await readFile(requestPath, "utf8");
+        const req: InstallRequest = installRequestSchema.parse(JSON.parse(raw) as unknown);
+        const result = await app.installerService.startInstall(req);
+        writeCliSuccess(command, result, startInstallResultSchema, Boolean(opts.json));
       } catch (error) {
         writeCliError(command, error, Boolean(opts.json));
         process.exitCode = 1;
