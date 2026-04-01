@@ -428,7 +428,7 @@ const deriveMatrixHostname = (input?: PreflightRequest): string | null => {
   }
 };
 
-const parseDfAvailableBytes = (
+export const parseDfAvailableBytes = (
   stdout: string,
 ): { availableBytes: number; mountPoint: string } | null => {
   const lines = stdout
@@ -474,4 +474,4 @@ const summarizeText = (value: string): string => {
   return singleLine.length > 240 ? `${singleLine.slice(0, 240)}...(truncated)` : singleLine;
 };
 
-const formatGiB = (bytes: number): string => (bytes / 1024 ** 3).toFixed(1);
+export const formatGiB = (bytes: number): string => (bytes / 1024 ** 3).toFixed(1);
