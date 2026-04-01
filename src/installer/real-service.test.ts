@@ -3921,6 +3921,7 @@ describe("RealInstallerService", () => {
       installJobsDir: join(tempRoot, "install-jobs"),
       openclawServiceHome: join(tempRoot, "openclaw-home"),
       provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "var", "backups"),
     };
 
     let sentMessageBody = "";
@@ -4725,6 +4726,7 @@ describe("RealInstallerService", () => {
       installJobsDir: join(tempRoot, "install-jobs"),
       openclawServiceHome: join(tempRoot, "openclaw-home"),
       provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "var", "backups"),
     };
     const priorOpenrouterApiKey = process.env.OPENROUTER_API_KEY;
     process.env.OPENROUTER_API_KEY = "sk-or-test";
@@ -7965,6 +7967,7 @@ describe("RealInstallerService", () => {
       installJobsDir: join(tempRoot, "install-jobs"),
       openclawServiceHome: join(tempRoot, "openclaw-home"),
       provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "var", "backups"),
     };
     await writeDedicatedBotRuntimeArtifacts(paths);
 
@@ -8112,6 +8115,7 @@ describe("RealInstallerService", () => {
       installJobsDir: join(tempRoot, "install-jobs"),
       openclawServiceHome: join(tempRoot, "openclaw-home"),
       provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "var", "backups"),
     };
     await writeDedicatedBotRuntimeArtifacts(paths);
 
@@ -8246,6 +8250,7 @@ describe("RealInstallerService", () => {
       installJobsDir: join(tempRoot, "install-jobs"),
       openclawServiceHome: join(tempRoot, "openclaw-home"),
       provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "var", "backups"),
     };
     await writeDedicatedBotRuntimeArtifacts(paths);
 
