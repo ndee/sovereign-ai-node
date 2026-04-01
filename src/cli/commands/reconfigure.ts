@@ -42,21 +42,19 @@ export const registerReconfigureCommand = (program: Command, app: AppContainer):
 
   reconfigure
     .command("matrix")
-    .description("Reconfigure Matrix settings (scaffold)")
+    .description("Reconfigure Matrix settings")
+    .option("--federation", "Enable Matrix federation (allows users from other homeservers)")
+    .option("--no-federation", "Disable Matrix federation")
     .option("--json", "Emit JSON output")
-    .action(async (opts: { json?: boolean }) => {
+    .action(async (opts: { federation?: boolean; json?: boolean }) => {
       const command = "reconfigure matrix";
       try {
+        if (opts.federation === undefined) {
+          throw new Error("Provide --federation or --no-federation");
+        }
         const result = await app.installerService.reconfigureMatrix({
           matrix: {
-            publicBaseUrl: "https://matrix.example.org",
-          },
-          bots: {
-            config: {
-              "mail-sentinel": {
-                e2eeAlertRoom: false,
-              },
-            },
+            federationEnabled: opts.federation,
           },
         });
         writeCliSuccess(command, result, reconfigureResultSchema, Boolean(opts.json));
