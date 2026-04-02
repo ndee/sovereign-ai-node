@@ -243,6 +243,7 @@ install_base_packages() {
     build-essential \
     gnupg \
     qrencode
+  command -v git >/dev/null 2>&1 || die "git is required but could not be installed"
 }
 
 ansible_playbook_available() {
