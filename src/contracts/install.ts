@@ -99,9 +99,21 @@ export const connectivityInstallInputSchema = z.object({
   mode: z.enum(["direct", "relay"]).optional(),
 });
 
+export const relayTunnelInputSchema = z.object({
+  serverAddr: z.string().min(1),
+  serverPort: z.number().int().positive().optional(),
+  token: z.string().min(1),
+  proxyName: z.string().min(1),
+  subdomain: z.string().min(1).optional(),
+});
+
 export const relayInstallInputSchema = z.object({
   controlUrl: z.string().min(1),
   enrollmentToken: z.string().min(1).optional(),
+  // Pre-enrolled fields — when all present the core installer skips enrollment.
+  hostname: z.string().min(1).optional(),
+  publicBaseUrl: z.string().min(1).optional(),
+  tunnel: relayTunnelInputSchema.optional(),
 });
 
 export const matrixInstallInputSchema = z.object({

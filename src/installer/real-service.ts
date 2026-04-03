@@ -6357,11 +6357,48 @@ export default function (api) {
     }
   }
 
+  private tryUsePreEnrolledRelay(
+    relay: NonNullable<InstallRequest["relay"]>,
+  ): RelayEnrollmentResult | null {
+    if (!relay.hostname || !relay.publicBaseUrl || !relay.tunnel) {
+      return null;
+    }
+    const t = relay.tunnel;
+    if (!t.serverAddr || !t.token || !t.proxyName) {
+      return null;
+    }
+    return {
+      controlUrl: relay.controlUrl,
+      hostname: relay.hostname,
+      publicBaseUrl: relay.publicBaseUrl,
+      tunnel: {
+        serverAddr: t.serverAddr,
+        serverPort: t.serverPort ?? 7000,
+        token: t.token,
+        proxyName: t.proxyName,
+        ...(t.subdomain === undefined ? {} : { subdomain: t.subdomain }),
+        type: "http",
+        localIp: "127.0.0.1",
+        localPort: RELAY_LOCAL_EDGE_PORT,
+      },
+    };
+  }
+
   private async resolveRelayEnrollment(
     req: InstallRequest,
     installationId: string,
   ): Promise<RelayEnrollmentResult> {
     const relay = this.getRelayRequest(req);
+
+    const preEnrolled = this.tryUsePreEnrolledRelay(relay);
+    if (preEnrolled !== null) {
+      this.logger.info(
+        { hostname: preEnrolled.hostname, publicBaseUrl: preEnrolled.publicBaseUrl },
+        "Using pre-enrolled relay configuration from request file",
+      );
+      return preEnrolled;
+    }
+
     const reused = await this.tryReuseExistingRelayEnrollment(relay);
     if (reused !== null) {
       this.logger.info(
