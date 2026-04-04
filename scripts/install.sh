@@ -2611,11 +2611,17 @@ if (selectedBots.length > 0) {
 }
 
 if (connectivityMode === "relay") {
-  // Preserve pre-enrolled fields (hostname, publicBaseUrl, tunnel) seeded
-  // by the Pro installer — only override controlUrl and optional fields.
+  // Read pre-enrolled relay fields from existing request file (seeded by Pro installer).
+  let existingRelay = {};
+  try {
+    const existing = JSON.parse(fs.readFileSync(process.env.SN_REQUEST_FILE, "utf8"));
+    if (existing && typeof existing.relay === "object" && existing.relay !== null) {
+      existingRelay = existing.relay;
+    }
+  } catch {}
   req.relay = {
-    ...relay,
-    controlUrl: process.env.SN_RELAY_CONTROL_URL || relay.controlUrl,
+    ...existingRelay,
+    controlUrl: process.env.SN_RELAY_CONTROL_URL || existingRelay.controlUrl,
   };
   if ((process.env.SN_RELAY_ENROLLMENT_TOKEN || "").trim().length > 0) {
     req.relay.enrollmentToken = process.env.SN_RELAY_ENROLLMENT_TOKEN;
