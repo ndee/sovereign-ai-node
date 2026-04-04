@@ -110,6 +110,7 @@ export const relayTunnelInputSchema = z.object({
 export const relayInstallInputSchema = z.object({
   controlUrl: z.string().min(1),
   enrollmentToken: z.string().min(1).optional(),
+  requestedSlug: z.string().min(1).optional(),
   // Pre-enrolled fields — when all present the core installer skips enrollment.
   hostname: z.string().min(1).optional(),
   publicBaseUrl: z.string().min(1).optional(),
