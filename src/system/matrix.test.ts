@@ -446,7 +446,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       };
       req.matrix.homeserverDomain = "node-abc.relay.example.com";
       req.matrix.publicBaseUrl = "https://node-abc.relay.example.com";
-      req.matrix.federationEnabled = false;
+      req.matrix.federationEnabled = true;
       req.matrix.tlsMode = "auto";
 
       const result = await provisioner.provision(req);
@@ -462,10 +462,17 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
         join(result.projectDir, "reverse-proxy", "Caddyfile"),
         "utf8",
       );
+      const envText = await readFile(join(result.projectDir, ".env"), "utf8");
+      const homeserverYaml = await readFile(
+        join(result.projectDir, "synapse", "homeserver.yaml"),
+        "utf8",
+      );
       expect(caddyText).toContain(":80 {");
       expect(caddyText).not.toContain("tls internal");
       expect(caddyText).not.toContain("/downloads/caddy-root-ca.crt");
       expect(caddyText).toContain("@onboardApi path /onboard/api /onboard/api/*");
+      expect(envText).toContain("MATRIX_FEDERATION_ENABLED=true");
+      expect(homeserverYaml).not.toContain("federation_domain_whitelist: []");
 
       const onboardPage = await readFile(
         join(result.projectDir, "well-known", "onboard", "index.html"),

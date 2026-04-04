@@ -1150,14 +1150,6 @@ export class RealInstallerService implements InstallerService {
 
     const runtimeConfig = await this.readRuntimeConfig();
 
-    if (requestedFederation && runtimeConfig.matrix.accessMode === "relay") {
-      throw {
-        code: "MATRIX_RELAY_FEDERATION_UNSUPPORTED",
-        message: "Managed relay mode does not support Matrix federation in v1",
-        retryable: false,
-      };
-    }
-
     const federationChanged = requestedFederation !== runtimeConfig.matrix.federationEnabled;
     const changed: string[] = [];
     let gatewayRestarted = false;
@@ -6640,7 +6632,7 @@ export default function (api) {
         ...req.matrix,
         homeserverDomain: enrollment.hostname,
         publicBaseUrl: enrollment.publicBaseUrl,
-        federationEnabled: false,
+        federationEnabled: req.matrix.federationEnabled ?? false,
       },
     };
   }
