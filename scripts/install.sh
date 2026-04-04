@@ -2611,8 +2611,11 @@ if (selectedBots.length > 0) {
 }
 
 if (connectivityMode === "relay") {
+  // Preserve pre-enrolled fields (hostname, publicBaseUrl, tunnel) seeded
+  // by the Pro installer — only override controlUrl and optional fields.
   req.relay = {
-    controlUrl: process.env.SN_RELAY_CONTROL_URL,
+    ...relay,
+    controlUrl: process.env.SN_RELAY_CONTROL_URL || relay.controlUrl,
   };
   if ((process.env.SN_RELAY_ENROLLMENT_TOKEN || "").trim().length > 0) {
     req.relay.enrollmentToken = process.env.SN_RELAY_ENROLLMENT_TOKEN;
