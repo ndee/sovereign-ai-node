@@ -1,0 +1,42 @@
+{
+  "mode": "bundled_matrix",
+  "connectivity": {
+    "mode": "relay"
+  },
+  "relay": {
+    "controlUrl": "https://relay.ci.local.test",
+    "hostname": "ci-relay.local.test",
+    "publicBaseUrl": "https://ci-relay.local.test",
+    "tunnel": {
+      "serverAddr": "127.0.0.1",
+      "serverPort": 7000,
+      "token": "ci-relay-token",
+      "proxyName": "relay-ci-node"
+    }
+  },
+  "matrix": {
+    "homeserverDomain": "ci-relay.local.test",
+    "publicBaseUrl": "https://ci-relay.local.test",
+    "federationEnabled": false,
+    "tlsMode": "auto",
+    "alertRoomName": "CI Relay Alerts"
+  },
+  "operator": {
+    "username": "operator"
+  },
+  "openrouter": {
+    "model": "qwen/qwen3.5-9b",
+    "apiKey": "sk-ci-fake-key-not-used"
+  },
+  "openclaw": {
+    "manageInstallation": true,
+    "installMethod": "install_sh",
+    "version": "pinned-by-sovereign",
+    "skipIfCompatibleInstalled": true,
+    "forceReinstall": false,
+    "runOnboard": false
+  },
+  "advanced": {
+    "nonInteractive": true
+  }
+}

@@ -164,6 +164,129 @@ jobs:
             cd "$COMPOSE_DIR" && docker compose logs --tail=100 2>&1 || true
           fi
 
+  e2e_relay_federation:
+    name: E2E Relay Federation Reconfigure
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Clone bot catalog repo
+        run: |
+          BOT_REF="${GITHUB_HEAD_REF:-main}"
+          if git ls-remote --exit-code --heads https://github.com/ndee/sovereign-ai-bots "$BOT_REF" >/dev/null 2>&1; then
+            git clone --depth 1 --branch "$BOT_REF" https://github.com/ndee/sovereign-ai-bots /tmp/sovereign-ai-bots
+          else
+            git clone --depth 1 https://github.com/ndee/sovereign-ai-bots /tmp/sovereign-ai-bots
+          fi
+
+      - name: Pre-pull Docker images
+        run: |
+          docker pull postgres:16-alpine &
+          docker pull matrixdotorg/synapse:v1.125.0 &
+          docker pull ghcr.io/fatedier/frps:v0.61.1 &
+          docker pull ghcr.io/fatedier/frpc:v0.61.1 &
+          wait
+
+      - name: Start local relay tunnel broker
+        run: |
+          cat >/tmp/ci-frps.toml <<'EOF'
+          bindPort = 7000
+          vhostHTTPPort = 8080
+
+          [auth]
+          method = "token"
+          token = "ci-relay-token"
+          EOF
+
+          docker run -d \
+            --name ci-relay-frps \
+            --network host \
+            -v /tmp/ci-frps.toml:/etc/frp/frps.toml:ro \
+            ghcr.io/fatedier/frps:v0.61.1 \
+            -c /etc/frp/frps.toml
+
+      - name: Run full installer with a pre-enrolled relay request
+        run: |
+          sudo install -d -m 0755 /etc/sovereign-node
+          sudo cp test/fixtures/ci-install-request-relay-federation.json /etc/sovereign-node/install-request.json
+
+          sudo env "PATH=$PATH" bash scripts/install.sh \
+            --source-dir "$GITHUB_WORKSPACE" \
+            --bots-source-dir /tmp/sovereign-ai-bots \
+            --request-file /etc/sovereign-node/install-request.json \
+            --install \
+            --non-interactive
+
+          sudo jq -e '
+            .connectivity.mode == "relay"
+            and .relay.hostname == "ci-relay.local.test"
+            and .matrix.publicBaseUrl == "https://ci-relay.local.test"
+            and .matrix.federationEnabled == false
+          ' /etc/sovereign-node/install-request.json > /dev/null
+
+          sudo jq -e '
+            .matrix.accessMode == "relay"
+            and .matrix.federationEnabled == false
+          ' /etc/sovereign-node/sovereign-node.json5 > /dev/null
+
+          PROJECT_DIR=$(sudo jq -r '.matrix.projectDir' /etc/sovereign-node/sovereign-node.json5)
+          sudo grep -q '^MATRIX_FEDERATION_ENABLED=false$' "$PROJECT_DIR/.env"
+          sudo grep -q '^federation_domain_whitelist: \[\]$' "$PROJECT_DIR/synapse/homeserver.yaml"
+          sudo systemctl is-active --quiet sovereign-matrix-relay-tunnel.service
+
+      - name: Reconfigure relay-mode Matrix to enable federation
+        run: |
+          sudo env "PATH=$PATH" sovereign-node reconfigure matrix --federation --json >/tmp/relay-reconfigure.json
+
+          jq -e '
+            .ok == true
+            and .result.target == "matrix"
+            and (.result.changed | index("matrix.federationEnabled")) != null
+          ' /tmp/relay-reconfigure.json > /dev/null
+
+          sudo jq -e '
+            .matrix.accessMode == "relay"
+            and .matrix.federationEnabled == true
+          ' /etc/sovereign-node/sovereign-node.json5 > /dev/null
+
+          sudo jq -e '.matrix.federationEnabled == true' /etc/sovereign-node/install-request.json > /dev/null
+
+          PROJECT_DIR=$(sudo jq -r '.matrix.projectDir' /etc/sovereign-node/sovereign-node.json5)
+          sudo grep -q '^MATRIX_FEDERATION_ENABLED=true$' "$PROJECT_DIR/.env"
+          ! sudo grep -q '^federation_domain_whitelist: \[\]$' "$PROJECT_DIR/synapse/homeserver.yaml"
+          sudo systemctl is-active --quiet sovereign-matrix-relay-tunnel.service
+
+      - name: Verify Matrix client API is reachable after reconfigure
+        run: |
+          curl -f --retry 3 --retry-delay 2 http://127.0.0.1:8008/_matrix/client/versions | jq .
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== request file ==="
+          sudo cat /etc/sovereign-node/install-request.json 2>/dev/null | jq . || true
+          echo "=== reconfigure output ==="
+          cat /tmp/relay-reconfigure.json 2>/dev/null | jq . || true
+          echo "=== sovereign-node status ==="
+          sudo env "PATH=$PATH" sovereign-node status --json 2>&1 || true
+          echo "=== relay tunnel service ==="
+          sudo systemctl status sovereign-matrix-relay-tunnel.service 2>&1 || true
+          echo "=== local frps logs ==="
+          docker logs ci-relay-frps 2>&1 || true
+          echo "=== docker compose logs ==="
+          PROJECT_DIR=$(sudo jq -r '.matrix.projectDir // empty' /etc/sovereign-node/sovereign-node.json5 2>/dev/null || true)
+          if [ -n "$PROJECT_DIR" ]; then
+            cd "$PROJECT_DIR" && docker compose logs --tail=100 2>&1 || true
+          fi
+
   e2e_interactive:
     name: E2E Install (interactive)
     runs-on: ubuntu-latest
