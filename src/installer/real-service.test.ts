@@ -8876,23 +8876,24 @@ describe("RealInstallerService", () => {
         new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } }),
     });
 
+    const getuidMock =
+      typeof process.getuid === "function"
+        ? vi
+            .spyOn(process as typeof process & { getuid: () => number }, "getuid")
+            .mockImplementation(() => 0)
+        : null;
+    process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
     try {
-      // Temporarily pretend to be root so applyCompiledSystemdResources runs
-      const originalGetuid = process.getuid!;
-      process.getuid = () => 0;
-      process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const svc = service as any;
-        const configRaw = await readFile(paths.configPath, "utf8");
-        const runtimeConfig = JSON.parse(configRaw) as RuntimeConfig;
-        runtimeConfig.hostResources =
-          parsed.hostResources as NonNullable<RuntimeConfig["hostResources"]>;
-        await svc.applyCompiledSystemdResources(runtimeConfig);
-      } finally {
-        process.getuid = originalGetuid;
-        delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
-      }
+      const configRaw = await readFile(paths.configPath, "utf8");
+      const runtimeConfig = JSON.parse(configRaw) as RuntimeConfig;
+      runtimeConfig.hostResources = parsed.hostResources as NonNullable<
+        RuntimeConfig["hostResources"]
+      >;
+      await (
+        service as unknown as {
+          applyCompiledSystemdResources(config: RuntimeConfig): Promise<void>;
+        }
+      ).applyCompiledSystemdResources(runtimeConfig);
 
       // Verify the service unit was overwritten with new content
       const writtenService = await readFile(
@@ -8916,13 +8917,11 @@ describe("RealInstallerService", () => {
       expect(execCommands).toContain("systemctl restart sovereign-mail-sentinel-scan.timer");
 
       // The service has desiredState enabled=false, active=false, so no enable/restart
-      expect(execCommands).not.toContain(
-        "systemctl enable sovereign-mail-sentinel-scan.service",
-      );
-      expect(execCommands).not.toContain(
-        "systemctl restart sovereign-mail-sentinel-scan.service",
-      );
+      expect(execCommands).not.toContain("systemctl enable sovereign-mail-sentinel-scan.service");
+      expect(execCommands).not.toContain("systemctl restart sovereign-mail-sentinel-scan.service");
     } finally {
+      getuidMock?.mockRestore();
+      delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
       await rm(tempRoot, { recursive: true, force: true });
     }
   });
@@ -8944,7 +8943,8 @@ describe("RealInstallerService", () => {
     };
     await writeRuntimeArtifacts(paths);
 
-    const serviceContent = "[Unit]\nDescription=Sovereign Mail Sentinel Scan\n\n[Service]\nType=oneshot\nUser=sovereign-ai-node\n\n[Install]\n";
+    const serviceContent =
+      "[Unit]\nDescription=Sovereign Mail Sentinel Scan\n\n[Service]\nType=oneshot\nUser=sovereign-ai-node\n\n[Install]\n";
 
     const raw = await readFile(paths.configPath, "utf8");
     const parsed = JSON.parse(raw) as {
@@ -9048,26 +9048,30 @@ describe("RealInstallerService", () => {
         new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } }),
     });
 
+    const getuidMock2 =
+      typeof process.getuid === "function"
+        ? vi
+            .spyOn(process as typeof process & { getuid: () => number }, "getuid")
+            .mockImplementation(() => 0)
+        : null;
+    process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
     try {
-      const originalGetuid = process.getuid!;
-      process.getuid = () => 0;
-      process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const svc = service as any;
-        const configRaw = await readFile(paths.configPath, "utf8");
-        const runtimeConfig = JSON.parse(configRaw) as RuntimeConfig;
-        runtimeConfig.hostResources =
-          parsed.hostResources as NonNullable<RuntimeConfig["hostResources"]>;
-        await svc.applyCompiledSystemdResources(runtimeConfig);
-      } finally {
-        process.getuid = originalGetuid;
-        delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
-      }
+      const configRaw = await readFile(paths.configPath, "utf8");
+      const runtimeConfig = JSON.parse(configRaw) as RuntimeConfig;
+      runtimeConfig.hostResources = parsed.hostResources as NonNullable<
+        RuntimeConfig["hostResources"]
+      >;
+      await (
+        service as unknown as {
+          applyCompiledSystemdResources(config: RuntimeConfig): Promise<void>;
+        }
+      ).applyCompiledSystemdResources(runtimeConfig);
 
       // Content is identical, so no daemon-reload should be called
       expect(execCommands).not.toContain("systemctl daemon-reload");
     } finally {
+      getuidMock2?.mockRestore();
+      delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
       await rm(tempRoot, { recursive: true, force: true });
     }
   });

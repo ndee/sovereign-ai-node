@@ -4345,7 +4345,9 @@ export default function (api) {
     }
 
     const systemdResources = (runtimeConfig.hostResources?.resources ?? []).filter(
-      (resource): resource is Extract<typeof resource, { kind: "systemdService" | "systemdTimer" }> =>
+      (
+        resource,
+      ): resource is Extract<typeof resource, { kind: "systemdService" | "systemdTimer" }> =>
         resource.kind === "systemdService" || resource.kind === "systemdTimer",
     );
     if (systemdResources.length === 0) {
