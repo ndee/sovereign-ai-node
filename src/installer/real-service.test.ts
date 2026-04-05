@@ -27,6 +27,12 @@ const priorBotRepoRef = process.env.SOVEREIGN_BOTS_REPO_REF;
 
 let testBotRepoDir = "";
 
+const managedAgentAccessTokenDir = (paths: SovereignPaths): string =>
+  join(dirname(paths.configPath), "matrix-agent-access-tokens");
+
+const managedAgentAccessTokenPath = (paths: SovereignPaths, agentId: string): string =>
+  join(managedAgentAccessTokenDir(paths), `matrix-agent-${agentId}-access-token`);
+
 const buildInstallRequest = (): InstallRequest => ({
   mode: "bundled_matrix",
   openclaw: {
@@ -772,13 +778,14 @@ const writeDedicatedBotRuntimeArtifacts = async (paths: SovereignPaths): Promise
 
   const bitcoinWorkspace = join(paths.stateDir, "bitcoin-skill-match", "workspace");
   const nodeOperatorWorkspace = join(paths.stateDir, "node-operator", "workspace");
-  const bitcoinTokenPath = join(paths.secretsDir, "matrix-agent-bitcoin-skill-match-access-token");
+  const bitcoinTokenPath = managedAgentAccessTokenPath(paths, "bitcoin-skill-match");
   const bitcoinPasswordPath = join(paths.secretsDir, "matrix-agent-bitcoin-skill-match-password");
-  const nodeOperatorTokenPath = join(paths.secretsDir, "matrix-agent-node-operator-access-token");
+  const nodeOperatorTokenPath = managedAgentAccessTokenPath(paths, "node-operator");
   const nodeOperatorPasswordPath = join(paths.secretsDir, "matrix-agent-node-operator-password");
 
   await mkdir(bitcoinWorkspace, { recursive: true });
   await mkdir(nodeOperatorWorkspace, { recursive: true });
+  await mkdir(managedAgentAccessTokenDir(paths), { recursive: true });
   await writeFile(bitcoinTokenPath, "bitcoin-skill-match-token\n", "utf8");
   await writeFile(bitcoinPasswordPath, "bitcoin-skill-match-password\n", "utf8");
   await writeFile(nodeOperatorTokenPath, "node-operator-token\n", "utf8");
@@ -4607,6 +4614,157 @@ describe("RealInstallerService", () => {
     }
   });
 
+  it("stores managed agent access tokens under a shared node-owned directory", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-agent-token-test-"));
+    const getuidMock =
+      typeof process.getuid === "function"
+        ? vi
+            .spyOn(process as typeof process & { getuid: () => number }, "getuid")
+            .mockImplementation(() => 0)
+        : null;
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+    await mkdir(dirname(paths.configPath), { recursive: true });
+    await mkdir(paths.secretsDir, { recursive: true });
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => {
+          throw new Error("not used");
+        },
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {
+          throw new Error("not used");
+        },
+        start: async () => {
+          throw new Error("not used");
+        },
+        restart: async () => {
+          throw new Error("not used");
+        },
+      },
+      managedAgentRegistrar: {
+        register: async () => {
+          throw new Error("not used");
+        },
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async () => ({
+          ok: true,
+          host: "imap.example.org",
+          port: 993,
+          tls: true,
+          auth: "ok",
+          mailbox: "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async ({ command, args }): Promise<ExecResult> => {
+          const serialized = [command, ...(args ?? [])].join(" ");
+          if (serialized === "getent passwd runner") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "runner:x:1001:1001::/home/runner:/bin/bash\n",
+              stderr: "",
+            };
+          }
+          if (serialized === "getent group gateway-bots") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "gateway-bots:x:1002:\n",
+              stderr: "",
+            };
+          }
+          return {
+            command: serialized,
+            exitCode: 1,
+            stdout: "",
+            stderr: "unexpected command",
+          };
+        },
+      },
+    });
+    const runtimeConfig = {
+      openclaw: {
+        serviceUser: "runner",
+        serviceGroup: "gateway-bots",
+      },
+    } as RuntimeConfig;
+
+    try {
+      const ownership = await (
+        service as unknown as {
+          resolveManagedAgentAccessTokenOwnership(
+            config: RuntimeConfig,
+          ): Promise<{ uid: number; gid: number } | null>;
+        }
+      ).resolveManagedAgentAccessTokenOwnership(runtimeConfig);
+
+      expect(ownership).toEqual({
+        uid: (await stat(dirname(paths.configPath))).uid,
+        gid: 1002,
+      });
+
+      const secretRef = await (
+        service as unknown as {
+          writeManagedAgentAccessTokenFile(
+            config: RuntimeConfig,
+            fileName: string,
+            value: string,
+          ): Promise<string>;
+        }
+      ).writeManagedAgentAccessTokenFile(
+        runtimeConfig,
+        "matrix-agent-mail-sentinel-access-token",
+        "shared-token",
+      );
+
+      const tokenPath = managedAgentAccessTokenPath(paths, "mail-sentinel");
+      expect(secretRef).toBe(`file:${tokenPath}`);
+      expect(await readFile(tokenPath, "utf8")).toBe("shared-token\n");
+      expect((await stat(tokenPath)).mode & 0o777).toBe(0o640);
+      expect((await stat(managedAgentAccessTokenDir(paths))).mode & 0o7777).toBe(0o2750);
+    } finally {
+      getuidMock?.mockRestore();
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("defaults the managed service identity to the invoking sudo user in root installs", () => {
     const getuidMock =
       typeof process.getuid === "function"
@@ -5102,6 +5260,11 @@ describe("RealInstallerService", () => {
       const initialOpenClawConfig = await readFile(openclawConfigPath, "utf8");
       expect(botTokenPath.length).toBeGreaterThan(0);
       expect(agentTokenPath.length).toBeGreaterThan(0);
+      expect(botTokenPath).toBe(managedAgentAccessTokenPath(paths, "mail-sentinel"));
+      expect(agentTokenPath).toBe(managedAgentAccessTokenPath(paths, "mail-sentinel"));
+      expect(botTokenPath.startsWith(`${paths.secretsDir}/`)).toBe(false);
+      expect((await stat(botTokenPath)).mode & 0o777).toBe(0o640);
+      expect((await stat(managedAgentAccessTokenDir(paths))).mode & 0o7777).toBe(0o2750);
       expect(initialOpenClawConfig).toContain("mail-sentinel-token");
       const restartCountBeforeRepair = gatewayRestarts;
 
@@ -7686,7 +7849,7 @@ describe("RealInstallerService", () => {
         `file:${join(paths.secretsDir, "matrix-agent-bitcoin-skill-match-password")}`,
       );
       expect(config.matrix?.bot?.accessTokenSecretRef).toBe(
-        `file:${join(paths.secretsDir, "matrix-agent-bitcoin-skill-match-access-token")}`,
+        `file:${managedAgentAccessTokenPath(paths, "bitcoin-skill-match")}`,
       );
       expect(commandCalls).toContain(
         "openclaw agents bind --agent bitcoin-skill-match --bind matrix:bitcoin-skill-match",
