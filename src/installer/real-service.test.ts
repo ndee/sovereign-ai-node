@@ -7424,6 +7424,18 @@ describe("RealInstallerService", () => {
           await stat(join(paths.stateDir, "bitcoin-skill-match", "workspace", ".openclaw"))
         ).isDirectory(),
       ).toBe(true);
+      const freshSessionsDir = join(
+        paths.openclawServiceHome,
+        ".openclaw",
+        ".openclaw",
+        "agents",
+        "bitcoin-skill-match",
+        "sessions",
+      );
+      expect((await stat(freshSessionsDir)).isDirectory()).toBe(true);
+      const freshSessionsEntries = await readdir(dirname(freshSessionsDir));
+      expect(freshSessionsEntries).toContain("sessions");
+      expect(freshSessionsEntries.some((e) => e.startsWith("sessions.reset."))).toBe(false);
       expect(sentMessageBody).toContain("Hello from Bitcoin Skill Match");
     } finally {
       if (priorOpenrouterApiKey === undefined) {
@@ -7832,6 +7844,18 @@ describe("RealInstallerService", () => {
           "utf8",
         ),
       ).toContain('"legacy":true');
+      const bsmSessionsDir = join(
+        paths.openclawServiceHome,
+        ".openclaw",
+        ".openclaw",
+        "agents",
+        "bitcoin-skill-match",
+        "sessions",
+      );
+      expect((await stat(bsmSessionsDir)).isDirectory()).toBe(true);
+      const bsmSessionsEntries = await readdir(dirname(bsmSessionsDir));
+      expect(bsmSessionsEntries).toContain("sessions");
+      expect(bsmSessionsEntries.some((e) => e.startsWith("sessions.reset."))).toBe(false);
       expect(sentBodies.some((body) => body.includes("Hello from Bitcoin Skill Match"))).toBe(true);
       expect(sentBodies.some((body) => body.includes("Hello from Node Operator"))).toBe(true);
     } finally {
