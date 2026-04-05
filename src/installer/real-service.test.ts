@@ -7435,9 +7435,7 @@ describe("RealInstallerService", () => {
       expect((await stat(freshSessionsDir)).isDirectory()).toBe(true);
       const freshSessionsEntries = await readdir(dirname(freshSessionsDir));
       expect(freshSessionsEntries).toContain("sessions");
-      expect(
-        freshSessionsEntries.some((e) => e.startsWith("sessions.reset.")),
-      ).toBe(false);
+      expect(freshSessionsEntries.some((e) => e.startsWith("sessions.reset."))).toBe(false);
       expect(sentMessageBody).toContain("Hello from Bitcoin Skill Match");
     } finally {
       if (priorOpenrouterApiKey === undefined) {
