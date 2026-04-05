@@ -8131,7 +8131,7 @@ describe("RealInstallerService", () => {
     }
   });
 
-  it("omits DM and group allowlists from OpenClaw config when federation is enabled", async () => {
+  it("keeps room reply routing open in OpenClaw config when federation is enabled", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {
       configPath: join(tempRoot, "etc", "sovereign-node.json5"),
@@ -8235,40 +8235,61 @@ describe("RealInstallerService", () => {
             dm?: { policy?: string; allowFrom?: string[] };
             groupPolicy?: string;
             groupAllowFrom?: string[];
-            groups?: Record<string, { users?: string[] }>;
+            groups?: Record<
+              string,
+              {
+                users?: string[];
+                autoReply?: boolean;
+                requireMention?: boolean;
+              }
+            >;
             accounts?: Record<
               string,
               {
                 dm?: { enabled?: boolean; policy?: string; allowFrom?: string[] };
                 groupPolicy?: string;
                 groupAllowFrom?: string[];
-                groups?: Record<string, { users?: string[] }>;
+                groups?: Record<
+                  string,
+                  {
+                    users?: string[];
+                    autoReply?: boolean;
+                    requireMention?: boolean;
+                  }
+                >;
               }
             >;
           };
         };
       };
 
-      // Channel-level: no DM policy, no group policy when federation is open
-      expect(openclawConfig.channels?.matrix?.dm).toBeUndefined();
-      expect(openclawConfig.channels?.matrix?.groupPolicy).toBeUndefined();
+      expect(openclawConfig.channels?.matrix?.dm?.policy).toBe("open");
+      expect(openclawConfig.channels?.matrix?.groupPolicy).toBe("open");
       expect(openclawConfig.channels?.matrix?.groupAllowFrom).toBeUndefined();
-      expect(openclawConfig.channels?.matrix?.groups).toBeUndefined();
+      expect(
+        openclawConfig.channels?.matrix?.groups?.["!alerts:matrix.example.org"]?.autoReply,
+      ).toBe(true);
+      expect(
+        openclawConfig.channels?.matrix?.groups?.["!alerts:matrix.example.org"]?.requireMention,
+      ).toBe(false);
 
-      // Per-account: DM enabled but no policy/allowFrom, no group policy
       const btcAccount = openclawConfig.channels?.matrix?.accounts?.["bitcoin-skill-match"];
       expect(btcAccount?.dm?.enabled).toBe(true);
-      expect(btcAccount?.dm?.policy).toBeUndefined();
+      expect(btcAccount?.dm?.policy).toBe("open");
       expect(btcAccount?.dm?.allowFrom).toBeUndefined();
-      expect(btcAccount?.groupPolicy).toBeUndefined();
+      expect(btcAccount?.groupPolicy).toBe("open");
       expect(btcAccount?.groupAllowFrom).toBeUndefined();
-      expect(btcAccount?.groups).toBeUndefined();
+      expect(btcAccount?.groups?.["!alerts:matrix.example.org"]?.autoReply).toBe(true);
+      expect(btcAccount?.groups?.["!alerts:matrix.example.org"]?.requireMention).toBe(false);
 
       const opAccount = openclawConfig.channels?.matrix?.accounts?.["node-operator"];
       expect(opAccount?.dm?.enabled).toBe(true);
-      expect(opAccount?.dm?.policy).toBeUndefined();
+      expect(opAccount?.dm?.policy).toBe("open");
       expect(opAccount?.dm?.allowFrom).toBeUndefined();
-      expect(opAccount?.groupPolicy).toBeUndefined();
+      expect(opAccount?.groupPolicy).toBe("open");
+      expect(opAccount?.groupAllowFrom).toBeUndefined();
+      expect(opAccount?.groups?.["!alerts:matrix.example.org"]?.autoReply).toBe(false);
+      expect(opAccount?.groups?.["!alerts:matrix.example.org"]?.requireMention).toBe(true);
     } finally {
       if (priorOpenrouterApiKey === undefined) {
         delete process.env.OPENROUTER_API_KEY;
@@ -8389,7 +8410,7 @@ describe("RealInstallerService", () => {
       const config = JSON.parse(configRaw) as { matrix?: { federationEnabled?: boolean } };
       expect(config.matrix?.federationEnabled).toBe(true);
 
-      // OpenClaw config should have no allowlists
+      // OpenClaw config should keep room routing open without allowlists
       const openclawRaw = await readFile(
         join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
         "utf8",
@@ -8399,11 +8420,19 @@ describe("RealInstallerService", () => {
           matrix?: {
             dm?: { policy?: string; allowFrom?: string[] };
             groupPolicy?: string;
+            groups?: Record<string, { autoReply?: boolean; requireMention?: boolean }>;
           };
         };
       };
-      expect(openclawConfig.channels?.matrix?.dm).toBeUndefined();
-      expect(openclawConfig.channels?.matrix?.groupPolicy).toBeUndefined();
+      expect(openclawConfig.channels?.matrix?.dm?.policy).toBe("open");
+      expect(openclawConfig.channels?.matrix?.dm?.allowFrom).toBeUndefined();
+      expect(openclawConfig.channels?.matrix?.groupPolicy).toBe("open");
+      expect(
+        openclawConfig.channels?.matrix?.groups?.["!alerts:matrix.example.org"]?.autoReply,
+      ).toBe(true);
+      expect(
+        openclawConfig.channels?.matrix?.groups?.["!alerts:matrix.example.org"]?.requireMention,
+      ).toBe(false);
     } finally {
       if (priorOpenrouterApiKey === undefined) {
         delete process.env.OPENROUTER_API_KEY;
