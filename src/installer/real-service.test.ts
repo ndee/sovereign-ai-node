@@ -27,6 +27,12 @@ const priorBotRepoRef = process.env.SOVEREIGN_BOTS_REPO_REF;
 
 let testBotRepoDir = "";
 
+const managedAgentAccessTokenDir = (paths: SovereignPaths): string =>
+  join(dirname(paths.configPath), "matrix-agent-access-tokens");
+
+const managedAgentAccessTokenPath = (paths: SovereignPaths, agentId: string): string =>
+  join(managedAgentAccessTokenDir(paths), `matrix-agent-${agentId}-access-token`);
+
 const buildInstallRequest = (): InstallRequest => ({
   mode: "bundled_matrix",
   openclaw: {
@@ -772,13 +778,14 @@ const writeDedicatedBotRuntimeArtifacts = async (paths: SovereignPaths): Promise
 
   const bitcoinWorkspace = join(paths.stateDir, "bitcoin-skill-match", "workspace");
   const nodeOperatorWorkspace = join(paths.stateDir, "node-operator", "workspace");
-  const bitcoinTokenPath = join(paths.secretsDir, "matrix-agent-bitcoin-skill-match-access-token");
+  const bitcoinTokenPath = managedAgentAccessTokenPath(paths, "bitcoin-skill-match");
   const bitcoinPasswordPath = join(paths.secretsDir, "matrix-agent-bitcoin-skill-match-password");
-  const nodeOperatorTokenPath = join(paths.secretsDir, "matrix-agent-node-operator-access-token");
+  const nodeOperatorTokenPath = managedAgentAccessTokenPath(paths, "node-operator");
   const nodeOperatorPasswordPath = join(paths.secretsDir, "matrix-agent-node-operator-password");
 
   await mkdir(bitcoinWorkspace, { recursive: true });
   await mkdir(nodeOperatorWorkspace, { recursive: true });
+  await mkdir(managedAgentAccessTokenDir(paths), { recursive: true });
   await writeFile(bitcoinTokenPath, "bitcoin-skill-match-token\n", "utf8");
   await writeFile(bitcoinPasswordPath, "bitcoin-skill-match-password\n", "utf8");
   await writeFile(nodeOperatorTokenPath, "node-operator-token\n", "utf8");
@@ -1301,6 +1308,139 @@ describe("RealInstallerService", () => {
       expect(capturedEnrollmentToken).toBe("");
       expect(enrollment.hostname).toBe("pilot-node.relay.sovereign-ai-node.com");
       expect(enrollment.publicBaseUrl).toBe("https://pilot-node.relay.sovereign-ai-node.com");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves requested federation when building the effective relay install request", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "pinned-by-sovereign",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: "/tmp/ws",
+          agentCommand: "openclaw agents add mail-sentinel",
+          cronCommand: "openclaw cron add --name mail-sentinel-poll",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      fetchImpl: async () =>
+        new Response("{}", { status: 404, headers: { "Content-Type": "application/json" } }),
+    });
+
+    try {
+      const req = buildInstallRequest() as InstallRequest & {
+        relay: { controlUrl: string; enrollmentToken: string };
+      };
+      req.connectivity = { mode: "relay" };
+      req.relay = {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+        enrollmentToken: "relay-enrollment-token",
+      };
+      req.matrix.homeserverDomain = "relay-pending.invalid";
+      req.matrix.publicBaseUrl = "https://relay-pending.invalid";
+      req.matrix.federationEnabled = true;
+      req.matrix.tlsMode = "auto";
+
+      const effectiveReq = await (
+        service as unknown as {
+          buildRelayProvisionRequest: (
+            value: InstallRequest,
+            enrollment: {
+              controlUrl: string;
+              hostname: string;
+              publicBaseUrl: string;
+              tunnel: {
+                serverAddr: string;
+                serverPort: number;
+                token: string;
+                proxyName: string;
+                type: "http";
+                localIp: string;
+                localPort: number;
+              };
+            },
+          ) => InstallRequest;
+        }
+      ).buildRelayProvisionRequest(req, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+        hostname: "pilot-node.relay.sovereign-ai-node.com",
+        publicBaseUrl: "https://pilot-node.relay.sovereign-ai-node.com",
+        tunnel: {
+          serverAddr: "relay.sovereign-ai-node.com",
+          serverPort: 7000,
+          token: "relay-token",
+          proxyName: "relay-pilot-node",
+          type: "http",
+          localIp: "127.0.0.1",
+          localPort: 18080,
+        },
+      });
+
+      expect(effectiveReq.connectivity?.mode).toBe("relay");
+      expect(effectiveReq.matrix.homeserverDomain).toBe("pilot-node.relay.sovereign-ai-node.com");
+      expect(effectiveReq.matrix.publicBaseUrl).toBe(
+        "https://pilot-node.relay.sovereign-ai-node.com",
+      );
+      expect(effectiveReq.matrix.federationEnabled).toBe(true);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -4343,6 +4483,7 @@ describe("RealInstallerService", () => {
   });
 
   it("resolves configured runtime ownership from the service identity when running as root", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-ownership-test-"));
     const getuidMock =
       typeof process.getuid === "function"
         ? vi
@@ -4452,8 +4593,175 @@ describe("RealInstallerService", () => {
 
       expect(ownership).toEqual({ uid: 1001, gid: 1001 });
       expect(commandCalls).toEqual(["getent passwd runner"]);
+
+      const tempFile = join(tempRoot, "ownership-seed-test");
+      await writeFile(tempFile, "test", "utf8");
+      await (
+        service as unknown as {
+          applyConfiguredRuntimeOwnership(path: string, config: RuntimeConfig): Promise<void>;
+        }
+      ).applyConfiguredRuntimeOwnership(tempFile, runtimeConfig);
+
+      const cachedOwnership = (
+        service as unknown as {
+          resolvedRuntimeOwnership: { uid: number; gid: number } | null | undefined;
+        }
+      ).resolvedRuntimeOwnership;
+      expect(cachedOwnership).toEqual({ uid: 1001, gid: 1001 });
     } finally {
       getuidMock?.mockRestore();
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("stores managed agent access tokens under a shared node-owned directory", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-agent-token-test-"));
+    const getuidMock =
+      typeof process.getuid === "function"
+        ? vi
+            .spyOn(process as typeof process & { getuid: () => number }, "getuid")
+            .mockImplementation(() => 0)
+        : null;
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+    await mkdir(dirname(paths.configPath), { recursive: true });
+    await mkdir(paths.secretsDir, { recursive: true });
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => {
+          throw new Error("not used");
+        },
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {
+          throw new Error("not used");
+        },
+        start: async () => {
+          throw new Error("not used");
+        },
+        restart: async () => {
+          throw new Error("not used");
+        },
+      },
+      managedAgentRegistrar: {
+        register: async () => {
+          throw new Error("not used");
+        },
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async () => ({
+          ok: true,
+          host: "imap.example.org",
+          port: 993,
+          tls: true,
+          auth: "ok",
+          mailbox: "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async ({ command, args }): Promise<ExecResult> => {
+          const serialized = [command, ...(args ?? [])].join(" ");
+          if (serialized === "getent passwd runner") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "runner:x:1001:1001::/home/runner:/bin/bash\n",
+              stderr: "",
+            };
+          }
+          if (serialized === "getent group gateway-bots") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "gateway-bots:x:1002:\n",
+              stderr: "",
+            };
+          }
+          return {
+            command: serialized,
+            exitCode: 1,
+            stdout: "",
+            stderr: "unexpected command",
+          };
+        },
+      },
+    });
+    const runtimeConfig = {
+      openclaw: {
+        serviceUser: "runner",
+        serviceGroup: "gateway-bots",
+      },
+    } as RuntimeConfig;
+
+    try {
+      const ownership = await (
+        service as unknown as {
+          resolveManagedAgentAccessTokenOwnership(
+            config: RuntimeConfig,
+          ): Promise<{ uid: number; gid: number } | null>;
+        }
+      ).resolveManagedAgentAccessTokenOwnership(runtimeConfig);
+
+      expect(ownership).toEqual({
+        uid: (await stat(dirname(paths.configPath))).uid,
+        gid: 1002,
+      });
+
+      const secretRef = await (
+        service as unknown as {
+          writeManagedAgentAccessTokenFile(
+            config: RuntimeConfig,
+            fileName: string,
+            value: string,
+          ): Promise<string>;
+        }
+      ).writeManagedAgentAccessTokenFile(
+        runtimeConfig,
+        "matrix-agent-mail-sentinel-access-token",
+        "shared-token",
+      );
+
+      const tokenPath = managedAgentAccessTokenPath(paths, "mail-sentinel");
+      expect(secretRef).toBe(`file:${tokenPath}`);
+      expect(await readFile(tokenPath, "utf8")).toBe("shared-token\n");
+      expect((await stat(tokenPath)).mode & 0o777).toBe(0o640);
+      expect((await stat(managedAgentAccessTokenDir(paths))).mode & 0o7777).toBe(0o2750);
+    } finally {
+      getuidMock?.mockRestore();
+      await rm(tempRoot, { recursive: true, force: true });
     }
   });
 
@@ -4952,6 +5260,11 @@ describe("RealInstallerService", () => {
       const initialOpenClawConfig = await readFile(openclawConfigPath, "utf8");
       expect(botTokenPath.length).toBeGreaterThan(0);
       expect(agentTokenPath.length).toBeGreaterThan(0);
+      expect(botTokenPath).toBe(managedAgentAccessTokenPath(paths, "mail-sentinel"));
+      expect(agentTokenPath).toBe(managedAgentAccessTokenPath(paths, "mail-sentinel"));
+      expect(botTokenPath.startsWith(`${paths.secretsDir}/`)).toBe(false);
+      expect((await stat(botTokenPath)).mode & 0o777).toBe(0o640);
+      expect((await stat(managedAgentAccessTokenDir(paths))).mode & 0o7777).toBe(0o2750);
       expect(initialOpenClawConfig).toContain("mail-sentinel-token");
       const restartCountBeforeRepair = gatewayRestarts;
 
@@ -7291,6 +7604,18 @@ describe("RealInstallerService", () => {
           await stat(join(paths.stateDir, "bitcoin-skill-match", "workspace", ".openclaw"))
         ).isDirectory(),
       ).toBe(true);
+      const freshSessionsDir = join(
+        paths.openclawServiceHome,
+        ".openclaw",
+        ".openclaw",
+        "agents",
+        "bitcoin-skill-match",
+        "sessions",
+      );
+      expect((await stat(freshSessionsDir)).isDirectory()).toBe(true);
+      const freshSessionsEntries = await readdir(dirname(freshSessionsDir));
+      expect(freshSessionsEntries).toContain("sessions");
+      expect(freshSessionsEntries.some((e) => e.startsWith("sessions.reset."))).toBe(false);
       expect(sentMessageBody).toContain("Hello from Bitcoin Skill Match");
     } finally {
       if (priorOpenrouterApiKey === undefined) {
@@ -7524,7 +7849,7 @@ describe("RealInstallerService", () => {
         `file:${join(paths.secretsDir, "matrix-agent-bitcoin-skill-match-password")}`,
       );
       expect(config.matrix?.bot?.accessTokenSecretRef).toBe(
-        `file:${join(paths.secretsDir, "matrix-agent-bitcoin-skill-match-access-token")}`,
+        `file:${managedAgentAccessTokenPath(paths, "bitcoin-skill-match")}`,
       );
       expect(commandCalls).toContain(
         "openclaw agents bind --agent bitcoin-skill-match --bind matrix:bitcoin-skill-match",
@@ -7699,6 +8024,18 @@ describe("RealInstallerService", () => {
           "utf8",
         ),
       ).toContain('"legacy":true');
+      const bsmSessionsDir = join(
+        paths.openclawServiceHome,
+        ".openclaw",
+        ".openclaw",
+        "agents",
+        "bitcoin-skill-match",
+        "sessions",
+      );
+      expect((await stat(bsmSessionsDir)).isDirectory()).toBe(true);
+      const bsmSessionsEntries = await readdir(dirname(bsmSessionsDir));
+      expect(bsmSessionsEntries).toContain("sessions");
+      expect(bsmSessionsEntries.some((e) => e.startsWith("sessions.reset."))).toBe(false);
       expect(sentBodies.some((body) => body.includes("Hello from Bitcoin Skill Match"))).toBe(true);
       expect(sentBodies.some((body) => body.includes("Hello from Node Operator"))).toBe(true);
     } finally {
@@ -7957,7 +8294,7 @@ describe("RealInstallerService", () => {
     }
   });
 
-  it("omits DM and group allowlists from OpenClaw config when federation is enabled", async () => {
+  it("keeps room reply routing open in OpenClaw config when federation is enabled", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {
       configPath: join(tempRoot, "etc", "sovereign-node.json5"),
@@ -7976,6 +8313,28 @@ describe("RealInstallerService", () => {
     const parsed = JSON.parse(raw) as { matrix?: { federationEnabled?: boolean } };
     parsed.matrix = { ...parsed.matrix, federationEnabled: true };
     await writeFile(paths.configPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+
+    const seededGatewayAuth = {
+      mode: "token",
+      token: "existing-gateway-token",
+    } as const;
+    await writeFile(
+      join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
+      `${JSON.stringify(
+        {
+          meta: {
+            lastTouchedVersion: "2026.3.13",
+          },
+          gateway: {
+            bind: "loopback",
+            auth: seededGatewayAuth,
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
 
     const priorOpenrouterApiKey = process.env.OPENROUTER_API_KEY;
     process.env.OPENROUTER_API_KEY = "sk-or-test";
@@ -8056,45 +8415,77 @@ describe("RealInstallerService", () => {
         "utf8",
       );
       const openclawConfig = JSON.parse(openclawConfigRaw) as {
+        meta?: {
+          lastTouchedVersion?: string;
+        };
+        gateway?: {
+          auth?: {
+            mode?: string;
+            token?: string;
+          };
+        };
         channels?: {
           matrix?: {
             dm?: { policy?: string; allowFrom?: string[] };
             groupPolicy?: string;
             groupAllowFrom?: string[];
-            groups?: Record<string, { users?: string[] }>;
+            groups?: Record<
+              string,
+              {
+                users?: string[];
+                autoReply?: boolean;
+                requireMention?: boolean;
+              }
+            >;
             accounts?: Record<
               string,
               {
                 dm?: { enabled?: boolean; policy?: string; allowFrom?: string[] };
                 groupPolicy?: string;
                 groupAllowFrom?: string[];
-                groups?: Record<string, { users?: string[] }>;
+                groups?: Record<
+                  string,
+                  {
+                    users?: string[];
+                    autoReply?: boolean;
+                    requireMention?: boolean;
+                  }
+                >;
               }
             >;
           };
         };
       };
 
-      // Channel-level: no DM policy, no group policy when federation is open
-      expect(openclawConfig.channels?.matrix?.dm).toBeUndefined();
-      expect(openclawConfig.channels?.matrix?.groupPolicy).toBeUndefined();
+      expect(openclawConfig.meta?.lastTouchedVersion).toBe("2026.3.13");
+      expect(openclawConfig.gateway?.auth).toEqual(seededGatewayAuth);
+      expect(openclawConfig.channels?.matrix?.dm?.policy).toBe("open");
+      expect(openclawConfig.channels?.matrix?.groupPolicy).toBe("open");
       expect(openclawConfig.channels?.matrix?.groupAllowFrom).toBeUndefined();
-      expect(openclawConfig.channels?.matrix?.groups).toBeUndefined();
+      expect(
+        openclawConfig.channels?.matrix?.groups?.["!alerts:matrix.example.org"]?.autoReply,
+      ).toBe(true);
+      expect(
+        openclawConfig.channels?.matrix?.groups?.["!alerts:matrix.example.org"]?.requireMention,
+      ).toBe(false);
 
-      // Per-account: DM enabled but no policy/allowFrom, no group policy
       const btcAccount = openclawConfig.channels?.matrix?.accounts?.["bitcoin-skill-match"];
       expect(btcAccount?.dm?.enabled).toBe(true);
-      expect(btcAccount?.dm?.policy).toBeUndefined();
+      expect(btcAccount?.dm?.policy).toBe("open");
       expect(btcAccount?.dm?.allowFrom).toBeUndefined();
-      expect(btcAccount?.groupPolicy).toBeUndefined();
+      expect(btcAccount?.groupPolicy).toBe("open");
       expect(btcAccount?.groupAllowFrom).toBeUndefined();
-      expect(btcAccount?.groups).toBeUndefined();
+      expect(btcAccount?.groups?.["!alerts:matrix.example.org"]?.autoReply).toBe(true);
+      expect(btcAccount?.groups?.["!alerts:matrix.example.org"]?.requireMention).toBe(false);
 
       const opAccount = openclawConfig.channels?.matrix?.accounts?.["node-operator"];
       expect(opAccount?.dm?.enabled).toBe(true);
-      expect(opAccount?.dm?.policy).toBeUndefined();
+      expect(opAccount?.dm?.policy).toBe("open");
       expect(opAccount?.dm?.allowFrom).toBeUndefined();
-      expect(opAccount?.groupPolicy).toBeUndefined();
+      expect(opAccount?.groupPolicy).toBe("open");
+      expect(opAccount?.groupAllowFrom).toBeUndefined();
+      expect(opAccount?.groups?.["!alerts:matrix.example.org"]?.autoReply).toBe(false);
+      expect(opAccount?.groups?.["!alerts:matrix.example.org"]?.requireMention).toBe(true);
     } finally {
       if (priorOpenrouterApiKey === undefined) {
         delete process.env.OPENROUTER_API_KEY;
@@ -8215,7 +8606,7 @@ describe("RealInstallerService", () => {
       const config = JSON.parse(configRaw) as { matrix?: { federationEnabled?: boolean } };
       expect(config.matrix?.federationEnabled).toBe(true);
 
-      // OpenClaw config should have no allowlists
+      // OpenClaw config should keep room routing open without allowlists
       const openclawRaw = await readFile(
         join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
         "utf8",
@@ -8225,11 +8616,19 @@ describe("RealInstallerService", () => {
           matrix?: {
             dm?: { policy?: string; allowFrom?: string[] };
             groupPolicy?: string;
+            groups?: Record<string, { autoReply?: boolean; requireMention?: boolean }>;
           };
         };
       };
-      expect(openclawConfig.channels?.matrix?.dm).toBeUndefined();
-      expect(openclawConfig.channels?.matrix?.groupPolicy).toBeUndefined();
+      expect(openclawConfig.channels?.matrix?.dm?.policy).toBe("open");
+      expect(openclawConfig.channels?.matrix?.dm?.allowFrom).toBeUndefined();
+      expect(openclawConfig.channels?.matrix?.groupPolicy).toBe("open");
+      expect(
+        openclawConfig.channels?.matrix?.groups?.["!alerts:matrix.example.org"]?.autoReply,
+      ).toBe(true);
+      expect(
+        openclawConfig.channels?.matrix?.groups?.["!alerts:matrix.example.org"]?.requireMention,
+      ).toBe(false);
     } finally {
       if (priorOpenrouterApiKey === undefined) {
         delete process.env.OPENROUTER_API_KEY;
@@ -8240,7 +8639,7 @@ describe("RealInstallerService", () => {
     }
   });
 
-  it("rejects enabling federation in relay mode", async () => {
+  it("enables federation in relay mode", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {
       configPath: join(tempRoot, "etc", "sovereign-node.json5"),
@@ -8325,11 +8724,15 @@ describe("RealInstallerService", () => {
     });
 
     try {
-      await expect(
-        service.reconfigureMatrix({ matrix: { federationEnabled: true } }),
-      ).rejects.toMatchObject({
-        code: "MATRIX_RELAY_FEDERATION_UNSUPPORTED",
+      const result = await service.reconfigureMatrix({
+        matrix: { federationEnabled: true },
       });
+
+      expect(result.changed).toContain("matrix.federationEnabled");
+
+      const configRaw = await readFile(paths.configPath, "utf8");
+      const config = JSON.parse(configRaw) as { matrix?: { federationEnabled?: boolean } };
+      expect(config.matrix?.federationEnabled).toBe(true);
     } finally {
       if (priorOpenrouterApiKey === undefined) {
         delete process.env.OPENROUTER_API_KEY;

@@ -12,7 +12,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import type {
   BotCatalog,
   BotConfigRecord,
@@ -1149,14 +1149,6 @@ export class RealInstallerService implements InstallerService {
     }
 
     const runtimeConfig = await this.readRuntimeConfig();
-
-    if (requestedFederation && runtimeConfig.matrix.accessMode === "relay") {
-      throw {
-        code: "MATRIX_RELAY_FEDERATION_UNSUPPORTED",
-        message: "Managed relay mode does not support Matrix federation in v1",
-        retryable: false,
-      };
-    }
 
     const federationChanged = requestedFederation !== runtimeConfig.matrix.federationEnabled;
     const changed: string[] = [];
@@ -4360,6 +4352,12 @@ export default function (api) {
       sessionsStat = await stat(sessionsDir);
     } catch (error) {
       if (isNodeError(error) && error.code === "ENOENT") {
+        await mkdir(sessionsDir, { recursive: true });
+        await this.applyRuntimeOwnership(sessionsDir);
+        this.logger.info(
+          { agentId, sessionsDir },
+          "Created managed agent sessions directory (first install)",
+        );
         return;
       }
       throw error;
@@ -4453,7 +4451,8 @@ export default function (api) {
       password,
       expectedUserId: upsertedUserId,
     });
-    const accessTokenSecretRef = await this.writeManagedSecretFile(
+    const accessTokenSecretRef = await this.writeManagedAgentAccessTokenFile(
+      runtimeConfig,
       `matrix-agent-${agentId}-access-token`,
       loginSession.accessToken,
     );
@@ -5371,14 +5370,17 @@ export default function (api) {
     }
   }
 
-  private async validateAndRefreshMatrixIdentityToken(input: {
-    label: string;
-    adminBaseUrl: string;
-    localpart?: string | undefined;
-    userId: string;
-    accessTokenSecretRef?: string | undefined;
-    passwordSecretRef?: string | undefined;
-  }): Promise<boolean> {
+  private async validateAndRefreshMatrixIdentityToken(
+    input: {
+      label: string;
+      adminBaseUrl: string;
+      localpart?: string | undefined;
+      userId: string;
+      accessTokenSecretRef?: string | undefined;
+      passwordSecretRef?: string | undefined;
+    },
+    runtimeConfig: RuntimeConfig,
+  ): Promise<boolean> {
     const tokenRef = input.accessTokenSecretRef;
     const passwordRef = input.passwordSecretRef;
     if (tokenRef === undefined || passwordRef === undefined) {
@@ -5479,12 +5481,18 @@ export default function (api) {
       expectedUserId,
     });
 
-    await this.writeManagedSecretFile(
-      tokenRef.startsWith("file:")
-        ? (tokenRef.slice("file:".length).split("/").pop() ?? "matrix-bot-access-token")
-        : "matrix-bot-access-token",
-      session.accessToken,
-    );
+    const tokenFileName = tokenRef.startsWith("file:")
+      ? basename(tokenRef.slice("file:".length)) || "matrix-bot-access-token"
+      : "matrix-bot-access-token";
+    if (isManagedAgentMatrixAccessTokenFileName(tokenFileName)) {
+      await this.writeManagedAgentAccessTokenFile(
+        runtimeConfig,
+        tokenFileName,
+        session.accessToken,
+      );
+    } else {
+      await this.writeManagedSecretFile(tokenFileName, session.accessToken);
+    }
 
     this.logger.info(
       {
@@ -5535,7 +5543,8 @@ export default function (api) {
         continue;
       }
       seen.add(dedupeKey);
-      refreshed = (await this.validateAndRefreshMatrixIdentityToken(candidate)) || refreshed;
+      refreshed =
+        (await this.validateAndRefreshMatrixIdentityToken(candidate, runtimeConfig)) || refreshed;
     }
 
     if (!refreshed) {
@@ -6640,7 +6649,7 @@ export default function (api) {
         ...req.matrix,
         homeserverDomain: enrollment.hostname,
         publicBaseUrl: enrollment.publicBaseUrl,
-        federationEnabled: false,
+        federationEnabled: req.matrix.federationEnabled ?? false,
       },
     };
   }
@@ -8392,6 +8401,14 @@ export default function (api) {
   private async writeOpenClawRuntimeArtifacts(runtimeConfig: RuntimeConfig): Promise<void> {
     await this.writeManagedOpenClawExtensions({ runtimeConfig });
     const openrouterApiKey = await this.resolveSecretRef(runtimeConfig.openrouter.apiKeySecretRef);
+    const existingRuntimePayload = await this.readManagedOpenClawRuntimeJson(runtimeConfig);
+    const preservedMeta = isRecord(existingRuntimePayload?.meta)
+      ? existingRuntimePayload.meta
+      : undefined;
+    const preservedGatewayAuth =
+      isRecord(existingRuntimePayload?.gateway) && isRecord(existingRuntimePayload.gateway.auth)
+        ? existingRuntimePayload.gateway.auth
+        : undefined;
     const managedAgents = ensureCoreManagedAgents(runtimeConfig.openclawProfile.agents);
     const operatorAllowlist = [runtimeConfig.matrix.operator.userId];
     const managedAgentPackages = new Map(
@@ -8445,10 +8462,10 @@ export default function (api) {
         accessToken: string;
         dm?: {
           enabled: boolean;
-          policy?: "allowlist";
+          policy?: "allowlist" | "open";
           allowFrom?: string[];
         };
-        groupPolicy?: "allowlist";
+        groupPolicy?: "allowlist" | "open";
         groupAllowFrom?: string[];
         groups?: Record<
           string,
@@ -8536,7 +8553,18 @@ export default function (api) {
         userId: agent.matrix.userId,
         accessToken: await this.resolveSecretRef(agent.matrix.accessTokenSecretRef),
         ...(federationOpen
-          ? { dm: { enabled: routing.dmEnabled } }
+          ? {
+              dm: {
+                enabled: routing.dmEnabled,
+                policy: "open" as const,
+              },
+              groupPolicy: "open" as const,
+              groups: buildMatrixGroupEntries({
+                users: [],
+                autoReply: routing.alertRoom.autoReply,
+                requireMention: routing.alertRoom.requireMention,
+              }),
+            }
           : {
               dm: {
                 enabled: routing.dmEnabled,
@@ -8559,7 +8587,18 @@ export default function (api) {
         userId: runtimeConfig.matrix.bot.userId,
         accessToken: await this.resolveSecretRef(runtimeConfig.matrix.bot.accessTokenSecretRef),
         ...(federationOpen
-          ? { dm: { enabled: true } }
+          ? {
+              dm: {
+                enabled: true,
+                policy: "open" as const,
+              },
+              groupPolicy: "open" as const,
+              groups: buildMatrixGroupEntries({
+                users: [],
+                autoReply: true,
+                requireMention: false,
+              }),
+            }
           : {
               dm: {
                 enabled: true,
@@ -8578,8 +8617,10 @@ export default function (api) {
     }
 
     const runtimePayload = {
+      ...(preservedMeta === undefined ? {} : { meta: preservedMeta }),
       gateway: {
         bind: "loopback" as const,
+        ...(preservedGatewayAuth === undefined ? {} : { auth: preservedGatewayAuth }),
       },
       session: {
         dmScope: runtimeConfig.openclawProfile.session?.dmScope ?? MANAGED_OPENCLAW_DM_SCOPE,
@@ -8610,7 +8651,17 @@ export default function (api) {
                 accounts: matrixAccounts,
               }),
           ...(federationOpen
-            ? {}
+            ? {
+                dm: {
+                  policy: "open" as const,
+                },
+                groupPolicy: "open" as const,
+                groups: buildMatrixGroupEntries({
+                  users: [],
+                  autoReply: true,
+                  requireMention: false,
+                }),
+              }
             : {
                 dm: {
                   policy: "allowlist" as const,
@@ -8865,6 +8916,48 @@ export default function (api) {
     return `file:${filePath}`;
   }
 
+  private async writeManagedAgentAccessTokenFile(
+    runtimeConfig: RuntimeConfig,
+    fileName: string,
+    value: string,
+  ): Promise<string> {
+    const secretsDir = await this.ensureManagedAgentAccessTokenDir(runtimeConfig);
+    const filePath = join(secretsDir, fileName);
+    const tempPath = `${filePath}.${randomUUID()}.tmp`;
+    await writeFile(tempPath, `${value}\n`, "utf8");
+    await chmod(tempPath, 0o640);
+    await rename(tempPath, filePath);
+    await this.applyManagedAgentAccessTokenOwnership(filePath, runtimeConfig);
+    return `file:${filePath}`;
+  }
+
+  private async ensureManagedAgentAccessTokenDir(runtimeConfig: RuntimeConfig): Promise<string> {
+    const dir = this.getManagedAgentAccessTokenDir();
+    try {
+      await mkdir(dir, { recursive: true });
+      // The API user owns this directory while the configured service group can read tokens.
+      await chmod(dir, 0o2750);
+      await this.applyManagedAgentAccessTokenOwnership(dir, runtimeConfig);
+      await access(dir, fsConstants.W_OK);
+      return dir;
+    } catch (error) {
+      throw {
+        code: "SECRET_WRITE_FAILED",
+        message:
+          "Managed agent access token directory is not writable; rerun with sufficient privileges",
+        retryable: false,
+        details: {
+          secretsDir: dir,
+          error: describeError(error),
+        },
+      };
+    }
+  }
+
+  private getManagedAgentAccessTokenDir(): string {
+    return join(dirname(this.paths.configPath), "matrix-agent-access-tokens");
+  }
+
   private async ensureSecretsDir(): Promise<string> {
     if (this.resolvedSecretsDir !== null) {
       return this.resolvedSecretsDir;
@@ -8968,8 +9061,41 @@ export default function (api) {
     return null;
   }
 
+  private async resolveManagedAgentAccessTokenOwnership(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<{ uid: number; gid: number } | null> {
+    const serviceOwnership = await this.resolveConfiguredRuntimeOwnership(runtimeConfig);
+    if (serviceOwnership === null) {
+      return null;
+    }
+
+    let ownerUid: number | null = null;
+    for (const candidate of [dirname(this.paths.configPath), this.paths.secretsDir]) {
+      try {
+        ownerUid = (await stat(candidate)).uid;
+        break;
+      } catch (error) {
+        if (isNodeError(error) && (error.code === "ENOENT" || error.code === "ENOTDIR")) {
+        }
+      }
+    }
+
+    return {
+      uid: ownerUid ?? serviceOwnership.uid,
+      gid: serviceOwnership.gid,
+    };
+  }
+
   private async applyRuntimeOwnership(path: string): Promise<void> {
     const ownership = await this.resolveRuntimeOwnership();
+    await this.applyOwnership(path, ownership);
+  }
+
+  private async applyManagedAgentAccessTokenOwnership(
+    path: string,
+    runtimeConfig: RuntimeConfig,
+  ): Promise<void> {
+    const ownership = await this.resolveManagedAgentAccessTokenOwnership(runtimeConfig);
     await this.applyOwnership(path, ownership);
   }
 
@@ -9061,6 +9187,7 @@ export default function (api) {
   ): Promise<void> {
     const ownership = await this.resolveConfiguredRuntimeOwnership(runtimeConfig);
     if (ownership !== null) {
+      this.resolvedRuntimeOwnership = ownership;
       await this.applyOwnership(path, ownership);
       return;
     }
@@ -9141,6 +9268,9 @@ const toSystemdDuration = (value: string): string => {
   const systemdUnit = match[2].toLowerCase() === "m" ? "min" : match[2].toLowerCase();
   return `${match[1]}${systemdUnit}`;
 };
+
+const isManagedAgentMatrixAccessTokenFileName = (fileName: string): boolean =>
+  /^matrix-agent-.+-access-token$/.test(fileName);
 
 const shouldGateSystemGatewayOnLocalMatrix = (adminBaseUrl: string): boolean => {
   try {

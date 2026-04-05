@@ -121,15 +121,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         publicBaseUrl,
       });
     }
-    const federationEnabled =
-      accessMode === "relay" ? false : (req.matrix.federationEnabled ?? false);
-    if (accessMode === "relay" && req.matrix.federationEnabled === true) {
-      throw {
-        code: "MATRIX_RELAY_FEDERATION_UNSUPPORTED",
-        message: "Managed relay mode does not support Matrix federation in v1",
-        retryable: false,
-      };
-    }
+    const federationEnabled = req.matrix.federationEnabled ?? false;
     const baseDir = await this.ensureBaseDir();
     const projectSlug = slugifyProjectName(homeserverDomain);
     const projectDir = join(baseDir, projectSlug);
