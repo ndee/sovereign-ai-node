@@ -4765,6 +4765,159 @@ describe("RealInstallerService", () => {
     }
   });
 
+  it("stores managed secrets under the configured service identity in root installs", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-managed-secret-test-"));
+    const getuidMock =
+      typeof process.getuid === "function"
+        ? vi
+            .spyOn(process as typeof process & { getuid: () => number }, "getuid")
+            .mockImplementation(() => 0)
+        : null;
+    const priorSudoUser = process.env.SUDO_USER;
+    const priorServiceUser = process.env.SOVEREIGN_NODE_SERVICE_USER;
+    const priorServiceGroup = process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+    process.env.SUDO_USER = "runner";
+    delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+    delete process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => {
+          throw new Error("not used");
+        },
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {
+          throw new Error("not used");
+        },
+        start: async () => {
+          throw new Error("not used");
+        },
+        restart: async () => {
+          throw new Error("not used");
+        },
+      },
+      managedAgentRegistrar: {
+        register: async () => {
+          throw new Error("not used");
+        },
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async () => ({
+          ok: true,
+          host: "imap.example.org",
+          port: 993,
+          tls: true,
+          auth: "ok",
+          mailbox: "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async ({ command, args }): Promise<ExecResult> => {
+          const serialized = [command, ...(args ?? [])].join(" ");
+          if (serialized === "getent passwd runner") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "runner:x:1001:1001::/home/runner:/bin/bash\n",
+              stderr: "",
+            };
+          }
+          return {
+            command: serialized,
+            exitCode: 1,
+            stdout: "",
+            stderr: "unexpected command",
+          };
+        },
+      },
+    });
+
+    try {
+      const secretRef = await (
+        service as unknown as {
+          writeManagedSecretFile(fileName: string, value: string): Promise<string>;
+        }
+      ).writeManagedSecretFile("matrix-agent-mail-sentinel-access-token", "token-value");
+
+      expect(secretRef).toBe(
+        `file:${join(paths.secretsDir, "matrix-agent-mail-sentinel-access-token")}`,
+      );
+      expect(
+        await readFile(join(paths.secretsDir, "matrix-agent-mail-sentinel-access-token"), "utf8"),
+      ).toBe("token-value\n");
+      expect((await stat(paths.secretsDir)).mode & 0o777).toBe(0o700);
+
+      const cachedOwnership = (
+        service as unknown as {
+          resolvedRuntimeOwnership: { uid: number; gid: number } | null | undefined;
+        }
+      ).resolvedRuntimeOwnership;
+      expect(cachedOwnership).toEqual({ uid: 1001, gid: 1001 });
+
+      const runtimeOwnership = await (
+        service as unknown as {
+          resolveRuntimeOwnership(): Promise<{ uid: number; gid: number } | null>;
+        }
+      ).resolveRuntimeOwnership();
+      expect(runtimeOwnership).toEqual({ uid: 1001, gid: 1001 });
+    } finally {
+      getuidMock?.mockRestore();
+      if (priorSudoUser === undefined) {
+        delete process.env.SUDO_USER;
+      } else {
+        process.env.SUDO_USER = priorSudoUser;
+      }
+      if (priorServiceUser === undefined) {
+        delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+      } else {
+        process.env.SOVEREIGN_NODE_SERVICE_USER = priorServiceUser;
+      }
+      if (priorServiceGroup === undefined) {
+        delete process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+      } else {
+        process.env.SOVEREIGN_NODE_SERVICE_GROUP = priorServiceGroup;
+      }
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("defaults the managed service identity to the invoking sudo user in root installs", () => {
     const getuidMock =
       typeof process.getuid === "function"
