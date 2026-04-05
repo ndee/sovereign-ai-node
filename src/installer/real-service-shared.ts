@@ -63,6 +63,7 @@ export type CompiledHostResource =
   | {
       id: string;
       botId: string;
+      agentId: string;
       kind: "directory";
       path: string;
       mode?: string;
@@ -73,6 +74,7 @@ export type CompiledHostResource =
   | {
       id: string;
       botId: string;
+      agentId: string;
       kind: "managedFile" | "stateFile";
       path: string;
       content: string;
@@ -93,6 +95,7 @@ export type CompiledHostResource =
   | {
       id: string;
       botId: string;
+      agentId: string;
       kind: "systemdService";
       name: string;
       content: string;
@@ -105,6 +108,7 @@ export type CompiledHostResource =
   | {
       id: string;
       botId: string;
+      agentId: string;
       kind: "systemdTimer";
       name: string;
       content: string;
@@ -117,6 +121,7 @@ export type CompiledHostResource =
   | {
       id: string;
       botId: string;
+      agentId: string;
       kind: "openclawCron";
       desiredState: "present" | "absent";
       match: {
@@ -137,6 +142,7 @@ export type CompiledHostResource =
 
 export type CompiledBotStatus = {
   botId: string;
+  agentId: string;
   resourceId: string;
   path: string;
   fields: Record<
@@ -180,6 +186,7 @@ export type RuntimeConfig = {
       templateRef?: string;
       toolInstanceIds?: string[];
       botId?: string;
+      botInstanceId?: string;
       matrix?: {
         localpart: string;
         userId: string;
@@ -209,6 +216,7 @@ export type RuntimeConfig = {
   };
   bots: {
     config: Record<string, Record<string, BotConfigValue>>;
+    instances: RuntimeBotInstance[];
   };
   matrix: {
     accessMode: "direct" | "relay";
@@ -269,6 +277,22 @@ export type RuntimeConfig = {
 };
 
 export type RuntimeAgentEntry = RuntimeConfig["openclawProfile"]["agents"][number];
+
+export type RuntimeBotInstance = {
+  id: string;
+  packageId: string;
+  workspace: string;
+  config: Record<string, BotConfigValue>;
+  secretRefs: Record<string, string>;
+  matrix?: {
+    localpart?: string;
+    alertRoom?: {
+      roomId: string;
+      roomName: string;
+    };
+    allowedUsers?: string[];
+  };
+};
 
 export type InstallProvenance = {
   nodeRepoUrl: string;
@@ -501,6 +525,10 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
           typeof agent.model === "string" && agent.model.length > 0 ? agent.model : undefined;
         const botId =
           typeof agent.botId === "string" && agent.botId.length > 0 ? agent.botId : undefined;
+        const botInstanceId =
+          typeof agent.botInstanceId === "string" && agent.botInstanceId.length > 0
+            ? agent.botInstanceId
+            : undefined;
         return [
           {
             id: agent.id,
@@ -509,6 +537,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
             ...(model === undefined ? {} : { model }),
             ...(templateRef === undefined ? {} : { templateRef }),
             ...(botId === undefined ? {} : { botId }),
+            ...(botInstanceId === undefined ? {} : { botInstanceId }),
             ...(toolInstanceIds === undefined || toolInstanceIds.length === 0
               ? {}
               : { toolInstanceIds }),
@@ -564,6 +593,85 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
         }),
       )
     : {};
+  const botInstances = Array.isArray(bots.instances)
+    ? bots.instances.flatMap((entry): RuntimeBotInstance[] => {
+        if (
+          !isRecord(entry) ||
+          typeof entry.id !== "string" ||
+          entry.id.length === 0 ||
+          typeof entry.packageId !== "string" ||
+          entry.packageId.length === 0
+        ) {
+          return [];
+        }
+        const config = isRecord(entry.config)
+          ? Object.fromEntries(
+              Object.entries(entry.config).filter(
+                (pair): pair is [string, BotConfigValue] =>
+                  typeof pair[0] === "string" &&
+                  pair[0].length > 0 &&
+                  (typeof pair[1] === "string" ||
+                    typeof pair[1] === "number" ||
+                    typeof pair[1] === "boolean"),
+              ),
+            )
+          : {};
+        const secretRefs = isRecord(entry.secretRefs)
+          ? Object.fromEntries(
+              Object.entries(entry.secretRefs).filter(
+                (pair): pair is [string, string] =>
+                  typeof pair[0] === "string" &&
+                  pair[0].length > 0 &&
+                  typeof pair[1] === "string" &&
+                  pair[1].length > 0,
+              ),
+            )
+          : {};
+        const matrixEntry = isRecord(entry.matrix) ? entry.matrix : {};
+        const alertRoomEntry = isRecord(matrixEntry.alertRoom) ? matrixEntry.alertRoom : {};
+        const allowedUsers = Array.isArray(matrixEntry.allowedUsers)
+          ? matrixEntry.allowedUsers.filter(
+              (item): item is string => typeof item === "string" && item.length > 0,
+            )
+          : [];
+        return [
+          {
+            id: entry.id,
+            packageId: entry.packageId,
+            workspace:
+              typeof entry.workspace === "string" && entry.workspace.length > 0
+                ? entry.workspace
+                : join("/var/lib/sovereign-node", entry.id, "workspace"),
+            config,
+            secretRefs,
+            ...(!isRecord(entry.matrix) && allowedUsers.length === 0
+              ? {}
+              : {
+                  matrix: {
+                    ...(typeof matrixEntry.localpart === "string" &&
+                    matrixEntry.localpart.length > 0
+                      ? { localpart: matrixEntry.localpart }
+                      : {}),
+                    ...(typeof alertRoomEntry.roomId === "string" &&
+                    alertRoomEntry.roomId.length > 0
+                      ? {
+                          alertRoom: {
+                            roomId: alertRoomEntry.roomId,
+                            roomName:
+                              typeof alertRoomEntry.roomName === "string" &&
+                              alertRoomEntry.roomName.length > 0
+                                ? alertRoomEntry.roomName
+                                : "Sovereign Alerts",
+                          },
+                        }
+                      : {}),
+                    ...(allowedUsers.length === 0 ? {} : { allowedUsers }),
+                  },
+                }),
+          },
+        ];
+      })
+    : [];
   const templates = isRecord(parsed.templates) ? parsed.templates : {};
   const templateInstalledEntries = Array.isArray(templates.installed)
     ? templates.installed.flatMap((entry) => {
@@ -752,11 +860,14 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
       if (!isRecord(entry) || typeof entry.id !== "string" || typeof entry.botId !== "string") {
         continue;
       }
+      const agentId =
+        typeof entry.agentId === "string" && entry.agentId.length > 0 ? entry.agentId : entry.botId;
       const checks = parseHostChecks(entry.checks);
       if (entry.kind === "directory" && typeof entry.path === "string") {
         compiledHostResources.push({
           id: entry.id,
           botId: entry.botId,
+          agentId,
           kind: "directory",
           path: entry.path,
           ...(typeof entry.mode === "string" ? { mode: entry.mode } : {}),
@@ -776,6 +887,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
         compiledHostResources.push({
           id: entry.id,
           botId: entry.botId,
+          agentId,
           kind: entry.kind,
           path: entry.path,
           content: entry.content,
@@ -801,6 +913,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
         compiledHostResources.push({
           id: entry.id,
           botId: entry.botId,
+          agentId,
           kind: entry.kind,
           name: entry.name,
           content: entry.content,
@@ -820,6 +933,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
         compiledHostResources.push({
           id: entry.id,
           botId: entry.botId,
+          agentId,
           kind: "openclawCron",
           desiredState: entry.desiredState,
           match: {
@@ -862,12 +976,15 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
       ) {
         continue;
       }
+      const agentId =
+        typeof entry.agentId === "string" && entry.agentId.length > 0 ? entry.agentId : entry.botId;
       const fields = parseStatusFields(entry.fields);
       if (fields === null) {
         continue;
       }
       compiledBotStatus.push({
         botId: entry.botId,
+        agentId,
         resourceId: entry.resourceId,
         path: entry.path,
         fields,
@@ -1061,6 +1178,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
     ...(relayConfig === undefined ? {} : { relay: relayConfig }),
     bots: {
       config: botConfig,
+      instances: botInstances,
     },
     templates: {
       installed: templateInstalledEntries,
@@ -1243,6 +1361,7 @@ const ensureCoreManagedAgents = (agents: RuntimeAgentEntry[]): RuntimeAgentEntry
       ...(entry.model === undefined ? {} : { model: entry.model }),
       ...(entry.templateRef === undefined ? {} : { templateRef: entry.templateRef }),
       ...(entry.botId === undefined ? {} : { botId: entry.botId }),
+      ...(entry.botInstanceId === undefined ? {} : { botInstanceId: entry.botInstanceId }),
       ...(entry.toolInstanceIds === undefined || entry.toolInstanceIds.length === 0
         ? {}
         : { toolInstanceIds: entry.toolInstanceIds }),

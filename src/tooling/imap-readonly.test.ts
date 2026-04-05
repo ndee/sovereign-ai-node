@@ -53,6 +53,7 @@ const buildRuntimeConfig = (secretRef: string): RuntimeConfig => ({
         e2eeAlertRoom: false,
       },
     },
+    instances: [],
   },
   matrix: {
     accessMode: "relay",
