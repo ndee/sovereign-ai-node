@@ -8314,6 +8314,28 @@ describe("RealInstallerService", () => {
     parsed.matrix = { ...parsed.matrix, federationEnabled: true };
     await writeFile(paths.configPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
 
+    const seededGatewayAuth = {
+      mode: "token",
+      token: "existing-gateway-token",
+    } as const;
+    await writeFile(
+      join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
+      `${JSON.stringify(
+        {
+          meta: {
+            lastTouchedVersion: "2026.3.13",
+          },
+          gateway: {
+            bind: "loopback",
+            auth: seededGatewayAuth,
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+
     const priorOpenrouterApiKey = process.env.OPENROUTER_API_KEY;
     process.env.OPENROUTER_API_KEY = "sk-or-test";
 
@@ -8393,6 +8415,15 @@ describe("RealInstallerService", () => {
         "utf8",
       );
       const openclawConfig = JSON.parse(openclawConfigRaw) as {
+        meta?: {
+          lastTouchedVersion?: string;
+        };
+        gateway?: {
+          auth?: {
+            mode?: string;
+            token?: string;
+          };
+        };
         channels?: {
           matrix?: {
             dm?: { policy?: string; allowFrom?: string[] };
@@ -8426,6 +8457,8 @@ describe("RealInstallerService", () => {
         };
       };
 
+      expect(openclawConfig.meta?.lastTouchedVersion).toBe("2026.3.13");
+      expect(openclawConfig.gateway?.auth).toEqual(seededGatewayAuth);
       expect(openclawConfig.channels?.matrix?.dm?.policy).toBe("open");
       expect(openclawConfig.channels?.matrix?.groupPolicy).toBe("open");
       expect(openclawConfig.channels?.matrix?.groupAllowFrom).toBeUndefined();
