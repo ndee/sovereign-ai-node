@@ -4476,6 +4476,7 @@ describe("RealInstallerService", () => {
   });
 
   it("resolves configured runtime ownership from the service identity when running as root", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-ownership-test-"));
     const getuidMock =
       typeof process.getuid === "function"
         ? vi
@@ -4585,8 +4586,24 @@ describe("RealInstallerService", () => {
 
       expect(ownership).toEqual({ uid: 1001, gid: 1001 });
       expect(commandCalls).toEqual(["getent passwd runner"]);
+
+      const tempFile = join(tempRoot, "ownership-seed-test");
+      await writeFile(tempFile, "test", "utf8");
+      await (
+        service as unknown as {
+          applyConfiguredRuntimeOwnership(path: string, config: RuntimeConfig): Promise<void>;
+        }
+      ).applyConfiguredRuntimeOwnership(tempFile, runtimeConfig);
+
+      const cachedOwnership = (
+        service as unknown as {
+          resolvedRuntimeOwnership: { uid: number; gid: number } | null | undefined;
+        }
+      ).resolvedRuntimeOwnership;
+      expect(cachedOwnership).toEqual({ uid: 1001, gid: 1001 });
     } finally {
       getuidMock?.mockRestore();
+      await rm(tempRoot, { recursive: true, force: true });
     }
   });
 

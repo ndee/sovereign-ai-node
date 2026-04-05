@@ -9059,6 +9059,7 @@ export default function (api) {
   ): Promise<void> {
     const ownership = await this.resolveConfiguredRuntimeOwnership(runtimeConfig);
     if (ownership !== null) {
+      this.resolvedRuntimeOwnership = ownership;
       await this.applyOwnership(path, ownership);
       return;
     }
