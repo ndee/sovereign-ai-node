@@ -8443,10 +8443,10 @@ export default function (api) {
         accessToken: string;
         dm?: {
           enabled: boolean;
-          policy?: "allowlist";
+          policy?: "allowlist" | "open";
           allowFrom?: string[];
         };
-        groupPolicy?: "allowlist";
+        groupPolicy?: "allowlist" | "open";
         groupAllowFrom?: string[];
         groups?: Record<
           string,
