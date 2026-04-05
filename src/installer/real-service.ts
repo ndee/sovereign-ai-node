@@ -8454,10 +8454,10 @@ export default function (api) {
         accessToken: string;
         dm?: {
           enabled: boolean;
-          policy?: "allowlist";
+          policy?: "allowlist" | "open";
           allowFrom?: string[];
         };
-        groupPolicy?: "allowlist";
+        groupPolicy?: "allowlist" | "open";
         groupAllowFrom?: string[];
         groups?: Record<
           string,
@@ -8545,7 +8545,18 @@ export default function (api) {
         userId: agent.matrix.userId,
         accessToken: await this.resolveSecretRef(agent.matrix.accessTokenSecretRef),
         ...(federationOpen
-          ? { dm: { enabled: routing.dmEnabled } }
+          ? {
+              dm: {
+                enabled: routing.dmEnabled,
+                policy: "open" as const,
+              },
+              groupPolicy: "open" as const,
+              groups: buildMatrixGroupEntries({
+                users: [],
+                autoReply: routing.alertRoom.autoReply,
+                requireMention: routing.alertRoom.requireMention,
+              }),
+            }
           : {
               dm: {
                 enabled: routing.dmEnabled,
@@ -8568,7 +8579,18 @@ export default function (api) {
         userId: runtimeConfig.matrix.bot.userId,
         accessToken: await this.resolveSecretRef(runtimeConfig.matrix.bot.accessTokenSecretRef),
         ...(federationOpen
-          ? { dm: { enabled: true } }
+          ? {
+              dm: {
+                enabled: true,
+                policy: "open" as const,
+              },
+              groupPolicy: "open" as const,
+              groups: buildMatrixGroupEntries({
+                users: [],
+                autoReply: true,
+                requireMention: false,
+              }),
+            }
           : {
               dm: {
                 enabled: true,
@@ -8619,7 +8641,17 @@ export default function (api) {
                 accounts: matrixAccounts,
               }),
           ...(federationOpen
-            ? {}
+            ? {
+                dm: {
+                  policy: "open" as const,
+                },
+                groupPolicy: "open" as const,
+                groups: buildMatrixGroupEntries({
+                  users: [],
+                  autoReply: true,
+                  requireMention: false,
+                }),
+              }
             : {
                 dm: {
                   policy: "allowlist" as const,
