@@ -4210,6 +4210,7 @@ export default function (api) {
       });
     }
 
+    await this.applyCompiledSystemdResources(runtimeConfig);
     await this.persistManagedAgentTopologyDocument(runtimeConfig);
     await this.writeOpenClawRuntimeArtifacts(runtimeConfig);
     this.setManagedOpenClawEnv(runtimeConfig);
@@ -4335,6 +4336,86 @@ export default function (api) {
         await chmod(resource.path, Number.parseInt(resource.mode, 8));
       }
       await this.applyRuntimeOwnership(resource.path);
+    }
+  }
+
+  private async applyCompiledSystemdResources(runtimeConfig: RuntimeConfig): Promise<void> {
+    if (typeof process.getuid !== "function" || process.getuid() !== 0) {
+      return;
+    }
+
+    const systemdResources = (runtimeConfig.hostResources?.resources ?? []).filter(
+      (resource): resource is Extract<typeof resource, { kind: "systemdService" | "systemdTimer" }> =>
+        resource.kind === "systemdService" || resource.kind === "systemdTimer",
+    );
+    if (systemdResources.length === 0) {
+      return;
+    }
+
+    const changedUnits: Array<{
+      name: string;
+      desiredState: { enabled: boolean; active: boolean };
+    }> = [];
+    for (const resource of systemdResources) {
+      const systemdDir =
+        process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR?.trim() || "/etc/systemd/system";
+      const unitPath = join(systemdDir, resource.name);
+      let existingContent: string | undefined;
+      try {
+        existingContent = await readFile(unitPath, "utf8");
+      } catch (error) {
+        if (!isNodeError(error) || error.code !== "ENOENT") {
+          this.logger.warn(
+            {
+              unitPath,
+              error: describeError(error),
+            },
+            "Failed to read existing systemd unit for comparison",
+          );
+        }
+      }
+      if (existingContent === resource.content) {
+        continue;
+      }
+      try {
+        await writeFile(unitPath, resource.content, "utf8");
+      } catch (error) {
+        this.logger.warn(
+          {
+            unitPath,
+            error: describeError(error),
+          },
+          "Failed to write bot systemd unit",
+        );
+        continue;
+      }
+      changedUnits.push({
+        name: resource.name,
+        desiredState: resource.desiredState,
+      });
+      this.logger.info(
+        { unitName: resource.name, botId: resource.botId },
+        "Updated bot systemd unit",
+      );
+    }
+
+    if (changedUnits.length === 0) {
+      return;
+    }
+
+    const reloadResult = await this.safeExec("systemctl", ["daemon-reload"]);
+    if (!reloadResult.ok || reloadResult.result.exitCode !== 0) {
+      this.logger.warn("systemctl daemon-reload failed after writing bot systemd units");
+      return;
+    }
+
+    for (const unit of changedUnits) {
+      if (unit.desiredState.enabled) {
+        await this.safeExec("systemctl", ["enable", unit.name]);
+      }
+      if (unit.desiredState.active) {
+        await this.safeExec("systemctl", ["restart", unit.name]);
+      }
     }
   }
 
@@ -6205,6 +6286,7 @@ export default function (api) {
           if (topologyChanged) {
             await this.persistManagedAgentTopologyDocument(runtimeConfig);
           }
+          await this.applyCompiledSystemdResources(runtimeConfig);
           await this.writeOpenClawRuntimeArtifacts(runtimeConfig);
           stepState.runtimeConfig = runtimeConfig;
           this.setManagedOpenClawEnv(runtimeConfig);
