@@ -8401,6 +8401,14 @@ export default function (api) {
   private async writeOpenClawRuntimeArtifacts(runtimeConfig: RuntimeConfig): Promise<void> {
     await this.writeManagedOpenClawExtensions({ runtimeConfig });
     const openrouterApiKey = await this.resolveSecretRef(runtimeConfig.openrouter.apiKeySecretRef);
+    const existingRuntimePayload = await this.readManagedOpenClawRuntimeJson(runtimeConfig);
+    const preservedMeta = isRecord(existingRuntimePayload?.meta)
+      ? existingRuntimePayload.meta
+      : undefined;
+    const preservedGatewayAuth =
+      isRecord(existingRuntimePayload?.gateway) && isRecord(existingRuntimePayload.gateway.auth)
+        ? existingRuntimePayload.gateway.auth
+        : undefined;
     const managedAgents = ensureCoreManagedAgents(runtimeConfig.openclawProfile.agents);
     const operatorAllowlist = [runtimeConfig.matrix.operator.userId];
     const managedAgentPackages = new Map(
@@ -8609,8 +8617,10 @@ export default function (api) {
     }
 
     const runtimePayload = {
+      ...(preservedMeta === undefined ? {} : { meta: preservedMeta }),
       gateway: {
         bind: "loopback" as const,
+        ...(preservedGatewayAuth === undefined ? {} : { auth: preservedGatewayAuth }),
       },
       session: {
         dmScope: runtimeConfig.openclawProfile.session?.dmScope ?? MANAGED_OPENCLAW_DM_SCOPE,
