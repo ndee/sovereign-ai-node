@@ -4352,6 +4352,12 @@ export default function (api) {
       sessionsStat = await stat(sessionsDir);
     } catch (error) {
       if (isNodeError(error) && error.code === "ENOENT") {
+        await mkdir(sessionsDir, { recursive: true });
+        await this.applyRuntimeOwnership(sessionsDir);
+        this.logger.info(
+          { agentId, sessionsDir },
+          "Created managed agent sessions directory (first install)",
+        );
         return;
       }
       throw error;
