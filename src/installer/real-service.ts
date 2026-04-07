@@ -2964,10 +2964,12 @@ export class RealInstallerService implements InstallerService {
           desiredState: "absent",
           match: {
             ...(superseded.match.id === undefined ? {} : { id: superseded.match.id }),
-            ...(superseded.match.name === undefined ? {} : { name: superseded.match.name }),
+            ...(superseded.match.name === undefined
+              ? {}
+              : { name: this.resolveHostResourceString(context, superseded.match.name) }),
             ...(superseded.match.agentId === undefined
               ? {}
-              : { agentId: superseded.match.agentId }),
+              : { agentId: this.resolveHostResourceString(context, superseded.match.agentId) }),
           },
           checks: [],
         });
