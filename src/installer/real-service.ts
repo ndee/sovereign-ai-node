@@ -161,6 +161,7 @@ import {
   type RelayRuntimeConfig,
   type RelayTunnelConfig,
   type RuntimeAgentEntry,
+  type RuntimeBotInstance,
   type RuntimeConfig,
   resolveVersionPinStatus,
   SOVEREIGN_GATEWAY_SYSTEMD_UNIT,
@@ -181,11 +182,18 @@ import {
 } from "./real-service-shared.js";
 import type {
   InstallerService,
+  MailSentinelApplyResult,
+  MailSentinelDeleteResult,
+  MailSentinelListResult,
+  MailSentinelMigrationResult,
+  MailSentinelSummary,
   ManagedAgent,
   ManagedAgentDeleteResult,
   ManagedAgentListResult,
   ManagedAgentUpsertResult,
   MatrixUserRemoveResult,
+  MigrationStatusResult,
+  PendingMigration,
   SovereignBotInstantiateResult,
   SovereignBotListResult,
   SovereignTemplateInstallResult,
@@ -221,8 +229,18 @@ type HostResourceContext = {
   runtimeConfig: RuntimeConfig;
   botPackage: LoadedBotPackage;
   agent: RuntimeConfig["openclawProfile"]["agents"][number];
+  botInstance?: RuntimeBotInstance;
   toolInstanceIds: string[];
+  toolInstanceIdMap: Record<string, string>;
 };
+
+type MaterializedBotToolInstance = RuntimeConfig["sovereignTools"]["instances"][number] & {
+  botId: string;
+  botInstanceId?: string;
+  manifestToolId: string;
+};
+
+type RequestedBotInstance = RuntimeBotInstance;
 
 const OPENCLAW_EXEC_TOOL_ID = "exec";
 const OPENCLAW_SESSION_STATUS_TOOL_ID = "session_status";
@@ -238,6 +256,14 @@ const DOCTOR_DISK_WARN_BYTES = 2 * 1024 * 1024 * 1024;
 const DOCTOR_DISK_FAIL_BYTES = 500 * 1024 * 1024;
 const LOBSTER_CLI_PROBE_TIMEOUT_MS = 20_000;
 const LOBSTER_CLI_INSTALL_TIMEOUT_MS = 5 * 60_000;
+const MAIL_SENTINEL_MIGRATION_ID = "mail-sentinel-instances";
+const MAIL_SENTINEL_IMAP_HOST_KEY = "imapHost";
+const MAIL_SENTINEL_IMAP_PORT_KEY = "imapPort";
+const MAIL_SENTINEL_IMAP_TLS_KEY = "imapTls";
+const MAIL_SENTINEL_IMAP_USERNAME_KEY = "imapUsername";
+const MAIL_SENTINEL_IMAP_MAILBOX_KEY = "imapMailbox";
+const MAIL_SENTINEL_IMAP_CONFIGURED_KEY = "imapConfigured";
+const MAIL_SENTINEL_IMAP_PASSWORD_SECRET_KEY = "imapPassword";
 const SOVEREIGN_PINNED_LOBSTER_PACKAGE_NAME = "@clawdbot/lobster";
 const SOVEREIGN_PINNED_LOBSTER_VERSION = "2026.1.24";
 const SOVEREIGN_EXECUTABLE_PATHS: Record<string, string> = {
@@ -396,6 +422,262 @@ export class RealInstallerService implements InstallerService {
     };
   }
 
+  private resolveRequestedBotInstances(input: {
+    req: InstallRequest;
+    packages: LoadedBotPackage[];
+    configById: Record<string, BotConfigRecord>;
+    imap: RuntimeConfig["imap"];
+    matrixRoom: { roomId: string; roomName: string };
+    previousRuntimeConfig: RuntimeConfig | null;
+  }): RequestedBotInstance[] {
+    const explicitInstances = Array.isArray(input.req.bots?.instances)
+      ? input.req.bots.instances.map((entry) =>
+          this.normalizeRequestedBotInstance({
+            entry,
+            configById: input.configById,
+            matrixRoom: input.matrixRoom,
+            previousRuntimeConfig: input.previousRuntimeConfig,
+          }),
+        )
+      : [];
+    const normalized = explicitInstances.map((entry) =>
+      this.applyLegacyMailSentinelRequestedInstanceDefaults({
+        entry,
+        imap: input.imap,
+        matrixRoom: input.matrixRoom,
+        previousRuntimeConfig: input.previousRuntimeConfig,
+      }),
+    );
+    const hasMailSentinelInstance = normalized.some(
+      (entry) => entry.packageId === MAIL_SENTINEL_AGENT_ID,
+    );
+    if (
+      !hasMailSentinelInstance &&
+      input.packages.some((entry) => entry.manifest.id === MAIL_SENTINEL_AGENT_ID)
+    ) {
+      normalized.push(
+        this.buildLegacyMailSentinelRequestedInstance({
+          configById: input.configById,
+          imap: input.imap,
+          matrixRoom: input.matrixRoom,
+          previousRuntimeConfig: input.previousRuntimeConfig,
+        }),
+      );
+    }
+    return sortBotInstances(normalized);
+  }
+
+  private normalizeRequestedBotInstance(input: {
+    entry: NonNullable<NonNullable<InstallRequest["bots"]>["instances"]>[number];
+    configById: Record<string, BotConfigRecord>;
+    matrixRoom: { roomId: string; roomName: string };
+    previousRuntimeConfig: RuntimeConfig | null;
+  }): RequestedBotInstance {
+    const id = sanitizeManagedAgentId(input.entry.id);
+    const packageId = input.entry.packageId.trim();
+    const previous = input.previousRuntimeConfig?.bots.instances.find((entry) => entry.id === id);
+    const matrixEntry = isRecord(input.entry.matrix) ? input.entry.matrix : {};
+    const alertRoomEntry = isRecord(matrixEntry.alertRoom) ? matrixEntry.alertRoom : {};
+    const allowedUsers = normalizeMatrixUserList(
+      Array.isArray(matrixEntry.allowedUsers)
+        ? matrixEntry.allowedUsers
+        : (previous?.matrix?.allowedUsers ?? []),
+    );
+    const config = {
+      ...(input.configById[packageId] ?? {}),
+      ...(previous?.config ?? {}),
+      ...normalizeBotConfigRecord(input.entry.config),
+    };
+    const secretRefs = normalizeStringRecord({
+      ...(previous?.secretRefs ?? {}),
+      ...normalizeStringRecord(
+        isRecord(input.entry.secretRefs)
+          ? Object.fromEntries(
+              Object.entries(input.entry.secretRefs).filter(
+                (pair): pair is [string, string] =>
+                  typeof pair[0] === "string" &&
+                  pair[0].length > 0 &&
+                  typeof pair[1] === "string" &&
+                  pair[1].length > 0,
+              ),
+            )
+          : {},
+      ),
+    });
+    const localpart =
+      typeof matrixEntry.localpart === "string" && matrixEntry.localpart.trim().length > 0
+        ? sanitizeManagedAgentLocalpart(matrixEntry.localpart, id)
+        : previous?.matrix?.localpart;
+    const roomId =
+      typeof alertRoomEntry.roomId === "string" && alertRoomEntry.roomId.trim().length > 0
+        ? alertRoomEntry.roomId.trim()
+        : previous?.matrix?.alertRoom?.roomId;
+    const roomName =
+      typeof alertRoomEntry.roomName === "string" && alertRoomEntry.roomName.trim().length > 0
+        ? alertRoomEntry.roomName.trim()
+        : (previous?.matrix?.alertRoom?.roomName ??
+          (roomId === undefined ? undefined : input.matrixRoom.roomName));
+    return {
+      id,
+      packageId,
+      workspace: sanitizeManagedWorkspace(
+        input.entry.workspace,
+        previous?.workspace ?? join(this.paths.stateDir, id, "workspace"),
+      ),
+      config,
+      secretRefs,
+      ...(localpart === undefined && roomId === undefined && allowedUsers.length === 0
+        ? {}
+        : {
+            matrix: {
+              ...(localpart === undefined ? {} : { localpart }),
+              ...(roomId === undefined
+                ? {}
+                : {
+                    alertRoom: {
+                      roomId,
+                      roomName: roomName ?? input.matrixRoom.roomName,
+                    },
+                  }),
+              ...(allowedUsers.length === 0 ? {} : { allowedUsers }),
+            },
+          }),
+    };
+  }
+
+  private buildLegacyMailSentinelRequestedInstance(input: {
+    configById: Record<string, BotConfigRecord>;
+    imap: RuntimeConfig["imap"];
+    matrixRoom: { roomId: string; roomName: string };
+    previousRuntimeConfig: RuntimeConfig | null;
+  }): RequestedBotInstance {
+    const previous =
+      input.previousRuntimeConfig?.bots.instances.find(
+        (entry) => entry.id === MAIL_SENTINEL_AGENT_ID,
+      ) ?? undefined;
+    const previousAgent = input.previousRuntimeConfig?.openclawProfile.agents.find(
+      (entry) => entry.id === MAIL_SENTINEL_AGENT_ID,
+    );
+    return this.applyLegacyMailSentinelRequestedInstanceDefaults({
+      entry: {
+        id: MAIL_SENTINEL_AGENT_ID,
+        packageId: MAIL_SENTINEL_AGENT_ID,
+        workspace:
+          previous?.workspace ?? join(this.paths.stateDir, MAIL_SENTINEL_AGENT_ID, "workspace"),
+        config: {
+          ...(input.configById[MAIL_SENTINEL_AGENT_ID] ?? {}),
+          ...(previous?.config ?? {}),
+        },
+        secretRefs: previous?.secretRefs ?? {},
+        matrix: {
+          ...(previous?.matrix?.localpart === undefined
+            ? previousAgent?.matrix?.localpart === undefined
+              ? {}
+              : { localpart: previousAgent.matrix.localpart }
+            : { localpart: previous.matrix.localpart }),
+          alertRoom: previous?.matrix?.alertRoom ?? input.matrixRoom,
+          ...(previous?.matrix?.allowedUsers === undefined
+            ? {}
+            : { allowedUsers: previous.matrix.allowedUsers }),
+        },
+      },
+      imap: input.imap,
+      matrixRoom: input.matrixRoom,
+      previousRuntimeConfig: input.previousRuntimeConfig,
+    });
+  }
+
+  private applyLegacyMailSentinelRequestedInstanceDefaults(input: {
+    entry: RequestedBotInstance;
+    imap: RuntimeConfig["imap"];
+    matrixRoom: { roomId: string; roomName: string };
+    previousRuntimeConfig: RuntimeConfig | null;
+  }): RequestedBotInstance {
+    if (input.entry.packageId !== MAIL_SENTINEL_AGENT_ID) {
+      return input.entry;
+    }
+    const previous = input.previousRuntimeConfig?.bots.instances.find(
+      (entry) => entry.id === input.entry.id,
+    );
+    const next: RequestedBotInstance = {
+      ...input.entry,
+      config: {
+        ...input.entry.config,
+        ...(input.entry.config[MAIL_SENTINEL_IMAP_CONFIGURED_KEY] === undefined
+          ? { [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: input.imap.status === "configured" }
+          : {}),
+        ...(input.entry.config[MAIL_SENTINEL_IMAP_HOST_KEY] === undefined
+          ? {
+              [MAIL_SENTINEL_IMAP_HOST_KEY]:
+                previous?.config[MAIL_SENTINEL_IMAP_HOST_KEY] ?? input.imap.host,
+            }
+          : {}),
+        ...(input.entry.config[MAIL_SENTINEL_IMAP_PORT_KEY] === undefined
+          ? {
+              [MAIL_SENTINEL_IMAP_PORT_KEY]:
+                previous?.config[MAIL_SENTINEL_IMAP_PORT_KEY] ?? input.imap.port,
+            }
+          : {}),
+        ...(input.entry.config[MAIL_SENTINEL_IMAP_TLS_KEY] === undefined
+          ? {
+              [MAIL_SENTINEL_IMAP_TLS_KEY]:
+                previous?.config[MAIL_SENTINEL_IMAP_TLS_KEY] ?? input.imap.tls,
+            }
+          : {}),
+        ...(input.entry.config[MAIL_SENTINEL_IMAP_USERNAME_KEY] === undefined
+          ? {
+              [MAIL_SENTINEL_IMAP_USERNAME_KEY]:
+                previous?.config[MAIL_SENTINEL_IMAP_USERNAME_KEY] ?? input.imap.username,
+            }
+          : {}),
+        ...(input.entry.config[MAIL_SENTINEL_IMAP_MAILBOX_KEY] === undefined
+          ? {
+              [MAIL_SENTINEL_IMAP_MAILBOX_KEY]:
+                previous?.config[MAIL_SENTINEL_IMAP_MAILBOX_KEY] ?? input.imap.mailbox,
+            }
+          : {}),
+      },
+      secretRefs: normalizeStringRecord({
+        ...input.entry.secretRefs,
+        ...(input.entry.secretRefs[MAIL_SENTINEL_IMAP_PASSWORD_SECRET_KEY] === undefined &&
+        input.imap.status === "configured"
+          ? {
+              [MAIL_SENTINEL_IMAP_PASSWORD_SECRET_KEY]:
+                previous?.secretRefs[MAIL_SENTINEL_IMAP_PASSWORD_SECRET_KEY] ??
+                input.imap.secretRef,
+            }
+          : {}),
+      }),
+      matrix: {
+        ...(input.entry.matrix ?? {}),
+        ...(input.entry.matrix?.alertRoom === undefined
+          ? { alertRoom: previous?.matrix?.alertRoom ?? input.matrixRoom }
+          : {}),
+        ...(input.entry.matrix?.allowedUsers === undefined &&
+        previous?.matrix?.allowedUsers !== undefined
+          ? { allowedUsers: previous.matrix.allowedUsers }
+          : {}),
+      },
+    };
+    return next;
+  }
+
+  private getRuntimeBotInstance(
+    runtimeConfig: RuntimeConfig,
+    id: string,
+  ): RuntimeBotInstance | undefined {
+    return runtimeConfig.bots.instances.find((entry) => entry.id === id);
+  }
+
+  private getRuntimeBotInstanceForAgent(
+    runtimeConfig: RuntimeConfig,
+    agent: RuntimeAgentEntry,
+  ): RuntimeBotInstance | undefined {
+    return agent.botInstanceId === undefined
+      ? undefined
+      : this.getRuntimeBotInstance(runtimeConfig, agent.botInstanceId);
+  }
+
   private resolveSharedServiceBotLocalpart(packages: LoadedBotPackage[]): string | undefined {
     return packages.find((entry) => entry.manifest.matrixIdentity.mode === "service-account")
       ?.manifest.matrixIdentity.localpartPrefix;
@@ -536,8 +818,13 @@ export class RealInstallerService implements InstallerService {
       req.bots?.selected
         ?.map((entry: string) => entry.trim())
         .filter((entry: string) => entry.length > 0) ?? [];
-    if (selected.length > 0) {
-      return dedupeStrings(selected);
+    const selectedFromInstances = Array.isArray(req.bots?.instances)
+      ? req.bots.instances
+          .map((entry) => entry.packageId.trim())
+          .filter((entry) => entry.length > 0)
+      : [];
+    if (selected.length > 0 || selectedFromInstances.length > 0) {
+      return dedupeStrings([...selected, ...selectedFromInstances]);
     }
     return dedupeStrings(defaultBotIds);
   }
@@ -1025,7 +1312,9 @@ export class RealInstallerService implements InstallerService {
     const provenance = await this.tryReadInstallProvenance();
     if (runtimeConfig !== null) {
       for (const resource of runtimeConfig.hostResources?.resources ?? []) {
-        const observed = hostResourceStatus.resources.find((entry) => entry.id === resource.id);
+        const observed = hostResourceStatus.resources.find(
+          (entry) => entry.id === resource.id && entry.agentId === resource.agentId,
+        );
         if (observed === undefined) {
           continue;
         }
@@ -1046,7 +1335,7 @@ export class RealInstallerService implements InstallerService {
             checks.push(
               check(
                 `host-resource:${resource.id}:${resourceCheck.id}`,
-                `${resource.botId} ${resource.id}`,
+                `${resource.agentId} ${resource.id}`,
                 actual === resourceCheck.equals
                   ? "pass"
                   : resourceCheck.severity === "fail"
@@ -1059,7 +1348,7 @@ export class RealInstallerService implements InstallerService {
             );
             continue;
           }
-          const botFields = hostResourceStatus.bots[resource.botId]?.fields ?? {};
+          const botFields = hostResourceStatus.bots[resource.agentId]?.fields ?? {};
           const actual = botFields[resourceCheck.field];
           const numeric = typeof actual === "number" ? actual : undefined;
           const failed =
@@ -1073,7 +1362,7 @@ export class RealInstallerService implements InstallerService {
           checks.push(
             check(
               `host-resource:${resource.id}:${resourceCheck.id}`,
-              `${resource.botId} ${resourceCheck.field}`,
+              `${resource.agentId} ${resourceCheck.field}`,
               failed ? "fail" : warned ? "warn" : "pass",
               numeric === undefined
                 ? `Field '${resourceCheck.field}' is unavailable`
@@ -1456,6 +1745,270 @@ export class RealInstallerService implements InstallerService {
       localpart: normalized.localpart,
       userId: normalized.userId,
       removed,
+    };
+  }
+
+  async getPendingMigrations(): Promise<MigrationStatusResult> {
+    const requestPath = this.getInstallRequestPath();
+    return {
+      requestFile: requestPath,
+      pending: await this.listPendingMigrations(),
+    };
+  }
+
+  async migrateLegacyMailSentinel(req: {
+    nonInteractive?: boolean;
+    matrixLocalpart?: string;
+    alertRoomId?: string;
+    alertRoomName?: string;
+    createAlertRoomName?: string;
+    allowedUsers?: string[];
+  }): Promise<MailSentinelMigrationResult> {
+    const runtimeConfig = await this.readRuntimeConfig();
+    const { requestFile, request } = await this.readSavedInstallRequestOrThrow();
+    if (!(await this.isMailSentinelMigrationPending(request, runtimeConfig))) {
+      const existing = this.getRuntimeBotInstance(runtimeConfig, MAIL_SENTINEL_AGENT_ID);
+      if (existing === undefined) {
+        throw {
+          code: "MAIL_SENTINEL_MIGRATION_NOT_REQUIRED",
+          message: "Legacy Mail Sentinel migration is not pending",
+          retryable: false,
+        };
+      }
+      return {
+        changed: false,
+        requestFile,
+        instance: this.toMailSentinelSummary(existing, runtimeConfig),
+      };
+    }
+
+    const legacyAgent = runtimeConfig.openclawProfile.agents.find(
+      (entry) => entry.id === MAIL_SENTINEL_AGENT_ID,
+    );
+    if (legacyAgent === undefined) {
+      throw {
+        code: "MAIL_SENTINEL_MIGRATION_NOT_REQUIRED",
+        message: "Legacy Mail Sentinel agent was not found in the current runtime",
+        retryable: false,
+      };
+    }
+
+    const defaultAllowedUsers = normalizeMatrixUserList(
+      (req.allowedUsers ?? (await this.listInvitedHumanMatrixUserIds(runtimeConfig))).map(
+        (entry) => this.normalizeMatrixUserIdentifier(entry, runtimeConfig).userId,
+      ),
+    );
+    if (defaultAllowedUsers.length === 0) {
+      throw {
+        code: "MAIL_SENTINEL_MIGRATION_INPUT_REQUIRED",
+        message: "Provide at least one allowed Matrix user for the migrated Mail Sentinel instance",
+        retryable: false,
+      };
+    }
+
+    const alertRoom =
+      req.createAlertRoomName === undefined
+        ? {
+            roomId: req.alertRoomId?.trim() || runtimeConfig.matrix.alertRoom.roomId,
+            roomName: req.alertRoomName?.trim() || runtimeConfig.matrix.alertRoom.roomName,
+          }
+        : await this.createMatrixRoomViaClientApi({
+            runtimeConfig,
+            roomName: req.createAlertRoomName,
+          });
+    const localpart = sanitizeManagedAgentLocalpart(
+      req.matrixLocalpart ?? legacyAgent.matrix?.localpart,
+      MAIL_SENTINEL_AGENT_ID,
+    );
+
+    request.bots = {
+      ...(request.bots ?? {}),
+      selected: dedupeStrings([...(request.bots?.selected ?? []), MAIL_SENTINEL_AGENT_ID]),
+      instances: sortBotInstances([
+        ...((request.bots?.instances ?? []).filter(
+          (entry) => entry.packageId !== MAIL_SENTINEL_AGENT_ID,
+        ) as RequestedBotInstance[]),
+        {
+          id: MAIL_SENTINEL_AGENT_ID,
+          packageId: MAIL_SENTINEL_AGENT_ID,
+          workspace: legacyAgent.workspace,
+          config: {},
+          secretRefs: {},
+          matrix: {
+            localpart,
+            alertRoom,
+            allowedUsers: defaultAllowedUsers,
+          },
+        },
+      ]),
+    };
+    await this.writeSavedInstallRequest(request);
+    return {
+      changed: true,
+      requestFile,
+      instance: this.toMailSentinelSummary(
+        {
+          id: MAIL_SENTINEL_AGENT_ID,
+          packageId: MAIL_SENTINEL_AGENT_ID,
+          workspace: legacyAgent.workspace,
+          config: {},
+          secretRefs: {},
+          matrix: {
+            localpart,
+            alertRoom,
+            allowedUsers: defaultAllowedUsers,
+          },
+        },
+        runtimeConfig,
+      ),
+    };
+  }
+
+  async listMailSentinelInstances(): Promise<MailSentinelListResult> {
+    const runtimeConfig = await this.tryReadRuntimeConfig();
+    if (runtimeConfig !== null) {
+      const runtimeInstances = runtimeConfig.bots.instances.filter(
+        (entry) => entry.packageId === MAIL_SENTINEL_AGENT_ID,
+      );
+      if (runtimeInstances.length > 0) {
+        return {
+          instances: runtimeInstances.map((entry) =>
+            this.toMailSentinelSummary(entry, runtimeConfig),
+          ),
+        };
+      }
+      const legacyAgent = runtimeConfig.openclawProfile.agents.find(
+        (entry) => entry.id === MAIL_SENTINEL_AGENT_ID,
+      );
+      if (legacyAgent !== undefined) {
+        return {
+          instances: [
+            this.toMailSentinelSummary(
+              {
+                id: MAIL_SENTINEL_AGENT_ID,
+                packageId: MAIL_SENTINEL_AGENT_ID,
+                workspace: legacyAgent.workspace,
+                config: {
+                  [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: runtimeConfig.imap.status === "configured",
+                  [MAIL_SENTINEL_IMAP_HOST_KEY]: runtimeConfig.imap.host,
+                  [MAIL_SENTINEL_IMAP_PORT_KEY]: runtimeConfig.imap.port,
+                  [MAIL_SENTINEL_IMAP_TLS_KEY]: runtimeConfig.imap.tls,
+                  [MAIL_SENTINEL_IMAP_USERNAME_KEY]: runtimeConfig.imap.username,
+                  [MAIL_SENTINEL_IMAP_MAILBOX_KEY]: runtimeConfig.imap.mailbox,
+                },
+                secretRefs: {
+                  [MAIL_SENTINEL_IMAP_PASSWORD_SECRET_KEY]: runtimeConfig.imap.secretRef,
+                },
+                matrix: {
+                  ...(legacyAgent.matrix?.localpart === undefined
+                    ? {}
+                    : { localpart: legacyAgent.matrix.localpart }),
+                  alertRoom: runtimeConfig.matrix.alertRoom,
+                  allowedUsers: await this.listInvitedHumanMatrixUserIds(runtimeConfig),
+                },
+              },
+              runtimeConfig,
+            ),
+          ],
+        };
+      }
+    }
+
+    const request = await this.tryReadSavedInstallRequest();
+    return {
+      instances: (request?.request.bots?.instances ?? [])
+        .filter((entry) => entry.packageId === MAIL_SENTINEL_AGENT_ID)
+        .map((entry) =>
+          this.toMailSentinelSummary(
+            this.normalizeRequestedBotInstance({
+              entry,
+              configById: isBotConfigRecordMap(request?.request.bots?.config)
+                ? (request.request.bots?.config ?? {})
+                : {},
+              matrixRoom: {
+                roomId: "",
+                roomName: request?.request.matrix.alertRoomName ?? "Sovereign Alerts",
+              },
+              previousRuntimeConfig: runtimeConfig,
+            }),
+            runtimeConfig,
+          ),
+        ),
+    };
+  }
+
+  async createMailSentinelInstance(req: {
+    id: string;
+    imapHost: string;
+    imapPort: number;
+    imapTls: boolean;
+    imapUsername: string;
+    imapPassword?: string;
+    imapSecretRef?: string;
+    mailbox?: string;
+    matrixLocalpart?: string;
+    alertRoomId?: string;
+    alertRoomName?: string;
+    createAlertRoomName?: string;
+    allowedUsers: string[];
+    pollInterval?: string;
+    lookbackWindow?: string;
+    defaultReminderDelay?: string;
+    digestInterval?: string;
+  }): Promise<MailSentinelApplyResult> {
+    return this.applyMailSentinelInstance(req, "create");
+  }
+
+  async updateMailSentinelInstance(req: {
+    id: string;
+    imapHost?: string;
+    imapPort?: number;
+    imapTls?: boolean;
+    imapUsername?: string;
+    imapPassword?: string;
+    imapSecretRef?: string;
+    mailbox?: string;
+    matrixLocalpart?: string;
+    alertRoomId?: string;
+    alertRoomName?: string;
+    createAlertRoomName?: string;
+    allowedUsers?: string[];
+    pollInterval?: string;
+    lookbackWindow?: string;
+    defaultReminderDelay?: string;
+    digestInterval?: string;
+  }): Promise<MailSentinelApplyResult> {
+    return this.applyMailSentinelInstance(req, "update");
+  }
+
+  async deleteMailSentinelInstance(req: { id: string }): Promise<MailSentinelDeleteResult> {
+    await this.assertNoPendingMigrations();
+    const { request } = await this.readSavedInstallRequestOrThrow();
+    const id = sanitizeManagedAgentId(req.id);
+    const existingInstances = request.bots?.instances ?? [];
+    const nextInstances = existingInstances.filter((entry) => entry.id !== id);
+    if (nextInstances.length === existingInstances.length) {
+      return {
+        id,
+        deleted: false,
+      };
+    }
+    request.bots = {
+      ...(request.bots ?? {}),
+      selected: (request.bots?.selected ?? []).filter(
+        (entry) =>
+          entry !== MAIL_SENTINEL_AGENT_ID ||
+          nextInstances.some((item) => item.packageId === entry),
+      ),
+      instances: nextInstances,
+    };
+    this.syncSelectedBotsWithInstances(request);
+    await this.writeSavedInstallRequest(request);
+    const result = await this.startInstall(request);
+    return {
+      id,
+      deleted: true,
+      job: result.job,
     };
   }
 
@@ -1923,6 +2476,7 @@ export class RealInstallerService implements InstallerService {
   private async ensureBotToolInstances(
     runtimeConfig: RuntimeConfig,
     botPackage: LoadedBotPackage,
+    botInstance?: RequestedBotInstance,
   ): Promise<string[]> {
     const requiredCoreTemplateRefs = botPackage.manifest.toolInstances
       .map((entry: LoadedBotPackage["manifest"]["toolInstances"][number]) => entry.templateRef)
@@ -1934,15 +2488,29 @@ export class RealInstallerService implements InstallerService {
       );
       await this.persistManagedAgentTopologyDocument(runtimeConfig);
     }
+    const toolInstanceIdMap = this.buildManagedBotToolInstanceIdMap(
+      botPackage,
+      botInstance?.id ?? botPackage.manifest.id,
+    );
     const toolInstanceIds: string[] = [];
     for (const tool of botPackage.manifest.toolInstances) {
-      if (!this.isBotToolInstanceEnabled(runtimeConfig, tool.enabledWhen)) {
+      if (
+        !this.isBotToolInstanceEnabled(runtimeConfig, tool.enabledWhen, {
+          botPackage,
+          botInstance,
+          toolInstanceIdMap,
+        })
+      ) {
         continue;
       }
-      const bindings = this.resolveBotToolBindings(runtimeConfig, tool);
+      const bindings = this.resolveBotToolBindings(runtimeConfig, tool, {
+        botPackage,
+        botInstance,
+        toolInstanceIdMap,
+      });
       await this.upsertSovereignToolInstance(
         {
-          id: tool.id,
+          id: toolInstanceIdMap[tool.id] ?? tool.id,
           templateRef: tool.templateRef,
           config: bindings.config,
           secretRefs: bindings.secretRefs,
@@ -1957,38 +2525,84 @@ export class RealInstallerService implements InstallerService {
   private buildManagedBotToolInstance(input: {
     runtimeConfig: RuntimeConfig;
     availableBotPackages: LoadedBotPackage[];
+    botPackage: LoadedBotPackage;
+    botInstance?: RequestedBotInstance;
     tool: LoadedBotPackage["manifest"]["toolInstances"][number];
     existing: RuntimeConfig["sovereignTools"]["instances"][number] | undefined;
-  }): RuntimeConfig["sovereignTools"]["instances"][number] {
+    toolInstanceIdMap: Record<string, string>;
+  }): MaterializedBotToolInstance {
     const template = this.resolveKnownToolTemplateManifest(
       input.tool.templateRef,
       input.availableBotPackages,
     );
-    const bindings = this.resolveBotToolBindings(input.runtimeConfig, input.tool);
+    const bindings = this.resolveBotToolBindings(input.runtimeConfig, input.tool, {
+      botPackage: input.botPackage,
+      botInstance: input.botInstance,
+      toolInstanceIdMap: input.toolInstanceIdMap,
+    });
+    const id = input.toolInstanceIdMap[input.tool.id] ?? input.tool.id;
     return {
-      id: input.tool.id,
+      id,
       templateRef: input.tool.templateRef,
       capabilities: [...template.capabilities],
       config: bindings.config,
       secretRefs: bindings.secretRefs,
       createdAt: input.existing?.createdAt ?? now(),
       updatedAt: now(),
+      botId: input.botPackage.manifest.id,
+      ...(input.botInstance === undefined ? {} : { botInstanceId: input.botInstance.id }),
+      manifestToolId: input.tool.id,
     };
+  }
+
+  private buildManagedBotToolInstanceIdMap(
+    botPackage: LoadedBotPackage,
+    instanceId: string,
+  ): Record<string, string> {
+    return Object.fromEntries(
+      botPackage.manifest.toolInstances.map((tool) => [
+        tool.id,
+        this.materializeManagedBotToolInstanceId(botPackage, instanceId, tool.id),
+      ]),
+    );
+  }
+
+  private materializeManagedBotToolInstanceId(
+    botPackage: LoadedBotPackage,
+    instanceId: string,
+    manifestToolId: string,
+  ): string {
+    if (instanceId === botPackage.manifest.id) {
+      return manifestToolId;
+    }
+    return sanitizeToolInstanceId(`${instanceId}-${manifestToolId}`);
   }
 
   private isBotToolInstanceEnabled(
     runtimeConfig: RuntimeConfig,
     enabledWhen: LoadedBotPackage["manifest"]["toolInstances"][number]["enabledWhen"],
+    context?: {
+      botPackage: LoadedBotPackage;
+      botInstance: RequestedBotInstance | undefined;
+      toolInstanceIdMap: Record<string, string>;
+    },
   ): boolean {
     if (enabledWhen === undefined) {
       return true;
     }
-    return this.resolveBotPathValue(runtimeConfig, enabledWhen.path) === enabledWhen.equals;
+    return (
+      this.resolveBotPathValue(runtimeConfig, enabledWhen.path, context) === enabledWhen.equals
+    );
   }
 
   private resolveBotToolBindings(
     runtimeConfig: RuntimeConfig,
     tool: LoadedBotPackage["manifest"]["toolInstances"][number],
+    context?: {
+      botPackage: LoadedBotPackage;
+      botInstance: RequestedBotInstance | undefined;
+      toolInstanceIdMap: Record<string, string>;
+    },
   ): {
     config: Record<string, string>;
     secretRefs: Record<string, string>;
@@ -1999,7 +2613,7 @@ export class RealInstallerService implements InstallerService {
           ([key, binding]) => [
             key,
             this.stringifyBotBindingValue(
-              this.resolveRequiredBotPathValue(runtimeConfig, binding.from),
+              this.resolveRequiredBotPathValue(runtimeConfig, binding.from, context),
               binding.stringify === true,
             ),
           ],
@@ -2010,7 +2624,7 @@ export class RealInstallerService implements InstallerService {
           ([key, binding]) => [
             key,
             this.stringifyBotBindingValue(
-              this.resolveRequiredBotPathValue(runtimeConfig, binding.from),
+              this.resolveRequiredBotPathValue(runtimeConfig, binding.from, context),
               true,
             ),
           ],
@@ -2019,8 +2633,16 @@ export class RealInstallerService implements InstallerService {
     };
   }
 
-  private resolveRequiredBotPathValue(runtimeConfig: RuntimeConfig, path: string): BotConfigValue {
-    const value = this.resolveBotPathValue(runtimeConfig, path);
+  private resolveRequiredBotPathValue(
+    runtimeConfig: RuntimeConfig,
+    path: string,
+    context?: {
+      botPackage: LoadedBotPackage;
+      botInstance: RequestedBotInstance | undefined;
+      toolInstanceIdMap: Record<string, string>;
+    },
+  ): BotConfigValue {
+    const value = this.resolveBotPathValue(runtimeConfig, path, context);
     if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
       return value;
     }
@@ -2034,13 +2656,44 @@ export class RealInstallerService implements InstallerService {
     };
   }
 
-  private resolveBotPathValue(runtimeConfig: RuntimeConfig, path: string): unknown {
-    return path.split(".").reduce<unknown>((current, segment) => {
-      if (!isRecord(current) || !(segment in current)) {
-        return undefined;
-      }
-      return current[segment];
-    }, runtimeConfig);
+  private resolveBotPathValue(
+    runtimeConfig: RuntimeConfig,
+    path: string,
+    context?: {
+      botPackage: LoadedBotPackage;
+      botInstance: RequestedBotInstance | undefined;
+      toolInstanceIdMap: Record<string, string>;
+    },
+  ): unknown {
+    const botInstance = context?.botInstance;
+    return path.split(".").reduce<unknown>(
+      (current, segment) => {
+        if (!isRecord(current) || !(segment in current)) {
+          return undefined;
+        }
+        return current[segment];
+      },
+      {
+        ...runtimeConfig,
+        ...(botInstance === undefined
+          ? {}
+          : {
+              instance: {
+                id: botInstance.id,
+                packageId: botInstance.packageId,
+                workspace: botInstance.workspace,
+                config: botInstance.config,
+                secretRefs: botInstance.secretRefs,
+                matrix: botInstance.matrix ?? {},
+                toolInstanceIds: context?.toolInstanceIdMap ?? {},
+              },
+              agent: {
+                id: botInstance.id,
+                workspace: botInstance.workspace,
+              },
+            }),
+      },
+    );
   }
 
   private stringifyBotBindingValue(value: BotConfigValue, forceString: boolean): string {
@@ -2061,25 +2714,33 @@ export class RealInstallerService implements InstallerService {
     const botStatus: CompiledBotStatus[] = [];
 
     for (const botPackage of botPackages) {
-      const agent = runtimeConfig.openclawProfile.agents.find(
+      const agents = runtimeConfig.openclawProfile.agents.filter(
         (entry) => entry.botId === botPackage.manifest.id || entry.id === botPackage.manifest.id,
       );
-      if (agent === undefined) {
+      if (agents.length === 0) {
         continue;
       }
-      const context: HostResourceContext = {
-        runtimeConfig,
-        botPackage,
-        agent,
-        toolInstanceIds: agent.toolInstanceIds ?? [],
-      };
-      for (const resource of botPackage.manifest.hostResources) {
-        if (!this.isBotHostResourceEnabled(context, resource.enabledWhen)) {
-          continue;
+      for (const agent of agents) {
+        const botInstance = this.getRuntimeBotInstanceForAgent(runtimeConfig, agent);
+        const context: HostResourceContext = {
+          runtimeConfig,
+          botPackage,
+          agent,
+          ...(botInstance === undefined ? {} : { botInstance }),
+          toolInstanceIds: agent.toolInstanceIds ?? [],
+          toolInstanceIdMap: this.buildManagedBotToolInstanceIdMap(
+            botPackage,
+            botInstance?.id ?? agent.id,
+          ),
+        };
+        for (const resource of botPackage.manifest.hostResources) {
+          if (!this.isBotHostResourceEnabled(context, resource.enabledWhen)) {
+            continue;
+          }
+          const compiled = await this.compileHostResource(context, resource);
+          resources.push(...compiled.resources);
+          botStatus.push(...compiled.botStatus);
         }
-        const compiled = await this.compileHostResource(context, resource);
-        resources.push(...compiled.resources);
-        botStatus.push(...compiled.botStatus);
       }
     }
 
@@ -2145,6 +2806,7 @@ export class RealInstallerService implements InstallerService {
         const compiledDirectory: CompiledHostResource = {
           id: resource.id,
           botId: context.botPackage.manifest.id,
+          agentId: context.agent.id,
           kind: "directory",
           path: this.resolveHostResourceString(context, resource.spec.path),
           ...(resource.spec.mode === undefined ? {} : { mode: resource.spec.mode }),
@@ -2184,6 +2846,7 @@ export class RealInstallerService implements InstallerService {
         const compiledFile: CompiledHostResource = {
           id: resource.id,
           botId: context.botPackage.manifest.id,
+          agentId: context.agent.id,
           kind: resource.kind,
           path,
           content,
@@ -2218,6 +2881,7 @@ export class RealInstallerService implements InstallerService {
         if (resource.kind === "stateFile" && Object.keys(resource.status.fields).length > 0) {
           plan.botStatus.push({
             botId: context.botPackage.manifest.id,
+            agentId: context.agent.id,
             resourceId: resource.id,
             path,
             fields: this.compileHostStatusFields(resource.status.fields),
@@ -2230,6 +2894,7 @@ export class RealInstallerService implements InstallerService {
         plan.resources.push({
           id: resource.id,
           botId: context.botPackage.manifest.id,
+          agentId: context.agent.id,
           kind: "systemdService",
           name,
           content: this.renderSystemdServiceResource(context, resource),
@@ -2243,6 +2908,7 @@ export class RealInstallerService implements InstallerService {
         plan.resources.push({
           id: resource.id,
           botId: context.botPackage.manifest.id,
+          agentId: context.agent.id,
           kind: "systemdTimer",
           name,
           content: this.renderSystemdTimerResource(context, resource),
@@ -2256,6 +2922,7 @@ export class RealInstallerService implements InstallerService {
         plan.resources.push({
           id: resource.id,
           botId: context.botPackage.manifest.id,
+          agentId: context.agent.id,
           kind: "openclawCron",
           desiredState,
           match: {
@@ -2292,14 +2959,17 @@ export class RealInstallerService implements InstallerService {
         plan.resources.push({
           id: `${resource.id}::supersede::${index}`,
           botId: context.botPackage.manifest.id,
+          agentId: context.agent.id,
           kind: "openclawCron",
           desiredState: "absent",
           match: {
             ...(superseded.match.id === undefined ? {} : { id: superseded.match.id }),
-            ...(superseded.match.name === undefined ? {} : { name: superseded.match.name }),
+            ...(superseded.match.name === undefined
+              ? {}
+              : { name: this.resolveHostResourceString(context, superseded.match.name) }),
             ...(superseded.match.agentId === undefined
               ? {}
-              : { agentId: superseded.match.agentId }),
+              : { agentId: this.resolveHostResourceString(context, superseded.match.agentId) }),
           },
           checks: [],
         });
@@ -2401,6 +3071,8 @@ export class RealInstallerService implements InstallerService {
   }
 
   private resolveHostResourcePathValue(context: HostResourceContext, path: string): unknown {
+    const alertRoom =
+      context.botInstance?.matrix?.alertRoom ?? context.runtimeConfig.matrix.alertRoom;
     const values = {
       node: {
         paths: {
@@ -2421,13 +3093,25 @@ export class RealInstallerService implements InstallerService {
         version: context.botPackage.manifest.version,
         config: context.runtimeConfig.bots.config[context.botPackage.manifest.id] ?? {},
       },
+      instance:
+        context.botInstance === undefined
+          ? undefined
+          : {
+              id: context.botInstance.id,
+              packageId: context.botInstance.packageId,
+              workspace: context.botInstance.workspace,
+              config: context.botInstance.config,
+              secretRefs: context.botInstance.secretRefs,
+              matrix: context.botInstance.matrix ?? {},
+              toolInstanceIds: context.toolInstanceIdMap,
+            },
       agent: {
         id: context.agent.id,
         workspace: context.agent.workspace,
       },
       matrix: {
         homeserver: context.runtimeConfig.matrix.publicBaseUrl,
-        alertRoomId: context.runtimeConfig.matrix.alertRoom.roomId,
+        alertRoomId: alertRoom.roomId,
         operatorUserId: context.runtimeConfig.matrix.operator.userId,
       },
       tools: {
@@ -2448,6 +3132,8 @@ export class RealInstallerService implements InstallerService {
     source: string | undefined,
     inlineContent: string | undefined,
   ): Promise<string> {
+    const alertRoom =
+      context.botInstance?.matrix?.alertRoom ?? context.runtimeConfig.matrix.alertRoom;
     const raw =
       source !== undefined
         ? await readFile(join(context.botPackage.rootDir, source), "utf8")
@@ -2460,7 +3146,7 @@ export class RealInstallerService implements InstallerService {
       content: stripSingleTrailingNewline(raw),
       agentId: context.agent.id,
       matrixHomeserver: context.runtimeConfig.matrix.publicBaseUrl,
-      matrixAlertRoomId: context.runtimeConfig.matrix.alertRoom.roomId,
+      matrixAlertRoomId: alertRoom.roomId,
       matrixOperatorUserId: context.runtimeConfig.matrix.operator.userId,
       toolSection,
     })}\n`;
@@ -2584,6 +3270,7 @@ export class RealInstallerService implements InstallerService {
     resources: Array<{
       id: string;
       botId: string;
+      agentId: string;
       kind:
         | "directory"
         | "managedFile"
@@ -2609,6 +3296,7 @@ export class RealInstallerService implements InstallerService {
     const resources: Array<{
       id: string;
       botId: string;
+      agentId: string;
       kind:
         | "directory"
         | "managedFile"
@@ -2633,11 +3321,11 @@ export class RealInstallerService implements InstallerService {
     const cronJobs = await this.listOpenClawCronJobsForStatus(runtimeConfig);
 
     for (const resource of runtimeConfig.hostResources?.resources ?? []) {
-      const currentBot = bots[resource.botId] ?? {
+      const currentBot = bots[resource.agentId] ?? {
         fields: {},
         health: "healthy" as ComponentHealth,
       };
-      bots[resource.botId] = currentBot;
+      bots[resource.agentId] = currentBot;
       switch (resource.kind) {
         case "directory":
         case "managedFile":
@@ -2660,6 +3348,7 @@ export class RealInstallerService implements InstallerService {
           resources.push({
             id: resource.id,
             botId: resource.botId,
+            agentId: resource.agentId,
             kind: resource.kind,
             target: resource.path,
             present,
@@ -2702,6 +3391,7 @@ export class RealInstallerService implements InstallerService {
           resources.push({
             id: resource.id,
             botId: resource.botId,
+            agentId: resource.agentId,
             kind: resource.kind,
             target: resource.name,
             enabled,
@@ -2734,6 +3424,7 @@ export class RealInstallerService implements InstallerService {
           resources.push({
             id: resource.id,
             botId: resource.botId,
+            agentId: resource.agentId,
             kind: resource.kind,
             target: resource.match.name ?? resource.match.id ?? resource.id,
             present,
@@ -4299,7 +4990,7 @@ export default function (api) {
     }
     const normalizedWorkspace = workspaceDir.endsWith("/") ? workspaceDir : `${workspaceDir}/`;
     for (const resource of runtimeConfig.hostResources?.resources ?? []) {
-      if (resource.botId !== agent.botId) {
+      if (resource.agentId !== agent.id) {
         continue;
       }
       if (resource.kind === "directory") {
@@ -4381,6 +5072,37 @@ export default function (api) {
     );
   }
 
+  private resolveManagedAgentAlertRoom(
+    runtimeConfig: RuntimeConfig,
+    entry: RuntimeAgentEntry,
+  ): { roomId: string; roomName: string } {
+    return (
+      this.getRuntimeBotInstanceForAgent(runtimeConfig, entry)?.matrix?.alertRoom ??
+      runtimeConfig.matrix.alertRoom
+    );
+  }
+
+  private async ensureManagedAgentAllowedUsersInAlertRoom(input: {
+    runtimeConfig: RuntimeConfig;
+    entry: RuntimeAgentEntry;
+    roomId: string;
+    inviterAccessToken: string;
+  }): Promise<void> {
+    const botInstance = this.getRuntimeBotInstanceForAgent(input.runtimeConfig, input.entry);
+    const allowedUsers = botInstance?.matrix?.allowedUsers ?? [];
+    for (const user of allowedUsers) {
+      const normalized = this.normalizeMatrixUserIdentifier(user, input.runtimeConfig);
+      await this.inviteMatrixUserToRoom({
+        adminBaseUrl: input.runtimeConfig.matrix.adminBaseUrl,
+        roomId: input.roomId,
+        inviterAccessToken: input.inviterAccessToken,
+        inviteeUserId: normalized.userId,
+        failureCode: "MATRIX_AGENT_IDENTITY_FAILED",
+        failureMessage: `Failed to invite ${normalized.userId} into bot alert room`,
+      });
+    }
+  }
+
   private async ensureManagedAgentMatrixIdentity(
     runtimeConfig: RuntimeConfig,
     agentId: string,
@@ -4417,7 +5139,11 @@ export default function (api) {
       entry,
       agentId,
     );
-    const localpart = sanitizeManagedAgentLocalpart(entry.matrix?.localpart, fallbackLocalpart);
+    const localpart = sanitizeManagedAgentLocalpart(
+      this.getRuntimeBotInstanceForAgent(runtimeConfig, entry)?.matrix?.localpart ??
+        entry.matrix?.localpart,
+      fallbackLocalpart,
+    );
     const expectedUserId = `@${localpart}:${runtimeConfig.matrix.homeserverDomain}`;
 
     let passwordSecretRef = entry.matrix?.passwordSecretRef;
@@ -4456,13 +5182,20 @@ export default function (api) {
       `matrix-agent-${agentId}-access-token`,
       loginSession.accessToken,
     );
+    const alertRoom = this.resolveManagedAgentAlertRoom(runtimeConfig, entry);
 
     await this.ensureMatrixUserInAlertRoom({
       adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
-      roomId: runtimeConfig.matrix.alertRoom.roomId,
+      roomId: alertRoom.roomId,
       inviterAccessToken: operatorAccessToken,
       inviteeUserId: loginSession.userId,
       inviteeAccessToken: loginSession.accessToken,
+    });
+    await this.ensureManagedAgentAllowedUsersInAlertRoom({
+      runtimeConfig,
+      entry,
+      roomId: alertRoom.roomId,
+      inviterAccessToken: operatorAccessToken,
     });
 
     const nextIdentity = {
@@ -7618,6 +8351,402 @@ export default function (api) {
     return DEFAULT_INSTALL_REQUEST_FILE;
   }
 
+  private async tryReadSavedInstallRequest(): Promise<{
+    requestFile: string;
+    request: InstallRequest;
+  } | null> {
+    const requestFile = this.getInstallRequestPath();
+    let raw = "";
+    try {
+      raw = await readFile(requestFile, "utf8");
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return null;
+      }
+      throw {
+        code: "REQUEST_READ_FAILED",
+        message: "Failed to read the saved install request file",
+        retryable: false,
+        details: {
+          requestFile,
+          error: describeError(error),
+        },
+      };
+    }
+
+    const parsed = parseJsonDocument(raw);
+    const validated = installRequestSchema.safeParse(parsed);
+    if (!validated.success) {
+      throw {
+        code: "REQUEST_INVALID",
+        message: "Saved install request file is invalid",
+        retryable: false,
+        details: {
+          requestFile,
+        },
+      };
+    }
+    return {
+      requestFile,
+      request: validated.data,
+    };
+  }
+
+  private async readSavedInstallRequestOrThrow(): Promise<{
+    requestFile: string;
+    request: InstallRequest;
+  }> {
+    const loaded = await this.tryReadSavedInstallRequest();
+    if (loaded !== null) {
+      return loaded;
+    }
+    const requestFile = this.getInstallRequestPath();
+    throw {
+      code: "REQUEST_NOT_FOUND",
+      message: "Saved install request file was not found",
+      retryable: false,
+      details: {
+        requestFile,
+      },
+    };
+  }
+
+  private async writeSavedInstallRequest(request: InstallRequest): Promise<string> {
+    const requestFile = this.getInstallRequestPath();
+    await this.writeInstallerJsonFile(requestFile, request, 0o640);
+    return requestFile;
+  }
+
+  private async listPendingMigrations(): Promise<PendingMigration[]> {
+    const request = await this.tryReadSavedInstallRequest();
+    const runtimeConfig = await this.tryReadRuntimeConfig();
+    const pending: PendingMigration[] = [];
+    if (await this.isMailSentinelMigrationPending(request?.request ?? null, runtimeConfig)) {
+      pending.push({
+        id: MAIL_SENTINEL_MIGRATION_ID,
+        description: "Migrate the legacy single mail-sentinel into bot-instance configuration",
+        interactive: true,
+      });
+    }
+    return pending;
+  }
+
+  private async isMailSentinelMigrationPending(
+    request: InstallRequest | null,
+    runtimeConfig: RuntimeConfig | null,
+  ): Promise<boolean> {
+    if (request === null || runtimeConfig === null) {
+      return false;
+    }
+    const hasLegacyMailSentinel =
+      runtimeConfig.openclawProfile.agents.some((entry) => entry.id === MAIL_SENTINEL_AGENT_ID) ||
+      request.bots?.selected?.includes(MAIL_SENTINEL_AGENT_ID) === true ||
+      request.bots?.config?.[MAIL_SENTINEL_AGENT_ID] !== undefined ||
+      request.imap !== undefined;
+    const hasInstanceConfig =
+      request.bots?.instances?.some((entry) => entry.packageId === MAIL_SENTINEL_AGENT_ID) === true;
+    return hasLegacyMailSentinel && !hasInstanceConfig;
+  }
+
+  private async assertNoPendingMigrations(): Promise<void> {
+    const pending = await this.listPendingMigrations();
+    if (pending.length === 0) {
+      return;
+    }
+    throw {
+      code: "MIGRATION_REQUIRED",
+      message: `Pending migration '${pending[0]?.id ?? MAIL_SENTINEL_MIGRATION_ID}' must be completed before this command can run`,
+      retryable: false,
+      details: {
+        command: "sovereign-node migrate",
+      },
+    };
+  }
+
+  private async createMatrixRoomViaClientApi(input: {
+    runtimeConfig: RuntimeConfig;
+    roomName: string;
+  }): Promise<{ roomId: string; roomName: string }> {
+    const operatorTokenSecretRef = input.runtimeConfig.matrix.operator.accessTokenSecretRef;
+    if (operatorTokenSecretRef === undefined || operatorTokenSecretRef.length === 0) {
+      throw {
+        code: "MATRIX_ROOM_CREATE_FAILED",
+        message: "Operator Matrix access token is required to create a Mail Sentinel alert room",
+        retryable: false,
+      };
+    }
+    const operatorAccessToken = await this.resolveSecretRef(operatorTokenSecretRef);
+    const endpoint = new URL(
+      "/_matrix/client/v3/createRoom",
+      ensureTrailingSlash(input.runtimeConfig.matrix.adminBaseUrl),
+    ).toString();
+    const response = await this.fetchImpl(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${operatorAccessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        name: input.roomName,
+        preset: "private_chat",
+        visibility: "private",
+      }),
+    });
+    const bodyText = await response.text();
+    const parsed = parseJsonSafely(bodyText);
+    if (!response.ok) {
+      throw {
+        code: "MATRIX_ROOM_CREATE_FAILED",
+        message: "Failed to create a Mail Sentinel alert room",
+        retryable: true,
+        details: {
+          endpoint,
+          status: response.status,
+          body: summarizeUnknown(parsed),
+        },
+      };
+    }
+    const roomId = isRecord(parsed) && typeof parsed.room_id === "string" ? parsed.room_id : "";
+    if (roomId.length === 0) {
+      throw {
+        code: "MATRIX_ROOM_CREATE_FAILED",
+        message: "Matrix room creation returned an invalid room id",
+        retryable: true,
+      };
+    }
+    return {
+      roomId,
+      roomName: input.roomName,
+    };
+  }
+
+  private toMailSentinelSummary(
+    instance: RequestedBotInstance | RuntimeBotInstance,
+    runtimeConfig: RuntimeConfig | null,
+  ): MailSentinelSummary {
+    const agent = runtimeConfig?.openclawProfile.agents.find(
+      (entry) => entry.botInstanceId === instance.id || entry.id === instance.id,
+    );
+    return {
+      id: instance.id,
+      packageId: instance.packageId,
+      workspace: instance.workspace,
+      ...(instance.matrix?.localpart === undefined
+        ? agent?.matrix?.localpart === undefined
+          ? {}
+          : { matrixLocalpart: agent.matrix.localpart }
+        : { matrixLocalpart: instance.matrix.localpart }),
+      ...(agent?.matrix?.userId === undefined ? {} : { matrixUserId: agent.matrix.userId }),
+      ...(instance.matrix?.alertRoom?.roomId === undefined
+        ? {}
+        : { alertRoomId: instance.matrix.alertRoom.roomId }),
+      ...(instance.matrix?.alertRoom?.roomName === undefined
+        ? {}
+        : { alertRoomName: instance.matrix.alertRoom.roomName }),
+      allowedUsers: instance.matrix?.allowedUsers ?? [],
+      ...(typeof instance.config[MAIL_SENTINEL_IMAP_HOST_KEY] === "string"
+        ? { imapHost: instance.config[MAIL_SENTINEL_IMAP_HOST_KEY] }
+        : {}),
+      ...(typeof instance.config[MAIL_SENTINEL_IMAP_USERNAME_KEY] === "string"
+        ? { imapUsername: instance.config[MAIL_SENTINEL_IMAP_USERNAME_KEY] }
+        : {}),
+      ...(typeof instance.config[MAIL_SENTINEL_IMAP_MAILBOX_KEY] === "string"
+        ? { mailbox: instance.config[MAIL_SENTINEL_IMAP_MAILBOX_KEY] }
+        : {}),
+      ...(typeof instance.config.pollInterval === "string"
+        ? { pollInterval: instance.config.pollInterval }
+        : {}),
+    };
+  }
+
+  private syncSelectedBotsWithInstances(request: InstallRequest): void {
+    const explicitPackageIds = dedupeStrings(
+      (request.bots?.instances ?? [])
+        .map((entry) => entry.packageId.trim())
+        .filter((entry) => entry.length > 0),
+    );
+    const selected = request.bots?.selected ?? [];
+    request.bots = {
+      ...(request.bots ?? {}),
+      selected: dedupeStrings([
+        ...selected.filter((entry) => !explicitPackageIds.includes(entry)),
+        ...explicitPackageIds,
+      ]),
+    };
+  }
+
+  private async applyMailSentinelInstance(
+    req: {
+      id: string;
+      imapHost?: string;
+      imapPort?: number;
+      imapTls?: boolean;
+      imapUsername?: string;
+      imapPassword?: string;
+      imapSecretRef?: string;
+      mailbox?: string;
+      matrixLocalpart?: string;
+      alertRoomId?: string;
+      alertRoomName?: string;
+      createAlertRoomName?: string;
+      allowedUsers?: string[];
+      pollInterval?: string;
+      lookbackWindow?: string;
+      defaultReminderDelay?: string;
+      digestInterval?: string;
+    },
+    mode: "create" | "update",
+  ): Promise<MailSentinelApplyResult> {
+    await this.assertNoPendingMigrations();
+    const runtimeConfig = await this.readRuntimeConfig();
+    const { request } = await this.readSavedInstallRequestOrThrow();
+    const id = sanitizeManagedAgentId(req.id);
+    const existingRaw = (request.bots?.instances ?? []).find((entry) => entry.id === id) as
+      | NonNullable<NonNullable<InstallRequest["bots"]>["instances"]>[number]
+      | undefined;
+    if (mode === "create" && existingRaw !== undefined) {
+      throw {
+        code: "MAIL_SENTINEL_EXISTS",
+        message: `Mail Sentinel instance '${id}' already exists`,
+        retryable: false,
+      };
+    }
+    if (mode === "update" && existingRaw === undefined) {
+      throw {
+        code: "MAIL_SENTINEL_NOT_FOUND",
+        message: `Mail Sentinel instance '${id}' does not exist`,
+        retryable: false,
+      };
+    }
+    const base =
+      existingRaw === undefined
+        ? this.applyLegacyMailSentinelRequestedInstanceDefaults({
+            entry: {
+              id,
+              packageId: MAIL_SENTINEL_AGENT_ID,
+              workspace: join(this.paths.stateDir, id, "workspace"),
+              config: {},
+              secretRefs: {},
+              matrix: {
+                allowedUsers: [],
+              },
+            },
+            imap: runtimeConfig.imap,
+            matrixRoom: runtimeConfig.matrix.alertRoom,
+            previousRuntimeConfig: runtimeConfig,
+          })
+        : this.normalizeRequestedBotInstance({
+            entry: existingRaw,
+            configById: isBotConfigRecordMap(request.bots?.config)
+              ? (request.bots?.config ?? {})
+              : {},
+            matrixRoom: runtimeConfig.matrix.alertRoom,
+            previousRuntimeConfig: runtimeConfig,
+          });
+    const imapSecretRef =
+      req.imapPassword === undefined
+        ? (req.imapSecretRef ?? base.secretRefs[MAIL_SENTINEL_IMAP_PASSWORD_SECRET_KEY])
+        : await this.writeManagedSecretFile(`mail-sentinel-${id}-imap-password`, req.imapPassword);
+    if (imapSecretRef === undefined || imapSecretRef.length === 0) {
+      throw {
+        code: "MAIL_SENTINEL_IMAP_SECRET_REQUIRED",
+        message: "Provide --imap-secret-ref or --imap-password for the Mail Sentinel instance",
+        retryable: false,
+      };
+    }
+    const alertRoom =
+      req.createAlertRoomName === undefined
+        ? {
+            roomId:
+              req.alertRoomId?.trim() ||
+              base.matrix?.alertRoom?.roomId ||
+              runtimeConfig.matrix.alertRoom.roomId,
+            roomName:
+              req.alertRoomName?.trim() ||
+              base.matrix?.alertRoom?.roomName ||
+              runtimeConfig.matrix.alertRoom.roomName,
+          }
+        : await this.createMatrixRoomViaClientApi({
+            runtimeConfig,
+            roomName: req.createAlertRoomName,
+          });
+    const allowedUsers = normalizeMatrixUserList(
+      (req.allowedUsers ?? base.matrix?.allowedUsers ?? []).map(
+        (entry) => this.normalizeMatrixUserIdentifier(entry, runtimeConfig).userId,
+      ),
+    );
+    if (allowedUsers.length === 0) {
+      throw {
+        code: "MAIL_SENTINEL_ALLOWED_USERS_REQUIRED",
+        message: "Provide at least one allowed Matrix user for the Mail Sentinel instance",
+        retryable: false,
+      };
+    }
+    const next: RequestedBotInstance = {
+      ...base,
+      config: {
+        ...base.config,
+        [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: true,
+        [MAIL_SENTINEL_IMAP_HOST_KEY]:
+          req.imapHost ?? String(base.config[MAIL_SENTINEL_IMAP_HOST_KEY] ?? ""),
+        [MAIL_SENTINEL_IMAP_PORT_KEY]:
+          req.imapPort ?? Number(base.config[MAIL_SENTINEL_IMAP_PORT_KEY] ?? 0),
+        [MAIL_SENTINEL_IMAP_TLS_KEY]:
+          req.imapTls ?? Boolean(base.config[MAIL_SENTINEL_IMAP_TLS_KEY] ?? false),
+        [MAIL_SENTINEL_IMAP_USERNAME_KEY]:
+          req.imapUsername ?? String(base.config[MAIL_SENTINEL_IMAP_USERNAME_KEY] ?? ""),
+        [MAIL_SENTINEL_IMAP_MAILBOX_KEY]:
+          req.mailbox ?? base.config[MAIL_SENTINEL_IMAP_MAILBOX_KEY] ?? "INBOX",
+        ...(req.pollInterval === undefined ? {} : { pollInterval: req.pollInterval }),
+        ...(req.lookbackWindow === undefined ? {} : { lookbackWindow: req.lookbackWindow }),
+        ...(req.defaultReminderDelay === undefined
+          ? {}
+          : { defaultReminderDelay: req.defaultReminderDelay }),
+        ...(req.digestInterval === undefined ? {} : { digestInterval: req.digestInterval }),
+      },
+      secretRefs: normalizeStringRecord({
+        ...base.secretRefs,
+        [MAIL_SENTINEL_IMAP_PASSWORD_SECRET_KEY]: imapSecretRef,
+      }),
+      matrix: {
+        localpart: sanitizeManagedAgentLocalpart(req.matrixLocalpart ?? base.matrix?.localpart, id),
+        alertRoom,
+        allowedUsers,
+      },
+    };
+    if (
+      typeof next.config[MAIL_SENTINEL_IMAP_HOST_KEY] !== "string" ||
+      typeof next.config[MAIL_SENTINEL_IMAP_PORT_KEY] !== "number" ||
+      typeof next.config[MAIL_SENTINEL_IMAP_TLS_KEY] !== "boolean" ||
+      typeof next.config[MAIL_SENTINEL_IMAP_USERNAME_KEY] !== "string"
+    ) {
+      throw {
+        code: "MAIL_SENTINEL_IMAP_CONFIG_INVALID",
+        message: "Mail Sentinel IMAP host, port, tls, and username must be configured",
+        retryable: false,
+      };
+    }
+    request.bots = {
+      ...(request.bots ?? {}),
+      selected: dedupeStrings([...(request.bots?.selected ?? []), MAIL_SENTINEL_AGENT_ID]),
+      instances: sortBotInstances([
+        ...((request.bots?.instances ?? []).filter(
+          (entry) => entry.id !== id,
+        ) as RequestedBotInstance[]),
+        next,
+      ]),
+    };
+    this.syncSelectedBotsWithInstances(request);
+    await this.writeSavedInstallRequest(request);
+    const result = await this.startInstall(request);
+    return {
+      instance: this.toMailSentinelSummary(next, runtimeConfig),
+      changed: true,
+      job: result.job,
+    };
+  }
+
   private async writeInstallerJsonFile(path: string, value: unknown, mode: number): Promise<void> {
     const tempPath = `${path}.${randomUUID()}.tmp`;
     await mkdir(dirname(path), { recursive: true });
@@ -8112,6 +9241,7 @@ export default function (api) {
       matrix: baseMatrixConfig,
       bots: {
         config: selectedBotConfig,
+        instances: [],
       },
       templates: {
         installed: installedTemplates,
@@ -8150,61 +9280,174 @@ export default function (api) {
             } satisfies RelayRuntimeConfig,
           }),
     };
-    const preservedUserToolInstances = preservedToolInstances.filter(
-      (entry) => !allManagedBotToolIds.has(entry.id),
+    const requestedBotInstances = this.resolveRequestedBotInstances({
+      req: input.req,
+      packages: selectedBotPackages,
+      configById: selectedBotConfig,
+      imap: imapConfig,
+      matrixRoom: input.matrixRoom,
+      previousRuntimeConfig,
+    });
+    provisionalRuntimeConfig.bots.instances = requestedBotInstances;
+    const managedBotToolInstances = selectedBotPackages.flatMap((botPackage) => {
+      const instances = requestedBotInstances.filter(
+        (entry) => entry.packageId === botPackage.manifest.id,
+      );
+      if (instances.length === 0) {
+        const toolInstanceIdMap = this.buildManagedBotToolInstanceIdMap(
+          botPackage,
+          botPackage.manifest.id,
+        );
+        return botPackage.manifest.toolInstances.flatMap(
+          (tool: LoadedBotPackage["manifest"]["toolInstances"][number]) =>
+            this.isBotToolInstanceEnabled(provisionalRuntimeConfig, tool.enabledWhen, {
+              botPackage,
+              botInstance: undefined,
+              toolInstanceIdMap,
+            })
+              ? [
+                  this.buildManagedBotToolInstance({
+                    runtimeConfig: provisionalRuntimeConfig,
+                    availableBotPackages: selectedBotPackages,
+                    botPackage,
+                    tool,
+                    existing: preservedToolInstances.find(
+                      (entry) => entry.id === (toolInstanceIdMap[tool.id] ?? tool.id),
+                    ),
+                    toolInstanceIdMap,
+                  }),
+                ]
+              : [],
+        );
+      }
+      return instances.flatMap((botInstance) => {
+        const toolInstanceIdMap = this.buildManagedBotToolInstanceIdMap(botPackage, botInstance.id);
+        return botPackage.manifest.toolInstances.flatMap(
+          (tool: LoadedBotPackage["manifest"]["toolInstances"][number]) =>
+            this.isBotToolInstanceEnabled(provisionalRuntimeConfig, tool.enabledWhen, {
+              botPackage,
+              botInstance,
+              toolInstanceIdMap,
+            })
+              ? [
+                  this.buildManagedBotToolInstance({
+                    runtimeConfig: provisionalRuntimeConfig,
+                    availableBotPackages: selectedBotPackages,
+                    botPackage,
+                    botInstance,
+                    tool,
+                    existing: preservedToolInstances.find(
+                      (entry) => entry.id === (toolInstanceIdMap[tool.id] ?? tool.id),
+                    ),
+                    toolInstanceIdMap,
+                  }),
+                ]
+              : [],
+        );
+      });
+    });
+    const previousManagedBotToolIds = new Set(
+      previousRuntimeConfig?.openclawProfile.agents
+        .filter((agent) =>
+          allBotPackages.some(
+            (botPackage) =>
+              agent.botId === botPackage.manifest.id ||
+              agent.templateRef === botPackage.templateRef,
+          ),
+        )
+        .flatMap((agent) => agent.toolInstanceIds ?? []) ?? [],
     );
-    const managedBotToolInstances = selectedBotPackages.flatMap((botPackage) =>
-      botPackage.manifest.toolInstances.flatMap(
-        (tool: LoadedBotPackage["manifest"]["toolInstances"][number]) =>
-          this.isBotToolInstanceEnabled(provisionalRuntimeConfig, tool.enabledWhen)
-            ? [
-                this.buildManagedBotToolInstance({
-                  runtimeConfig: provisionalRuntimeConfig,
-                  availableBotPackages: selectedBotPackages,
-                  tool,
-                  existing: preservedToolInstances.find((entry) => entry.id === tool.id),
-                }),
-              ]
-            : [],
-      ),
+    const managedBotToolIds = new Set([
+      ...previousManagedBotToolIds,
+      ...managedBotToolInstances.map((entry) => entry.id),
+      ...Array.from(allManagedBotToolIds),
+    ]);
+    const preservedUserToolInstances = preservedToolInstances.filter(
+      (entry) => !managedBotToolIds.has(entry.id),
     );
     provisionalRuntimeConfig.sovereignTools.instances = sortToolInstances([
       ...preservedUserToolInstances,
-      ...managedBotToolInstances,
+      ...managedBotToolInstances.map(
+        ({
+          botId: _botId,
+          botInstanceId: _botInstanceId,
+          manifestToolId: _manifestToolId,
+          ...tool
+        }) => tool,
+      ),
     ]);
-    const managedBotAgents = selectedBotPackages.map((botPackage) => {
-      const toolInstanceIds = managedBotToolInstances
-        .filter((tool: RuntimeConfig["sovereignTools"]["instances"][number]) =>
-          botPackage.manifest.toolInstances.some(
-            (definition: LoadedBotPackage["manifest"]["toolInstances"][number]) =>
-              definition.id === tool.id,
-          ),
-        )
-        .map((tool: RuntimeConfig["sovereignTools"]["instances"][number]) => tool.id);
-      const configuredModel =
-        selectedBotConfig[botPackage.manifest.id]?.model ?? botPackage.template.model;
-      return {
-        id: botPackage.manifest.id,
-        workspace: join(this.paths.stateDir, botPackage.manifest.id, "workspace"),
-        ...(typeof configuredModel === "string" && configuredModel.trim().length > 0
-          ? { model: configuredModel.trim() }
-          : {}),
-        templateRef: botPackage.templateRef,
-        botId: botPackage.manifest.id,
-        ...(toolInstanceIds.length === 0 ? {} : { toolInstanceIds }),
-        ...(botPackage.manifest.matrixIdentity.mode !== "service-account"
-          ? {}
-          : {
-              matrix: {
-                localpart: input.matrixAccounts.bot.localpart,
-                userId: input.matrixAccounts.bot.userId,
-                ...(input.matrixAccounts.bot.passwordSecretRef === undefined
-                  ? {}
-                  : { passwordSecretRef: input.matrixAccounts.bot.passwordSecretRef }),
-                accessTokenSecretRef: botTokenSecretRef,
-              },
-            }),
-      };
+    const managedBotAgents = selectedBotPackages.flatMap((botPackage) => {
+      const instances = requestedBotInstances.filter(
+        (entry) => entry.packageId === botPackage.manifest.id,
+      );
+      if (instances.length === 0) {
+        const toolInstanceIds = managedBotToolInstances
+          .filter(
+            (tool) => tool.botId === botPackage.manifest.id && tool.botInstanceId === undefined,
+          )
+          .map((tool) => tool.id);
+        const configuredModel =
+          selectedBotConfig[botPackage.manifest.id]?.model ?? botPackage.template.model;
+        return [
+          {
+            id: botPackage.manifest.id,
+            workspace: join(this.paths.stateDir, botPackage.manifest.id, "workspace"),
+            ...(typeof configuredModel === "string" && configuredModel.trim().length > 0
+              ? { model: configuredModel.trim() }
+              : {}),
+            templateRef: botPackage.templateRef,
+            botId: botPackage.manifest.id,
+            ...(toolInstanceIds.length === 0 ? {} : { toolInstanceIds }),
+            ...(botPackage.manifest.matrixIdentity.mode !== "service-account"
+              ? {}
+              : {
+                  matrix: {
+                    localpart: input.matrixAccounts.bot.localpart,
+                    userId: input.matrixAccounts.bot.userId,
+                    ...(input.matrixAccounts.bot.passwordSecretRef === undefined
+                      ? {}
+                      : { passwordSecretRef: input.matrixAccounts.bot.passwordSecretRef }),
+                    accessTokenSecretRef: botTokenSecretRef,
+                  },
+                }),
+          },
+        ];
+      }
+      return instances.map((botInstance) => {
+        const toolInstanceIds = managedBotToolInstances
+          .filter(
+            (tool) =>
+              tool.botId === botPackage.manifest.id && tool.botInstanceId === botInstance.id,
+          )
+          .map((tool) => tool.id);
+        const configuredModel =
+          typeof botInstance.config.model === "string" && botInstance.config.model.trim().length > 0
+            ? botInstance.config.model.trim()
+            : (selectedBotConfig[botPackage.manifest.id]?.model ?? botPackage.template.model);
+        return {
+          id: botInstance.id,
+          workspace: botInstance.workspace,
+          ...(typeof configuredModel === "string" && configuredModel.trim().length > 0
+            ? { model: configuredModel }
+            : {}),
+          templateRef: botPackage.templateRef,
+          botId: botPackage.manifest.id,
+          botInstanceId: botInstance.id,
+          ...(toolInstanceIds.length === 0 ? {} : { toolInstanceIds }),
+          ...(botPackage.manifest.matrixIdentity.mode !== "service-account"
+            ? {}
+            : {
+                matrix: {
+                  localpart: input.matrixAccounts.bot.localpart,
+                  userId: input.matrixAccounts.bot.userId,
+                  ...(input.matrixAccounts.bot.passwordSecretRef === undefined
+                    ? {}
+                    : { passwordSecretRef: input.matrixAccounts.bot.passwordSecretRef }),
+                  accessTokenSecretRef: botTokenSecretRef,
+                },
+              }),
+        };
+      });
     });
     const managedAgents = ensureCoreManagedAgents([...preservedUserAgents, ...managedBotAgents]);
     const runtimeConfig: RuntimeConfig = {
@@ -8480,6 +9723,7 @@ export default function (api) {
       }
     > = {};
     const buildMatrixGroupEntries = (input: {
+      roomId: string;
       users: string[];
       autoReply: boolean;
       requireMention: boolean;
@@ -8500,7 +9744,7 @@ export default function (api) {
         requireMention: input.requireMention,
         users: input.users,
       },
-      [runtimeConfig.matrix.alertRoom.roomId]: {
+      [input.roomId]: {
         enabled: true,
         allow: true,
         autoReply: input.autoReply,
@@ -8548,19 +9792,26 @@ export default function (api) {
         });
       }
       const routing = this.resolveBotMatrixRouting(botPackage?.manifest);
+      const botInstance = this.getRuntimeBotInstanceForAgent(runtimeConfig, agent);
+      const alertRoom = botInstance?.matrix?.alertRoom ?? runtimeConfig.matrix.alertRoom;
+      const explicitAllowlist = botInstance?.matrix?.allowedUsers;
+      const agentAllowlist = explicitAllowlist ?? matrixParticipantAllowlist;
       matrixAccounts[agent.id] = {
         homeserver: runtimeConfig.matrix.adminBaseUrl,
         userId: agent.matrix.userId,
         accessToken: await this.resolveSecretRef(agent.matrix.accessTokenSecretRef),
-        ...(federationOpen
+        ...(explicitAllowlist !== undefined || !federationOpen
           ? {
               dm: {
                 enabled: routing.dmEnabled,
-                policy: "open" as const,
+                policy: "allowlist" as const,
+                allowFrom: agentAllowlist,
               },
-              groupPolicy: "open" as const,
+              groupPolicy: "allowlist" as const,
+              groupAllowFrom: agentAllowlist,
               groups: buildMatrixGroupEntries({
-                users: [],
+                roomId: alertRoom.roomId,
+                users: agentAllowlist,
                 autoReply: routing.alertRoom.autoReply,
                 requireMention: routing.alertRoom.requireMention,
               }),
@@ -8568,13 +9819,12 @@ export default function (api) {
           : {
               dm: {
                 enabled: routing.dmEnabled,
-                policy: "allowlist" as const,
-                allowFrom: matrixParticipantAllowlist,
+                policy: "open" as const,
               },
-              groupPolicy: "allowlist" as const,
-              groupAllowFrom: matrixParticipantAllowlist,
+              groupPolicy: "open" as const,
               groups: buildMatrixGroupEntries({
-                users: matrixParticipantAllowlist,
+                roomId: alertRoom.roomId,
+                users: [],
                 autoReply: routing.alertRoom.autoReply,
                 requireMention: routing.alertRoom.requireMention,
               }),
@@ -8594,6 +9844,7 @@ export default function (api) {
               },
               groupPolicy: "open" as const,
               groups: buildMatrixGroupEntries({
+                roomId: runtimeConfig.matrix.alertRoom.roomId,
                 users: [],
                 autoReply: true,
                 requireMention: false,
@@ -8608,6 +9859,7 @@ export default function (api) {
               groupPolicy: "allowlist" as const,
               groupAllowFrom: matrixParticipantAllowlist,
               groups: buildMatrixGroupEntries({
+                roomId: runtimeConfig.matrix.alertRoom.roomId,
                 users: matrixParticipantAllowlist,
                 autoReply: true,
                 requireMention: false,
@@ -8657,6 +9909,7 @@ export default function (api) {
                 },
                 groupPolicy: "open" as const,
                 groups: buildMatrixGroupEntries({
+                  roomId: runtimeConfig.matrix.alertRoom.roomId,
                   users: [],
                   autoReply: true,
                   requireMention: false,
@@ -8670,6 +9923,7 @@ export default function (api) {
                 groupPolicy: "allowlist" as const,
                 groupAllowFrom: matrixParticipantAllowlist,
                 groups: buildMatrixGroupEntries({
+                  roomId: runtimeConfig.matrix.alertRoom.roomId,
                   users: matrixParticipantAllowlist,
                   autoReply: true,
                   requireMention: false,
@@ -9310,6 +10564,33 @@ const isBotConfigRecordMap = (value: unknown): value is Record<string, BotConfig
       ),
   );
 };
+
+const normalizeBotConfigRecord = (value: unknown): BotConfigRecord =>
+  !isRecord(value)
+    ? {}
+    : Object.fromEntries(
+        Object.entries(value)
+          .filter(
+            (entry): entry is [string, BotConfigValue] =>
+              typeof entry[0] === "string" &&
+              entry[0].length > 0 &&
+              (typeof entry[1] === "string" ||
+                typeof entry[1] === "number" ||
+                typeof entry[1] === "boolean"),
+          )
+          .sort(([left], [right]) => left.localeCompare(right)),
+      );
+
+const normalizeMatrixUserList = (values: string[]): string[] =>
+  dedupeStrings(
+    values
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0)
+      .sort((left, right) => left.localeCompare(right)),
+  );
+
+const sortBotInstances = (entries: RequestedBotInstance[]): RequestedBotInstance[] =>
+  [...entries].sort((left, right) => left.id.localeCompare(right.id));
 
 const sortInstalledTemplates = (
   entries: RuntimeConfig["templates"]["installed"],

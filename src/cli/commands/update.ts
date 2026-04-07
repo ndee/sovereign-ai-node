@@ -28,6 +28,18 @@ export const registerUpdateCommand = (program: Command, app: AppContainer): void
     .action(async (opts: UpdateOptions) => {
       const command = "update";
       try {
+        const pending = await app.installerService.getPendingMigrations();
+        if (pending.pending.length > 0) {
+          throw {
+            code: "UPDATE_REQUIRES_MIGRATION",
+            message: `Run 'sovereign-node migrate' before update (${pending.pending.map((entry) => entry.id).join(", ")})`,
+            retryable: false,
+            details: {
+              requestFile: pending.requestFile,
+              pending: pending.pending.map((entry) => entry.id),
+            },
+          };
+        }
         const requestPath = opts.requestFile ?? DEFAULT_INSTALL_REQUEST_FILE;
         const raw = await readFile(requestPath, "utf8");
         const req: InstallRequest = installRequestSchema.parse(JSON.parse(raw) as unknown);

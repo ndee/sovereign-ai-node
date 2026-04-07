@@ -10,7 +10,7 @@ export default defineConfig({
       reportsDirectory: "coverage/integration",
       reporter: ["text-summary", "json-summary", "lcov"],
       include: ["src/api/**/*.ts", "src/cli/**/*.ts", "src/installer/**/*.ts"],
-      exclude: ["**/*.test.ts"],
+      exclude: ["**/*.test.ts", "src/installer/stub-service.ts"],
       thresholds: {
         statements: 59,
         branches: 65,

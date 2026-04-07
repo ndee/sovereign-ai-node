@@ -132,9 +132,30 @@ export const operatorInstallInputSchema = z.object({
 
 export const botConfigValueSchema = z.union([z.string(), z.number().finite(), z.boolean()]);
 
+export const botInstanceMatrixSchema = z.object({
+  localpart: z.string().min(1).optional(),
+  alertRoom: z
+    .object({
+      roomId: z.string().min(1).optional(),
+      roomName: z.string().min(1).optional(),
+    })
+    .optional(),
+  allowedUsers: z.array(z.string().min(1)).optional(),
+});
+
+export const botInstanceInstallInputSchema = z.object({
+  id: z.string().min(1),
+  packageId: z.string().min(1),
+  workspace: z.string().min(1).optional(),
+  config: z.record(z.string(), botConfigValueSchema).optional(),
+  secretRefs: z.record(z.string(), z.string().min(1)).optional(),
+  matrix: botInstanceMatrixSchema.optional(),
+});
+
 export const botsInstallInputSchema = z.object({
   selected: z.array(z.string().min(1)).optional(),
   config: z.record(z.string(), z.record(z.string(), botConfigValueSchema)).optional(),
+  instances: z.array(botInstanceInstallInputSchema).optional(),
 });
 
 export const advancedInstallInputSchema = z.object({
@@ -192,6 +213,7 @@ export const testAlertResultSchema = z.object({
 const hostResourceStateSchema = z.object({
   id: z.string().min(1),
   botId: z.string().min(1),
+  agentId: z.string().min(1).optional(),
   kind: z.enum([
     "directory",
     "managedFile",
