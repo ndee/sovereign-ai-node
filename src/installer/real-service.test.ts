@@ -8943,6 +8943,7 @@ describe("RealInstallerService", () => {
 
     const priorOpenrouterApiKey = process.env.OPENROUTER_API_KEY;
     process.env.OPENROUTER_API_KEY = "sk-or-test";
+    let federationUpdateArgs: Record<string, unknown> | null = null;
 
     const service = new RealInstallerService(createLogger(), paths, {
       openclawBootstrapper: {
@@ -8989,6 +8990,9 @@ describe("RealInstallerService", () => {
         provision: async () => {
           throw new Error("not used");
         },
+        updateFederationConfig: async (params) => {
+          federationUpdateArgs = params as Record<string, unknown>;
+        },
         bootstrapAccounts: async () => {
           throw new Error("not used");
         },
@@ -9011,6 +9015,12 @@ describe("RealInstallerService", () => {
       });
 
       expect(result.changed).toContain("matrix.federationEnabled");
+      expect(federationUpdateArgs).toMatchObject({
+        federationEnabled: true,
+        accessMode: "relay",
+        homeserverDomain: "matrix.example.org",
+        publicBaseUrl: "https://matrix.example.org",
+      });
 
       const configRaw = await readFile(paths.configPath, "utf8");
       const config = JSON.parse(configRaw) as { matrix?: { federationEnabled?: boolean } };
