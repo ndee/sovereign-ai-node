@@ -10223,7 +10223,7 @@ export default function (api) {
     await writeFile(tempPath, `${value}\n`, "utf8");
     await chmod(tempPath, 0o600);
     await rename(tempPath, filePath);
-    await this.applyRuntimeOwnership(filePath);
+    await this.applyServiceOwnership(filePath);
     return `file:${filePath}`;
   }
 
@@ -10231,7 +10231,7 @@ export default function (api) {
     try {
       await mkdir(this.paths.secretsDir, { recursive: true });
       await chmod(this.paths.secretsDir, 0o700);
-      await this.applyRuntimeOwnership(this.paths.secretsDir);
+      await this.applyServiceOwnership(this.paths.secretsDir);
       await access(this.paths.secretsDir, fsConstants.W_OK);
     } catch (error) {
       throw {
@@ -10250,7 +10250,7 @@ export default function (api) {
     await writeFile(tempPath, `${value}\n`, "utf8");
     await chmod(tempPath, 0o600);
     await rename(tempPath, filePath);
-    await this.applyRuntimeOwnership(filePath);
+    await this.applyServiceOwnership(filePath);
     return `file:${filePath}`;
   }
 
@@ -10304,7 +10304,7 @@ export default function (api) {
     try {
       await mkdir(this.paths.secretsDir, { recursive: true });
       await chmod(this.paths.secretsDir, 0o700);
-      await this.applyRuntimeOwnership(this.paths.secretsDir);
+      await this.applyServiceOwnership(this.paths.secretsDir);
       await access(this.paths.secretsDir, fsConstants.W_OK);
       this.resolvedSecretsDir = this.paths.secretsDir;
       return this.resolvedSecretsDir;
@@ -10437,8 +10437,24 @@ export default function (api) {
     await this.applyOwnership(path, ownership);
   }
 
+  private async applyServiceOwnership(path: string, runtimeConfig?: RuntimeConfig): Promise<void> {
+    const ownership = await this.resolveServiceOwnership(runtimeConfig);
+    if (ownership !== null) {
+      this.resolvedRuntimeOwnership = ownership;
+      await this.applyOwnership(path, ownership);
+      return;
+    }
+    await this.applyRuntimeOwnership(path);
+  }
+
   private async resolveConfiguredRuntimeOwnership(
     runtimeConfig: RuntimeConfig,
+  ): Promise<{ uid: number; gid: number } | null> {
+    return this.resolveServiceOwnership(runtimeConfig);
+  }
+
+  private async resolveServiceOwnership(
+    runtimeConfig?: RuntimeConfig,
   ): Promise<{ uid: number; gid: number } | null> {
     if (typeof process.getuid !== "function" || process.getuid() !== 0) {
       return null;
