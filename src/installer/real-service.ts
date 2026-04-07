@@ -1191,6 +1191,9 @@ export class RealInstallerService implements InstallerService {
           federationEnabled: requestedFederation,
           projectDir,
           composeFilePath: join(projectDir, "compose.yaml"),
+          accessMode: runtimeConfig.matrix.accessMode,
+          homeserverDomain: runtimeConfig.matrix.homeserverDomain,
+          publicBaseUrl: runtimeConfig.matrix.publicBaseUrl,
         });
       }
 

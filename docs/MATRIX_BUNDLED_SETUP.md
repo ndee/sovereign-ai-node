@@ -275,9 +275,10 @@ If federation is enabled:
 
 Failure and rollback behavior for partial bundled Matrix installs is defined in `docs/INSTALLER_CONTRACTS.md` and should be treated as part of the operator contract.
 
-Relay v1 note:
+Relay note:
 
-- federation is intentionally disabled in relay mode
+- relay mode can support federation when `/.well-known/matrix/server` delegates the homeserver name to the public relay endpoint on port `443`
+- relay deployments should verify the published `m.server` value after install or reconfigure, because other homeservers will otherwise fall back to port `8448`
 
 ## Operations and Backup Expectations
 

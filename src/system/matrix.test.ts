@@ -467,12 +467,17 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
         join(result.projectDir, "synapse", "homeserver.yaml"),
         "utf8",
       );
+      const wellKnownServer = await readFile(
+        join(result.projectDir, "well-known", ".well-known", "matrix", "server"),
+        "utf8",
+      );
       expect(caddyText).toContain(":80 {");
       expect(caddyText).not.toContain("tls internal");
       expect(caddyText).not.toContain("/downloads/caddy-root-ca.crt");
       expect(caddyText).toContain("@onboardApi path /onboard/api /onboard/api/*");
       expect(envText).toContain("MATRIX_FEDERATION_ENABLED=true");
       expect(homeserverYaml).not.toContain("federation_domain_whitelist: []");
+      expect(wellKnownServer).toContain('"m.server": "node-abc.relay.example.com:443"');
 
       const onboardPage = await readFile(
         join(result.projectDir, "well-known", "onboard", "index.html"),
@@ -1006,9 +1011,11 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
     const paths = buildPaths(tempRoot);
     const synapseDir = join(tempRoot, "project", "synapse");
     const projectDir = join(tempRoot, "project");
+    const wellKnownDir = join(projectDir, "well-known", ".well-known", "matrix");
     const composeFilePath = join(projectDir, "compose.yaml");
 
     await mkdir(synapseDir, { recursive: true });
+    await mkdir(wellKnownDir, { recursive: true });
     await writeFile(
       join(synapseDir, "homeserver.yaml"),
       [
@@ -1026,6 +1033,11 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
         "MATRIX_FEDERATION_ENABLED=false",
         "MATRIX_HOMESERVER_DOMAIN=matrix.example.org",
       ].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      join(wellKnownDir, "server"),
+      '{\n  "m.server": "node-abc.relay.example.com"\n}\n',
       "utf8",
     );
     await writeFile(composeFilePath, "version: '3'\nservices:\n  synapse: {}", "utf8");
@@ -1049,6 +1061,9 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
         federationEnabled: true,
         projectDir,
         composeFilePath,
+        accessMode: "relay",
+        homeserverDomain: "node-abc.relay.example.com",
+        publicBaseUrl: "https://node-abc.relay.example.com",
       });
 
       const yaml = await readFile(join(synapseDir, "homeserver.yaml"), "utf8");
@@ -1056,6 +1071,9 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
 
       const env = await readFile(join(projectDir, ".env"), "utf8");
       expect(env).toContain("MATRIX_FEDERATION_ENABLED=true");
+
+      const wellKnownServer = await readFile(join(wellKnownDir, "server"), "utf8");
+      expect(wellKnownServer).toContain('"m.server": "node-abc.relay.example.com:443"');
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -1108,6 +1126,9 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
         federationEnabled: false,
         projectDir,
         composeFilePath,
+        accessMode: "direct",
+        homeserverDomain: "matrix.example.org",
+        publicBaseUrl: "https://matrix.example.org",
       });
 
       const yaml = await readFile(join(synapseDir, "homeserver.yaml"), "utf8");

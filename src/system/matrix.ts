@@ -92,6 +92,9 @@ export interface BundledMatrixProvisioner {
     federationEnabled: boolean;
     projectDir: string;
     composeFilePath: string;
+    accessMode: BundledMatrixAccessMode;
+    homeserverDomain: string;
+    publicBaseUrl: string;
   }): Promise<void>;
 }
 
@@ -223,6 +226,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     ];
     if (usesReverseProxy) {
       const wellKnown = renderWellKnownFiles({
+        accessMode,
         homeserverDomain,
         publicBaseUrl,
       });
@@ -1258,10 +1262,20 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     federationEnabled: boolean;
     projectDir: string;
     composeFilePath: string;
+    accessMode: BundledMatrixAccessMode;
+    homeserverDomain: string;
+    publicBaseUrl: string;
   }): Promise<void> {
     const synapseDir = join(params.projectDir, "synapse");
     const homeserverPath = join(synapseDir, "homeserver.yaml");
     const envFilePath = join(params.projectDir, ".env");
+    const wellKnownServerPath = join(
+      params.projectDir,
+      "well-known",
+      ".well-known",
+      "matrix",
+      "server",
+    );
 
     const homeserverYaml = await readFile(homeserverPath, "utf8");
     const whitelistLine = "federation_domain_whitelist: []";
@@ -1289,6 +1303,18 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     );
     if (updatedEnv !== envContent) {
       await writeFile(envFilePath, updatedEnv, "utf8");
+    }
+
+    const hasWellKnownServer = await access(wellKnownServerPath, fsConstants.F_OK)
+      .then(() => true)
+      .catch(() => false);
+    if (hasWellKnownServer) {
+      const wellKnown = renderWellKnownFiles({
+        accessMode: params.accessMode,
+        homeserverDomain: params.homeserverDomain,
+        publicBaseUrl: params.publicBaseUrl,
+      });
+      await writeFile(wellKnownServerPath, `${wellKnown.server}\n`, "utf8");
     }
 
     await this.runComposeCommand(params.projectDir, params.composeFilePath, ["restart", "synapse"]);
@@ -2252,11 +2278,18 @@ const buildElementWebRoomLink = (roomId: string): string =>
   `https://app.element.io/#/room/${encodeURIComponent(roomId)}`;
 
 const renderWellKnownFiles = (input: {
+  accessMode: BundledMatrixAccessMode;
   homeserverDomain: string;
   publicBaseUrl: string;
 }): { client: string; server: string } => {
   const parsed = new URL(input.publicBaseUrl);
   const httpsPort = parsed.port.length > 0 ? parsed.port : "443";
+  const serverHost =
+    input.accessMode === "relay"
+      ? `${input.homeserverDomain}:443`
+      : httpsPort === "443"
+        ? input.homeserverDomain
+        : `${input.homeserverDomain}:${httpsPort}`;
   return {
     client: JSON.stringify(
       {
@@ -2269,8 +2302,7 @@ const renderWellKnownFiles = (input: {
     ),
     server: JSON.stringify(
       {
-        "m.server":
-          httpsPort === "443" ? input.homeserverDomain : `${input.homeserverDomain}:${httpsPort}`,
+        "m.server": serverHost,
       },
       null,
       2,
