@@ -120,6 +120,54 @@ export type MatrixUserRemoveResult = {
   removed: boolean;
 };
 
+export type PendingMigration = {
+  id: string;
+  description: string;
+  interactive: boolean;
+};
+
+export type MigrationStatusResult = {
+  requestFile: string;
+  pending: PendingMigration[];
+};
+
+export type MailSentinelSummary = {
+  id: string;
+  packageId: string;
+  workspace: string;
+  matrixLocalpart?: string;
+  matrixUserId?: string;
+  alertRoomId?: string;
+  alertRoomName?: string;
+  allowedUsers: string[];
+  imapHost?: string;
+  imapUsername?: string;
+  mailbox?: string;
+  pollInterval?: string;
+};
+
+export type MailSentinelListResult = {
+  instances: MailSentinelSummary[];
+};
+
+export type MailSentinelMigrationResult = {
+  changed: boolean;
+  requestFile: string;
+  instance: MailSentinelSummary;
+};
+
+export type MailSentinelApplyResult = {
+  instance: MailSentinelSummary;
+  changed: boolean;
+  job?: StartInstallResult["job"];
+};
+
+export type MailSentinelDeleteResult = {
+  id: string;
+  deleted: boolean;
+  job?: StartInstallResult["job"];
+};
+
 export interface InstallerService {
   preflight(input?: PreflightRequest): Promise<PreflightResult>;
   testImap(req: TestImapRequest): Promise<TestImapResult>;
@@ -138,6 +186,55 @@ export interface InstallerService {
     ttlMinutes?: number;
   }): Promise<MatrixOnboardingIssueResult>;
   removeMatrixUser(req: { username: string }): Promise<MatrixUserRemoveResult>;
+  getPendingMigrations(): Promise<MigrationStatusResult>;
+  migrateLegacyMailSentinel(req: {
+    nonInteractive?: boolean;
+    matrixLocalpart?: string;
+    alertRoomId?: string;
+    alertRoomName?: string;
+    createAlertRoomName?: string;
+    allowedUsers?: string[];
+  }): Promise<MailSentinelMigrationResult>;
+  listMailSentinelInstances(): Promise<MailSentinelListResult>;
+  createMailSentinelInstance(req: {
+    id: string;
+    imapHost: string;
+    imapPort: number;
+    imapTls: boolean;
+    imapUsername: string;
+    imapPassword?: string;
+    imapSecretRef?: string;
+    mailbox?: string;
+    matrixLocalpart?: string;
+    alertRoomId?: string;
+    alertRoomName?: string;
+    createAlertRoomName?: string;
+    allowedUsers: string[];
+    pollInterval?: string;
+    lookbackWindow?: string;
+    defaultReminderDelay?: string;
+    digestInterval?: string;
+  }): Promise<MailSentinelApplyResult>;
+  updateMailSentinelInstance(req: {
+    id: string;
+    imapHost?: string;
+    imapPort?: number;
+    imapTls?: boolean;
+    imapUsername?: string;
+    imapPassword?: string;
+    imapSecretRef?: string;
+    mailbox?: string;
+    matrixLocalpart?: string;
+    alertRoomId?: string;
+    alertRoomName?: string;
+    createAlertRoomName?: string;
+    allowedUsers?: string[];
+    pollInterval?: string;
+    lookbackWindow?: string;
+    defaultReminderDelay?: string;
+    digestInterval?: string;
+  }): Promise<MailSentinelApplyResult>;
+  deleteMailSentinelInstance(req: { id: string }): Promise<MailSentinelDeleteResult>;
   listManagedAgents(): Promise<ManagedAgentListResult>;
   createManagedAgent(req: {
     id: string;

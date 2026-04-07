@@ -73,6 +73,7 @@ const buildInstallRequest = (): InstallRequest => ({
         e2eeAlertRoom: false,
       },
     },
+    instances: [],
   },
   advanced: {
     nonInteractive: true,
@@ -738,6 +739,7 @@ const writeRuntimeArtifacts = async (paths: SovereignPaths): Promise<void> => {
               e2eeAlertRoom: false,
             },
           },
+          instances: [],
         },
       },
       null,
@@ -3668,6 +3670,12 @@ describe("RealInstallerService", () => {
       },
       execRunner: {
         run: async ({ command, args }): Promise<ExecResult> => {
+          const handled = maybeHandleInstalledLobsterExec(
+            args === undefined ? { command } : { command, args },
+          );
+          if (handled !== null) {
+            return handled;
+          }
           const serialized = [command, ...(args ?? [])].join(" ");
           commandCalls.push(serialized);
           const lobsterResult = maybeHandleInstalledLobsterExec(
@@ -4424,6 +4432,7 @@ describe("RealInstallerService", () => {
       },
       bots: {
         config: {},
+        instances: [],
       },
       matrix: {
         accessMode: "direct",
@@ -4761,6 +4770,159 @@ describe("RealInstallerService", () => {
       expect((await stat(managedAgentAccessTokenDir(paths))).mode & 0o7777).toBe(0o2750);
     } finally {
       getuidMock?.mockRestore();
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("stores managed secrets under the configured service identity in root installs", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-managed-secret-test-"));
+    const getuidMock =
+      typeof process.getuid === "function"
+        ? vi
+            .spyOn(process as typeof process & { getuid: () => number }, "getuid")
+            .mockImplementation(() => 0)
+        : null;
+    const priorSudoUser = process.env.SUDO_USER;
+    const priorServiceUser = process.env.SOVEREIGN_NODE_SERVICE_USER;
+    const priorServiceGroup = process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+    process.env.SUDO_USER = "runner";
+    delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+    delete process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => {
+          throw new Error("not used");
+        },
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {
+          throw new Error("not used");
+        },
+        start: async () => {
+          throw new Error("not used");
+        },
+        restart: async () => {
+          throw new Error("not used");
+        },
+      },
+      managedAgentRegistrar: {
+        register: async () => {
+          throw new Error("not used");
+        },
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async () => ({
+          ok: true,
+          host: "imap.example.org",
+          port: 993,
+          tls: true,
+          auth: "ok",
+          mailbox: "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async ({ command, args }): Promise<ExecResult> => {
+          const serialized = [command, ...(args ?? [])].join(" ");
+          if (serialized === "getent passwd runner") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "runner:x:1001:1001::/home/runner:/bin/bash\n",
+              stderr: "",
+            };
+          }
+          return {
+            command: serialized,
+            exitCode: 1,
+            stdout: "",
+            stderr: "unexpected command",
+          };
+        },
+      },
+    });
+
+    try {
+      const secretRef = await (
+        service as unknown as {
+          writeManagedSecretFile(fileName: string, value: string): Promise<string>;
+        }
+      ).writeManagedSecretFile("matrix-agent-mail-sentinel-access-token", "token-value");
+
+      expect(secretRef).toBe(
+        `file:${join(paths.secretsDir, "matrix-agent-mail-sentinel-access-token")}`,
+      );
+      expect(
+        await readFile(join(paths.secretsDir, "matrix-agent-mail-sentinel-access-token"), "utf8"),
+      ).toBe("token-value\n");
+      expect((await stat(paths.secretsDir)).mode & 0o777).toBe(0o700);
+
+      const cachedOwnership = (
+        service as unknown as {
+          resolvedRuntimeOwnership: { uid: number; gid: number } | null | undefined;
+        }
+      ).resolvedRuntimeOwnership;
+      expect(cachedOwnership).toEqual({ uid: 1001, gid: 1001 });
+
+      const runtimeOwnership = await (
+        service as unknown as {
+          resolveRuntimeOwnership(): Promise<{ uid: number; gid: number } | null>;
+        }
+      ).resolveRuntimeOwnership();
+      expect(runtimeOwnership).toEqual({ uid: 1001, gid: 1001 });
+    } finally {
+      getuidMock?.mockRestore();
+      if (priorSudoUser === undefined) {
+        delete process.env.SUDO_USER;
+      } else {
+        process.env.SUDO_USER = priorSudoUser;
+      }
+      if (priorServiceUser === undefined) {
+        delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+      } else {
+        process.env.SOVEREIGN_NODE_SERVICE_USER = priorServiceUser;
+      }
+      if (priorServiceGroup === undefined) {
+        delete process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+      } else {
+        process.env.SOVEREIGN_NODE_SERVICE_GROUP = priorServiceGroup;
+      }
       await rm(tempRoot, { recursive: true, force: true });
     }
   });
@@ -5290,6 +5452,126 @@ describe("RealInstallerService", () => {
       } else {
         process.env.OPENROUTER_API_KEY = priorOpenrouterApiKey;
       }
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("migrates legacy mail-sentinel request data into bot instances", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+    await writeRuntimeArtifacts(paths);
+    const requestPath = join(dirname(paths.configPath), "install-request.json");
+    await writeFile(requestPath, `${JSON.stringify(buildInstallRequest(), null, 2)}\n`, "utf8");
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => {
+          throw new Error("not used");
+        },
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => {
+          throw new Error("not used");
+        },
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async () => ({
+          ok: true,
+          host: "imap.example.org",
+          port: 993,
+          tls: true,
+          auth: "ok",
+          mailbox: "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+    });
+
+    try {
+      const result = await service.migrateLegacyMailSentinel({
+        allowedUsers: ["operator"],
+      });
+
+      expect(result.changed).toBe(true);
+      expect(result.requestFile).toBe(requestPath);
+      expect(result.instance.id).toBe("mail-sentinel");
+      expect(result.instance.allowedUsers).toEqual(["@operator:matrix.example.org"]);
+
+      const raw = await readFile(requestPath, "utf8");
+      const request = JSON.parse(raw) as {
+        bots?: {
+          selected?: string[];
+          instances?: Array<{
+            id?: string;
+            packageId?: string;
+            workspace?: string;
+            config?: Record<string, unknown>;
+            secretRefs?: Record<string, unknown>;
+            matrix?: {
+              localpart?: string;
+              alertRoom?: { roomId?: string; roomName?: string };
+              allowedUsers?: string[];
+            };
+          }>;
+        };
+      };
+      expect(request.bots?.selected).toContain("mail-sentinel");
+      expect(request.bots?.instances).toEqual([
+        {
+          id: "mail-sentinel",
+          packageId: "mail-sentinel",
+          workspace: join(paths.stateDir, "mail-sentinel", "workspace"),
+          config: {},
+          secretRefs: {},
+          matrix: {
+            localpart: "mail-sentinel",
+            alertRoom: {
+              roomId: "!alerts:matrix.example.org",
+              roomName: "Sovereign Alerts",
+            },
+            allowedUsers: ["@operator:matrix.example.org"],
+          },
+        },
+      ]);
+    } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
   });
@@ -8661,6 +8943,7 @@ describe("RealInstallerService", () => {
 
     const priorOpenrouterApiKey = process.env.OPENROUTER_API_KEY;
     process.env.OPENROUTER_API_KEY = "sk-or-test";
+    let federationUpdateArgs: Record<string, unknown> | null = null;
 
     const service = new RealInstallerService(createLogger(), paths, {
       openclawBootstrapper: {
@@ -8707,6 +8990,9 @@ describe("RealInstallerService", () => {
         provision: async () => {
           throw new Error("not used");
         },
+        updateFederationConfig: async (params) => {
+          federationUpdateArgs = params as Record<string, unknown>;
+        },
         bootstrapAccounts: async () => {
           throw new Error("not used");
         },
@@ -8729,6 +9015,12 @@ describe("RealInstallerService", () => {
       });
 
       expect(result.changed).toContain("matrix.federationEnabled");
+      expect(federationUpdateArgs).toMatchObject({
+        federationEnabled: true,
+        accessMode: "relay",
+        homeserverDomain: "matrix.example.org",
+        publicBaseUrl: "https://matrix.example.org",
+      });
 
       const configRaw = await readFile(paths.configPath, "utf8");
       const config = JSON.parse(configRaw) as { matrix?: { federationEnabled?: boolean } };
@@ -8739,6 +9031,339 @@ describe("RealInstallerService", () => {
       } else {
         process.env.OPENROUTER_API_KEY = priorOpenrouterApiKey;
       }
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("writes compiled systemd units to disk when content differs", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const systemdDir = join(tempRoot, "etc", "systemd", "system");
+    await mkdir(systemdDir, { recursive: true });
+
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+    await writeRuntimeArtifacts(paths);
+
+    const serviceContent =
+      "[Unit]\nDescription=Sovereign Mail Sentinel Scan\n\n[Service]\nType=oneshot\nUser=sovereign-ai-node\n\n[Install]\n";
+    const timerContent =
+      "[Unit]\nDescription=Sovereign Mail Sentinel Scan Timer\n\n[Timer]\nOnUnitActiveSec=30min\n\n[Install]\nWantedBy=timers.target\n";
+
+    const raw = await readFile(paths.configPath, "utf8");
+    const parsed = JSON.parse(raw) as {
+      hostResources?: {
+        planPath?: string;
+        resources?: Array<Record<string, unknown>>;
+        botStatus?: Array<Record<string, unknown>>;
+      };
+    };
+    parsed.hostResources = {
+      planPath: join(dirname(paths.configPath), "host-resources.json"),
+      resources: [
+        {
+          id: "scan-service",
+          botId: "mail-sentinel",
+          kind: "systemdService",
+          name: "sovereign-mail-sentinel-scan.service",
+          content: serviceContent,
+          desiredState: { enabled: false, active: false },
+          checks: [],
+        },
+        {
+          id: "scan-timer",
+          botId: "mail-sentinel",
+          kind: "systemdTimer",
+          name: "sovereign-mail-sentinel-scan.timer",
+          content: timerContent,
+          desiredState: { enabled: true, active: true },
+          checks: [],
+        },
+      ],
+      botStatus: [],
+    };
+    await writeFile(paths.configPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+
+    // Write an outdated unit to verify it gets overwritten
+    await writeFile(
+      join(systemdDir, "sovereign-mail-sentinel-scan.service"),
+      "[Unit]\nDescription=Old\n\n[Service]\nType=oneshot\nUser=sovereign-node\n\n[Install]\n",
+      "utf8",
+    );
+
+    const execCommands: string[] = [];
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async ({ command, args }) => {
+          const serialized = [command, ...(args ?? [])].join(" ");
+          execCommands.push(serialized);
+          return { command: serialized, exitCode: 0, stdout: "", stderr: "" };
+        },
+      },
+      fetchImpl: async () =>
+        new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } }),
+    });
+
+    const getuidMock =
+      typeof process.getuid === "function"
+        ? vi
+            .spyOn(process as typeof process & { getuid: () => number }, "getuid")
+            .mockImplementation(() => 0)
+        : null;
+    process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
+    try {
+      const configRaw = await readFile(paths.configPath, "utf8");
+      const runtimeConfig = JSON.parse(configRaw) as RuntimeConfig;
+      runtimeConfig.hostResources = parsed.hostResources as NonNullable<
+        RuntimeConfig["hostResources"]
+      >;
+      await (
+        service as unknown as {
+          applyCompiledSystemdResources(config: RuntimeConfig): Promise<void>;
+        }
+      ).applyCompiledSystemdResources(runtimeConfig);
+
+      // Verify the service unit was overwritten with new content
+      const writtenService = await readFile(
+        join(systemdDir, "sovereign-mail-sentinel-scan.service"),
+        "utf8",
+      );
+      expect(writtenService).toBe(serviceContent);
+
+      // Verify the timer unit was created
+      const writtenTimer = await readFile(
+        join(systemdDir, "sovereign-mail-sentinel-scan.timer"),
+        "utf8",
+      );
+      expect(writtenTimer).toBe(timerContent);
+
+      // Verify systemctl daemon-reload was called
+      expect(execCommands).toContain("systemctl daemon-reload");
+
+      // Verify enable and restart were called for the timer (desiredState.enabled + active)
+      expect(execCommands).toContain("systemctl enable sovereign-mail-sentinel-scan.timer");
+      expect(execCommands).toContain("systemctl restart sovereign-mail-sentinel-scan.timer");
+
+      // The service has desiredState enabled=false, active=false, so no enable/restart
+      expect(execCommands).not.toContain("systemctl enable sovereign-mail-sentinel-scan.service");
+      expect(execCommands).not.toContain("systemctl restart sovereign-mail-sentinel-scan.service");
+    } finally {
+      getuidMock?.mockRestore();
+      delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("skips writing systemd units when content is unchanged", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const systemdDir = join(tempRoot, "etc", "systemd", "system");
+    await mkdir(systemdDir, { recursive: true });
+
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+    await writeRuntimeArtifacts(paths);
+
+    const serviceContent =
+      "[Unit]\nDescription=Sovereign Mail Sentinel Scan\n\n[Service]\nType=oneshot\nUser=sovereign-ai-node\n\n[Install]\n";
+
+    const raw = await readFile(paths.configPath, "utf8");
+    const parsed = JSON.parse(raw) as {
+      hostResources?: {
+        planPath?: string;
+        resources?: Array<Record<string, unknown>>;
+        botStatus?: Array<Record<string, unknown>>;
+      };
+    };
+    parsed.hostResources = {
+      planPath: join(dirname(paths.configPath), "host-resources.json"),
+      resources: [
+        {
+          id: "scan-service",
+          botId: "mail-sentinel",
+          kind: "systemdService",
+          name: "sovereign-mail-sentinel-scan.service",
+          content: serviceContent,
+          desiredState: { enabled: false, active: false },
+          checks: [],
+        },
+      ],
+      botStatus: [],
+    };
+    await writeFile(paths.configPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+
+    // Write the exact same content so nothing should change
+    await writeFile(
+      join(systemdDir, "sovereign-mail-sentinel-scan.service"),
+      serviceContent,
+      "utf8",
+    );
+
+    const execCommands: string[] = [];
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async ({ command, args }) => {
+          const serialized = [command, ...(args ?? [])].join(" ");
+          execCommands.push(serialized);
+          return { command: serialized, exitCode: 0, stdout: "", stderr: "" };
+        },
+      },
+      fetchImpl: async () =>
+        new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } }),
+    });
+
+    const getuidMock2 =
+      typeof process.getuid === "function"
+        ? vi
+            .spyOn(process as typeof process & { getuid: () => number }, "getuid")
+            .mockImplementation(() => 0)
+        : null;
+    process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
+    try {
+      const configRaw = await readFile(paths.configPath, "utf8");
+      const runtimeConfig = JSON.parse(configRaw) as RuntimeConfig;
+      runtimeConfig.hostResources = parsed.hostResources as NonNullable<
+        RuntimeConfig["hostResources"]
+      >;
+      await (
+        service as unknown as {
+          applyCompiledSystemdResources(config: RuntimeConfig): Promise<void>;
+        }
+      ).applyCompiledSystemdResources(runtimeConfig);
+
+      // Content is identical, so no daemon-reload should be called
+      expect(execCommands).not.toContain("systemctl daemon-reload");
+    } finally {
+      getuidMock2?.mockRestore();
+      delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
       await rm(tempRoot, { recursive: true, force: true });
     }
   });

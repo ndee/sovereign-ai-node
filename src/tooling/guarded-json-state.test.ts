@@ -70,6 +70,7 @@ const buildRuntimeConfig = (input: {
         stateAuditPath: input.auditPath,
       },
     },
+    instances: [],
   },
   matrix: {
     accessMode: "direct",
