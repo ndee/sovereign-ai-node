@@ -53,8 +53,8 @@ export const hostSupersedeMatcherSchema = z.object({
   kind: z.enum(["openclawCron", "systemdService", "systemdTimer", "file", "directory"]),
   match: z.object({
     id: z.string().min(1).optional(),
-    name: z.string().min(1).optional(),
-    agentId: z.string().min(1).optional(),
+    name: hostValueExprSchema.optional(),
+    agentId: hostValueExprSchema.optional(),
     path: z.string().min(1).optional(),
   }),
 });

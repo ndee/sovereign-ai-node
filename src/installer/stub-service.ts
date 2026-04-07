@@ -25,10 +25,16 @@ import type {
 import type { Logger } from "../logging/logger.js";
 import type {
   InstallerService,
+  MailSentinelApplyResult,
+  MailSentinelDeleteResult,
+  MailSentinelListResult,
+  MailSentinelMigrationResult,
   ManagedAgentDeleteResult,
   ManagedAgentListResult,
   ManagedAgentUpsertResult,
   MatrixUserRemoveResult,
+  MigrationStatusResult,
+  PendingMigration,
   SovereignBotInstantiateResult,
   SovereignBotListResult,
   SovereignTemplateInstallResult,
@@ -299,6 +305,101 @@ export class StubInstallerService implements InstallerService {
       localpart,
       userId: `@${localpart}:matrix.example.org`,
       removed: true,
+    };
+  }
+
+  async getPendingMigrations(): Promise<MigrationStatusResult> {
+    const pending: PendingMigration[] = [];
+    return {
+      requestFile: "/etc/sovereign-node/install-request.json",
+      pending,
+    };
+  }
+
+  async migrateLegacyMailSentinel(): Promise<MailSentinelMigrationResult> {
+    return {
+      changed: false,
+      requestFile: "/etc/sovereign-node/install-request.json",
+      instance: {
+        id: "mail-sentinel",
+        packageId: "mail-sentinel",
+        workspace: "/var/lib/sovereign-node/mail-sentinel/workspace",
+        matrixLocalpart: "mail-sentinel",
+        matrixUserId: "@mail-sentinel:matrix.example.org",
+        alertRoomId: "!alerts:matrix.example.org",
+        alertRoomName: "Sovereign Alerts",
+        allowedUsers: ["@operator:matrix.example.org"],
+        imapHost: "imap.example.org",
+        imapUsername: "mailbox@example.org",
+        mailbox: "INBOX",
+        pollInterval: "30m",
+      },
+    };
+  }
+
+  async listMailSentinelInstances(): Promise<MailSentinelListResult> {
+    return {
+      instances: [
+        {
+          id: "mail-sentinel",
+          packageId: "mail-sentinel",
+          workspace: "/var/lib/sovereign-node/mail-sentinel/workspace",
+          matrixLocalpart: "mail-sentinel",
+          matrixUserId: "@mail-sentinel:matrix.example.org",
+          alertRoomId: "!alerts:matrix.example.org",
+          alertRoomName: "Sovereign Alerts",
+          allowedUsers: ["@operator:matrix.example.org"],
+          imapHost: "imap.example.org",
+          imapUsername: "mailbox@example.org",
+          mailbox: "INBOX",
+          pollInterval: "30m",
+        },
+      ],
+    };
+  }
+
+  async createMailSentinelInstance(req: { id: string }): Promise<MailSentinelApplyResult> {
+    return {
+      instance: {
+        id: req.id,
+        packageId: "mail-sentinel",
+        workspace: `/var/lib/sovereign-node/${req.id}/workspace`,
+        allowedUsers: [],
+      },
+      changed: true,
+      job: (
+        await this.startInstall({
+          mode: "bundled_matrix",
+          openrouter: { secretRef: "env:OPENROUTER_API_KEY" },
+          matrix: {
+            homeserverDomain: "matrix.example.org",
+            publicBaseUrl: "https://matrix.example.org",
+          },
+          operator: { username: "operator" },
+        })
+      ).job,
+    };
+  }
+
+  async updateMailSentinelInstance(req: { id: string }): Promise<MailSentinelApplyResult> {
+    return await this.createMailSentinelInstance(req);
+  }
+
+  async deleteMailSentinelInstance(req: { id: string }): Promise<MailSentinelDeleteResult> {
+    return {
+      id: req.id,
+      deleted: true,
+      job: (
+        await this.startInstall({
+          mode: "bundled_matrix",
+          openrouter: { secretRef: "env:OPENROUTER_API_KEY" },
+          matrix: {
+            homeserverDomain: "matrix.example.org",
+            publicBaseUrl: "https://matrix.example.org",
+          },
+          operator: { username: "operator" },
+        })
+      ).job,
     };
   }
 

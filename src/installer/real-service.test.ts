@@ -73,6 +73,7 @@ const buildInstallRequest = (): InstallRequest => ({
         e2eeAlertRoom: false,
       },
     },
+    instances: [],
   },
   advanced: {
     nonInteractive: true,
@@ -738,6 +739,7 @@ const writeRuntimeArtifacts = async (paths: SovereignPaths): Promise<void> => {
               e2eeAlertRoom: false,
             },
           },
+          instances: [],
         },
       },
       null,
@@ -3668,6 +3670,12 @@ describe("RealInstallerService", () => {
       },
       execRunner: {
         run: async ({ command, args }): Promise<ExecResult> => {
+          const handled = maybeHandleInstalledLobsterExec(
+            args === undefined ? { command } : { command, args },
+          );
+          if (handled !== null) {
+            return handled;
+          }
           const serialized = [command, ...(args ?? [])].join(" ");
           commandCalls.push(serialized);
           const lobsterResult = maybeHandleInstalledLobsterExec(
@@ -4424,6 +4432,7 @@ describe("RealInstallerService", () => {
       },
       bots: {
         config: {},
+        instances: [],
       },
       matrix: {
         accessMode: "direct",
@@ -5290,6 +5299,126 @@ describe("RealInstallerService", () => {
       } else {
         process.env.OPENROUTER_API_KEY = priorOpenrouterApiKey;
       }
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("migrates legacy mail-sentinel request data into bot instances", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+    await writeRuntimeArtifacts(paths);
+    const requestPath = join(dirname(paths.configPath), "install-request.json");
+    await writeFile(requestPath, `${JSON.stringify(buildInstallRequest(), null, 2)}\n`, "utf8");
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => {
+          throw new Error("not used");
+        },
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => {
+          throw new Error("not used");
+        },
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async () => ({
+          ok: true,
+          host: "imap.example.org",
+          port: 993,
+          tls: true,
+          auth: "ok",
+          mailbox: "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+    });
+
+    try {
+      const result = await service.migrateLegacyMailSentinel({
+        allowedUsers: ["operator"],
+      });
+
+      expect(result.changed).toBe(true);
+      expect(result.requestFile).toBe(requestPath);
+      expect(result.instance.id).toBe("mail-sentinel");
+      expect(result.instance.allowedUsers).toEqual(["@operator:matrix.example.org"]);
+
+      const raw = await readFile(requestPath, "utf8");
+      const request = JSON.parse(raw) as {
+        bots?: {
+          selected?: string[];
+          instances?: Array<{
+            id?: string;
+            packageId?: string;
+            workspace?: string;
+            config?: Record<string, unknown>;
+            secretRefs?: Record<string, unknown>;
+            matrix?: {
+              localpart?: string;
+              alertRoom?: { roomId?: string; roomName?: string };
+              allowedUsers?: string[];
+            };
+          }>;
+        };
+      };
+      expect(request.bots?.selected).toContain("mail-sentinel");
+      expect(request.bots?.instances).toEqual([
+        {
+          id: "mail-sentinel",
+          packageId: "mail-sentinel",
+          workspace: join(paths.stateDir, "mail-sentinel", "workspace"),
+          config: {},
+          secretRefs: {},
+          matrix: {
+            localpart: "mail-sentinel",
+            alertRoom: {
+              roomId: "!alerts:matrix.example.org",
+              roomName: "Sovereign Alerts",
+            },
+            allowedUsers: ["@operator:matrix.example.org"],
+          },
+        },
+      ]);
+    } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
   });
