@@ -112,21 +112,21 @@ check_workspace() {
     return
   fi
 
-  local bin_path="${agent_dir}/workspace/bin/mail-sentinel.mjs"
+  local bin_path="${agent_dir}/workspace/bin/mail-sentinel.js"
   if [[ -x "$bin_path" ]]; then
-    record "workspace-executable" "pass" "mail-sentinel.mjs is executable"
+    record "workspace-executable" "pass" "mail-sentinel.js is executable"
   else
-    record "workspace-executable" "fail" "mail-sentinel.mjs not found or not executable"
+    record "workspace-executable" "fail" "mail-sentinel.js not found or not executable"
   fi
 }
 
 # ── 5. Run mail-sentinel scan (may warn if IMAP is not configured) ──
 check_scan() {
   local agent_dir="/var/lib/sovereign-node/mail-sentinel"
-  local bin_path="${agent_dir}/workspace/bin/mail-sentinel.mjs"
+  local bin_path="${agent_dir}/workspace/bin/mail-sentinel.js"
 
   if [[ ! -x "$bin_path" ]]; then
-    record "scan" "fail" "mail-sentinel.mjs not found"
+    record "scan" "fail" "mail-sentinel.js not found"
     return
   fi
 
@@ -165,10 +165,10 @@ except: print("parse-error")
 # ── 6. Run mail-sentinel list-alerts ──
 check_list_alerts() {
   local agent_dir="/var/lib/sovereign-node/mail-sentinel"
-  local bin_path="${agent_dir}/workspace/bin/mail-sentinel.mjs"
+  local bin_path="${agent_dir}/workspace/bin/mail-sentinel.js"
 
   if [[ ! -x "$bin_path" ]]; then
-    record "list-alerts" "fail" "mail-sentinel.mjs not found"
+    record "list-alerts" "fail" "mail-sentinel.js not found"
     return
   fi
 
@@ -199,10 +199,10 @@ check_list_alerts() {
 # ── 7. Run mail-sentinel feedback (dry run with --latest, expect graceful handling) ──
 check_feedback() {
   local agent_dir="/var/lib/sovereign-node/mail-sentinel"
-  local bin_path="${agent_dir}/workspace/bin/mail-sentinel.mjs"
+  local bin_path="${agent_dir}/workspace/bin/mail-sentinel.js"
 
   if [[ ! -x "$bin_path" ]]; then
-    record "feedback" "fail" "mail-sentinel.mjs not found"
+    record "feedback" "fail" "mail-sentinel.js not found"
     return
   fi
 
