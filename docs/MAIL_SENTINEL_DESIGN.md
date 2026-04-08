@@ -21,6 +21,7 @@ This document covers:
 - classifies high-signal messages
 - posts alerts/summaries
 - learns from user feedback over time without requiring mailbox write access
+- can be installed as multiple managed instances, each with its own IMAP binding, Matrix identity, alert room, and polling schedule
 
 The resulting Sovereign agent is designed to be:
 
@@ -32,8 +33,8 @@ Template/runtime binding in this model:
 
 - agent template: `mail-sentinel@1.0.0`
 - tool template: `imap-readonly@1.0.0`
-- default tool instance id (when IMAP is configured): `mail-sentinel-imap`
-- default runtime agent id: `mail-sentinel`
+- default single-instance IDs remain `mail-sentinel-imap` and `mail-sentinel`
+- current installer-managed deployments may create multiple Mail Sentinel instances instead of a single fixed runtime binding
 
 ## Product and Packaging Decisions
 
