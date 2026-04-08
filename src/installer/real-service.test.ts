@@ -388,12 +388,12 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
         openclawBundledPlugins: ["lobster", "llm-task"],
         openclawToolNames: ["lobster", "llm-task"],
         allowedCommands: [
-          "<agent-workspace>/bin/mail-sentinel.mjs scan --instance <tool-instance-id> --json",
-          "<agent-workspace>/bin/mail-sentinel.mjs list-alerts --instance <tool-instance-id> --view today --json",
-          "<agent-workspace>/bin/mail-sentinel.mjs list-alerts --instance <tool-instance-id> --view recent --json",
-          "<agent-workspace>/bin/mail-sentinel.mjs feedback --instance <tool-instance-id> --latest --action important --json",
-          "<agent-workspace>/bin/mail-sentinel.mjs feedback --instance <tool-instance-id> --alert-id <alert-id> --action important --json",
-          "<agent-workspace>/bin/mail-sentinel.mjs feedback --instance <tool-instance-id> --alert-id <alert-id> --action remind-later --delay <duration> --json",
+          "<agent-workspace>/bin/mail-sentinel.js scan --instance <tool-instance-id> --json",
+          "<agent-workspace>/bin/mail-sentinel.js list-alerts --instance <tool-instance-id> --view today --json",
+          "<agent-workspace>/bin/mail-sentinel.js list-alerts --instance <tool-instance-id> --view recent --json",
+          "<agent-workspace>/bin/mail-sentinel.js feedback --instance <tool-instance-id> --latest --action important --json",
+          "<agent-workspace>/bin/mail-sentinel.js feedback --instance <tool-instance-id> --alert-id <alert-id> --action important --json",
+          "<agent-workspace>/bin/mail-sentinel.js feedback --instance <tool-instance-id> --alert-id <alert-id> --action remind-later --delay <duration> --json",
         ],
       },
     ],
@@ -481,8 +481,8 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
     agentTemplateModel: "qwen/qwen-2.5-32b-instruct",
     extraWorkspaceFiles: [
       {
-        path: "bin/mail-sentinel.mjs",
-        source: "workspace/bin/mail-sentinel.mjs",
+        path: "bin/mail-sentinel.js",
+        source: "workspace/bin/mail-sentinel.js",
         content: "#!/usr/bin/env node\n",
         mode: "755",
       },
@@ -2062,10 +2062,10 @@ describe("RealInstallerService", () => {
         "Use only the documented OpenClaw tools or CLI commands listed below.",
       );
       expect(mailSentinelToolsRaw).toContain(
-        `${join(paths.stateDir, "mail-sentinel", "workspace", "bin", "mail-sentinel.mjs")} scan --instance mail-sentinel-core --json`,
+        `${join(paths.stateDir, "mail-sentinel", "workspace", "bin", "mail-sentinel.js")} scan --instance mail-sentinel-core --json`,
       );
       expect(mailSentinelToolsRaw).toContain(
-        `${join(paths.stateDir, "mail-sentinel", "workspace", "bin", "mail-sentinel.mjs")} list-alerts --instance mail-sentinel-core --view today --json`,
+        `${join(paths.stateDir, "mail-sentinel", "workspace", "bin", "mail-sentinel.js")} list-alerts --instance mail-sentinel-core --view today --json`,
       );
       expect(mailSentinelToolsRaw).toContain("openclaw-tool: `lobster`");
       expect(mailSentinelToolsRaw).toContain("openclaw-tool: `llm-task`");

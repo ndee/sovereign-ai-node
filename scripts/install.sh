@@ -626,6 +626,35 @@ build_app() {
   )
 }
 
+build_bots() {
+  if [[ ! -f "${BOTS_DIR}/package.json" ]]; then
+    log "No package.json under ${BOTS_DIR}; skipping bot build"
+    return 0
+  fi
+  log "Installing dependencies and building bots"
+  (
+    cd "$BOTS_DIR"
+    if [[ -f "pnpm-lock.yaml" ]]; then
+      if command -v corepack >/dev/null 2>&1; then
+        corepack pnpm install --frozen-lockfile
+        corepack pnpm run build
+        exit 0
+      fi
+
+      if command -v pnpm >/dev/null 2>&1; then
+        pnpm install --frozen-lockfile
+        pnpm run build
+        exit 0
+      fi
+
+      die "pnpm lockfile detected in ${BOTS_DIR} but neither corepack nor pnpm is available"
+    fi
+
+    npm ci
+    npm run build
+  )
+}
+
 install_wrappers() {
   log "Installing CLI wrappers into /usr/local/bin"
 
@@ -3770,6 +3799,7 @@ main() {
   ui_run_step_captured "Sync bot package source" sync_bots_source
   ui_run_step_captured "Write install provenance" write_install_provenance
   ui_run_step_foreground "Load bot catalog" load_available_bot_catalog
+  ui_run_step_captured "Build bot packages" build_bots
   ui_run_step_captured "Build application" build_app
   ui_run_step_captured "Install CLI wrappers" install_wrappers
   ui_run_step_captured "Install systemd service" install_systemd_unit
