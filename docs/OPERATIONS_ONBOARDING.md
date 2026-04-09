@@ -97,6 +97,7 @@ Relevant operator commands:
 
 - `sovereign-node templates list --json`
 - `sovereign-node templates install <id>@<version> --json`
+- `sovereign-node migrate --status --json`
 - `sovereign-node tools list --json`
 - `sovereign-node tools create ... --json`
 - `sovereign-node tools update ... --json`
@@ -104,6 +105,11 @@ Relevant operator commands:
 - `sovereign-node agents create ... --json`
 - `sovereign-node agents update ... --json`
 - `sovereign-node agents delete <id> --json`
+- `sovereign-node mail-sentinels list --json`
+- `sovereign-node mail-sentinels show <id> --json`
+- `sovereign-node mail-sentinels create <id> ... --json`
+- `sovereign-node mail-sentinels update <id> ... --json`
+- `sovereign-node mail-sentinels delete <id> --json`
 
 Contract note:
 
@@ -144,7 +150,7 @@ curl -fsSL <sovereign-node-installer-url> | sudo bash
 Notes:
 
 - the installer script now starts with an explicit `Install / Update / Exit` action menu in interactive mode
-- `Update` reuses existing settings and request file
+- `Update` reuses existing settings and request file, but requires `sovereign-node migrate` first when pending migrations exist
 - `Install` on an existing system behaves as reconfigure with prefilled defaults
 - `sovereign-node install` owns OpenClaw installation in the default path.
 - Operators should not run `openclaw onboard` in the default Sovereign flow.
@@ -165,7 +171,7 @@ In the default bundled mode, the installer should perform these steps in order:
 10. Install/repair the OpenClaw gateway service and start it.
 11. Install/configure required OpenClaw plugins.
 12. Install/pin core templates and instantiate core agent/tool runtime entries.
-13. Register `mail-sentinel` cron polling job.
+13. Register `mail-sentinel` polling resources.
 14. Run health checks and synthetic hello alerts from core agents.
 15. Print Element connection details and next steps.
 
@@ -212,6 +218,13 @@ Recommended operator command set:
 - `sovereign-node doctor`
 - `sovereign-node logs`
 - `sovereign-node test-alert`
+- `sovereign-node update`
+- `sovereign-node migrate`
+- `sovereign-node mail-sentinels list`
+- `sovereign-node mail-sentinels show <id>`
+- `sovereign-node mail-sentinels create <id> ...`
+- `sovereign-node mail-sentinels update <id> ...`
+- `sovereign-node mail-sentinels delete <id>`
 - `sovereign-node reconfigure imap`
 - `sovereign-node reconfigure matrix`
 - `sovereign-node reconfigure openrouter`
@@ -267,7 +280,7 @@ sudo sovereign-node onboarding issue
 Security note:
 
 - the operator password is no longer embedded in `/onboard`
-- bootstrap codes are single-use and expire after 10 minutes by default
+- bootstrap codes are single-use and expire after 21 minutes by default
 
 ## Wait for Mail Alerts (Operator Step 4)
 
@@ -276,7 +289,7 @@ Before the operator “just waits,” the system must prove the path works.
 Required post-install verification:
 
 - Run a synthetic test alert to the Matrix room
-- Confirm the `mail-sentinel` cron job exists and is enabled
+- Confirm the `mail-sentinel` polling timer/service exists and is enabled
 - Confirm OpenClaw health is green
 - Confirm last IMAP credential test succeeded
 

@@ -230,7 +230,7 @@ Current behavior:
 - the installer issues a short-lived one-time onboarding code
 - the operator enters that code into `/onboard`
 - the onboarding API reveals the password once and then invalidates the code
-- default TTL is 10 minutes
+- default TTL is 21 minutes
 - operators can issue a fresh code with:
 
 ```bash

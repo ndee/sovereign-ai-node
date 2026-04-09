@@ -275,7 +275,7 @@ Behavior:
 
 Flags:
 
-- `--ttl-minutes <minutes>` default `10`
+- `--ttl-minutes <minutes>` default `21`
 - `--json`
 
 `--json` result shape:
@@ -285,6 +285,7 @@ Flags:
   "code": "ABCD-EFGH-IJKL",
   "expiresAt": "2026-03-06T12:34:56.000Z",
   "onboardingUrl": "https://node-name.sovereign-ai-node.com/onboard",
+  "onboardingLink": "https://node-name.sovereign-ai-node.com/onboard#code=ABCD-EFGH-IJKL",
   "username": "@operator:node-name.sovereign-ai-node.com"
 }
 ```
@@ -294,8 +295,45 @@ Normative onboarding rules:
 - `/onboard` MUST NOT embed the operator password in static HTML or JS
 - onboarding codes MUST be stored server-side as salted hashes
 - onboarding codes MUST be single-use
-- default TTL MUST be 10 minutes
+- default TTL MUST be 21 minutes
 - onboarding API responses revealing the password MUST be sent with `Cache-Control: no-store`
+
+## `sovereign-node update`
+
+Purpose:
+
+- re-run the install flow using the saved install request file
+
+Behavior:
+
+- MUST fail clearly when pending migrations exist
+- MUST instruct the operator to run `sovereign-node migrate` first when that happens
+
+## `sovereign-node migrate`
+
+Purpose:
+
+- inspect and apply one-off request/config migrations required before future updates
+
+Behavior:
+
+- `--status` shows pending migrations without applying them
+- interactive mode MAY prompt for missing values required by a migration
+- current migration path covers legacy single-instance Mail Sentinel installs
+
+## `sovereign-node mail-sentinels`
+
+Purpose:
+
+- manage installer-managed Mail Sentinel instances
+
+Current subcommands:
+
+- `list`
+- `show <id>`
+- `create <id>`
+- `update <id>`
+- `delete <id>`
 
 ## `sovereign-node doctor`
 
@@ -362,7 +400,12 @@ Purpose:
 
 Purpose:
 
-- update Matrix homeserver/room/operator settings for the bundled deployment profile
+- toggle bundled Matrix federation for the active installation
+
+Current CLI flags:
+
+- `--federation`
+- `--no-federation`
 
 `--json` result schema:
 
@@ -457,12 +500,13 @@ type CheckResult = {
 
 type JobState = "pending" | "running" | "succeeded" | "failed" | "canceled";
 
-type StepState = "pending" | "running" | "succeeded" | "failed" | "canceled" | "skipped";
+type StepState = "pending" | "running" | "succeeded" | "failed" | "canceled" | "skipped" | "warned";
 
 type JobStep = {
   id:
     | "preflight"
     | "openclaw_bootstrap_cli"
+    | "openclaw_bundled_plugin_tools"
     | "imap_validate"
     | "relay_enroll"
     | "matrix_provision"
@@ -470,6 +514,8 @@ type JobStep = {
     | "matrix_bootstrap_room"
     | "openclaw_gateway_service_install"
     | "openclaw_configure"
+    | "bots_configure"
+    | "mail_sentinel_scan_timer"
     | "mail_sentinel_register"
     | "smoke_checks"
     | "test_alert";
@@ -493,6 +539,16 @@ type InstallRequest = {
   relay?: {
     controlUrl: string;
     enrollmentToken?: string;
+    requestedSlug?: string;
+    hostname?: string; // when pre-enrolled, installer skips relay enrollment
+    publicBaseUrl?: string; // when pre-enrolled, installer skips relay enrollment
+    tunnel?: {
+      serverAddr: string;
+      serverPort?: number;
+      token: string;
+      proxyName: string;
+      subdomain?: string;
+    };
   };
   openclaw?: {
     manageInstallation?: boolean; // default true
@@ -529,6 +585,25 @@ type InstallRequest = {
     username: string; // localpart or full matrix user id
     password?: string; // optional if backend generates one
   };
+  bots?: {
+    selected?: string[];
+    config?: Record<string, Record<string, string | number | boolean>>;
+    instances?: Array<{
+      id: string;
+      packageId: string;
+      workspace?: string;
+      config?: Record<string, string | number | boolean>;
+      secretRefs?: Record<string, string>;
+      matrix?: {
+        localpart?: string;
+        alertRoom?: {
+          roomId?: string;
+          roomName?: string;
+        };
+        allowedUsers?: string[];
+      };
+    }>;
+  };
   advanced?: {
     rollbackPolicy?: "safe_partial" | "manual" | "aggressive_non_destructive";
     skipPreflight?: boolean; // default false
@@ -550,6 +625,7 @@ Constraints:
 - `connectivity.mode = "relay"` requires a valid `relay` object
 - `relay.enrollmentToken` is optional only for the default Sovereign managed relay (`https://relay.sovereign-ai-node.com`)
 - custom relays must provide `relay.enrollmentToken`
+- relay enrollment is skipped when `relay.hostname`, `relay.publicBaseUrl`, and `relay.tunnel` are already populated
 - relay hostname selection is installer-managed; user-provided relay slugs are not part of the public contract
 - `matrix.federationEnabled` defaults to `false`
 
