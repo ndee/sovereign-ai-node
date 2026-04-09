@@ -75,12 +75,12 @@ Implementation guidance:
 
 Operators should use the OpenClaw CLI directly for runtime operations.
 
-If a `sovereign-node` CLI is added, it should complement OpenClaw rather than hide it.
+`sovereign-node` is now part of the current operator surface and should complement OpenClaw rather than hide it.
 
 Recommended split:
 
 - `openclaw`: runtime-native operations (agents, plugins, channels, cron, health, security audit)
-- `sovereign-node` (optional): profile application, bot pack install/sync, opinionated checks, backups/runbooks
+- `sovereign-node`: install/update/migration flow, bundled diagnostics, and installer-managed Mail Sentinel instance lifecycle
 
 This preserves transparency and reduces wrapper drift while still allowing a simpler operator experience for common tasks.
 
@@ -106,7 +106,7 @@ The intended operator experience is intentionally simple:
 This is the correct product-level UX target, but several setup steps must be automated behind it for reliability:
 
 - IMAP validation, secret storage, and read-only plugin configuration
-- OpenClaw install/profile application, plugin enablement, and agent/cron registration
+- OpenClaw install/profile application, plugin enablement, and managed agent/timer registration
 - bundled Matrix provisioning (Synapse, database, reverse proxy/TLS)
 - Matrix account bootstrap (operator + managed agent identities), private room creation, and room targeting
 - post-install health checks and a test alert

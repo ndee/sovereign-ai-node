@@ -500,12 +500,13 @@ type CheckResult = {
 
 type JobState = "pending" | "running" | "succeeded" | "failed" | "canceled";
 
-type StepState = "pending" | "running" | "succeeded" | "failed" | "canceled" | "skipped";
+type StepState = "pending" | "running" | "succeeded" | "failed" | "canceled" | "skipped" | "warned";
 
 type JobStep = {
   id:
     | "preflight"
     | "openclaw_bootstrap_cli"
+    | "openclaw_bundled_plugin_tools"
     | "imap_validate"
     | "relay_enroll"
     | "matrix_provision"
@@ -513,6 +514,8 @@ type JobStep = {
     | "matrix_bootstrap_room"
     | "openclaw_gateway_service_install"
     | "openclaw_configure"
+    | "bots_configure"
+    | "mail_sentinel_scan_timer"
     | "mail_sentinel_register"
     | "smoke_checks"
     | "test_alert";
@@ -536,6 +539,16 @@ type InstallRequest = {
   relay?: {
     controlUrl: string;
     enrollmentToken?: string;
+    requestedSlug?: string;
+    hostname?: string; // when pre-enrolled, installer skips relay enrollment
+    publicBaseUrl?: string; // when pre-enrolled, installer skips relay enrollment
+    tunnel?: {
+      serverAddr: string;
+      serverPort?: number;
+      token: string;
+      proxyName: string;
+      subdomain?: string;
+    };
   };
   openclaw?: {
     manageInstallation?: boolean; // default true
@@ -572,6 +585,25 @@ type InstallRequest = {
     username: string; // localpart or full matrix user id
     password?: string; // optional if backend generates one
   };
+  bots?: {
+    selected?: string[];
+    config?: Record<string, Record<string, string | number | boolean>>;
+    instances?: Array<{
+      id: string;
+      packageId: string;
+      workspace?: string;
+      config?: Record<string, string | number | boolean>;
+      secretRefs?: Record<string, string>;
+      matrix?: {
+        localpart?: string;
+        alertRoom?: {
+          roomId?: string;
+          roomName?: string;
+        };
+        allowedUsers?: string[];
+      };
+    }>;
+  };
   advanced?: {
     rollbackPolicy?: "safe_partial" | "manual" | "aggressive_non_destructive";
     skipPreflight?: boolean; // default false
@@ -593,6 +625,7 @@ Constraints:
 - `connectivity.mode = "relay"` requires a valid `relay` object
 - `relay.enrollmentToken` is optional only for the default Sovereign managed relay (`https://relay.sovereign-ai-node.com`)
 - custom relays must provide `relay.enrollmentToken`
+- relay enrollment is skipped when `relay.hostname`, `relay.publicBaseUrl`, and `relay.tunnel` are already populated
 - relay hostname selection is installer-managed; user-provided relay slugs are not part of the public contract
 - `matrix.federationEnabled` defaults to `false`
 

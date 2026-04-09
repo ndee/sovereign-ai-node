@@ -209,22 +209,24 @@ Core expectations:
 
 OpenClaw CLI remains the primary runtime/operator interface.
 
-If `sovereign-ai-node` adds its own CLI, it should live next to `openclaw` rather than hiding it.
+`sovereign-ai-node` now ships its own operator CLI, and it is intended to live next to `openclaw` rather than hide it.
 
 CLI policy:
 
 - `openclaw` handles runtime-native operations (agents, plugins, channels, cron, health, security audit)
-- `sovereign-node` (optional) handles profile application, bot pack install/sync, and opinionated helper workflows
+- `sovereign-node` handles install, update, migration, diagnostics, and opinionated helper workflows such as Mail Sentinel instance management
 - OpenClaw CLI remains available for debugging, advanced operations, and break-glass use
 
 Typical lifecycle:
 
 - Default operator path: `sovereign-node install` bootstraps OpenClaw (official `install.sh`, pinned version, `--no-onboard`)
+- Check/update saved install state when needed (`sovereign-node update`, `sovereign-node migrate`)
 - Install/repair the OpenClaw gateway service (`openclaw gateway install`) after Sovereign writes the runtime config
 - Install and enable required plugins
 - Install/pin templates (`sovereign-node templates ...`)
 - Create/configure tool instances (`sovereign-node tools ...`)
 - Create/configure agents (`sovereign-node agents ...`)
+- Manage installer-owned Mail Sentinel instances (`sovereign-node mail-sentinels ...`)
 - Apply runtime profile config
 - Configure channels (for example Matrix plugin + channel config)
 - Configure cron jobs
@@ -266,7 +268,7 @@ The core repo should contain:
 - Agent workspace templates
 - Curated skill packs
 - First-party OpenClaw plugins/tools (when needed)
-- Optional helper CLI/wrappers that compose OpenClaw CLI (not replace it)
+- Helper CLI/wrappers that compose OpenClaw CLI (not replace it)
 - Security and operations runbooks
 - Operator onboarding runbook (`docs/OPERATIONS_ONBOARDING.md`)
 - Bundled Matrix setup runbook (`docs/MATRIX_BUNDLED_SETUP.md`)
@@ -281,7 +283,7 @@ The following contracts should be kept stable and versioned in this repo:
 - Agent workspace pack layout conventions
 - Skill pack naming and activation conventions
 - Agent-vs-plugin packaging conventions (bot behavior vs reusable capability plugins)
-- Operator CLI coexistence policy (`openclaw` + optional `sovereign-node`)
+- Operator CLI coexistence policy (`openclaw` + `sovereign-node`)
 - CLI/Wizard backend reuse policy (one provisioning implementation, multiple operator surfaces)
 - Sovereign-managed OpenClaw bootstrap policy (official installer usage, pinning, `--no-onboard`)
 - Installer/CLI/API schema contracts and failure semantics (`docs/INSTALLER_CONTRACTS.md`)
