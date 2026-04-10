@@ -14,7 +14,7 @@ This document covers:
 
 ## Summary
 
-`Mail Sentinel` is a Sovereign agent template (`mail-sentinel@1.0.0`) instantiated as a managed OpenClaw agent that:
+`Mail Sentinel` is a Sovereign agent template (`mail-sentinel@2.0.0`) instantiated as a managed OpenClaw agent that:
 
 - polls mail on a schedule
 - reads mail via a strictly read-only IMAP tool surface
@@ -29,11 +29,12 @@ The resulting Sovereign agent is designed to be:
 - minimally privileged
 - configurable with standard OpenClaw primitives (agent workspace, skills, plugins, cron, tool policy)
 
-Template/runtime binding in this model:
+Template/runtime binding in the current bundled install path:
 
-- agent template: `mail-sentinel@1.0.0`
-- tool template: `imap-readonly@1.0.0`
-- default single-instance IDs remain `mail-sentinel-imap` and `mail-sentinel`
+- agent template: `mail-sentinel@2.0.0`
+- tool templates: `mail-sentinel-tool@1.0.0` and `imap-readonly@1.0.0`
+- default tool instance IDs remain `mail-sentinel-core` and `mail-sentinel-imap`
+- the default single managed agent ID remains `mail-sentinel`
 - current installer-managed deployments may create multiple Mail Sentinel instances instead of a single fixed runtime binding
 
 ## Product and Packaging Decisions
