@@ -68,8 +68,8 @@ Sovereign AI Node separates **templates** from **runtime instances**:
 
 ### Agent templates
 
-* `mail-sentinel@1.0.0`
-* `node-operator@1.0.0`
+* `mail-sentinel@2.0.0`
+* `node-operator@2.0.0`
 
 ### Tool templates
 

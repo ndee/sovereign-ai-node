@@ -88,8 +88,8 @@ Installer- and operator-facing contracts in this document use the following mode
 Current core templates in the bundled profile:
 
 - Agent templates:
-  - `mail-sentinel@1.0.0`
-  - `node-operator@1.0.0`
+  - `mail-sentinel@2.0.0`
+  - `node-operator@2.0.0`
 - Tool templates:
   - `mail-sentinel-tool@1.0.0`
   - `imap-readonly@1.0.0`
