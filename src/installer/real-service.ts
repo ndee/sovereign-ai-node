@@ -599,14 +599,23 @@ export class RealInstallerService implements InstallerService {
     const previous = input.previousRuntimeConfig?.bots.instances.find(
       (entry) => entry.id === input.entry.id,
     );
+    // Treat manifest-default sentinel values as "not yet configured" so the
+    // reconciliation fills them from the top-level imap config. Without this
+    // the merge of configDefaults produces explicit values like
+    // imapHost="pending" that pass the `=== undefined` check and block the
+    // fallback to the real imap settings.
+    const needsImap = (key: string): boolean => {
+      const value = input.entry.config[key];
+      return value === undefined || value === "pending" || value === false;
+    };
     const next: RequestedBotInstance = {
       ...input.entry,
       config: {
         ...input.entry.config,
-        ...(input.entry.config[MAIL_SENTINEL_IMAP_CONFIGURED_KEY] === undefined
+        ...(needsImap(MAIL_SENTINEL_IMAP_CONFIGURED_KEY)
           ? { [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: input.imap.status === "configured" }
           : {}),
-        ...(input.entry.config[MAIL_SENTINEL_IMAP_HOST_KEY] === undefined
+        ...(needsImap(MAIL_SENTINEL_IMAP_HOST_KEY)
           ? {
               [MAIL_SENTINEL_IMAP_HOST_KEY]:
                 previous?.config[MAIL_SENTINEL_IMAP_HOST_KEY] ?? input.imap.host,
@@ -624,7 +633,7 @@ export class RealInstallerService implements InstallerService {
                 previous?.config[MAIL_SENTINEL_IMAP_TLS_KEY] ?? input.imap.tls,
             }
           : {}),
-        ...(input.entry.config[MAIL_SENTINEL_IMAP_USERNAME_KEY] === undefined
+        ...(needsImap(MAIL_SENTINEL_IMAP_USERNAME_KEY)
           ? {
               [MAIL_SENTINEL_IMAP_USERNAME_KEY]:
                 previous?.config[MAIL_SENTINEL_IMAP_USERNAME_KEY] ?? input.imap.username,
