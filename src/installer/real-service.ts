@@ -599,30 +599,33 @@ export class RealInstallerService implements InstallerService {
     const previous = input.previousRuntimeConfig?.bots.instances.find(
       (entry) => entry.id === input.entry.id,
     );
-    // Treat manifest-default sentinel values as "not yet configured" so the
-    // reconciliation fills them from the top-level imap config. Without this
-    // the merge of configDefaults produces explicit values like
-    // imapHost="pending" that pass the `=== undefined` check and block the
-    // fallback to the real imap settings.
-    // When the instance's imapConfigured flag is absent or carries the
-    // manifest-default sentinel (false / "pending"), treat the entire IMAP
-    // block as needing reconciliation from the authoritative top-level
-    // imap config. This covers hosts that ran the broken migration (config:
-    // {}) and accumulated stale manifest defaults plus stale previous
-    // runtime values (port 993, host "pending", etc.) across multiple
-    // update cycles.
+    // The top-level `imap` section is the authoritative source for all
+    // mail-sentinel IMAP settings. Whenever it is configured, overwrite the
+    // instance's six IMAP keys unconditionally — even if they already carry
+    // plausible-looking values. Hosts that went through the earlier broken
+    // migrations accumulated stale manifest defaults (imapPort=993,
+    // imapHost="pending") both in the install-request and in the previous
+    // runtime config. PR #97's sentinel-based trigger only fired when
+    // imapConfigured itself was still a sentinel; a second update cycle
+    // could therefore leave imapPort/imapTls/imapMailbox pinned to 993 even
+    // though imapHost and imapUsername had already been corrected. Treating
+    // the top-level section as the single source of truth eliminates the
+    // drift window entirely.
+    //
+    // When the top-level imap section is still pending, fall back to the
+    // entry's own values (or the previous runtime config) so genuinely
+    // fresh installs without IMAP configured don't lose any per-instance
+    // overrides that may have been placed in the install request.
     const isImapSentinel = (value: unknown): boolean =>
       value === undefined || value === "pending" || value === false;
-    const freshImapReconciliation = isImapSentinel(
-      input.entry.config[MAIL_SENTINEL_IMAP_CONFIGURED_KEY],
-    );
+    const topLevelImapAuthoritative = input.imap.status === "configured";
     const next: RequestedBotInstance = {
       ...input.entry,
       config: {
         ...input.entry.config,
-        ...(freshImapReconciliation
+        ...(topLevelImapAuthoritative
           ? {
-              [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: input.imap.status === "configured",
+              [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: true,
               [MAIL_SENTINEL_IMAP_HOST_KEY]: input.imap.host,
               [MAIL_SENTINEL_IMAP_PORT_KEY]: input.imap.port,
               [MAIL_SENTINEL_IMAP_TLS_KEY]: input.imap.tls,
@@ -630,6 +633,9 @@ export class RealInstallerService implements InstallerService {
               [MAIL_SENTINEL_IMAP_MAILBOX_KEY]: input.imap.mailbox,
             }
           : {
+              ...(isImapSentinel(input.entry.config[MAIL_SENTINEL_IMAP_CONFIGURED_KEY])
+                ? { [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: false }
+                : {}),
               ...(input.entry.config[MAIL_SENTINEL_IMAP_HOST_KEY] === undefined
                 ? {
                     [MAIL_SENTINEL_IMAP_HOST_KEY]:
