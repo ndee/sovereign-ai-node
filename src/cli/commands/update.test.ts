@@ -355,6 +355,24 @@ describe("executeUpdateViaInstaller", () => {
 });
 
 describe("registerUpdateCommand", () => {
+  const stubUid = (uid: number): (() => void) => {
+    const original = process.getuid;
+    Object.defineProperty(process, "getuid", {
+      configurable: true,
+      value: () => uid,
+    });
+    return () => {
+      if (original === undefined) {
+        delete (process as { getuid?: () => number }).getuid;
+      } else {
+        Object.defineProperty(process, "getuid", {
+          configurable: true,
+          value: original,
+        });
+      }
+    };
+  };
+
   it("blocks update when pending migrations exist", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-update-command-test-"));
     tempRoots.push(tempRoot);
@@ -379,18 +397,107 @@ describe("registerUpdateCommand", () => {
     registerUpdateCommand(program, app);
 
     const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const restoreUid = stubUid(0);
     const originalExitCode = process.exitCode;
     try {
       await program.parseAsync(["node", "test", "update", "--request-file", requestPath]);
       expect(app.installerService.getPendingMigrations).toHaveBeenCalled();
       expect(app.installerService.startInstall).not.toHaveBeenCalled();
       expect(process.exitCode).toBe(1);
-      // The migration-blocked error should surface in stderr.
       const stderrCalls = stderrWrite.mock.calls.flat().join("");
       expect(stderrCalls).toContain("migrate");
     } finally {
       process.exitCode = originalExitCode;
+      restoreUid();
       stderrWrite.mockRestore();
+    }
+  });
+
+  it("fails fast with UPDATE_REQUIRES_ROOT before touching migrations when uid is non-zero", async () => {
+    const program = new Command();
+    program.exitOverride();
+    const app = createMockApp(false);
+    registerUpdateCommand(program, app);
+
+    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const restoreUid = stubUid(1000);
+    const originalExitCode = process.exitCode;
+    try {
+      await program.parseAsync(["node", "test", "update"]);
+      expect(app.installerService.getPendingMigrations).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+      const stderrCalls = stderrWrite.mock.calls.flat().join("");
+      expect(stderrCalls).toContain("must run as root");
+      expect(stderrCalls).not.toContain("Failed to read the saved install request file");
+    } finally {
+      process.exitCode = originalExitCode;
+      restoreUid();
+      stderrWrite.mockRestore();
+    }
+  });
+
+  it("runs the installer and reports success when root and no pending migrations", async () => {
+    const program = new Command();
+    program.exitOverride();
+    const app = createMockApp(false);
+    const executeUpdate = vi.fn(async () => ({
+      installerUrl: "https://example.org/install.sh",
+      exitCode: 0,
+    }));
+    registerUpdateCommand(program, app, {
+      executeUpdate,
+      getuid: () => 0,
+    });
+
+    const stdoutWrite = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const originalExitCode = process.exitCode;
+    try {
+      await program.parseAsync([
+        "node",
+        "test",
+        "update",
+        "--installer-url",
+        "https://example.org/install.sh",
+        "--request-file",
+        "/etc/sovereign-node/install-request.json",
+        "--ref",
+        "main",
+        "--json",
+      ]);
+      expect(app.installerService.getPendingMigrations).toHaveBeenCalled();
+      expect(executeUpdate).toHaveBeenCalledWith({
+        requestFile: "/etc/sovereign-node/install-request.json",
+        ref: "main",
+        installerUrl: "https://example.org/install.sh",
+      });
+      expect(process.exitCode).toBe(0);
+    } finally {
+      process.exitCode = originalExitCode;
+      stdoutWrite.mockRestore();
+    }
+  });
+
+  it("forwards installer non-zero exit code as the process exit code", async () => {
+    const program = new Command();
+    program.exitOverride();
+    const app = createMockApp(false);
+    const executeUpdate = vi.fn(async () => ({
+      installerUrl: DEFAULT_INSTALL_SH_URL,
+      exitCode: 7,
+    }));
+    registerUpdateCommand(program, app, {
+      executeUpdate,
+      getuid: () => 0,
+    });
+
+    const stdoutWrite = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const originalExitCode = process.exitCode;
+    try {
+      await program.parseAsync(["node", "test", "update"]);
+      expect(process.exitCode).toBe(7);
+    } finally {
+      process.exitCode = originalExitCode;
+      stdoutWrite.mockRestore();
     }
   });
 });
