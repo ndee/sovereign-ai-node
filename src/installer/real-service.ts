@@ -613,6 +613,26 @@ export class RealInstallerService implements InstallerService {
     const imapFallback = (key: string, topLevel: unknown): BotConfigValue =>
       isImapSentinel(previous?.config[key]) ? (topLevel as BotConfigValue) : previous!.config[key]!;
     const needsImap = (key: string): boolean => isImapSentinel(input.entry.config[key]);
+    // imapHost, imapUsername and imapConfigured have unambiguous sentinel
+    // values ("pending", false) so we can detect a manifest-default IMAP
+    // block directly. imapPort, imapTls and imapMailbox don't: 993/true/
+    // "INBOX" are both valid real values AND manifest defaults. Treat the
+    // whole block as sentinel-contaminated whenever any of the unambiguous
+    // keys still carry a sentinel, and copy port/tls/mailbox from the
+    // top-level imap section so they never drift out of sync with host.
+    const entryImapBlockIsSentinel =
+      needsImap(MAIL_SENTINEL_IMAP_HOST_KEY) ||
+      needsImap(MAIL_SENTINEL_IMAP_USERNAME_KEY) ||
+      needsImap(MAIL_SENTINEL_IMAP_CONFIGURED_KEY);
+    const previousImapBlockIsSentinel =
+      previous !== undefined &&
+      (isImapSentinel(previous.config[MAIL_SENTINEL_IMAP_HOST_KEY]) ||
+        isImapSentinel(previous.config[MAIL_SENTINEL_IMAP_USERNAME_KEY]) ||
+        isImapSentinel(previous.config[MAIL_SENTINEL_IMAP_CONFIGURED_KEY]));
+    const coupledImapFallback = (key: string, topLevel: unknown): BotConfigValue =>
+      previous === undefined || previousImapBlockIsSentinel
+        ? (topLevel as BotConfigValue)
+        : ((previous.config[key] ?? topLevel) as BotConfigValue);
     const next: RequestedBotInstance = {
       ...input.entry,
       config: {
@@ -627,18 +647,32 @@ export class RealInstallerService implements InstallerService {
                 : input.imap.host,
             }
           : {}),
-        ...(input.entry.config[MAIL_SENTINEL_IMAP_PORT_KEY] === undefined
+        ...(entryImapBlockIsSentinel
           ? {
-              [MAIL_SENTINEL_IMAP_PORT_KEY]:
-                previous?.config[MAIL_SENTINEL_IMAP_PORT_KEY] ?? input.imap.port,
+              [MAIL_SENTINEL_IMAP_PORT_KEY]: coupledImapFallback(
+                MAIL_SENTINEL_IMAP_PORT_KEY,
+                input.imap.port,
+              ),
             }
-          : {}),
-        ...(input.entry.config[MAIL_SENTINEL_IMAP_TLS_KEY] === undefined
+          : input.entry.config[MAIL_SENTINEL_IMAP_PORT_KEY] === undefined
+            ? {
+                [MAIL_SENTINEL_IMAP_PORT_KEY]:
+                  previous?.config[MAIL_SENTINEL_IMAP_PORT_KEY] ?? input.imap.port,
+              }
+            : {}),
+        ...(entryImapBlockIsSentinel
           ? {
-              [MAIL_SENTINEL_IMAP_TLS_KEY]:
-                previous?.config[MAIL_SENTINEL_IMAP_TLS_KEY] ?? input.imap.tls,
+              [MAIL_SENTINEL_IMAP_TLS_KEY]: coupledImapFallback(
+                MAIL_SENTINEL_IMAP_TLS_KEY,
+                input.imap.tls,
+              ),
             }
-          : {}),
+          : input.entry.config[MAIL_SENTINEL_IMAP_TLS_KEY] === undefined
+            ? {
+                [MAIL_SENTINEL_IMAP_TLS_KEY]:
+                  previous?.config[MAIL_SENTINEL_IMAP_TLS_KEY] ?? input.imap.tls,
+              }
+            : {}),
         ...(needsImap(MAIL_SENTINEL_IMAP_USERNAME_KEY)
           ? {
               [MAIL_SENTINEL_IMAP_USERNAME_KEY]: previous
@@ -646,12 +680,19 @@ export class RealInstallerService implements InstallerService {
                 : input.imap.username,
             }
           : {}),
-        ...(input.entry.config[MAIL_SENTINEL_IMAP_MAILBOX_KEY] === undefined
+        ...(entryImapBlockIsSentinel
           ? {
-              [MAIL_SENTINEL_IMAP_MAILBOX_KEY]:
-                previous?.config[MAIL_SENTINEL_IMAP_MAILBOX_KEY] ?? input.imap.mailbox,
+              [MAIL_SENTINEL_IMAP_MAILBOX_KEY]: coupledImapFallback(
+                MAIL_SENTINEL_IMAP_MAILBOX_KEY,
+                input.imap.mailbox,
+              ),
             }
-          : {}),
+          : input.entry.config[MAIL_SENTINEL_IMAP_MAILBOX_KEY] === undefined
+            ? {
+                [MAIL_SENTINEL_IMAP_MAILBOX_KEY]:
+                  previous?.config[MAIL_SENTINEL_IMAP_MAILBOX_KEY] ?? input.imap.mailbox,
+              }
+            : {}),
       },
       secretRefs: normalizeStringRecord({
         ...input.entry.secretRefs,
