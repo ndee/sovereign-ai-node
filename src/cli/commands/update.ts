@@ -171,7 +171,17 @@ export const executeUpdateViaInstaller = async (
   }
 };
 
-export const registerUpdateCommand = (program: Command, app: AppContainer): void => {
+export type RegisterUpdateDeps = {
+  executeUpdate?: typeof executeUpdateViaInstaller;
+  getuid?: () => number;
+};
+
+export const registerUpdateCommand = (
+  program: Command,
+  app: AppContainer,
+  deps: RegisterUpdateDeps = {},
+): void => {
+  const executeUpdate = deps.executeUpdate ?? executeUpdateViaInstaller;
   program
     .command("update")
     .description(
@@ -185,6 +195,7 @@ export const registerUpdateCommand = (program: Command, app: AppContainer): void
     .action(async (opts: UpdateOptions) => {
       const command = "update";
       try {
+        requireRoot(deps.getuid);
         const pending = await app.installerService.getPendingMigrations();
         if (pending.pending.length > 0) {
           throw {
@@ -197,8 +208,7 @@ export const registerUpdateCommand = (program: Command, app: AppContainer): void
             },
           };
         }
-        requireRoot();
-        const result = await executeUpdateViaInstaller({
+        const result = await executeUpdate({
           requestFile: opts.requestFile,
           ref: opts.ref,
           installerUrl: opts.installerUrl,
