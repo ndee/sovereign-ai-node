@@ -5588,6 +5588,162 @@ describe("RealInstallerService", () => {
     }
   });
 
+  it("overwrites stale instance imap port/tls/mailbox from the authoritative top-level imap config", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => {
+          throw new Error("not used");
+        },
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => {
+          throw new Error("not used");
+        },
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async () => ({
+          ok: true,
+          host: "127.0.0.1",
+          port: 1143,
+          tls: true,
+          auth: "ok",
+          mailbox: "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+    });
+
+    try {
+      const internals = service as unknown as {
+        applyLegacyMailSentinelRequestedInstanceDefaults(input: {
+          entry: {
+            id: string;
+            packageId: string;
+            workspace: string;
+            config: Record<string, unknown>;
+            secretRefs: Record<string, string>;
+            matrix?: Record<string, unknown>;
+          };
+          imap: RuntimeConfig["imap"];
+          matrixRoom: { roomId: string; roomName: string };
+          previousRuntimeConfig: RuntimeConfig | null;
+        }): {
+          id: string;
+          config: Record<string, unknown>;
+        };
+      };
+
+      // Simulate a host that went through PRs #93-#95 and then PR #97:
+      // the earlier fixes corrected imapHost/imapUsername/imapConfigured
+      // into the install-request, but imapPort stayed at the manifest
+      // default 993. PR #97's trigger (`isImapSentinel(imapConfigured)`)
+      // does not fire because imapConfigured is already `true`, so the
+      // per-key `=== undefined` check in the else branch is reached and
+      // the stale 993 survives (it's not undefined, and previous runtime
+      // config is also 993).
+      const staleInstanceConfig = {
+        imapConfigured: true,
+        imapHost: "127.0.0.1",
+        imapPort: 993,
+        imapTls: true,
+        imapUsername: "are-you-anatta@pm.me",
+        imapMailbox: "INBOX",
+        pollInterval: "30m",
+      };
+
+      const result = internals.applyLegacyMailSentinelRequestedInstanceDefaults({
+        entry: {
+          id: "mail-sentinel",
+          packageId: "mail-sentinel",
+          workspace: "/var/lib/sovereign-node/mail-sentinel/workspace",
+          config: { ...staleInstanceConfig },
+          secretRefs: {},
+        },
+        imap: {
+          status: "configured",
+          host: "127.0.0.1",
+          port: 1143,
+          tls: true,
+          username: "are-you-anatta@pm.me",
+          mailbox: "INBOX",
+          secretRef: "file:/etc/sovereign-node/secrets/proton-bridge-imap-password",
+        },
+        matrixRoom: {
+          roomId: "!alerts:matrix.example.org",
+          roomName: "Sovereign Alerts",
+        },
+        previousRuntimeConfig: {
+          bots: {
+            instances: [
+              {
+                id: "mail-sentinel",
+                packageId: "mail-sentinel",
+                workspace: "/var/lib/sovereign-node/mail-sentinel/workspace",
+                config: { ...staleInstanceConfig },
+                secretRefs: {},
+              },
+            ],
+          },
+        } as unknown as RuntimeConfig,
+      });
+
+      // The authoritative top-level imap section says port 1143. The
+      // instance must adopt it, regardless of whether imapConfigured was
+      // already a non-sentinel value.
+      expect(result.config.imapPort).toBe(1143);
+      expect(result.config.imapHost).toBe("127.0.0.1");
+      expect(result.config.imapTls).toBe(true);
+      expect(result.config.imapUsername).toBe("are-you-anatta@pm.me");
+      expect(result.config.imapMailbox).toBe("INBOX");
+      expect(result.config.imapConfigured).toBe(true);
+      // Non-IMAP keys in the entry must be preserved.
+      expect(result.config.pollInterval).toBe("30m");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("treats disabled systemd host resources as healthy when they match desired state", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {
