@@ -5559,8 +5559,20 @@ describe("RealInstallerService", () => {
           id: "mail-sentinel",
           packageId: "mail-sentinel",
           workspace: join(paths.stateDir, "mail-sentinel", "workspace"),
-          config: {},
-          secretRefs: {},
+          config: {
+            pollInterval: "30m",
+            lookbackWindow: "1h",
+            e2eeAlertRoom: false,
+            imapConfigured: true,
+            imapHost: "imap.example.org",
+            imapPort: 993,
+            imapTls: true,
+            imapUsername: "pending",
+            imapMailbox: "INBOX",
+          },
+          secretRefs: {
+            imapPassword: "file:/tmp/imap-secret",
+          },
           matrix: {
             localpart: "mail-sentinel",
             alertRoom: {
