@@ -604,54 +604,63 @@ export class RealInstallerService implements InstallerService {
     // the merge of configDefaults produces explicit values like
     // imapHost="pending" that pass the `=== undefined` check and block the
     // fallback to the real imap settings.
-    // Treat manifest-default sentinel values as "not yet configured" so the
-    // reconciliation fills them from the top-level imap config. Both the
-    // entry's own config AND the previous runtime config can carry stale
-    // sentinel values from an earlier broken migration.
+    // When the instance's imapConfigured flag is absent or carries the
+    // manifest-default sentinel (false / "pending"), treat the entire IMAP
+    // block as needing reconciliation from the authoritative top-level
+    // imap config. This covers hosts that ran the broken migration (config:
+    // {}) and accumulated stale manifest defaults plus stale previous
+    // runtime values (port 993, host "pending", etc.) across multiple
+    // update cycles.
     const isImapSentinel = (value: unknown): boolean =>
       value === undefined || value === "pending" || value === false;
-    const imapFallback = (key: string, topLevel: unknown): BotConfigValue =>
-      isImapSentinel(previous?.config[key]) ? (topLevel as BotConfigValue) : previous!.config[key]!;
-    const needsImap = (key: string): boolean => isImapSentinel(input.entry.config[key]);
+    const freshImapReconciliation = isImapSentinel(
+      input.entry.config[MAIL_SENTINEL_IMAP_CONFIGURED_KEY],
+    );
     const next: RequestedBotInstance = {
       ...input.entry,
       config: {
         ...input.entry.config,
-        ...(needsImap(MAIL_SENTINEL_IMAP_CONFIGURED_KEY)
-          ? { [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: input.imap.status === "configured" }
-          : {}),
-        ...(needsImap(MAIL_SENTINEL_IMAP_HOST_KEY)
+        ...(freshImapReconciliation
           ? {
-              [MAIL_SENTINEL_IMAP_HOST_KEY]: previous
-                ? imapFallback(MAIL_SENTINEL_IMAP_HOST_KEY, input.imap.host)
-                : input.imap.host,
+              [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: input.imap.status === "configured",
+              [MAIL_SENTINEL_IMAP_HOST_KEY]: input.imap.host,
+              [MAIL_SENTINEL_IMAP_PORT_KEY]: input.imap.port,
+              [MAIL_SENTINEL_IMAP_TLS_KEY]: input.imap.tls,
+              [MAIL_SENTINEL_IMAP_USERNAME_KEY]: input.imap.username,
+              [MAIL_SENTINEL_IMAP_MAILBOX_KEY]: input.imap.mailbox,
             }
-          : {}),
-        ...(input.entry.config[MAIL_SENTINEL_IMAP_PORT_KEY] === undefined
-          ? {
-              [MAIL_SENTINEL_IMAP_PORT_KEY]:
-                previous?.config[MAIL_SENTINEL_IMAP_PORT_KEY] ?? input.imap.port,
-            }
-          : {}),
-        ...(input.entry.config[MAIL_SENTINEL_IMAP_TLS_KEY] === undefined
-          ? {
-              [MAIL_SENTINEL_IMAP_TLS_KEY]:
-                previous?.config[MAIL_SENTINEL_IMAP_TLS_KEY] ?? input.imap.tls,
-            }
-          : {}),
-        ...(needsImap(MAIL_SENTINEL_IMAP_USERNAME_KEY)
-          ? {
-              [MAIL_SENTINEL_IMAP_USERNAME_KEY]: previous
-                ? imapFallback(MAIL_SENTINEL_IMAP_USERNAME_KEY, input.imap.username)
-                : input.imap.username,
-            }
-          : {}),
-        ...(input.entry.config[MAIL_SENTINEL_IMAP_MAILBOX_KEY] === undefined
-          ? {
-              [MAIL_SENTINEL_IMAP_MAILBOX_KEY]:
-                previous?.config[MAIL_SENTINEL_IMAP_MAILBOX_KEY] ?? input.imap.mailbox,
-            }
-          : {}),
+          : {
+              ...(input.entry.config[MAIL_SENTINEL_IMAP_HOST_KEY] === undefined
+                ? {
+                    [MAIL_SENTINEL_IMAP_HOST_KEY]:
+                      previous?.config[MAIL_SENTINEL_IMAP_HOST_KEY] ?? input.imap.host,
+                  }
+                : {}),
+              ...(input.entry.config[MAIL_SENTINEL_IMAP_PORT_KEY] === undefined
+                ? {
+                    [MAIL_SENTINEL_IMAP_PORT_KEY]:
+                      previous?.config[MAIL_SENTINEL_IMAP_PORT_KEY] ?? input.imap.port,
+                  }
+                : {}),
+              ...(input.entry.config[MAIL_SENTINEL_IMAP_TLS_KEY] === undefined
+                ? {
+                    [MAIL_SENTINEL_IMAP_TLS_KEY]:
+                      previous?.config[MAIL_SENTINEL_IMAP_TLS_KEY] ?? input.imap.tls,
+                  }
+                : {}),
+              ...(input.entry.config[MAIL_SENTINEL_IMAP_USERNAME_KEY] === undefined
+                ? {
+                    [MAIL_SENTINEL_IMAP_USERNAME_KEY]:
+                      previous?.config[MAIL_SENTINEL_IMAP_USERNAME_KEY] ?? input.imap.username,
+                  }
+                : {}),
+              ...(input.entry.config[MAIL_SENTINEL_IMAP_MAILBOX_KEY] === undefined
+                ? {
+                    [MAIL_SENTINEL_IMAP_MAILBOX_KEY]:
+                      previous?.config[MAIL_SENTINEL_IMAP_MAILBOX_KEY] ?? input.imap.mailbox,
+                  }
+                : {}),
+            }),
       },
       secretRefs: normalizeStringRecord({
         ...input.entry.secretRefs,
