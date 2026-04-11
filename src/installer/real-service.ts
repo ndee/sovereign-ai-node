@@ -604,10 +604,15 @@ export class RealInstallerService implements InstallerService {
     // the merge of configDefaults produces explicit values like
     // imapHost="pending" that pass the `=== undefined` check and block the
     // fallback to the real imap settings.
-    const needsImap = (key: string): boolean => {
-      const value = input.entry.config[key];
-      return value === undefined || value === "pending" || value === false;
-    };
+    // Treat manifest-default sentinel values as "not yet configured" so the
+    // reconciliation fills them from the top-level imap config. Both the
+    // entry's own config AND the previous runtime config can carry stale
+    // sentinel values from an earlier broken migration.
+    const isImapSentinel = (value: unknown): boolean =>
+      value === undefined || value === "pending" || value === false;
+    const imapFallback = (key: string, topLevel: unknown): BotConfigValue =>
+      isImapSentinel(previous?.config[key]) ? (topLevel as BotConfigValue) : previous!.config[key]!;
+    const needsImap = (key: string): boolean => isImapSentinel(input.entry.config[key]);
     const next: RequestedBotInstance = {
       ...input.entry,
       config: {
@@ -617,8 +622,9 @@ export class RealInstallerService implements InstallerService {
           : {}),
         ...(needsImap(MAIL_SENTINEL_IMAP_HOST_KEY)
           ? {
-              [MAIL_SENTINEL_IMAP_HOST_KEY]:
-                previous?.config[MAIL_SENTINEL_IMAP_HOST_KEY] ?? input.imap.host,
+              [MAIL_SENTINEL_IMAP_HOST_KEY]: previous
+                ? imapFallback(MAIL_SENTINEL_IMAP_HOST_KEY, input.imap.host)
+                : input.imap.host,
             }
           : {}),
         ...(input.entry.config[MAIL_SENTINEL_IMAP_PORT_KEY] === undefined
@@ -635,8 +641,9 @@ export class RealInstallerService implements InstallerService {
           : {}),
         ...(needsImap(MAIL_SENTINEL_IMAP_USERNAME_KEY)
           ? {
-              [MAIL_SENTINEL_IMAP_USERNAME_KEY]:
-                previous?.config[MAIL_SENTINEL_IMAP_USERNAME_KEY] ?? input.imap.username,
+              [MAIL_SENTINEL_IMAP_USERNAME_KEY]: previous
+                ? imapFallback(MAIL_SENTINEL_IMAP_USERNAME_KEY, input.imap.username)
+                : input.imap.username,
             }
           : {}),
         ...(input.entry.config[MAIL_SENTINEL_IMAP_MAILBOX_KEY] === undefined
