@@ -1824,6 +1824,33 @@ export class RealInstallerService implements InstallerService {
       MAIL_SENTINEL_AGENT_ID,
     );
 
+    const legacyBotConfig = request.bots?.config?.[MAIL_SENTINEL_AGENT_ID] ?? {};
+    const migratedConfig: Record<string, BotConfigValue> = {
+      ...legacyBotConfig,
+      [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: runtimeConfig.imap.status === "configured",
+      [MAIL_SENTINEL_IMAP_HOST_KEY]: runtimeConfig.imap.host,
+      [MAIL_SENTINEL_IMAP_PORT_KEY]: runtimeConfig.imap.port,
+      [MAIL_SENTINEL_IMAP_TLS_KEY]: runtimeConfig.imap.tls,
+      [MAIL_SENTINEL_IMAP_USERNAME_KEY]: runtimeConfig.imap.username,
+      [MAIL_SENTINEL_IMAP_MAILBOX_KEY]: runtimeConfig.imap.mailbox,
+    };
+    const migratedSecretRefs: Record<string, string> = normalizeStringRecord({
+      ...(runtimeConfig.imap.status === "configured" && runtimeConfig.imap.secretRef !== undefined
+        ? { [MAIL_SENTINEL_IMAP_PASSWORD_SECRET_KEY]: runtimeConfig.imap.secretRef }
+        : {}),
+    });
+    const migratedInstance: RequestedBotInstance = {
+      id: MAIL_SENTINEL_AGENT_ID,
+      packageId: MAIL_SENTINEL_AGENT_ID,
+      workspace: legacyAgent.workspace,
+      config: migratedConfig,
+      secretRefs: migratedSecretRefs,
+      matrix: {
+        localpart,
+        alertRoom,
+        allowedUsers: defaultAllowedUsers,
+      },
+    };
     request.bots = {
       ...(request.bots ?? {}),
       selected: dedupeStrings([...(request.bots?.selected ?? []), MAIL_SENTINEL_AGENT_ID]),
@@ -1831,39 +1858,14 @@ export class RealInstallerService implements InstallerService {
         ...((request.bots?.instances ?? []).filter(
           (entry) => entry.packageId !== MAIL_SENTINEL_AGENT_ID,
         ) as RequestedBotInstance[]),
-        {
-          id: MAIL_SENTINEL_AGENT_ID,
-          packageId: MAIL_SENTINEL_AGENT_ID,
-          workspace: legacyAgent.workspace,
-          config: {},
-          secretRefs: {},
-          matrix: {
-            localpart,
-            alertRoom,
-            allowedUsers: defaultAllowedUsers,
-          },
-        },
+        migratedInstance,
       ]),
     };
     await this.writeSavedInstallRequest(request);
     return {
       changed: true,
       requestFile,
-      instance: this.toMailSentinelSummary(
-        {
-          id: MAIL_SENTINEL_AGENT_ID,
-          packageId: MAIL_SENTINEL_AGENT_ID,
-          workspace: legacyAgent.workspace,
-          config: {},
-          secretRefs: {},
-          matrix: {
-            localpart,
-            alertRoom,
-            allowedUsers: defaultAllowedUsers,
-          },
-        },
-        runtimeConfig,
-      ),
+      instance: this.toMailSentinelSummary(migratedInstance, runtimeConfig),
     };
   }
 
