@@ -31,7 +31,7 @@ Matrix is the primary control plane. Bots register as Matrix users, operate insi
 
 ## Control plane
 
-![Matrix control plane showing multi-bot presence on Sovereign AI Node](docs/03-presence.png)
+![Matrix control plane showing multi-bot presence on Sovereign AI Node](docs/img/03-presence.png)
 Matrix acts as the control plane for Sovereign AI Node and its bots.
 
 ## What it is
