@@ -151,6 +151,7 @@ Notes:
 
 - the installer script now starts with an explicit `Install / Update / Exit` action menu in interactive mode
 - `Update` reuses existing settings and request file, but requires `sovereign-node migrate` first when pending migrations exist
+- for legacy single-instance Mail Sentinel installs, `sovereign-node migrate` now carries the active top-level IMAP settings and IMAP secret ref into the installer-managed `mail-sentinel` instance so update can continue without re-entering mailbox credentials
 - `Install` on an existing system behaves as reconfigure with prefilled defaults
 - `sovereign-node install` owns OpenClaw installation in the default path.
 - Operators should not run `openclaw onboard` in the default Sovereign flow.
@@ -228,6 +229,11 @@ Recommended operator command set:
 - `sovereign-node reconfigure imap`
 - `sovereign-node reconfigure matrix`
 - `sovereign-node reconfigure openrouter`
+
+Operational note for legacy/default Mail Sentinel installs:
+
+- the top-level `imap` section remains the source of truth for the default `mail-sentinel` instance created from older single-instance installs
+- if an older migration left the default `mail-sentinel` with stale IMAP values, running `sovereign-node migrate`, `sovereign-node update`, or `sovereign-node reconfigure imap` now repairs that instance from the top-level IMAP config
 
 `openclaw` remains fully supported for runtime-native operations:
 
