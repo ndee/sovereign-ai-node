@@ -320,6 +320,8 @@ Behavior:
 - `--status` shows pending migrations without applying them
 - interactive mode MAY prompt for missing values required by a migration
 - current migration path covers legacy single-instance Mail Sentinel installs
+- when migrating a legacy single-instance Mail Sentinel install, MUST carry the current top-level IMAP host, port, TLS mode, username, mailbox, and IMAP password secret ref into the installer-managed `mail-sentinel` instance request data
+- after a successful legacy Mail Sentinel migration, operators SHOULD NOT need to re-enter IMAP settings just because the install moved to installer-managed instances
 
 ## `sovereign-node mail-sentinels`
 
@@ -391,6 +393,12 @@ Purpose:
 Purpose:
 
 - update IMAP settings/credentials and validate them before persisting
+
+Behavior:
+
+- for the legacy/default `mail-sentinel` instance, the top-level `imap` section is the authoritative source for the instance IMAP host, port, TLS mode, username, mailbox, and password secret ref
+- when the top-level `imap` section is configured, update/reconfigure flows MUST overwrite stale legacy/default per-instance IMAP values with the top-level values
+- this reconciliation rule applies to the legacy/default `mail-sentinel` instance and MUST NOT be generalized to unrelated multi-instance Mail Sentinel entries without an explicit operator action
 
 `--json` result schema:
 
