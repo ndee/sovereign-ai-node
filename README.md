@@ -2,7 +2,7 @@
 
 Open-core, local-first multi-bot infrastructure for sovereign digital control.
 
-Sovereign AI Node is a self-hosted AI control plane for running specialized bots on your own infrastructure. It is not a single bot, not a SaaS wrapper, and not a cloud dashboard.
+Sovereign AI Node is a self-hosted runtime for running specialized bots on your own infrastructure, with Matrix as the operator-facing control plane. It is not a single bot, not a SaaS wrapper, and not a cloud dashboard.
 
 ## Install
 
@@ -10,13 +10,29 @@ Run the guided installer on a fresh Ubuntu VM:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ndee/sovereign-ai-node/main/scripts/install.sh | sudo bash
-````
+```
 
 If you are working from a local checkout instead:
 
 ```bash
 sudo bash scripts/install.sh --source-dir "$(pwd)"
 ```
+
+## Architecture
+
+Sovereign AI Node is the runtime and control plane layer. Bot packages are defined and versioned separately in [`sovereign-ai-bots`](https://github.com/ndee/sovereign-ai-bots).
+
+| Layer | Repository | Role |
+|---|---|---|
+| **Runtime** | `sovereign-ai-node` | Installer, Matrix stack, agent/tool contracts, policy boundaries |
+| **Bots** | `sovereign-ai-bots` | Installable bot packages, workspace files, manifests |
+
+Matrix is the primary control plane. Bots register as Matrix users, operate inside rooms, and receive operator interaction through standard Matrix clients.
+
+## Control plane
+
+![Matrix control plane showing multi-bot presence on Sovereign AI Node](docs/img/03-presence.png)
+Matrix acts as the control plane for Sovereign AI Node and its bots.
 
 ## What it is
 
@@ -29,22 +45,19 @@ Sovereign AI Node is:
 * cloud-optional
 * privacy-first
 
-It provides a self-hosted runtime for specialized bots, with Matrix as the operator-facing control plane.
-
 ## Current status
 
 **Current focus:** Mail Sentinel on a single self-hosted Linux node.
 
 Today, the project is centered on:
 
-* Sovereign AI Node
+* Sovereign AI Node runtime
 * OpenClaw as the default runtime backend
 * a bundled Matrix stack
 * external Element clients
 * Mail Sentinel as the first concrete module
 
-The broader multi-bot system is the platform direction.
-Mail Sentinel is the first real wedge.
+The broader multi-bot system is the platform direction. Mail Sentinel is the first real wedge. See the [Mail Sentinel package](https://github.com/ndee/sovereign-ai-bots) in `sovereign-ai-bots` for bot-level details and screenshots.
 
 ## Why Matrix
 
@@ -77,25 +90,6 @@ Sovereign AI Node separates **templates** from **runtime instances**:
 * `imap-readonly@1.0.0`
 * `node-cli-ops@1.0.0`
 
-## Mail Sentinel
-
-Mail Sentinel is the first real module on Sovereign AI Node.
-
-It:
-
-* monitors a mailbox locally
-* classifies incoming signals
-* routes what matters into Matrix
-
-Current signal categories:
-
-* **Decision Required**
-* **Financial Relevance**
-* **Risk / Escalation**
-
-Mail Sentinel does not train a model locally.
-It becomes quieter and more accurate by adapting local runtime configuration and scoring behavior from feedback.
-
 ## Runtime strategy
 
 Sovereign AI Node is **OpenClaw-first, adapter-safe**.
@@ -120,8 +114,6 @@ These are platform directions, not all currently shipped modules.
 
 ## Docs
 
-See:
-
 * `docs/ARCHITECTURE.md`
-* `deploy/`
 * `docs/MAIL_SENTINEL_DESIGN.md`
+* `deploy/`
