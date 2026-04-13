@@ -306,6 +306,7 @@ Purpose:
 
 Behavior:
 
+- MUST require root privileges and instruct the operator to re-run with `sudo` when invoked as a non-root user
 - MUST fail clearly when pending migrations exist
 - MUST instruct the operator to run `sovereign-node migrate` first when that happens
 
