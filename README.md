@@ -1,8 +1,18 @@
 # Sovereign AI Node
 
-Open-core, local-first multi-bot infrastructure for sovereign digital control.
+Open-core, local-first multi-bot AI runtime with Matrix as the control plane.
 
-Sovereign AI Node is a self-hosted runtime for running specialized bots on your own infrastructure, with Matrix as the operator-facing control plane. It is not a single bot, not a SaaS wrapper, and not a cloud dashboard.
+Sovereign AI Node is a self-hosted platform for running specialized bots on your own infrastructure. Matrix is the operator-facing control plane. It is not a single bot, not a SaaS wrapper, and not a cloud dashboard.
+
+## Prerequisites
+
+The current documented path requires:
+
+* a fresh Ubuntu VM (22.04+ recommended)
+* an [OpenRouter](https://openrouter.ai/) API key for the provider-backed bot runtime path
+* an Element or other Matrix client for operator interaction
+
+The installer provisions the Matrix stack (Synapse) and bot runtime (OpenClaw) automatically. Bot-specific prerequisites (e.g. IMAP mailbox credentials for Mail Sentinel) are documented in [`sovereign-ai-bots`](https://github.com/ndee/sovereign-ai-bots).
 
 ## Install
 
@@ -98,19 +108,7 @@ OpenClaw is the default execution framework today, but it sits behind a stable r
 
 ## Planned direction
 
-The long-term direction is a modular bot system.
-
-Planned bot families include:
-
-* Mailbot
-* Docsbot
-* Calendarbot
-* Opsbot
-* Securitybot
-* Financebot
-* Researchbot
-
-These are platform directions, not all currently shipped modules.
+The long-term direction is a modular bot system spanning mail, documents, calendars, operations, security, and finance. These are platform directions, not currently shipped modules.
 
 ## Docs
 
