@@ -150,7 +150,7 @@ curl -fsSL <sovereign-node-installer-url> | sudo bash
 Notes:
 
 - the installer script now starts with an explicit `Install / Update / Exit` action menu in interactive mode
-- `Update` reuses existing settings and request file, but the CLI entrypoint must run as root (`sudo sovereign-node update`) and still requires `sovereign-node migrate` first when pending migrations exist
+- `Update` reuses existing settings and request file, fetches the selected installer ref/URL before rerunning in update mode, and the CLI entrypoint must run as root (`sudo sovereign-node update`) while still requiring `sovereign-node migrate` first when pending migrations exist
 - for legacy single-instance Mail Sentinel installs, `sovereign-node migrate` now carries the active top-level IMAP settings and IMAP secret ref into the installer-managed `mail-sentinel` instance so update can continue without re-entering mailbox credentials
 - `Install` on an existing system behaves as reconfigure with prefilled defaults
 - `sovereign-node install` owns OpenClaw installation in the default path.
