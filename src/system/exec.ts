@@ -19,8 +19,12 @@ export interface ExecRunner {
 
 export class ExecaExecRunner implements ExecRunner {
   async run(input: ExecInput): Promise<ExecResult> {
+    // Default stdin to "ignore" so subprocesses cannot inherit an empty
+    // SSH/CI stdin and block forever on a read. Callers that genuinely
+    // need to pipe input can still override via input.options.stdin.
     const subprocess = await execa(input.command, input.args ?? [], {
       reject: false,
+      stdin: "ignore",
       ...(input.options ?? {}),
     });
     return {
