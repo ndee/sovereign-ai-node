@@ -6828,9 +6828,11 @@ export default function (api) {
             return;
           }
           stepState.relayEnrollment = await this.resolveRelayEnrollment(req, ctx.installationId);
+          const previousRuntimeConfig = await this.tryReadRuntimeConfig();
           stepState.effectiveRequest = this.buildRelayProvisionRequest(
             req,
             stepState.relayEnrollment,
+            previousRuntimeConfig,
           );
         },
       },
@@ -7491,7 +7493,12 @@ export default function (api) {
   private buildRelayProvisionRequest(
     req: InstallRequest,
     enrollment: RelayEnrollmentResult,
+    previousRuntimeConfig?: RuntimeConfig | null,
   ): InstallRequest {
+    const homeserverDomain =
+      previousRuntimeConfig?.matrix.accessMode === "direct"
+        ? previousRuntimeConfig.matrix.homeserverDomain
+        : enrollment.hostname;
     return {
       ...req,
       connectivity: {
@@ -7500,7 +7507,7 @@ export default function (api) {
       },
       matrix: {
         ...req.matrix,
-        homeserverDomain: enrollment.hostname,
+        homeserverDomain,
         publicBaseUrl: enrollment.publicBaseUrl,
         federationEnabled: req.matrix.federationEnabled ?? false,
       },
@@ -7760,6 +7767,14 @@ export default function (api) {
           entry.botId === botPackage.manifest.id &&
           entry.spec?.agentId === agent.id,
       );
+      const staleCronMatchers = (runtimeConfig.hostResources?.resources ?? []).flatMap((entry) =>
+        entry.kind === "openclawCron" &&
+        entry.desiredState === "absent" &&
+        entry.botId === botPackage.manifest.id &&
+        entry.agentId === agent.id
+          ? [entry.match]
+          : [],
+      );
       try {
         const registration = await this.withManagedOpenClawServiceIdentityEnv(
           runtimeConfig,
@@ -7767,6 +7782,7 @@ export default function (api) {
             await this.managedAgentRegistrar.register({
               agentId: agent.id,
               workspaceDir: agent.workspace,
+              ...(staleCronMatchers.length === 0 ? {} : { removeCronMatchers: staleCronMatchers }),
               ...(cronEntry === undefined ||
               compiledCron?.kind !== "openclawCron" ||
               compiledCron.spec === undefined

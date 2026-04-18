@@ -1448,6 +1448,396 @@ describe("RealInstallerService", () => {
     }
   });
 
+  it("preserves the existing bundled homeserver when switching a direct install to relay", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "pinned-by-sovereign",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          workspaceDir: "/tmp/ws",
+          agentCommand: "openclaw agents add mail-sentinel",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+    });
+
+    try {
+      const req = buildInstallRequest();
+      req.connectivity = { mode: "relay" };
+      req.relay = {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      };
+
+      const previousRuntimeConfig: RuntimeConfig = {
+        openrouter: {
+          model: "qwen/qwen3.5-9b",
+          apiKeySecretRef: "env:OPENROUTER_API_KEY",
+        },
+        openclaw: {
+          managedInstallation: true,
+          installMethod: "install_sh",
+          requestedVersion: "0.2.0",
+          openclawHome: "/tmp/openclaw-home",
+          runtimeConfigPath: "/tmp/openclaw.json5",
+          runtimeProfilePath: "/tmp/runtime.json5",
+          gatewayEnvPath: "/tmp/gateway.env",
+        },
+        openclawProfile: {
+          plugins: { allow: ["matrix"] },
+          agents: [],
+          crons: [],
+        },
+        imap: {
+          status: "configured",
+          host: "imap.example.org",
+          port: 993,
+          tls: true,
+          username: "operator@example.org",
+          mailbox: "INBOX",
+          secretRef: "file:/tmp/imap-secret",
+        },
+        bots: {
+          config: {},
+          instances: [],
+        },
+        matrix: {
+          accessMode: "direct",
+          homeserverDomain: "e2e.sovereign.local",
+          federationEnabled: false,
+          publicBaseUrl: "http://127.0.0.1:8008",
+          adminBaseUrl: "http://127.0.0.1:8008",
+          operator: {
+            userId: "@operator:e2e.sovereign.local",
+          },
+          bot: {
+            localpart: "mail-sentinel",
+            userId: "@mail-sentinel:e2e.sovereign.local",
+            accessTokenSecretRef: "file:/tmp/mail-sentinel.token",
+          },
+          alertRoom: {
+            roomId: "!alerts:e2e.sovereign.local",
+            roomName: "Sovereign Alerts",
+          },
+        },
+        templates: {
+          installed: [],
+        },
+        sovereignTools: {
+          instances: [],
+        },
+      };
+
+      const effectiveReq = await (
+        service as unknown as {
+          buildRelayProvisionRequest: (
+            value: InstallRequest,
+            enrollment: {
+              controlUrl: string;
+              hostname: string;
+              publicBaseUrl: string;
+              tunnel: {
+                serverAddr: string;
+                serverPort: number;
+                token: string;
+                proxyName: string;
+                type: "http";
+                localIp: string;
+                localPort: number;
+              };
+            },
+            previousRuntimeConfig?: RuntimeConfig | null,
+          ) => InstallRequest;
+        }
+      ).buildRelayProvisionRequest(
+        req,
+        {
+          controlUrl: "https://relay.sovereign-ai-node.com",
+          hostname: "wild-liberty-yak-82f6.sovereign-ai-node.com",
+          publicBaseUrl: "https://wild-liberty-yak-82f6.sovereign-ai-node.com",
+          tunnel: {
+            serverAddr: "relay.sovereign-ai-node.com",
+            serverPort: 7000,
+            token: "relay-token",
+            proxyName: "relay-wild-liberty-yak-82f6",
+            type: "http",
+            localIp: "127.0.0.1",
+            localPort: 18080,
+          },
+        },
+        previousRuntimeConfig,
+      );
+
+      expect(effectiveReq.connectivity?.mode).toBe("relay");
+      expect(effectiveReq.matrix.homeserverDomain).toBe("e2e.sovereign.local");
+      expect(effectiveReq.matrix.publicBaseUrl).toBe(
+        "https://wild-liberty-yak-82f6.sovereign-ai-node.com",
+      );
+      expect(effectiveReq.matrix.federationEnabled).toBe(false);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("passes superseded OpenClaw cron matches to managed agent registration", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+
+    let capturedInput:
+      | {
+          agentId: string;
+          workspaceDir: string;
+          removeCronMatchers?: Array<{ id?: string; name?: string; agentId?: string }>;
+        }
+      | undefined;
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "pinned-by-sovereign",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async (input) => {
+          capturedInput = input;
+          return {
+            agentId: input.agentId,
+            workspaceDir: input.workspaceDir,
+            agentCommand: `openclaw agents upsert --id ${input.agentId}`,
+          };
+        },
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+    });
+
+    const botPackage = buildTestLoadedBotPackage({
+      id: "mail-sentinel",
+      displayName: "Mail Sentinel",
+      description: "Test bot",
+      matrixMode: "dedicated-account",
+    });
+    const runtimeConfig = {
+      openrouter: {
+        model: "qwen/qwen3.5-9b",
+        apiKeySecretRef: "env:OPENROUTER_API_KEY",
+      },
+      openclaw: {
+        managedInstallation: true,
+        installMethod: "install_sh",
+        requestedVersion: "0.2.0",
+        openclawHome: "/tmp/openclaw-home",
+        runtimeConfigPath: "/tmp/openclaw.json5",
+        runtimeProfilePath: "/tmp/runtime.json5",
+        gatewayEnvPath: "/tmp/gateway.env",
+        serviceUser: "sovereign-node",
+        serviceGroup: "sovereign-node",
+      },
+      openclawProfile: {
+        plugins: { allow: ["matrix"] },
+        session: { dmScope: "per-channel-peer" },
+        agents: [
+          {
+            id: "mail-sentinel",
+            botId: "mail-sentinel",
+            workspace: "/tmp/mail-sentinel",
+            matrix: {
+              localpart: "mail-sentinel",
+              userId: "@mail-sentinel:e2e.sovereign.local",
+              accessTokenSecretRef: "file:/tmp/mail-sentinel.token",
+            },
+          },
+        ],
+        crons: [],
+      },
+      imap: {
+        status: "configured",
+        host: "imap.example.org",
+        port: 993,
+        tls: true,
+        username: "operator@example.org",
+        mailbox: "INBOX",
+        secretRef: "file:/tmp/imap-secret",
+      },
+      bots: {
+        config: {},
+        instances: [],
+      },
+      matrix: {
+        accessMode: "direct",
+        homeserverDomain: "e2e.sovereign.local",
+        federationEnabled: false,
+        publicBaseUrl: "http://127.0.0.1:8008",
+        adminBaseUrl: "http://127.0.0.1:8008",
+        operator: {
+          userId: "@operator:e2e.sovereign.local",
+        },
+        bot: {
+          localpart: "mail-sentinel",
+          userId: "@mail-sentinel:e2e.sovereign.local",
+          accessTokenSecretRef: "file:/tmp/mail-sentinel.token",
+        },
+        alertRoom: {
+          roomId: "!alerts:e2e.sovereign.local",
+          roomName: "Sovereign Alerts",
+        },
+      },
+      hostResources: {
+        planPath: "/tmp/host-resources.json",
+        resources: [
+          {
+            id: "scan-timer::supersede::0",
+            botId: "mail-sentinel",
+            agentId: "mail-sentinel",
+            kind: "openclawCron",
+            desiredState: "absent",
+            match: {
+              name: "mail-sentinel-poll",
+              agentId: "mail-sentinel",
+            },
+            checks: [],
+          },
+        ],
+        botStatus: [],
+      },
+      templates: {
+        installed: [],
+      },
+      sovereignTools: {
+        instances: [],
+      },
+    } as RuntimeConfig;
+
+    try {
+      (
+        service as unknown as { persistManagedBotRegistrationRecords: () => Promise<void> }
+      ).persistManagedBotRegistrationRecords = async () => {};
+      (
+        service as unknown as { ensureManagedAgentOpenClawBindings: () => Promise<void> }
+      ).ensureManagedAgentOpenClawBindings = async () => {};
+
+      await (
+        service as unknown as {
+          registerManagedBots: (
+            config: RuntimeConfig,
+            botPackages: LoadedBotPackage[],
+          ) => Promise<unknown>;
+        }
+      ).registerManagedBots(runtimeConfig, [botPackage]);
+
+      expect(capturedInput?.removeCronMatchers).toEqual([
+        {
+          name: "mail-sentinel-poll",
+          agentId: "mail-sentinel",
+        },
+      ]);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("persists install job snapshots and serves them via getInstallJob", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {
