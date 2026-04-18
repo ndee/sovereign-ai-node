@@ -297,9 +297,11 @@ export type RuntimeBotInstance = {
 export type InstallProvenance = {
   nodeRepoUrl: string;
   nodeRef: string;
+  nodeVersion?: string;
   nodeCommitSha: string;
   botsRepoUrl: string;
   botsRef: string;
+  botsVersion?: string;
   botsCommitSha: string;
   installedAt: string;
   installSource: "curl-installer" | "local-copy" | "git-clone";
@@ -339,12 +341,22 @@ export const parseInstallProvenance = (raw: string): InstallProvenance | null =>
   if (!INSTALL_SOURCE_VALUES.has(record.installSource as string)) {
     return null;
   }
+  const nodeVersion =
+    typeof record.nodeVersion === "string" && record.nodeVersion.length > 0
+      ? record.nodeVersion
+      : undefined;
+  const botsVersion =
+    typeof record.botsVersion === "string" && record.botsVersion.length > 0
+      ? record.botsVersion
+      : undefined;
   return {
     nodeRepoUrl: record.nodeRepoUrl as string,
     nodeRef: record.nodeRef as string,
+    ...(nodeVersion !== undefined ? { nodeVersion } : {}),
     nodeCommitSha: record.nodeCommitSha as string,
     botsRepoUrl: record.botsRepoUrl as string,
     botsRef: record.botsRef as string,
+    ...(botsVersion !== undefined ? { botsVersion } : {}),
     botsCommitSha: record.botsCommitSha as string,
     installedAt: record.installedAt as string,
     installSource: record.installSource as InstallProvenance["installSource"],

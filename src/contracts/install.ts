@@ -355,9 +355,11 @@ export const sovereignStatusSchema = z.object({
       .object({
         nodeRepoUrl: z.string().min(1),
         nodeRef: z.string().min(1),
+        nodeVersion: z.string().min(1).optional(),
         nodeCommitSha: z.string().min(1),
         botsRepoUrl: z.string().min(1),
         botsRef: z.string().min(1),
+        botsVersion: z.string().min(1).optional(),
         botsCommitSha: z.string().min(1),
         installedAt: z.string().min(1),
         installSource: z.enum(["curl-installer", "local-copy", "git-clone"]),
