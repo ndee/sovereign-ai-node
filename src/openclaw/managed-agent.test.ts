@@ -227,6 +227,56 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
     expect(calls.at(-1)).toContain("openclaw cron add --name mail-sentinel-poll");
   });
 
+  it("removes explicitly matched stale cron jobs even when no new cron is registered", async () => {
+    const calls: string[] = [];
+    const execRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        const serialized = [input.command, ...(input.args ?? [])].join(" ");
+        calls.push(serialized);
+        if (serialized === "openclaw cron list --json") {
+          return {
+            command: serialized,
+            exitCode: 0,
+            stdout: JSON.stringify({
+              jobs: [
+                {
+                  id: "11111111-1111-1111-1111-111111111111",
+                  name: "mail-sentinel-poll",
+                  agentId: "mail-sentinel",
+                },
+                {
+                  id: "22222222-2222-2222-2222-222222222222",
+                  name: "other-job",
+                  agentId: "mail-sentinel",
+                },
+              ],
+            }),
+            stderr: "",
+          };
+        }
+        return {
+          command: serialized,
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        };
+      },
+    };
+
+    const registrar = new ShellOpenClawManagedAgentRegistrar(execRunner, createLogger());
+    const result = await registrar.register({
+      agentId: "mail-sentinel",
+      workspaceDir: "/tmp/ws",
+      removeCronMatchers: [{ name: "mail-sentinel-poll", agentId: "mail-sentinel" }],
+    });
+
+    expect(result.cronJobId).toBeUndefined();
+    expect(calls).toContain("openclaw cron list --json");
+    expect(calls).toContain("openclaw cron rm 11111111-1111-1111-1111-111111111111");
+    expect(calls).not.toContain("openclaw cron rm 22222222-2222-2222-2222-222222222222");
+    expect(calls.some((entry) => entry.startsWith("openclaw cron add "))).toBe(false);
+  });
+
   it("retries cron listing when OpenClaw gateway is temporarily unavailable", async () => {
     const calls: string[] = [];
     let jsonListAttempts = 0;
