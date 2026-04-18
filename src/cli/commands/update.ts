@@ -9,13 +9,37 @@ import { z } from "zod";
 import type { AppContainer } from "../../app/create-app.js";
 import { writeCliError, writeCliSuccess } from "../output.js";
 
-export const DEFAULT_INSTALL_SH_URL =
-  "https://raw.githubusercontent.com/ndee/sovereign-ai-node/main/scripts/install.sh";
+export const GITHUB_REPO = "ndee/sovereign-ai-node";
+
+export const DEFAULT_INSTALL_SH_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh`;
 
 const INSTALL_SH_URL_TEMPLATE = (ref: string): string =>
-  `https://raw.githubusercontent.com/ndee/sovereign-ai-node/${ref}/scripts/install.sh`;
+  `https://raw.githubusercontent.com/${GITHUB_REPO}/${ref}/scripts/install.sh`;
 
+const LATEST_RELEASE_URL = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
+const LATEST_RELEASE_TIMEOUT_MS = 10_000;
 const FETCH_TIMEOUT_MS = 30_000;
+
+export const resolveLatestReleaseRef = async (
+  fetchFn: FetchLike = globalThis.fetch,
+): Promise<string | null> => {
+  try {
+    const response = await fetchFn(LATEST_RELEASE_URL, {
+      signal: AbortSignal.timeout(LATEST_RELEASE_TIMEOUT_MS),
+      headers: { Accept: "application/vnd.github+json" },
+    });
+    if (!response.ok) {
+      return null;
+    }
+    const data = (await response.json()) as { tag_name?: string };
+    if (typeof data.tag_name === "string" && data.tag_name.length > 0) {
+      return data.tag_name;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+};
 
 type UpdateOptions = {
   json?: boolean;
@@ -48,6 +72,7 @@ export const buildInstallerUrl = (opts: {
   ref?: string | undefined;
   envUrl?: string | undefined;
   envRef?: string | undefined;
+  latestRef?: string | undefined;
 }): string => {
   if (opts.envUrl !== undefined && opts.envUrl.length > 0) {
     return opts.envUrl;
@@ -60,6 +85,9 @@ export const buildInstallerUrl = (opts: {
   }
   if (opts.ref !== undefined && opts.ref.length > 0) {
     return INSTALL_SH_URL_TEMPLATE(opts.ref);
+  }
+  if (opts.latestRef !== undefined && opts.latestRef.length > 0) {
+    return INSTALL_SH_URL_TEMPLATE(opts.latestRef);
   }
   return DEFAULT_INSTALL_SH_URL;
 };
@@ -151,16 +179,27 @@ export const executeUpdateViaInstaller = async (
     fetchFn?: FetchLike | undefined;
     spawnFn?: SpawnerLike | undefined;
     env?: NodeJS.ProcessEnv | undefined;
+    resolveLatestRef?: typeof resolveLatestReleaseRef | undefined;
   } = {},
 ): Promise<{ installerUrl: string; exitCode: number }> => {
   const env = deps.env ?? process.env;
+  const fetchFn = deps.fetchFn ?? globalThis.fetch;
+  const hasExplicitRef =
+    (opts.installerUrl !== undefined && opts.installerUrl.length > 0) ||
+    (opts.ref !== undefined && opts.ref.length > 0) ||
+    (env.SOVEREIGN_NODE_INSTALL_SH_URL !== undefined &&
+      env.SOVEREIGN_NODE_INSTALL_SH_URL.length > 0) ||
+    (env.SOVEREIGN_NODE_REF !== undefined && env.SOVEREIGN_NODE_REF.length > 0);
+  const resolveFn = deps.resolveLatestRef ?? resolveLatestReleaseRef;
+  const latestRef = hasExplicitRef ? undefined : ((await resolveFn(fetchFn)) ?? undefined);
   const installerUrl = buildInstallerUrl({
     installerUrl: opts.installerUrl,
     ref: opts.ref,
     envUrl: env.SOVEREIGN_NODE_INSTALL_SH_URL,
     envRef: env.SOVEREIGN_NODE_REF,
+    latestRef,
   });
-  const body = await downloadInstallerScript(installerUrl, deps.fetchFn);
+  const body = await downloadInstallerScript(installerUrl, fetchFn);
   const { dir, path } = await writeInstallerTempScript(body);
   try {
     const args = buildInstallerArgs({ requestFile: opts.requestFile });
@@ -190,7 +229,7 @@ export const registerUpdateCommand = (
     )
     .option("--json", "Emit JSON output")
     .option("--request-file <path>", "Forwarded to install.sh as --request-file <path>")
-    .option("--ref <ref>", "Git ref for install.sh (default: main)")
+    .option("--ref <ref>", "Git ref for install.sh (default: latest release, fallback: main)")
     .option("--installer-url <url>", "Override the install.sh URL (wins over --ref)")
     .action(async (opts: UpdateOptions) => {
       const command = "update";

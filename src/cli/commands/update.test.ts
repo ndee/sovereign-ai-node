@@ -13,8 +13,10 @@ import {
   downloadInstallerScript,
   executeUpdateViaInstaller,
   type FetchLike,
+  GITHUB_REPO,
   registerUpdateCommand,
   requireRoot,
+  resolveLatestReleaseRef,
   runInstallerScript,
   type SpawnerLike,
   writeInstallerTempScript,
@@ -36,6 +38,7 @@ const mockResponse = (init: { ok?: boolean; status?: number; body?: string }): R
     ok,
     status,
     text: async () => body,
+    json: async () => JSON.parse(body || "null"),
   } as unknown as Response;
 };
 
@@ -97,10 +100,63 @@ describe("buildInstallerUrl", () => {
     );
   });
 
+  it("uses latestRef when no explicit override is provided", () => {
+    expect(buildInstallerUrl({ latestRef: "v2.1.0" })).toBe(
+      `https://raw.githubusercontent.com/${GITHUB_REPO}/v2.1.0/scripts/install.sh`,
+    );
+  });
+
+  it("prefers --ref over latestRef", () => {
+    expect(buildInstallerUrl({ ref: "dev", latestRef: "v2.1.0" })).toBe(
+      `https://raw.githubusercontent.com/${GITHUB_REPO}/dev/scripts/install.sh`,
+    );
+  });
+
+  it("prefers envRef over latestRef", () => {
+    expect(buildInstallerUrl({ envRef: "rc", latestRef: "v2.1.0" })).toBe(
+      `https://raw.githubusercontent.com/${GITHUB_REPO}/rc/scripts/install.sh`,
+    );
+  });
+
   it("ignores empty-string overrides", () => {
     expect(buildInstallerUrl({ installerUrl: "", ref: "", envUrl: "", envRef: "" })).toBe(
       DEFAULT_INSTALL_SH_URL,
     );
+  });
+
+  it("ignores empty latestRef", () => {
+    expect(buildInstallerUrl({ latestRef: "" })).toBe(DEFAULT_INSTALL_SH_URL);
+  });
+});
+
+describe("resolveLatestReleaseRef", () => {
+  it("returns tag_name from a successful API response", async () => {
+    const fetchFn = vi.fn<FetchLike>(async () =>
+      mockResponse({ body: JSON.stringify({ tag_name: "v2.1.0" }) }),
+    );
+    const ref = await resolveLatestReleaseRef(fetchFn);
+    expect(ref).toBe("v2.1.0");
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns null on non-ok response", async () => {
+    const fetchFn = vi.fn<FetchLike>(async () => mockResponse({ ok: false, status: 404 }));
+    const ref = await resolveLatestReleaseRef(fetchFn);
+    expect(ref).toBeNull();
+  });
+
+  it("returns null when tag_name is missing", async () => {
+    const fetchFn = vi.fn<FetchLike>(async () => mockResponse({ body: JSON.stringify({}) }));
+    const ref = await resolveLatestReleaseRef(fetchFn);
+    expect(ref).toBeNull();
+  });
+
+  it("returns null on network error", async () => {
+    const fetchFn = vi.fn<FetchLike>(async () => {
+      throw new Error("network error");
+    });
+    const ref = await resolveLatestReleaseRef(fetchFn);
+    expect(ref).toBeNull();
   });
 });
 
@@ -245,6 +301,7 @@ describe("runInstallerScript", () => {
 
 describe("executeUpdateViaInstaller", () => {
   const happyFetch: FetchLike = async () => mockResponse({ body: SHEBANG_BODY });
+  const noResolve = async () => null;
 
   it("downloads, writes, runs, and cleans up on success", async () => {
     const spawnFn = vi.fn<SpawnerLike>(() => ({ status: 0 }));
@@ -255,7 +312,7 @@ describe("executeUpdateViaInstaller", () => {
     };
     const result = await executeUpdateViaInstaller(
       { requestFile: "/etc/foo.json" },
-      { fetchFn: happyFetch, spawnFn: wrappedSpawn, env: {} },
+      { fetchFn: happyFetch, spawnFn: wrappedSpawn, env: {}, resolveLatestRef: noResolve },
     );
     expect(result.installerUrl).toBe(DEFAULT_INSTALL_SH_URL);
     expect(result.exitCode).toBe(0);
@@ -276,7 +333,10 @@ describe("executeUpdateViaInstaller", () => {
       observedDir = (args[0] as string).replace(/\/install\.sh$/, "");
       return { status: 3 };
     };
-    const result = await executeUpdateViaInstaller({}, { fetchFn: happyFetch, spawnFn, env: {} });
+    const result = await executeUpdateViaInstaller(
+      {},
+      { fetchFn: happyFetch, spawnFn, env: {}, resolveLatestRef: noResolve },
+    );
     expect(result.exitCode).toBe(3);
     expect(observedDir).toBeDefined();
     await expect(stat(observedDir as string)).rejects.toMatchObject({ code: "ENOENT" });
@@ -286,7 +346,7 @@ describe("executeUpdateViaInstaller", () => {
     const fetchFn: FetchLike = async () => mockResponse({ ok: false, status: 500 });
     const spawnFn = vi.fn<SpawnerLike>(() => ({ status: 0 }));
     await expect(
-      executeUpdateViaInstaller({}, { fetchFn, spawnFn, env: {} }),
+      executeUpdateViaInstaller({}, { fetchFn, spawnFn, env: {}, resolveLatestRef: noResolve }),
     ).rejects.toMatchObject({ code: "UPDATE_INSTALLER_DOWNLOAD_FAILED" });
     expect(spawnFn).not.toHaveBeenCalled();
   });
@@ -326,6 +386,33 @@ describe("executeUpdateViaInstaller", () => {
     );
   });
 
+  it("uses the latest release tag when no explicit ref is provided", async () => {
+    const calls: string[] = [];
+    const fetchFn: FetchLike = async (url) => {
+      calls.push(url as string);
+      return mockResponse({ body: SHEBANG_BODY });
+    };
+    const spawnFn: SpawnerLike = () => ({ status: 0 });
+    const result = await executeUpdateViaInstaller(
+      {},
+      { fetchFn, spawnFn, env: {}, resolveLatestRef: async () => "v2.1.0" },
+    );
+    expect(result.installerUrl).toBe(
+      `https://raw.githubusercontent.com/${GITHUB_REPO}/v2.1.0/scripts/install.sh`,
+    );
+  });
+
+  it("skips release resolution when --ref is provided", async () => {
+    const resolveFn = vi.fn(async () => "v2.1.0");
+    const fetchFn: FetchLike = async () => mockResponse({ body: SHEBANG_BODY });
+    const spawnFn: SpawnerLike = () => ({ status: 0 });
+    await executeUpdateViaInstaller(
+      { ref: "dev" },
+      { fetchFn, spawnFn, env: {}, resolveLatestRef: resolveFn },
+    );
+    expect(resolveFn).not.toHaveBeenCalled();
+  });
+
   it("uses process.env by default when deps.env is omitted", async () => {
     const originalUrl = process.env.SOVEREIGN_NODE_INSTALL_SH_URL;
     const originalRef = process.env.SOVEREIGN_NODE_REF;
@@ -338,7 +425,10 @@ describe("executeUpdateViaInstaller", () => {
         return mockResponse({ body: SHEBANG_BODY });
       };
       const spawnFn: SpawnerLike = () => ({ status: 0 });
-      const result = await executeUpdateViaInstaller({}, { fetchFn, spawnFn });
+      const result = await executeUpdateViaInstaller(
+        {},
+        { fetchFn, spawnFn, resolveLatestRef: noResolve },
+      );
       expect(result.installerUrl).toBe("https://default-env.example.org/install.sh");
       expect(calls).toEqual(["https://default-env.example.org/install.sh"]);
     } finally {
