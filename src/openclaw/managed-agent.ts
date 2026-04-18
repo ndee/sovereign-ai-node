@@ -6,7 +6,10 @@ import type { Logger } from "../logging/logger.js";
 import type { ExecResult, ExecRunner } from "../system/exec.js";
 
 const OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS = 90_000;
-const OPENCLAW_GATEWAY_RETRY_ATTEMPTS = 20;
+// 20 × 90s was pathological when combined with the 45-minute CI job budget:
+// a single stuck command could burn ~31 minutes of retries before surfacing.
+// 3 attempts covers transient gateway blips without monopolising the job.
+const OPENCLAW_GATEWAY_RETRY_ATTEMPTS = 3;
 const OPENCLAW_GATEWAY_RETRY_DELAY_MS = 3_000;
 const MANAGED_OPENCLAW_ENV_KEYS = [
   "OPENCLAW_HOME",
