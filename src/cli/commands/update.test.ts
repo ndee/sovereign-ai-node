@@ -38,6 +38,7 @@ const mockResponse = (init: { ok?: boolean; status?: number; body?: string }): R
     ok,
     status,
     text: async () => body,
+    json: async () => JSON.parse(body || "null"),
   } as unknown as Response;
 };
 
