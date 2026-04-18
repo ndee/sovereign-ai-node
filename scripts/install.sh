@@ -580,6 +580,17 @@ write_install_provenance() {
     install_source="curl-installer"
   fi
 
+  local node_version="unknown"
+  local bots_version="unknown"
+  local node_pkg_dir="${SOURCE_DIR:-$APP_DIR}"
+  local bots_pkg_dir="${BOTS_SOURCE_DIR:-$BOTS_DIR}"
+  if [[ -f "${node_pkg_dir}/package.json" ]]; then
+    node_version="$(jq -r '.version // "unknown"' "${node_pkg_dir}/package.json" 2>/dev/null || echo "unknown")"
+  fi
+  if [[ -f "${bots_pkg_dir}/package.json" ]]; then
+    bots_version="$(jq -r '.version // "unknown"' "${bots_pkg_dir}/package.json" 2>/dev/null || echo "unknown")"
+  fi
+
   local installed_at
   installed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -587,9 +598,11 @@ write_install_provenance() {
 {
   "nodeRepoUrl": "${node_repo}",
   "nodeRef": "${node_ref_resolved}",
+  "nodeVersion": "${node_version}",
   "nodeCommitSha": "${node_commit_sha}",
   "botsRepoUrl": "${bots_repo}",
   "botsRef": "${bots_ref_resolved}",
+  "botsVersion": "${bots_version}",
   "botsCommitSha": "${bots_commit_sha}",
   "installedAt": "${installed_at}",
   "installSource": "${install_source}"
