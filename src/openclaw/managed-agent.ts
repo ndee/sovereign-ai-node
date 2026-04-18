@@ -21,6 +21,11 @@ const MANAGED_OPENCLAW_ENV_KEYS = [
 export type ManagedAgentRegistrationInput = {
   agentId: string;
   workspaceDir: string;
+  removeCronMatchers?: Array<{
+    id?: string;
+    name?: string;
+    agentId?: string;
+  }>;
   cron?: {
     id: string;
     every: string;
@@ -80,6 +85,9 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
     });
 
     let cronCommandResult: ExecResult | undefined;
+    if (Array.isArray(input.removeCronMatchers) && input.removeCronMatchers.length > 0) {
+      await this.removeMatchingCronJobs(input.removeCronMatchers);
+    }
     if (input.cron !== undefined) {
       await this.removeExistingCronJobs(input.agentId, input.cron.id);
       cronCommandResult = await this.runCommandAlternatives({
@@ -112,11 +120,39 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
   }
 
   private async removeExistingCronJobs(agentId: string, cronJobId: string): Promise<void> {
-    const jobs = await this.listCronJobs();
-    const staleJobs = jobs.filter(
-      (job) => job.name === cronJobId && (job.agentId === undefined || job.agentId === agentId),
+    await this.removeMatchingCronJobs([{ name: cronJobId, agentId }]);
+  }
+
+  private async removeMatchingCronJobs(
+    matchers: Array<{
+      id?: string;
+      name?: string;
+      agentId?: string;
+    }>,
+  ): Promise<void> {
+    const normalizedMatchers = matchers.filter(
+      (matcher) =>
+        typeof matcher.id === "string" ||
+        typeof matcher.name === "string" ||
+        typeof matcher.agentId === "string",
     );
-    for (const job of staleJobs) {
+    if (normalizedMatchers.length === 0) {
+      return;
+    }
+
+    const jobs = await this.listCronJobs();
+    const staleJobs = jobs.filter((job) =>
+      normalizedMatchers.some(
+        (matcher) =>
+          (matcher.id === undefined || job.id === matcher.id || job.name === matcher.id) &&
+          (matcher.name === undefined || job.name === matcher.name) &&
+          (matcher.agentId === undefined || job.agentId === matcher.agentId),
+      ),
+    );
+    const uniqueStaleJobs = staleJobs.filter(
+      (job, index, all) => all.findIndex((entry) => entry.id === job.id) === index,
+    );
+    for (const job of uniqueStaleJobs) {
       const result = await this.execRunner.run({
         command: "openclaw",
         args: ["cron", "rm", job.id],
