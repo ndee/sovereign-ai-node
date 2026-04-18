@@ -302,7 +302,7 @@ Normative onboarding rules:
 
 Purpose:
 
-- re-run the install flow using the saved install request file
+- download `scripts/install.sh` from the selected Sovereign ref/URL and re-run the install flow in update mode using the saved install request file
 
 Behavior:
 
