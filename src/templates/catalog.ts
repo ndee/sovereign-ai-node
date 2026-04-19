@@ -16,14 +16,20 @@ export type ToolTemplateManifest = {
   requiredSecretRefs: string[];
   requiredConfigKeys: string[];
   allowedCommands: string[];
+  openclawPlugins?: string[];
+  openclawBundledPlugins?: string[];
+  openclawToolNames?: string[];
   signature: TemplateSignature;
 };
+
+export type ToolTemplateDefinition = Omit<ToolTemplateManifest, "signature">;
 
 export type AgentTemplateManifest = {
   kind: "sovereign-agent-template";
   id: string;
   version: string;
   description: string;
+  model?: string;
   matrix: {
     localpartPrefix: string;
   };
@@ -34,10 +40,6 @@ export type AgentTemplateManifest = {
   optionalToolTemplates: Array<{
     id: string;
     version: string;
-  }>;
-  workspaceFiles: Array<{
-    path: string;
-    content: string;
   }>;
   signature: TemplateSignature;
 };
@@ -84,12 +86,7 @@ export const CORE_TEMPLATE_MANIFESTS: ToolTemplateManifest[] = [
     id: "node-cli-ops",
     version: "1.0.0",
     description: "Least-privilege sovereign-node operational CLI tools for operator-style agents.",
-    capabilities: [
-      "node.status.read",
-      "node.doctor.read",
-      "node.agents.manage",
-      "node.alert.send",
-    ],
+    capabilities: ["node.status.read", "node.doctor.read", "node.agents.manage", "node.alert.send"],
     requiredSecretRefs: [],
     requiredConfigKeys: [],
     allowedCommands: [
@@ -104,7 +101,8 @@ export const CORE_TEMPLATE_MANIFESTS: ToolTemplateManifest[] = [
     signature: {
       algorithm: "ed25519",
       keyId: CORE_KEY_ID,
-      value: "mcnSHp56qDnOQ0t1+yuZr3t60KpNX1GcDUAEwO0EDPatVkQz88bRtornPGM3jkXI8lOpYxx/Bro0poXs2ODOBw==",
+      value:
+        "mcnSHp56qDnOQ0t1+yuZr3t60KpNX1GcDUAEwO0EDPatVkQz88bRtornPGM3jkXI8lOpYxx/Bro0poXs2ODOBw==",
     },
   },
   {
@@ -122,7 +120,8 @@ export const CORE_TEMPLATE_MANIFESTS: ToolTemplateManifest[] = [
     signature: {
       algorithm: "ed25519",
       keyId: CORE_KEY_ID,
-      value: "iC9gCncfVhI6ZCknRjuGy93IWVIntGuLktSNdpGaNfO+flWST34eosIQT4F/fYWtnJEI7KHSzAXOJzJHj1S+DA==",
+      value:
+        "iC9gCncfVhI6ZCknRjuGy93IWVIntGuLktSNdpGaNfO+flWST34eosIQT4F/fYWtnJEI7KHSzAXOJzJHj1S+DA==",
     },
   },
 ];
@@ -148,7 +147,9 @@ const stableSerializeWithoutSignature = (value: unknown): string => {
     }
     if (input !== null && typeof input === "object") {
       const record = input as Record<string, unknown>;
-      const keys = Object.keys(record).filter((key) => key !== "signature").sort();
+      const keys = Object.keys(record)
+        .filter((key) => key !== "signature")
+        .sort();
       return `{${keys.map((key) => `${JSON.stringify(key)}:${serialize(record[key])}`).join(",")}}`;
     }
     return JSON.stringify(input);
@@ -192,9 +193,7 @@ export const verifySignedTemplateManifest = (
   };
 };
 
-export const findCoreTemplateManifest = (
-  ref: string,
-): SovereignTemplateManifest | undefined => {
+export const findCoreTemplateManifest = (ref: string): SovereignTemplateManifest | undefined => {
   const parsed = parseTemplateRef(ref);
   return CORE_TEMPLATE_MANIFESTS.find(
     (entry) => entry.id === parsed.id && entry.version === parsed.version,

@@ -88,9 +88,10 @@ Installer- and operator-facing contracts in this document use the following mode
 Current core templates in the bundled profile:
 
 - Agent templates:
-  - `mail-sentinel@1.0.0`
-  - `node-operator@1.0.0`
+  - `mail-sentinel@2.0.0`
+  - `node-operator@2.0.0`
 - Tool templates:
+  - `mail-sentinel-tool@1.0.0`
   - `imap-readonly@1.0.0`
   - `node-cli-ops@1.0.0`
 
@@ -101,7 +102,7 @@ In the default install path, `sovereign-node install` is responsible for install
 Default behavior:
 
 - use the official OpenClaw installer script (`https://openclaw.ai/install.sh`)
-- install the current Sovereign-pinned OpenClaw version `2026.3.1`
+- install the current Sovereign-pinned OpenClaw version `2026.3.13`
 - skip OpenClaw onboarding (`--no-onboard`) because Sovereign owns the domain-specific configuration flow
 - run non-interactively in the installer backend
 
@@ -109,7 +110,7 @@ Target internal command pattern:
 
 ```bash
 curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install.sh | \
-  bash -s -- --version 2026.3.1 --no-onboard --no-prompt
+  bash -s -- --version 2026.3.13 --no-onboard --no-prompt
 ```
 
 After writing Sovereign-managed OpenClaw config and environment, the installer installs or repairs the gateway service via `openclaw gateway install` (using `--force` when a rewrite is required).
@@ -274,7 +275,7 @@ Behavior:
 
 Flags:
 
-- `--ttl-minutes <minutes>` default `10`
+- `--ttl-minutes <minutes>` default `21`
 - `--json`
 
 `--json` result shape:
@@ -284,6 +285,7 @@ Flags:
   "code": "ABCD-EFGH-IJKL",
   "expiresAt": "2026-03-06T12:34:56.000Z",
   "onboardingUrl": "https://node-name.sovereign-ai-node.com/onboard",
+  "onboardingLink": "https://node-name.sovereign-ai-node.com/onboard#code=ABCD-EFGH-IJKL",
   "username": "@operator:node-name.sovereign-ai-node.com"
 }
 ```
@@ -293,8 +295,48 @@ Normative onboarding rules:
 - `/onboard` MUST NOT embed the operator password in static HTML or JS
 - onboarding codes MUST be stored server-side as salted hashes
 - onboarding codes MUST be single-use
-- default TTL MUST be 10 minutes
+- default TTL MUST be 21 minutes
 - onboarding API responses revealing the password MUST be sent with `Cache-Control: no-store`
+
+## `sovereign-node update`
+
+Purpose:
+
+- download `scripts/install.sh` from the selected Sovereign ref/URL and re-run the install flow in update mode using the saved install request file
+
+Behavior:
+
+- MUST require root privileges and instruct the operator to re-run with `sudo` when invoked as a non-root user
+- MUST fail clearly when pending migrations exist
+- MUST instruct the operator to run `sovereign-node migrate` first when that happens
+
+## `sovereign-node migrate`
+
+Purpose:
+
+- inspect and apply one-off request/config migrations required before future updates
+
+Behavior:
+
+- `--status` shows pending migrations without applying them
+- interactive mode MAY prompt for missing values required by a migration
+- current migration path covers legacy single-instance Mail Sentinel installs
+- when migrating a legacy single-instance Mail Sentinel install, MUST carry the current top-level IMAP host, port, TLS mode, username, mailbox, and IMAP password secret ref into the installer-managed `mail-sentinel` instance request data
+- after a successful legacy Mail Sentinel migration, operators SHOULD NOT need to re-enter IMAP settings just because the install moved to installer-managed instances
+
+## `sovereign-node mail-sentinels`
+
+Purpose:
+
+- manage installer-managed Mail Sentinel instances
+
+Current subcommands:
+
+- `list`
+- `show <id>`
+- `create <id>`
+- `update <id>`
+- `delete <id>`
 
 ## `sovereign-node doctor`
 
@@ -353,6 +395,12 @@ Purpose:
 
 - update IMAP settings/credentials and validate them before persisting
 
+Behavior:
+
+- for the legacy/default `mail-sentinel` instance, the top-level `imap` section is the authoritative source for the instance IMAP host, port, TLS mode, username, mailbox, and password secret ref
+- when the top-level `imap` section is configured, update/reconfigure flows MUST overwrite stale legacy/default per-instance IMAP values with the top-level values
+- this reconciliation rule applies to the legacy/default `mail-sentinel` instance and MUST NOT be generalized to unrelated multi-instance Mail Sentinel entries without an explicit operator action
+
 `--json` result schema:
 
 - `result` MUST be a `ReconfigureResult` with `target = "imap"`
@@ -361,7 +409,12 @@ Purpose:
 
 Purpose:
 
-- update Matrix homeserver/room/operator settings for the bundled deployment profile
+- toggle bundled Matrix federation for the active installation
+
+Current CLI flags:
+
+- `--federation`
+- `--no-federation`
 
 `--json` result schema:
 
@@ -456,12 +509,13 @@ type CheckResult = {
 
 type JobState = "pending" | "running" | "succeeded" | "failed" | "canceled";
 
-type StepState = "pending" | "running" | "succeeded" | "failed" | "canceled" | "skipped";
+type StepState = "pending" | "running" | "succeeded" | "failed" | "canceled" | "skipped" | "warned";
 
 type JobStep = {
   id:
     | "preflight"
     | "openclaw_bootstrap_cli"
+    | "openclaw_bundled_plugin_tools"
     | "imap_validate"
     | "relay_enroll"
     | "matrix_provision"
@@ -469,6 +523,8 @@ type JobStep = {
     | "matrix_bootstrap_room"
     | "openclaw_gateway_service_install"
     | "openclaw_configure"
+    | "bots_configure"
+    | "mail_sentinel_scan_timer"
     | "mail_sentinel_register"
     | "smoke_checks"
     | "test_alert";
@@ -492,6 +548,16 @@ type InstallRequest = {
   relay?: {
     controlUrl: string;
     enrollmentToken?: string;
+    requestedSlug?: string;
+    hostname?: string; // when pre-enrolled, installer skips relay enrollment
+    publicBaseUrl?: string; // when pre-enrolled, installer skips relay enrollment
+    tunnel?: {
+      serverAddr: string;
+      serverPort?: number;
+      token: string;
+      proxyName: string;
+      subdomain?: string;
+    };
   };
   openclaw?: {
     manageInstallation?: boolean; // default true
@@ -528,10 +594,24 @@ type InstallRequest = {
     username: string; // localpart or full matrix user id
     password?: string; // optional if backend generates one
   };
-  mailSentinel?: {
-    pollInterval?: string; // default "5m"
-    lookbackWindow?: string; // default "15m"
-    e2eeAlertRoom?: boolean; // default false
+  bots?: {
+    selected?: string[];
+    config?: Record<string, Record<string, string | number | boolean>>;
+    instances?: Array<{
+      id: string;
+      packageId: string;
+      workspace?: string;
+      config?: Record<string, string | number | boolean>;
+      secretRefs?: Record<string, string>;
+      matrix?: {
+        localpart?: string;
+        alertRoom?: {
+          roomId?: string;
+          roomName?: string;
+        };
+        allowedUsers?: string[];
+      };
+    }>;
   };
   advanced?: {
     rollbackPolicy?: "safe_partial" | "manual" | "aggressive_non_destructive";
@@ -554,9 +634,9 @@ Constraints:
 - `connectivity.mode = "relay"` requires a valid `relay` object
 - `relay.enrollmentToken` is optional only for the default Sovereign managed relay (`https://relay.sovereign-ai-node.com`)
 - custom relays must provide `relay.enrollmentToken`
+- relay enrollment is skipped when `relay.hostname`, `relay.publicBaseUrl`, and `relay.tunnel` are already populated
 - relay hostname selection is installer-managed; user-provided relay slugs are not part of the public contract
 - `matrix.federationEnabled` defaults to `false`
-- `mailSentinel.e2eeAlertRoom` defaults to `false`
 
 ### `PreflightResult`
 
@@ -931,7 +1011,6 @@ Request body:
 type ReconfigureMatrixRequest = {
   matrix: Partial<InstallRequest["matrix"]>;
   operator?: Partial<InstallRequest["operator"]>;
-  mailSentinel?: Pick<NonNullable<InstallRequest["mailSentinel"]>, "e2eeAlertRoom">;
 };
 ```
 

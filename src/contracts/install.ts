@@ -8,13 +8,7 @@ import {
   isoTimestampSchema,
 } from "./common.js";
 
-export const jobStateSchema = z.enum([
-  "pending",
-  "running",
-  "succeeded",
-  "failed",
-  "canceled",
-]);
+export const jobStateSchema = z.enum(["pending", "running", "succeeded", "failed", "canceled"]);
 
 export const stepStateSchema = z.enum([
   "pending",
@@ -23,11 +17,13 @@ export const stepStateSchema = z.enum([
   "failed",
   "canceled",
   "skipped",
+  "warned",
 ]);
 
 export const jobStepIdSchema = z.enum([
   "preflight",
   "openclaw_bootstrap_cli",
+  "openclaw_bundled_plugin_tools",
   "imap_validate",
   "relay_enroll",
   "matrix_provision",
@@ -36,6 +32,7 @@ export const jobStepIdSchema = z.enum([
   "openclaw_gateway_service_install",
   "openclaw_configure",
   "bots_configure",
+  "mail_sentinel_scan_timer",
   "mail_sentinel_register",
   "smoke_checks",
   "test_alert",
@@ -91,8 +88,7 @@ export const openrouterInstallInputSchema = z
       model?: string | undefined;
       apiKey?: string | undefined;
       secretRef?: string | undefined;
-    }) =>
-      value.apiKey !== undefined || value.secretRef !== undefined,
+    }) => value.apiKey !== undefined || value.secretRef !== undefined,
     {
       message: "openrouter.apiKey or openrouter.secretRef is required",
       path: ["secretRef"],
@@ -103,9 +99,22 @@ export const connectivityInstallInputSchema = z.object({
   mode: z.enum(["direct", "relay"]).optional(),
 });
 
+export const relayTunnelInputSchema = z.object({
+  serverAddr: z.string().min(1),
+  serverPort: z.number().int().positive().optional(),
+  token: z.string().min(1),
+  proxyName: z.string().min(1),
+  subdomain: z.string().min(1).optional(),
+});
+
 export const relayInstallInputSchema = z.object({
   controlUrl: z.string().min(1),
   enrollmentToken: z.string().min(1).optional(),
+  requestedSlug: z.string().min(1).optional(),
+  // Pre-enrolled fields — when all present the core installer skips enrollment.
+  hostname: z.string().min(1).optional(),
+  publicBaseUrl: z.string().min(1).optional(),
+  tunnel: relayTunnelInputSchema.optional(),
 });
 
 export const matrixInstallInputSchema = z.object({
@@ -123,21 +132,34 @@ export const operatorInstallInputSchema = z.object({
 
 export const botConfigValueSchema = z.union([z.string(), z.number().finite(), z.boolean()]);
 
+export const botInstanceMatrixSchema = z.object({
+  localpart: z.string().min(1).optional(),
+  alertRoom: z
+    .object({
+      roomId: z.string().min(1).optional(),
+      roomName: z.string().min(1).optional(),
+    })
+    .optional(),
+  allowedUsers: z.array(z.string().min(1)).optional(),
+});
+
+export const botInstanceInstallInputSchema = z.object({
+  id: z.string().min(1),
+  packageId: z.string().min(1),
+  workspace: z.string().min(1).optional(),
+  config: z.record(z.string(), botConfigValueSchema).optional(),
+  secretRefs: z.record(z.string(), z.string().min(1)).optional(),
+  matrix: botInstanceMatrixSchema.optional(),
+});
+
 export const botsInstallInputSchema = z.object({
   selected: z.array(z.string().min(1)).optional(),
   config: z.record(z.string(), z.record(z.string(), botConfigValueSchema)).optional(),
-});
-
-export const mailSentinelInstallInputSchema = z.object({
-  pollInterval: z.string().min(1).optional(),
-  lookbackWindow: z.string().min(1).optional(),
-  e2eeAlertRoom: z.boolean().optional(),
+  instances: z.array(botInstanceInstallInputSchema).optional(),
 });
 
 export const advancedInstallInputSchema = z.object({
-  rollbackPolicy: z
-    .enum(["safe_partial", "manual", "aggressive_non_destructive"])
-    .optional(),
+  rollbackPolicy: z.enum(["safe_partial", "manual", "aggressive_non_destructive"]).optional(),
   skipPreflight: z.boolean().optional(),
   nonInteractive: z.boolean().optional(),
 });
@@ -152,7 +174,6 @@ export const installRequestSchema = z.object({
   matrix: matrixInstallInputSchema,
   operator: operatorInstallInputSchema,
   bots: botsInstallInputSchema.optional(),
-  mailSentinel: mailSentinelInstallInputSchema.optional(),
   advanced: advancedInstallInputSchema.optional(),
 });
 
@@ -189,6 +210,36 @@ export const testAlertResultSchema = z.object({
   error: errorDetailSchema.optional(),
 });
 
+const hostResourceStateSchema = z.object({
+  id: z.string().min(1),
+  botId: z.string().min(1),
+  agentId: z.string().min(1).optional(),
+  kind: z.enum([
+    "directory",
+    "managedFile",
+    "stateFile",
+    "systemdService",
+    "systemdTimer",
+    "openclawCron",
+  ]),
+  target: z.string().min(1),
+  present: z.boolean().optional(),
+  enabled: z.boolean().optional(),
+  active: z.boolean().optional(),
+  health: componentHealthSchema,
+  message: z.string().min(1).optional(),
+});
+
+const botRuntimeStatusSchema = z.object({
+  fields: z
+    .record(
+      z.string(),
+      z.union([z.string(), z.number().int(), z.boolean(), z.record(z.string(), z.unknown())]),
+    )
+    .default({}),
+  health: componentHealthSchema,
+});
+
 export const installResultSchema = z.object({
   installationId: idSchema,
   job: installJobSummarySchema,
@@ -221,12 +272,13 @@ export const installResultSchema = z.object({
     openclawHome: z.string().min(1),
     gatewayServiceInstalled: z.boolean(),
     gatewayServiceName: z.string().min(1).optional(),
-    agentId: z.literal("mail-sentinel"),
-    cronJobId: z.string().min(1),
+    managedAgentIds: z.array(z.string().min(1)),
+    managedCronIds: z.array(z.string().min(1)),
     pluginIds: z.array(z.string().min(1)),
   }),
   paths: z.object({
     configPath: z.string().min(1),
+    hostResourcesPlanPath: z.string().min(1),
     secretsDir: z.string().min(1),
     stateDir: z.string().min(1),
     logsDir: z.string().min(1),
@@ -286,13 +338,8 @@ export const sovereignStatusSchema = z.object({
     cronPresent: z.boolean(),
     pluginIds: z.array(z.string().min(1)).optional(),
   }),
-  mailSentinel: z.object({
-    agentId: z.literal("mail-sentinel"),
-    lastPollAt: isoTimestampSchema.optional(),
-    lastAlertAt: isoTimestampSchema.optional(),
-    lastError: errorDetailSchema.optional(),
-    consecutiveFailures: z.number().int().min(0),
-  }),
+  bots: z.record(z.string().min(1), botRuntimeStatusSchema),
+  hostResources: z.array(hostResourceStateSchema),
   imap: z.object({
     lastCredentialTestAt: isoTimestampSchema.optional(),
     authStatus: z.enum(["ok", "failed", "unknown"]),
@@ -304,6 +351,20 @@ export const sovereignStatusSchema = z.object({
     contractVersion: z.string().min(1),
     openclaw: z.string().min(1).optional(),
     plugins: z.record(z.string(), z.string()).optional(),
+    provenance: z
+      .object({
+        nodeRepoUrl: z.string().min(1),
+        nodeRef: z.string().min(1),
+        nodeVersion: z.string().min(1).optional(),
+        nodeCommitSha: z.string().min(1),
+        botsRepoUrl: z.string().min(1),
+        botsRef: z.string().min(1),
+        botsVersion: z.string().min(1).optional(),
+        botsCommitSha: z.string().min(1),
+        installedAt: z.string().min(1),
+        installSource: z.enum(["curl-installer", "local-copy", "git-clone"]),
+      })
+      .optional(),
   }),
 });
 
@@ -324,6 +385,7 @@ export const matrixOnboardingIssueResultSchema = z.object({
   code: z.string().min(1),
   expiresAt: isoTimestampSchema,
   onboardingUrl: z.string().min(1),
+  onboardingLink: z.string().min(1),
   username: z.string().min(1),
 });
 

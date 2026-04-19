@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -54,6 +54,54 @@ const writeInstalledPackage = async (extensionDir: string, name: string): Promis
 };
 
 describe("ShellOpenClawBootstrapper", () => {
+  it("hardens bundled extension directories so OpenClaw does not reject them as world-writable", async () => {
+    const globalRoot = await mkdtemp(join(tmpdir(), "openclaw-bootstrap-"));
+    const extensionDir = await writeBundledMatrixExtensionPackage(globalRoot);
+    const extensionsRoot = join(globalRoot, "openclaw", "extensions");
+    const memoryCoreDir = join(extensionsRoot, "memory-core");
+    const memoryCoreIndexPath = join(memoryCoreDir, "index.ts");
+    await writeInstalledPackage(extensionDir, "@matrix-org/matrix-sdk-crypto-nodejs");
+    await writeInstalledPackage(extensionDir, "@vector-im/matrix-bot-sdk");
+    await mkdir(memoryCoreDir, { recursive: true });
+    await writeFile(memoryCoreIndexPath, "export {};\n", "utf8");
+    await chmod(extensionsRoot, 0o777);
+    await chmod(extensionDir, 0o777);
+    await chmod(memoryCoreDir, 0o777);
+    await chmod(memoryCoreIndexPath, 0o666);
+
+    const execRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        if (input.command === "npm" && input.args?.[0] === "root") {
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: globalRoot,
+            stderr: "",
+          };
+        }
+        return {
+          command: [input.command, ...(input.args ?? [])].join(" "),
+          exitCode: 0,
+          stdout: SOVEREIGN_PINNED_OPENCLAW_VERSION,
+          stderr: "",
+        };
+      },
+    };
+
+    const bootstrapper = new ShellOpenClawBootstrapper(execRunner, createLogger());
+    await bootstrapper.ensureInstalled({
+      version: SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
+      noOnboard: true,
+      noPrompt: true,
+      skipIfCompatibleInstalled: true,
+    });
+
+    expect((await stat(extensionsRoot)).mode & 0o022).toBe(0);
+    expect((await stat(extensionDir)).mode & 0o022).toBe(0);
+    expect((await stat(memoryCoreDir)).mode & 0o022).toBe(0);
+    expect((await stat(memoryCoreIndexPath)).mode & 0o022).toBe(0);
+  });
+
   it("resolves pinned-by-sovereign to the concrete pinned version during install", async () => {
     const globalRoot = await mkdtemp(join(tmpdir(), "openclaw-bootstrap-"));
     const extensionDir = await writeBundledMatrixExtensionPackage(globalRoot);
@@ -118,6 +166,7 @@ describe("ShellOpenClawBootstrapper", () => {
     expect(calls[1]?.command).toBe("bash");
     expect(calls[1]?.args?.[1]).toContain("install.sh");
     expect(calls[1]?.args?.[1]).toContain(`'${SOVEREIGN_PINNED_OPENCLAW_VERSION}'`);
+    expect(calls[1]?.args?.[1]).toContain("NPM_CONFIG_CACHE");
     expect(calls[3]).toMatchObject({
       command: "npm",
       args: ["root", "-g"],
@@ -257,6 +306,86 @@ describe("ShellOpenClawBootstrapper", () => {
     expect(result.version).toBe(SOVEREIGN_PINNED_OPENCLAW_VERSION);
     expect(calls).toHaveLength(5);
     expect(calls[1]?.args?.[1]).toContain(`'${SOVEREIGN_PINNED_OPENCLAW_VERSION}'`);
+  });
+
+  it("falls back to direct npm install when install.sh fails", async () => {
+    const globalRoot = await mkdtemp(join(tmpdir(), "openclaw-bootstrap-"));
+    const extensionDir = await writeBundledMatrixExtensionPackage(globalRoot);
+    const calls: ExecInput[] = [];
+    const results: ExecResult[] = [
+      {
+        command: "openclaw --version",
+        exitCode: 1,
+        stdout: "",
+        stderr: "not installed",
+      },
+      {
+        command: "bash -lc <install>",
+        exitCode: 1,
+        stdout: "failed",
+        stderr: "boom",
+      },
+      {
+        command: "openclaw --version",
+        exitCode: 0,
+        stdout: SOVEREIGN_PINNED_OPENCLAW_VERSION,
+        stderr: "",
+      },
+      {
+        command: "npm root -g",
+        exitCode: 0,
+        stdout: globalRoot,
+        stderr: "",
+      },
+    ];
+
+    const execRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        calls.push(input);
+        if (input.command === "npm" && input.args?.[0] === "install" && input.args?.[1] === "-g") {
+          if (String(input.args?.[2]).startsWith("openclaw@")) {
+            await writeInstalledPackage(extensionDir, "@matrix-org/matrix-sdk-crypto-nodejs");
+            await writeInstalledPackage(extensionDir, "@vector-im/matrix-bot-sdk");
+            return {
+              command: [input.command, ...(input.args ?? [])].join(" "),
+              exitCode: 0,
+              stdout: "installed",
+              stderr: "",
+            };
+          }
+        }
+        if (input.command === "npm" && input.args?.[0] === "install") {
+          await writeInstalledPackage(extensionDir, "@matrix-org/matrix-sdk-crypto-nodejs");
+          await writeInstalledPackage(extensionDir, "@vector-im/matrix-bot-sdk");
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: "repaired",
+            stderr: "",
+          };
+        }
+        const next = results.shift();
+        if (next === undefined) {
+          throw new Error("unexpected exec call");
+        }
+        return next;
+      },
+    };
+
+    const bootstrapper = new ShellOpenClawBootstrapper(execRunner, createLogger());
+    const result = await bootstrapper.ensureInstalled({
+      version: SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
+      noOnboard: true,
+      noPrompt: true,
+      skipIfCompatibleInstalled: true,
+    });
+
+    expect(result.version).toBe(SOVEREIGN_PINNED_OPENCLAW_VERSION);
+    expect(result.installMethod).toBe("npm_fallback");
+    expect(calls[2]).toMatchObject({
+      command: "npm",
+      args: ["install", "-g", `openclaw@${SOVEREIGN_PINNED_OPENCLAW_VERSION}`],
+    });
   });
 
   it("repairs missing bundled matrix extension dependencies when a compatible install already exists", async () => {

@@ -19,6 +19,7 @@ ENV_FILE="${SOVEREIGN_NODE_ENV_FILE:-/etc/default/sovereign-node-api}"
 API_HOST="${SOVEREIGN_NODE_API_HOST:-127.0.0.1}"
 API_PORT="${SOVEREIGN_NODE_API_PORT:-8787}"
 REQUEST_FILE="${SOVEREIGN_NODE_REQUEST_FILE:-/etc/sovereign-node/install-request.json}"
+PROVENANCE_FILE="/etc/sovereign-node/install-provenance.json"
 RUNTIME_CONFIG_FILE="${SOVEREIGN_NODE_CONFIG_FILE:-/etc/sovereign-node/sovereign-node.json5}"
 RUN_INSTALL="${SOVEREIGN_NODE_RUN_INSTALL:-1}"
 NON_INTERACTIVE="${SOVEREIGN_NODE_NON_INTERACTIVE:-0}"
@@ -27,7 +28,7 @@ INSTALLATION_DETECTED="0"
 CONFIGURED_INSTALLATION="0"
 EXISTING_REQUEST_VALID="0"
 LAST_REQUEST_LOAD_ERROR=""
-RECOMMENDED_OPENROUTER_MODEL="openai/gpt-5-nano"
+RECOMMENDED_OPENROUTER_MODEL="qwen/qwen3.5-9b"
 LEGACY_OPENROUTER_MODEL="openrouter/anthropic/claude-sonnet-4-5"
 DEFAULT_OPENROUTER_MODEL="$RECOMMENDED_OPENROUTER_MODEL"
 RECOMMENDED_MATRIX_DOMAIN="matrix.local.test"
@@ -37,15 +38,17 @@ DEFAULT_MATRIX_PUBLIC_BASE_URL="http://127.0.0.1:8008"
 LEGACY_MATRIX_DOMAIN="matrix.local.test"
 LEGACY_MATRIX_PUBLIC_BASE_URL="http://127.0.0.1:8008"
 LEGACY_MATRIX_ALT_PUBLIC_BASE_URL="http://matrix.local.test:8008"
-DEFAULT_OPERATOR_USERNAME="operator"
-DEFAULT_ALERT_ROOM_NAME="Sovereign Alerts"
+DEFAULT_OPERATOR_USERNAME="admin"
+DEFAULT_ALERT_ROOM_NAME="Alerts"
 DEFAULT_SELECTED_BOTS="mail-sentinel"
-DEFAULT_POLL_INTERVAL="5m"
-DEFAULT_LOOKBACK_WINDOW="15m"
+DEFAULT_POLL_INTERVAL="30m"
+DEFAULT_LOOKBACK_WINDOW="1h"
 DEFAULT_FEDERATION_ENABLED="0"
 DEFAULT_MANAGED_RELAY_CONTROL_URL="https://relay.sovereign-ai-node.com"
-DEFAULT_CONNECTIVITY_MODE="relay"
+DEFAULT_CONNECTIVITY_MODE="direct"
 DEFAULT_RELAY_CONTROL_URL="${SOVEREIGN_NODE_RELAY_CONTROL_URL:-$DEFAULT_MANAGED_RELAY_CONTROL_URL}"
+DEFAULT_RELAY_REQUESTED_SLUG=""
+DEFAULT_RELAY_HOSTNAME=""
 DEFAULT_IMAP_CONFIGURED="0"
 DEFAULT_IMAP_HOST="imap.example.org"
 DEFAULT_IMAP_PORT="993"
@@ -59,6 +62,20 @@ LEGACY_OPENROUTER_MODEL_DETECTED="0"
 AVAILABLE_BOT_IDS=()
 AVAILABLE_BOT_DISPLAY_NAMES=()
 AVAILABLE_BOT_DEFAULT_INSTALLS=()
+UI_TOTAL_STEPS=0
+UI_CURRENT_STEP=0
+UI_ACTIVE_STEP_LABEL=""
+UI_ACTIVE_STEP_STARTED_AT=0
+UI_STEP_LOG_DIR=""
+UI_PRESERVE_STEP_LOGS="0"
+UI_BAR_WIDTH=28
+UI_TERMINAL_WIDTH=80
+UI_FANCY="0"
+UI_PROGRESS_LINE_OPEN="0"
+INSTALL_COMMAND_OUTPUT=""
+RUNTIME_STATUS_OUTPUT=""
+DOCTOR_REPORT_OUTPUT=""
+declare -a UI_SPINNER_FRAMES=("[    ]" "[=   ]" "[==  ]" "[=== ]" "[ ===]" "[  ==]" "[   =]")
 
 log() {
   printf '[%s] %s\n' "$SCRIPT_NAME" "$*"
@@ -220,14 +237,57 @@ ensure_supported_os() {
 install_base_packages() {
   log "Installing base packages"
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y
-  apt-get install -y \
+  apt_get_locked update -y
+  apt_get_locked install -y \
     ca-certificates \
     curl \
     git \
     build-essential \
     gnupg \
     qrencode
+  command -v git >/dev/null 2>&1 || die "git is required but could not be installed"
+}
+
+ansible_playbook_available() {
+  command -v ansible-playbook >/dev/null 2>&1
+}
+
+wait_for_apt_lock() {
+  local attempt
+  for attempt in $(seq 1 180); do
+    if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/dpkg/lock >/dev/null 2>&1; then
+      sleep 5
+      continue
+    fi
+    return 0
+  done
+  die "Timed out waiting for apt/dpkg lock"
+}
+
+apt_get_locked() {
+  wait_for_apt_lock
+  apt-get "$@"
+}
+
+install_ansible_if_needed() {
+  if [[ "$RUN_INSTALL" != "1" ]]; then
+    log "Install run skipped, skipping Ansible runtime"
+    return 0
+  fi
+
+  if ansible_playbook_available; then
+    log "Ansible runtime detected, skipping install"
+    return 0
+  fi
+
+  log "Installing Ansible runtime"
+  export DEBIAN_FRONTEND=noninteractive
+  apt_get_locked update -y
+  if ! apt_get_locked install -y ansible-core; then
+    apt_get_locked install -y ansible
+  fi
+
+  ansible_playbook_available || die "Failed to install ansible-playbook"
 }
 
 docker_cli_available() {
@@ -290,18 +350,18 @@ install_docker_if_needed() {
   configure_docker_apt_repo
 
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y
+  apt_get_locked update -y
 
-  if ! apt-get install -y \
+  if ! apt_get_locked install -y \
     docker-ce \
     docker-ce-cli \
     containerd.io \
     docker-buildx-plugin \
     docker-compose-plugin; then
     log "Docker CE package install failed, falling back to distro docker packages"
-    apt-get install -y docker.io docker-compose-v2 \
-      || apt-get install -y docker.io docker-compose-plugin \
-      || apt-get install -y docker.io docker-compose
+    apt_get_locked install -y docker.io docker-compose-v2 \
+      || apt_get_locked install -y docker.io docker-compose-plugin \
+      || apt_get_locked install -y docker.io docker-compose
   fi
 
   ensure_docker_daemon
@@ -338,8 +398,8 @@ install_node22_if_needed() {
     > /etc/apt/sources.list.d/nodesource.list
 
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y
-  apt-get install -y nodejs
+  apt_get_locked update -y
+  apt_get_locked install -y nodejs
 }
 
 ensure_service_account() {
@@ -485,10 +545,124 @@ sync_bots_source() {
   }
 }
 
+write_install_provenance() {
+  local node_commit_sha="unknown"
+  local node_ref_resolved="$REF"
+  local node_repo="$REPO_URL"
+  local bots_commit_sha="unknown"
+  local bots_ref_resolved="$BOTS_REF"
+  local bots_repo="$BOTS_REPO_URL"
+  local install_source="git-clone"
+
+  if [[ -n "$SOURCE_DIR" ]]; then
+    install_source="local-copy"
+    node_repo="local-copy"
+    if [[ -d "${SOURCE_DIR}/.git" ]]; then
+      node_commit_sha="$(git -C "$SOURCE_DIR" rev-parse HEAD 2>/dev/null || echo "unknown")"
+      node_ref_resolved="$(git -C "$SOURCE_DIR" symbolic-ref --short HEAD 2>/dev/null || echo "$REF")"
+    fi
+  elif [[ -d "${APP_DIR}/.git" ]]; then
+    node_commit_sha="$(git -C "$APP_DIR" rev-parse HEAD 2>/dev/null || echo "unknown")"
+  fi
+
+  if [[ -n "$BOTS_SOURCE_DIR" ]]; then
+    bots_repo="local-copy"
+    if [[ -d "${BOTS_SOURCE_DIR}/.git" ]]; then
+      bots_commit_sha="$(git -C "$BOTS_SOURCE_DIR" rev-parse HEAD 2>/dev/null || echo "unknown")"
+      bots_ref_resolved="$(git -C "$BOTS_SOURCE_DIR" symbolic-ref --short HEAD 2>/dev/null || echo "$BOTS_REF")"
+    fi
+  elif [[ -d "${BOTS_DIR}/.git" ]]; then
+    bots_commit_sha="$(git -C "$BOTS_DIR" rev-parse HEAD 2>/dev/null || echo "unknown")"
+  fi
+
+  # Detect curl-installer mode: when piped from stdin there is no SOURCE_DIR
+  if [[ -z "$SOURCE_DIR" && "$REPO_URL" == *"github.com"* ]]; then
+    install_source="curl-installer"
+  fi
+
+  local node_version="unknown"
+  local bots_version="unknown"
+  local node_pkg_dir="${SOURCE_DIR:-$APP_DIR}"
+  local bots_pkg_dir="${BOTS_SOURCE_DIR:-$BOTS_DIR}"
+  if [[ -f "${node_pkg_dir}/package.json" ]]; then
+    node_version="$(jq -r '.version // "unknown"' "${node_pkg_dir}/package.json" 2>/dev/null || echo "unknown")"
+  fi
+  if [[ -f "${bots_pkg_dir}/package.json" ]]; then
+    bots_version="$(jq -r '.version // "unknown"' "${bots_pkg_dir}/package.json" 2>/dev/null || echo "unknown")"
+  fi
+
+  local installed_at
+  installed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  cat > "$PROVENANCE_FILE" <<PROVENANCE_EOF
+{
+  "nodeRepoUrl": "${node_repo}",
+  "nodeRef": "${node_ref_resolved}",
+  "nodeVersion": "${node_version}",
+  "nodeCommitSha": "${node_commit_sha}",
+  "botsRepoUrl": "${bots_repo}",
+  "botsRef": "${bots_ref_resolved}",
+  "botsVersion": "${bots_version}",
+  "botsCommitSha": "${bots_commit_sha}",
+  "installedAt": "${installed_at}",
+  "installSource": "${install_source}"
+}
+PROVENANCE_EOF
+
+  chmod 0644 "$PROVENANCE_FILE"
+  chown "${SERVICE_USER}:${SERVICE_GROUP}" "$PROVENANCE_FILE" 2>/dev/null || true
+  log "Install provenance written to $PROVENANCE_FILE"
+}
+
 build_app() {
   log "Installing dependencies and building app"
   (
     cd "$APP_DIR"
+    if [[ -f "pnpm-lock.yaml" ]]; then
+      if command -v corepack >/dev/null 2>&1; then
+        corepack pnpm install --frozen-lockfile
+        corepack pnpm run build
+        exit 0
+      fi
+
+      if command -v pnpm >/dev/null 2>&1; then
+        pnpm install --frozen-lockfile
+        pnpm run build
+        exit 0
+      fi
+
+      die "pnpm lockfile detected but neither corepack nor pnpm is available"
+    fi
+
+    npm ci
+    npm run build
+  )
+}
+
+build_bots() {
+  if [[ ! -f "${BOTS_DIR}/package.json" ]]; then
+    log "No package.json under ${BOTS_DIR}; skipping bot build"
+    return 0
+  fi
+  log "Installing dependencies and building bots"
+  (
+    cd "$BOTS_DIR"
+    if [[ -f "pnpm-lock.yaml" ]]; then
+      if command -v corepack >/dev/null 2>&1; then
+        corepack pnpm install --frozen-lockfile
+        corepack pnpm run build
+        exit 0
+      fi
+
+      if command -v pnpm >/dev/null 2>&1; then
+        pnpm install --frozen-lockfile
+        pnpm run build
+        exit 0
+      fi
+
+      die "pnpm lockfile detected in ${BOTS_DIR} but neither corepack nor pnpm is available"
+    fi
+
     npm ci
     npm run build
   )
@@ -548,7 +722,61 @@ EOF
   fi
 
   systemctl daemon-reload
-  systemctl enable --now "${SERVICE_NAME}.service"
+  systemctl enable "${SERVICE_NAME}.service"
+  systemctl restart "${SERVICE_NAME}.service"
+}
+
+configure_system_hygiene() {
+  # --- journald size limit ---
+  local journald_dropin="/etc/systemd/journald.conf.d/sovereign-node.conf"
+  install -d -m 0755 /etc/systemd/journald.conf.d
+  cp "$APP_DIR/deploy/config/journald-sovereign-node.conf" "$journald_dropin"
+  chmod 0644 "$journald_dropin"
+  systemctl restart systemd-journald 2>/dev/null || true
+
+  # --- logrotate for sovereign-node logs ---
+  cp "$APP_DIR/deploy/config/logrotate-sovereign-node" /etc/logrotate.d/sovereign-node
+  chmod 0644 /etc/logrotate.d/sovereign-node
+
+  # --- snap retention limit (no-op if snap is absent) ---
+  if command -v snap >/dev/null 2>&1; then
+    snap set system refresh.retain=2 2>/dev/null || true
+  fi
+
+  # --- docker image prune timer ---
+  if docker_cli_available; then
+    cp "$APP_DIR/deploy/systemd/sovereign-node-docker-prune.service" \
+      /etc/systemd/system/sovereign-node-docker-prune.service
+    cp "$APP_DIR/deploy/systemd/sovereign-node-docker-prune.timer" \
+      /etc/systemd/system/sovereign-node-docker-prune.timer
+    systemctl daemon-reload
+    systemctl enable --now sovereign-node-docker-prune.timer 2>/dev/null || true
+  fi
+
+  # --- reduce reserved blocks on small disks ---
+  if command -v tune2fs >/dev/null 2>&1; then
+    local root_dev total_kb reserved_pct
+    root_dev="$(df -P / | tail -1 | awk '{print $1}')"
+    total_kb="$(df -Pk / | tail -1 | awk '{print $2}')"
+    if [[ "$total_kb" -lt $((64 * 1024 * 1024)) ]]; then
+      reserved_pct="$(tune2fs -l "$root_dev" 2>/dev/null \
+        | awk '/Reserved block count/ {rc=$NF} /Block count/ {bc=$NF} END {if (bc>0) printf "%d", rc*100/bc}' || true)"
+      if [[ -n "$reserved_pct" ]] && [[ "$reserved_pct" -gt 1 ]]; then
+        tune2fs -m 1 "$root_dev" 2>/dev/null || true
+        log "Reduced reserved blocks on $root_dev from ${reserved_pct}% to 1%"
+      fi
+    fi
+  fi
+
+  # --- disk space check timer ---
+  chmod +x "$APP_DIR/deploy/scripts/sovereign-node-disk-check.sh"
+  sed -e "s|__SCRIPTS_DIR__|${APP_DIR}/deploy/scripts|g" \
+    "$APP_DIR/deploy/systemd/sovereign-node-disk-check.service" \
+    > /etc/systemd/system/sovereign-node-disk-check.service
+  cp "$APP_DIR/deploy/systemd/sovereign-node-disk-check.timer" \
+    /etc/systemd/system/sovereign-node-disk-check.timer
+  systemctl daemon-reload
+  systemctl enable --now sovereign-node-disk-check.timer 2>/dev/null || true
 }
 
 install_request_template() {
@@ -601,7 +829,7 @@ detect_installation_state() {
 }
 
 has_tty() {
-  [[ -e /dev/tty ]]
+  [[ -t 0 || -t 1 ]] && [[ -r /dev/tty ]]
 }
 
 supports_color() {
@@ -609,11 +837,9 @@ supports_color() {
 }
 
 ui_print() {
-  if has_tty; then
-    printf '%b' "$*" > /dev/tty
-  else
-    printf '%b' "$*"
-  fi
+  # Write human-facing prompts to stderr so interactive runs launched via a pipe
+  # still render menus even when writing directly to /dev/tty is unreliable.
+  printf '%b' "$*" >&2
 }
 
 ui_title() {
@@ -674,7 +900,453 @@ ui_success() {
   fi
 }
 
-ui_choice_menu() {
+ui_is_fancy() {
+  [[ "$UI_FANCY" == "1" ]]
+}
+
+cleanup_ui_runtime() {
+  if [[ "$UI_PRESERVE_STEP_LOGS" != "1" ]] && [[ -n "$UI_STEP_LOG_DIR" ]] && [[ -d "$UI_STEP_LOG_DIR" ]]; then
+    rm -rf "$UI_STEP_LOG_DIR"
+  fi
+}
+
+ui_setup_runtime() {
+  UI_FANCY="0"
+  if has_tty; then
+    UI_FANCY="1"
+  fi
+  UI_TERMINAL_WIDTH="$(detect_terminal_width)"
+  UI_STEP_LOG_DIR="$(mktemp -d /tmp/sovereign-node-installer.XXXXXX)"
+  trap cleanup_ui_runtime EXIT
+}
+
+ui_configure_progress_plan() {
+  UI_TOTAL_STEPS=19
+}
+
+detect_terminal_width() {
+  local detected
+
+  detected=""
+  if has_tty; then
+    detected="$(stty size < /dev/tty 2>/dev/null | awk '{print $2}')"
+    if [[ -z "$detected" ]] && command -v tput >/dev/null 2>&1; then
+      detected="$(tput cols 2>/dev/null || true)"
+    fi
+  fi
+
+  if [[ -z "$detected" ]] || [[ ! "$detected" =~ ^[0-9]+$ ]] || [[ "$detected" -lt 40 ]]; then
+    detected=80
+  fi
+
+  printf '%s' "$detected"
+}
+
+format_duration() {
+  local total_seconds minutes seconds
+  total_seconds="${1:-0}"
+  minutes=$((total_seconds / 60))
+  seconds=$((total_seconds % 60))
+  if [[ "$minutes" -gt 0 ]]; then
+    printf '%dm%02ds' "$minutes" "$seconds"
+  else
+    printf '%ds' "$seconds"
+  fi
+}
+
+ui_progress_percent() {
+  local completed total
+  completed="${1:-0}"
+  total="${2:-0}"
+  if [[ "$total" -le 0 ]]; then
+    printf '0'
+    return 0
+  fi
+  printf '%d' $((completed * 100 / total))
+}
+
+ui_progress_bar() {
+  local completed total active width filled index bar
+  completed="${1:-0}"
+  total="${2:-0}"
+  active="${3:-0}"
+  width="${4:-$UI_BAR_WIDTH}"
+  filled=0
+  bar=""
+
+  if [[ "$total" -gt 0 ]]; then
+    filled=$((completed * width / total))
+  fi
+  if [[ "$filled" -gt "$width" ]]; then
+    filled="$width"
+  fi
+
+  for ((index = 0; index < width; index += 1)); do
+    if [[ "$index" -lt "$filled" ]]; then
+      bar="${bar}="
+    elif [[ "$active" == "1" ]] && [[ "$index" -eq "$filled" ]] && [[ "$filled" -lt "$width" ]]; then
+      bar="${bar}>"
+    else
+      bar="${bar}-"
+    fi
+  done
+
+  printf '%s' "$bar"
+}
+
+ui_truncate_text() {
+  local input max_width
+  input="$1"
+  max_width="${2:-0}"
+
+  if [[ "$max_width" -le 0 ]]; then
+    printf ''
+    return 0
+  fi
+
+  if [[ "${#input}" -le "$max_width" ]]; then
+    printf '%s' "$input"
+    return 0
+  fi
+
+  if [[ "$max_width" -le 3 ]]; then
+    printf '%s' "${input:0:max_width}"
+    return 0
+  fi
+
+  printf '%s...' "${input:0:max_width-3}"
+}
+
+ui_step_log_path() {
+  local slug
+  slug="$(
+    printf '%s' "${UI_ACTIVE_STEP_LABEL:-step}" \
+      | tr '[:upper:]' '[:lower:]' \
+      | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
+  )"
+  if [[ -z "$slug" ]]; then
+    slug="step"
+  fi
+  printf '%s/%02d-%s.log' "$UI_STEP_LOG_DIR" "$UI_CURRENT_STEP" "$slug"
+}
+
+ui_preserve_logs() {
+  UI_PRESERVE_STEP_LOGS="1"
+}
+
+ui_show_log_excerpt() {
+  local path
+  path="$1"
+  [[ -f "$path" ]] || return 0
+
+  ui_break_progress_line
+  ui_print "\nRecent output:\n"
+  while IFS= read -r line; do
+    ui_print "  ${line}\n"
+  done < <(tail -n 20 "$path")
+}
+
+ui_break_progress_line() {
+  if ui_is_fancy && [[ "${UI_PROGRESS_LINE_OPEN:-0}" == "1" ]]; then
+    ui_print "\n"
+    UI_PROGRESS_LINE_OPEN="0"
+  fi
+}
+
+ui_render_step_line() {
+  local state label detail frame completed percent bar counter line prefix prefix_plain
+  local body line_prefix bar_width available_body_width terminal_width
+  state="$1"
+  label="$2"
+  detail="${3:-}"
+  frame="${4:-}"
+
+  case "$state" in
+    running)
+      completed=$((UI_CURRENT_STEP - 1))
+      prefix="$frame"
+      if [[ -z "$prefix" ]]; then
+        prefix="[....]"
+      fi
+      ;;
+    success)
+      completed="$UI_CURRENT_STEP"
+      prefix="[ok]"
+      ;;
+    failed)
+      completed=$((UI_CURRENT_STEP - 1))
+      prefix="[!!]"
+      ;;
+    skipped)
+      completed="$UI_CURRENT_STEP"
+      prefix="[--]"
+      ;;
+    *)
+      completed="$UI_CURRENT_STEP"
+      prefix="[--]"
+      ;;
+  esac
+
+  percent="$(ui_progress_percent "$completed" "$UI_TOTAL_STEPS")"
+  bar_width="$UI_BAR_WIDTH"
+  terminal_width="${UI_TERMINAL_WIDTH:-80}"
+  if [[ "$terminal_width" -lt 72 ]]; then
+    bar_width=16
+  elif [[ "$terminal_width" -lt 88 ]]; then
+    bar_width=20
+  fi
+  bar="$(ui_progress_bar "$completed" "$UI_TOTAL_STEPS" "$( [[ "$state" == "running" ]] && printf '1' || printf '0' )" "$bar_width")"
+  counter="$(printf '%02d/%02d' "$UI_CURRENT_STEP" "$UI_TOTAL_STEPS")"
+  line_prefix="$(printf '%3s%% |%s| %s ' "$percent" "$bar" "$counter")"
+  body="$label"
+  if [[ -n "$detail" ]]; then
+    body="${body} - ${detail}"
+  fi
+  prefix_plain="$prefix"
+  available_body_width=$((terminal_width - ${#prefix_plain} - 1 - ${#line_prefix}))
+  if [[ "$available_body_width" -lt 8 ]]; then
+    available_body_width=8
+  fi
+  body="$(ui_truncate_text "$body" "$available_body_width")"
+  line="${line_prefix}${body}"
+
+  if supports_color; then
+    case "$state" in
+      running)
+        prefix="\033[36m${prefix}\033[0m"
+        ;;
+      success)
+        prefix="\033[32m${prefix}\033[0m"
+        ;;
+      failed)
+        prefix="\033[31m${prefix}\033[0m"
+        ;;
+      skipped)
+        prefix="\033[33m${prefix}\033[0m"
+        ;;
+    esac
+  fi
+
+  if ui_is_fancy; then
+    if [[ "$state" == "running" ]]; then
+      ui_print "\r\033[2K${prefix} ${line}"
+      UI_PROGRESS_LINE_OPEN="1"
+    elif [[ "$state" == "failed" ]]; then
+      ui_print "\r\033[2K${prefix} ${line}\n"
+      UI_PROGRESS_LINE_OPEN="0"
+    else
+      ui_print "\r\033[2K${prefix} ${line}"
+      UI_PROGRESS_LINE_OPEN="1"
+    fi
+  elif [[ "$state" == "success" ]]; then
+    log "${label}: ${detail:-done}"
+  elif [[ "$state" == "failed" ]]; then
+    log "${label}: ${detail:-failed}"
+  elif [[ "$state" == "skipped" ]]; then
+    log "${label}: ${detail:-skipped}"
+  else
+    log "$label"
+  fi
+}
+
+ui_begin_step() {
+  UI_CURRENT_STEP=$((UI_CURRENT_STEP + 1))
+  UI_ACTIVE_STEP_LABEL="$1"
+  UI_ACTIVE_STEP_STARTED_AT="$SECONDS"
+  ui_render_step_line "running" "$UI_ACTIVE_STEP_LABEL" "starting" "${UI_SPINNER_FRAMES[0]}"
+}
+
+ui_begin_step_static() {
+  UI_CURRENT_STEP=$((UI_CURRENT_STEP + 1))
+  UI_ACTIVE_STEP_LABEL="$1"
+  UI_ACTIVE_STEP_STARTED_AT="$SECONDS"
+  ui_render_step_line "running" "$UI_ACTIVE_STEP_LABEL" "${2:-working}" "${UI_SPINNER_FRAMES[0]}"
+}
+
+ui_update_step() {
+  local detail frame_index frame_count frame
+  detail="${1:-working}"
+  frame_index="${2:-0}"
+  frame_count="${#UI_SPINNER_FRAMES[@]}"
+  frame="${UI_SPINNER_FRAMES[$((frame_index % frame_count))]}"
+  ui_render_step_line "running" "$UI_ACTIVE_STEP_LABEL" "$detail" "$frame"
+}
+
+ui_complete_step() {
+  local detail elapsed formatted
+  detail="${1:-done}"
+  elapsed=$((SECONDS - UI_ACTIVE_STEP_STARTED_AT))
+  formatted="$(format_duration "$elapsed")"
+  ui_render_step_line "success" "$UI_ACTIVE_STEP_LABEL" "${detail} (${formatted})"
+  UI_ACTIVE_STEP_LABEL=""
+  UI_ACTIVE_STEP_STARTED_AT=0
+}
+
+ui_fail_step() {
+  local detail elapsed formatted
+  detail="${1:-failed}"
+  elapsed=$((SECONDS - UI_ACTIVE_STEP_STARTED_AT))
+  formatted="$(format_duration "$elapsed")"
+  ui_render_step_line "failed" "$UI_ACTIVE_STEP_LABEL" "${detail} (${formatted})"
+  UI_ACTIVE_STEP_LABEL=""
+  UI_ACTIVE_STEP_STARTED_AT=0
+}
+
+ui_skip_step() {
+  local label reason
+  label="$1"
+  reason="$2"
+  UI_CURRENT_STEP=$((UI_CURRENT_STEP + 1))
+  ui_render_step_line "skipped" "$label" "$reason"
+}
+
+ui_run_step_captured() {
+  local label log_path step_status frame_index pid
+  label="$1"
+  shift
+
+  if ! ui_is_fancy; then
+    ui_begin_step_static "$label"
+    set +e
+    "$@"
+    step_status=$?
+    set -e
+    if [[ "$step_status" -eq 0 ]]; then
+      ui_complete_step
+      return 0
+    fi
+    ui_fail_step
+    return "$step_status"
+  fi
+
+  ui_begin_step "$label"
+  log_path="$(ui_step_log_path)"
+  : > "$log_path"
+  "$@" >"$log_path" 2>&1 &
+  pid=$!
+  frame_index=0
+
+  while kill -0 "$pid" 2>/dev/null; do
+    ui_update_step "working" "$frame_index"
+    frame_index=$((frame_index + 1))
+    sleep 0.12
+  done
+
+  set +e
+  wait "$pid"
+  step_status=$?
+  set -e
+
+  if [[ "$step_status" -eq 0 ]]; then
+    ui_complete_step
+    return 0
+  fi
+
+  ui_preserve_logs
+  ui_fail_step "see $(basename "$log_path")"
+  ui_error "Step log: $log_path"
+  ui_show_log_excerpt "$log_path"
+  return "$step_status"
+}
+
+ui_run_step_foreground() {
+  local label step_status
+  label="$1"
+  shift
+  ui_begin_step_static "$label"
+  set +e
+  "$@"
+  step_status=$?
+  set -e
+  if [[ "$step_status" -eq 0 ]]; then
+    ui_complete_step
+    return 0
+  fi
+  ui_fail_step
+  return "$step_status"
+}
+
+ui_run_step_interactive() {
+  local label step_status
+  label="$1"
+  shift
+  ui_begin_step_static "$label" "interactive"
+  ui_break_progress_line
+  set +e
+  "$@"
+  step_status=$?
+  set -e
+  if [[ "$step_status" -eq 0 ]]; then
+    ui_complete_step
+    return 0
+  fi
+  ui_fail_step
+  return "$step_status"
+}
+
+ui_print_banner() {
+  local subtitle
+  if [[ "${ACTION:-install}" == "update" ]]; then
+    subtitle="Upgrade the existing Sovereign node in place."
+  else
+    subtitle="Provision and configure a Sovereign node from the terminal."
+  fi
+
+  ui_print "\n"
+  if supports_color; then
+    ui_print "\033[1;36m"
+  fi
+  ui_print " ___  _____   _____ ___ ___ ___ ___ _  _\n"
+  ui_print "/ __|/ _ \\ \\ / / __| _ \\ __|_ _/ __| \\| |\n"
+  ui_print "\\__ \\ (_) \\ V /| _||   / _| | | (_ | .\` |\n"
+  ui_print "|___/\\___/ \\_/ |___|_|_\\___|___\\___|_|\\_|\n"
+  ui_print "\n"
+  ui_print "       _   ___   _  _  ___  ___  ___\n"
+  ui_print "      /_\\ |_ _| | \\| |/ _ \\|   \\| __|\n"
+  ui_print "     / _ \\ | |  | .\` | (_) | |) | _|\n"
+  ui_print "    /_/ \\_\\___| |_|\\_|\\___/|___/|___|\n"
+  if supports_color; then
+    ui_print "\033[0m"
+  fi
+  ui_print "  ${subtitle}\n"
+  ui_print "  ${UI_TOTAL_STEPS} phases queued.\n\n"
+}
+
+ui_print_summary_block() {
+  local title payload
+  title="$1"
+  payload="$2"
+  [[ -n "$payload" ]] || return 0
+  ui_section "$title"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    ui_print "  ${line}\n"
+  done <<< "$payload"
+}
+
+ui_screen_line_count() {
+  local text width length count
+  text="$1"
+  width="${UI_TERMINAL_WIDTH:-80}"
+  length="${#text}"
+
+  if [[ "$width" -lt 1 ]]; then
+    width=80
+  fi
+
+  if [[ "$length" -le 0 ]]; then
+    printf '1'
+    return 0
+  fi
+
+  count=$(((length + width - 1) / width))
+  if [[ "$count" -lt 1 ]]; then
+    count=1
+  fi
+  printf '%s' "$count"
+}
+
+ui_choice_menu_simple() {
   local prompt default_choice answer option_count index option_number
   prompt="$1"
   default_choice="$2"
@@ -705,7 +1377,111 @@ ui_choice_menu() {
   done
 }
 
-ui_confirm() {
+ui_choice_menu_graphical() {
+  local prompt default_choice current_index rendered_lines key extra option_count index option_number
+  local plain_line display_line help_line summary_line
+  prompt="$1"
+  default_choice="$2"
+  shift 2
+  local options=("$@")
+  option_count="${#options[@]}"
+  current_index=$((default_choice - 1))
+  rendered_lines=0
+  key=""
+  extra=""
+  help_line="  arrows move, enter confirm."
+
+  while true; do
+    if [[ "$rendered_lines" -gt 0 ]]; then
+      ui_print "\033[${rendered_lines}A\r\033[J"
+    fi
+
+    rendered_lines=0
+    ui_print "${prompt}\n"
+    rendered_lines=$((rendered_lines + $(ui_screen_line_count "$prompt")))
+    ui_print "${help_line}\n"
+    rendered_lines=$((rendered_lines + $(ui_screen_line_count "$help_line")))
+
+    for index in "${!options[@]}"; do
+      option_number=$((index + 1))
+      plain_line="${options[$index]}"
+      if [[ "$option_number" == "$default_choice" ]]; then
+        plain_line="${plain_line}  default"
+      fi
+      display_line="  ${plain_line}"
+
+      if [[ "$index" == "$current_index" ]]; then
+        if supports_color; then
+          ui_print "  \033[1;36m>\033[0m \033[7m${display_line}\033[0m\n"
+        else
+          ui_print "  > ${display_line}\n"
+        fi
+      else
+        ui_print "    ${display_line}\n"
+      fi
+      rendered_lines=$((rendered_lines + $(ui_screen_line_count "  > ${display_line}")))
+    done
+
+    IFS= read -rsn1 key < /dev/tty || true
+    if [[ "$key" == $'\e' ]]; then
+      IFS= read -rsn1 -t 0.05 extra < /dev/tty || extra=""
+      if [[ "$extra" == "[" ]]; then
+        IFS= read -rsn1 -t 0.05 extra < /dev/tty || extra=""
+        case "$extra" in
+          A)
+            if [[ "$current_index" -gt 0 ]]; then
+              current_index=$((current_index - 1))
+            fi
+            continue
+            ;;
+          B)
+            if [[ "$current_index" -lt $((option_count - 1)) ]]; then
+              current_index=$((current_index + 1))
+            fi
+            continue
+            ;;
+        esac
+      fi
+    fi
+
+    case "$key" in
+      "")
+        summary_line="Selected: ${options[$current_index]}"
+        ui_print "\033[${rendered_lines}A\r\033[J"
+        ui_print "${summary_line}\n"
+        printf '%s' "$((current_index + 1))"
+        return 0
+        ;;
+      j|J)
+        if [[ "$current_index" -lt $((option_count - 1)) ]]; then
+          current_index=$((current_index + 1))
+        fi
+        ;;
+      k|K)
+        if [[ "$current_index" -gt 0 ]]; then
+          current_index=$((current_index - 1))
+        fi
+        ;;
+      [1-9])
+        index=$((10#$key - 1))
+        if [[ "$index" -lt "$option_count" ]]; then
+          current_index="$index"
+        fi
+        ;;
+    esac
+  done
+}
+
+ui_choice_menu() {
+  if ui_is_fancy && has_tty; then
+    ui_choice_menu_graphical "$@"
+    return 0
+  fi
+
+  ui_choice_menu_simple "$@"
+}
+
+ui_confirm_simple() {
   local prompt default answer normalized
   prompt="$1"
   default="$2"
@@ -726,6 +1502,31 @@ ui_confirm() {
     esac
     ui_warn "Please answer y or n."
   done
+}
+
+ui_confirm() {
+  local prompt default selected_choice default_choice
+  prompt="$1"
+  default="$2"
+
+  if ui_is_fancy && has_tty; then
+    if [[ "$default" == "y" ]] || [[ "$default" == "yes" ]]; then
+      default_choice="1"
+    else
+      default_choice="2"
+    fi
+    selected_choice="$(
+      ui_choice_menu \
+        "$prompt" \
+        "$default_choice" \
+        "Yes" \
+        "No"
+    )"
+    [[ "$selected_choice" == "1" ]]
+    return $?
+  fi
+
+  ui_confirm_simple "$prompt" "$default"
 }
 
 prompt_value() {
@@ -901,6 +1702,328 @@ describe_selected_bots() {
   printf '%s' "$joined"
 }
 
+build_default_bot_selection_numbers() {
+  local selected numbers index option_number
+  selected="$1"
+  numbers=""
+
+  for index in "${!AVAILABLE_BOT_IDS[@]}"; do
+    if bot_list_contains "$selected" "${AVAILABLE_BOT_IDS[$index]}"; then
+      option_number=$((index + 1))
+      if [[ -n "$numbers" ]]; then
+        numbers="${numbers},${option_number}"
+      else
+        numbers="$option_number"
+      fi
+    fi
+  done
+
+  printf '%s' "$numbers"
+}
+
+parse_bot_selection_input() {
+  local raw token selected index option_number
+  local -a requested_numbers
+  raw="$1"
+  selected=""
+  requested_numbers=()
+
+  case "$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')" in
+    all)
+      for index in "${!AVAILABLE_BOT_IDS[@]}"; do
+        selected="$(append_selected_bot "$selected" "${AVAILABLE_BOT_IDS[$index]}")"
+      done
+      printf '%s' "$selected"
+      return 0
+      ;;
+    none)
+      printf ''
+      return 0
+      ;;
+  esac
+
+  raw="$(printf '%s' "$raw" | tr ',' ' ')"
+  for token in $raw; do
+    if [[ ! "$token" =~ ^[0-9]+$ ]]; then
+      return 1
+    fi
+    if (( token < 1 || token > ${#AVAILABLE_BOT_IDS[@]} )); then
+      return 1
+    fi
+    requested_numbers+=("$token")
+  done
+
+  for index in "${!AVAILABLE_BOT_IDS[@]}"; do
+    option_number=$((index + 1))
+    for token in "${requested_numbers[@]}"; do
+      if [[ "$token" == "$option_number" ]]; then
+        selected="$(append_selected_bot "$selected" "${AVAILABLE_BOT_IDS[$index]}")"
+        break
+      fi
+    done
+  done
+
+  printf '%s' "$selected"
+}
+
+build_bot_selection_from_flags() {
+  local result index
+  result=""
+
+  for index in "${!AVAILABLE_BOT_IDS[@]}"; do
+    if [[ "${BOT_SELECTION_FLAGS[$index]:-0}" == "1" ]]; then
+      result="$(append_selected_bot "$result" "${AVAILABLE_BOT_IDS[$index]}")"
+    fi
+  done
+
+  printf '%s' "$result"
+}
+
+set_bot_selection_flags_from_list() {
+  local selected index
+  selected="$1"
+
+  BOT_SELECTION_FLAGS=()
+  for index in "${!AVAILABLE_BOT_IDS[@]}"; do
+    if bot_list_contains "$selected" "${AVAILABLE_BOT_IDS[$index]}"; then
+      BOT_SELECTION_FLAGS+=("1")
+    else
+      BOT_SELECTION_FLAGS+=("0")
+    fi
+  done
+}
+
+prompt_bot_selection_simple() {
+  local selected default_numbers answer parsed_selection index option_number marker suffix
+  selected="$1"
+
+  if [[ "${#AVAILABLE_BOT_IDS[@]}" -eq 0 ]]; then
+    die "No bots were loaded from ${BOTS_DIR}. Check the bots repository before continuing."
+  fi
+
+  while true; do
+    default_numbers="$(build_default_bot_selection_numbers "$selected")"
+    ui_print "Choose bots to install (comma-separated numbers, or 'all').\n"
+    for index in "${!AVAILABLE_BOT_IDS[@]}"; do
+      option_number=$((index + 1))
+      marker=" "
+      suffix=""
+      if bot_list_contains "$selected" "${AVAILABLE_BOT_IDS[$index]}"; then
+        marker="x"
+      fi
+      if [[ "${AVAILABLE_BOT_DEFAULT_INSTALLS[$index]}" == "1" ]]; then
+        suffix=" [default]"
+      fi
+      ui_print "  ${option_number}) [${marker}] ${AVAILABLE_BOT_DISPLAY_NAMES[$index]}${suffix}\n"
+    done
+    if [[ -n "$default_numbers" ]]; then
+      ui_print "Select [${default_numbers}]: "
+    else
+      ui_print "Select: "
+    fi
+    IFS= read -r answer < /dev/tty || true
+    if [[ -z "$answer" ]]; then
+      answer="$default_numbers"
+    fi
+    if ! parsed_selection="$(parse_bot_selection_input "$answer")"; then
+      ui_warn "Enter one or more bot numbers separated by commas, or 'all'."
+      continue
+    fi
+    if [[ -z "$parsed_selection" ]]; then
+      ui_warn "Select at least one bot to install."
+      continue
+    fi
+    printf '%s' "$parsed_selection"
+    return 0
+  done
+}
+
+prompt_bot_selection_graphical() {
+  local selected current_index rendered_lines key extra current_selection
+  local index marker line suffix status_line display_name
+  local title_line help_line summary_plain
+
+  selected="$1"
+  current_index=0
+  rendered_lines=0
+  key=""
+  extra=""
+  status_line=""
+  title_line="Choose bots to install"
+  help_line="  arrows move, space toggle, enter confirm, a all, n none."
+
+  if [[ "${#AVAILABLE_BOT_IDS[@]}" -eq 0 ]]; then
+    die "No bots were loaded from ${BOTS_DIR}. Check the bots repository before continuing."
+  fi
+
+  set_bot_selection_flags_from_list "$selected"
+  for index in "${!BOT_SELECTION_FLAGS[@]}"; do
+    if [[ "${BOT_SELECTION_FLAGS[$index]}" == "1" ]]; then
+      current_index="$index"
+      break
+    fi
+  done
+
+  redraw_bot_selection_menu() {
+    local selected_count
+
+    if [[ "$rendered_lines" -gt 0 ]]; then
+      ui_print "\033[${rendered_lines}A\r\033[J"
+    fi
+
+    rendered_lines=0
+    current_selection="$(build_bot_selection_from_flags)"
+    selected_count=0
+    for index in "${!BOT_SELECTION_FLAGS[@]}"; do
+      if [[ "${BOT_SELECTION_FLAGS[$index]}" == "1" ]]; then
+        selected_count=$((selected_count + 1))
+      fi
+    done
+
+    ui_print "${title_line}\n"
+    rendered_lines=$((rendered_lines + $(ui_screen_line_count "$title_line")))
+    ui_print "${help_line}\n"
+    rendered_lines=$((rendered_lines + $(ui_screen_line_count "$help_line")))
+
+    for index in "${!AVAILABLE_BOT_IDS[@]}"; do
+      if [[ "${BOT_SELECTION_FLAGS[$index]}" == "1" ]]; then
+        marker="[x]"
+      else
+        marker="[ ]"
+      fi
+
+      suffix=""
+      if [[ "${AVAILABLE_BOT_DEFAULT_INSTALLS[$index]}" == "1" ]]; then
+        suffix="  default"
+      fi
+      display_name="${AVAILABLE_BOT_DISPLAY_NAMES[$index]}${suffix}"
+      line="  ${marker} ${display_name}"
+
+      if [[ "$index" == "$current_index" ]]; then
+        if supports_color; then
+          ui_print "  \033[1;36m>\033[0m \033[7m${line}\033[0m\n"
+        else
+          ui_print "  > ${line}\n"
+        fi
+      else
+        ui_print "    ${line}\n"
+      fi
+      rendered_lines=$((rendered_lines + $(ui_screen_line_count "  > ${line}")))
+    done
+
+    if [[ -n "$status_line" ]]; then
+      if supports_color; then
+        ui_print "  \033[33m${status_line}\033[0m\n"
+      else
+        ui_print "  ${status_line}\n"
+      fi
+      rendered_lines=$((rendered_lines + $(ui_screen_line_count "  ${status_line}")))
+    else
+      summary_plain="  Selected (${selected_count}): $(describe_selected_bots "$current_selection")"
+      ui_print "${summary_plain}\n"
+      rendered_lines=$((rendered_lines + $(ui_screen_line_count "$summary_plain")))
+    fi
+  }
+
+  while true; do
+    redraw_bot_selection_menu
+    IFS= read -rsn1 key < /dev/tty || true
+
+    if [[ "$key" == $'\e' ]]; then
+      IFS= read -rsn1 -t 0.05 extra < /dev/tty || extra=""
+      if [[ "$extra" == "[" ]]; then
+        IFS= read -rsn1 -t 0.05 extra < /dev/tty || extra=""
+        case "$extra" in
+          A)
+            if [[ "$current_index" -gt 0 ]]; then
+              current_index=$((current_index - 1))
+            fi
+            status_line=""
+            continue
+            ;;
+          B)
+            if [[ "$current_index" -lt $((${#AVAILABLE_BOT_IDS[@]} - 1)) ]]; then
+              current_index=$((current_index + 1))
+            fi
+            status_line=""
+            continue
+            ;;
+        esac
+      fi
+    fi
+
+    case "$key" in
+      " ")
+        if [[ "${BOT_SELECTION_FLAGS[$current_index]}" == "1" ]]; then
+          BOT_SELECTION_FLAGS[$current_index]="0"
+        else
+          BOT_SELECTION_FLAGS[$current_index]="1"
+        fi
+        status_line=""
+        ;;
+      "")
+        current_selection="$(build_bot_selection_from_flags)"
+        if [[ -z "$current_selection" ]]; then
+          status_line="Select at least one bot to install."
+          continue
+        fi
+        ui_print "\033[${rendered_lines}A\r\033[J"
+        ui_print "Selected bots: $(describe_selected_bots "$current_selection")\n"
+        printf '%s' "$current_selection"
+        return 0
+        ;;
+      a|A)
+        for index in "${!BOT_SELECTION_FLAGS[@]}"; do
+          BOT_SELECTION_FLAGS[$index]="1"
+        done
+        status_line=""
+        ;;
+      n|N)
+        for index in "${!BOT_SELECTION_FLAGS[@]}"; do
+          BOT_SELECTION_FLAGS[$index]="0"
+        done
+        status_line=""
+        ;;
+      j|J)
+        if [[ "$current_index" -lt $((${#AVAILABLE_BOT_IDS[@]} - 1)) ]]; then
+          current_index=$((current_index + 1))
+        fi
+        status_line=""
+        ;;
+      k|K)
+        if [[ "$current_index" -gt 0 ]]; then
+          current_index=$((current_index - 1))
+        fi
+        status_line=""
+        ;;
+      [1-9])
+        index=$((10#$key - 1))
+        if [[ "$index" -lt "${#BOT_SELECTION_FLAGS[@]}" ]]; then
+          if [[ "${BOT_SELECTION_FLAGS[$index]}" == "1" ]]; then
+            BOT_SELECTION_FLAGS[$index]="0"
+          else
+            BOT_SELECTION_FLAGS[$index]="1"
+          fi
+          current_index="$index"
+          status_line=""
+        fi
+        ;;
+      *)
+        status_line="Use up/down, space, enter, a, or n."
+        ;;
+    esac
+  done
+}
+
+prompt_bot_selection() {
+  if ui_is_fancy && has_tty; then
+    prompt_bot_selection_graphical "$1"
+    return 0
+  fi
+
+  prompt_bot_selection_simple "$1"
+}
+
 reset_request_defaults() {
   EXISTING_REQUEST_VALID="0"
   LAST_REQUEST_LOAD_ERROR=""
@@ -908,12 +2031,14 @@ reset_request_defaults() {
   DEFAULT_OPENROUTER_MODEL="$RECOMMENDED_OPENROUTER_MODEL"
   DEFAULT_MATRIX_DOMAIN="$RECOMMENDED_MATRIX_DOMAIN"
   DEFAULT_MATRIX_PUBLIC_BASE_URL="$RECOMMENDED_MATRIX_PUBLIC_BASE_URL"
-  DEFAULT_OPERATOR_USERNAME="operator"
-  DEFAULT_ALERT_ROOM_NAME="Sovereign Alerts"
+  DEFAULT_OPERATOR_USERNAME="admin"
+  DEFAULT_ALERT_ROOM_NAME="Alerts"
   DEFAULT_SELECTED_BOTS="$(default_selected_bots_from_catalog)"
-  DEFAULT_POLL_INTERVAL="5m"
-  DEFAULT_LOOKBACK_WINDOW="15m"
+  DEFAULT_POLL_INTERVAL="30m"
+  DEFAULT_LOOKBACK_WINDOW="1h"
   DEFAULT_FEDERATION_ENABLED="0"
+  DEFAULT_RELAY_REQUESTED_SLUG=""
+  DEFAULT_RELAY_HOSTNAME=""
   DEFAULT_IMAP_CONFIGURED="0"
   DEFAULT_IMAP_HOST="imap.example.org"
   DEFAULT_IMAP_PORT="993"
@@ -1014,12 +2139,11 @@ const botConfig = bots && typeof bots === "object" && !Array.isArray(bots)
   && bots.config && typeof bots.config === "object" && !Array.isArray(bots.config)
   ? bots.config
   : {};
-const legacyMailSentinel = req.mailSentinel ?? {};
 const mailSentinel =
   botConfig["mail-sentinel"] && typeof botConfig["mail-sentinel"] === "object"
   && !Array.isArray(botConfig["mail-sentinel"])
     ? botConfig["mail-sentinel"]
-    : legacyMailSentinel;
+    : {};
 const imap = req.imap ?? {};
 let runtime = {};
 try {
@@ -1035,7 +2159,7 @@ const runtimeRelay = runtime && typeof runtime === "object" && !Array.isArray(ru
   ? runtime.relay ?? {}
   : {};
 
-const recommendedOpenrouterModel = "openai/gpt-5-nano";
+const recommendedOpenrouterModel = "qwen/qwen3.5-9b";
 const legacyOpenrouterModel = "openrouter/anthropic/claude-sonnet-4-5";
 const recommendedMatrixDomain = process.env.SN_RECOMMENDED_MATRIX_DOMAIN || "";
 const recommendedMatrixPublicBaseUrl = process.env.SN_RECOMMENDED_MATRIX_PUBLIC_BASE_URL || "";
@@ -1096,6 +2220,16 @@ if (runtimeRelayEnabled || connectivity.mode === "relay" || relay.controlUrl) {
   emit("DEFAULT_CONNECTIVITY_MODE", "direct");
 }
 emit("DEFAULT_RELAY_CONTROL_URL", runtimeRelayControlUrl || relay.controlUrl || "");
+const requestedRelaySlug =
+  relay && typeof relay === "object" && !Array.isArray(relay) && typeof relay.requestedSlug === "string"
+    ? relay.requestedSlug
+    : "";
+const deriveSlugFromHostname = (value) => {
+  const normalized = String(value || "").trim().toLowerCase().replace(/\.+$/g, "");
+  return normalized.length === 0 ? "" : normalized.split(".")[0] || "";
+};
+emit("DEFAULT_RELAY_REQUESTED_SLUG", requestedRelaySlug || deriveSlugFromHostname(runtimeRelayHostname));
+emit("DEFAULT_RELAY_HOSTNAME", runtimeRelayHostname);
 emit("EXISTING_RELAY_ENROLLMENT_TOKEN", relay.enrollmentToken || "");
 emit(
   "DEFAULT_SELECTED_BOTS",
@@ -1155,6 +2289,12 @@ NODE
         ;;
       DEFAULT_RELAY_CONTROL_URL)
         DEFAULT_RELAY_CONTROL_URL="$value"
+        ;;
+      DEFAULT_RELAY_REQUESTED_SLUG)
+        DEFAULT_RELAY_REQUESTED_SLUG="$value"
+        ;;
+      DEFAULT_RELAY_HOSTNAME)
+        DEFAULT_RELAY_HOSTNAME="$value"
         ;;
       EXISTING_RELAY_ENROLLMENT_TOKEN)
         EXISTING_RELAY_ENROLLMENT_TOKEN="$value"
@@ -1470,7 +2610,7 @@ const req = {
   openclaw: {
     manageInstallation: true,
     installMethod: "install_sh",
-    version: "2026.3.1",
+    version: "2026.3.13",
     skipIfCompatibleInstalled: true,
     forceReinstall: false,
     runOnboard: false,
@@ -1510,11 +2650,23 @@ if (selectedBots.length > 0) {
 }
 
 if (connectivityMode === "relay") {
+  // Read pre-enrolled relay fields from existing request file (seeded by Pro installer).
+  let existingRelay = {};
+  try {
+    const existing = JSON.parse(fs.readFileSync(process.env.SN_REQUEST_FILE, "utf8"));
+    if (existing && typeof existing.relay === "object" && existing.relay !== null) {
+      existingRelay = existing.relay;
+    }
+  } catch {}
   req.relay = {
-    controlUrl: process.env.SN_RELAY_CONTROL_URL,
+    ...existingRelay,
+    controlUrl: process.env.SN_RELAY_CONTROL_URL || existingRelay.controlUrl,
   };
   if ((process.env.SN_RELAY_ENROLLMENT_TOKEN || "").trim().length > 0) {
     req.relay.enrollmentToken = process.env.SN_RELAY_ENROLLMENT_TOKEN;
+  }
+  if ((process.env.SN_RELAY_REQUESTED_SLUG || "").trim().length > 0) {
+    req.relay.requestedSlug = process.env.SN_RELAY_REQUESTED_SLUG;
   }
 }
 
@@ -1556,7 +2708,16 @@ review_install_request() {
     else
       ui_info "Relay enrollment: token-based (custom relay)"
     fi
-    ui_info "Node name: auto-generated by relay (immutable)"
+    if [[ -n "${SN_RELAY_REQUESTED_SLUG:-}" ]]; then
+      ui_info "Requested node name: ${SN_RELAY_REQUESTED_SLUG}"
+      if [[ -n "${SN_RELAY_REQUESTED_HOSTNAME:-}" ]]; then
+        ui_info "Requested node hostname: ${SN_RELAY_REQUESTED_HOSTNAME}"
+      fi
+    elif [[ -n "${SN_RELAY_REQUESTED_HOSTNAME:-}" ]]; then
+      ui_info "Node hostname: ${SN_RELAY_REQUESTED_HOSTNAME} (existing assignment)"
+    else
+      ui_info "Node name: auto-generated by relay"
+    fi
     ui_info "Matrix hostname and public URL will be assigned by the relay during install."
   else
     ui_info "Connection mode: direct"
@@ -1606,8 +2767,8 @@ run_install_wizard() {
   local defaults_status openrouter_api_key openrouter_model matrix_domain matrix_public_base_url
   local operator_username alert_room_name selected_bots poll_interval lookback_window federation_enabled
   local matrix_tls_mode connectivity_choice connectivity_choice_default connectivity_mode
-  local prompted_selected_bots bot_prompt_default index
-  local relay_control_url relay_enrollment_token
+  local prompted_selected_bots
+  local relay_control_url relay_enrollment_token relay_requested_slug relay_requested_hostname
   local openrouter_secret_ref openrouter_secret_path openrouter_secret_mode
   local configure_imap imap_choice imap_host imap_port imap_tls imap_username imap_password
   local imap_mailbox imap_secret_ref imap_secret_path imap_secret_mode
@@ -1632,6 +2793,8 @@ run_install_wizard() {
   federation_enabled="$DEFAULT_FEDERATION_ENABLED"
   connectivity_mode="$DEFAULT_CONNECTIVITY_MODE"
   relay_control_url="$DEFAULT_RELAY_CONTROL_URL"
+  relay_requested_slug="$DEFAULT_RELAY_REQUESTED_SLUG"
+  relay_requested_hostname="$DEFAULT_RELAY_HOSTNAME"
   openrouter_secret_ref="$EXISTING_OPENROUTER_SECRET_REF"
   openrouter_secret_mode="replaced"
   matrix_tls_mode="$(infer_matrix_tls_mode_from_url "$matrix_public_base_url")"
@@ -1663,38 +2826,31 @@ run_install_wizard() {
   fi
 
   ui_section "Connection"
-  connectivity_choice_default="1"
-  if [[ "$connectivity_mode" != "relay" ]]; then
-    if [[ "$matrix_tls_mode" == "internal" ]] || [[ "$matrix_tls_mode" == "local-dev" ]]; then
-      connectivity_choice_default="3"
-    else
-      connectivity_choice_default="2"
+  if [[ "$connectivity_mode" == "relay" ]]; then
+    # Relay mode was pre-configured (e.g. by the Pro installer).
+    ui_info "Connection mode: Managed Relay (configured by Pro installer)"
+  else
+    connectivity_choice_default="2"
+    if [[ "$matrix_tls_mode" != "internal" ]] && [[ "$matrix_tls_mode" != "local-dev" ]]; then
+      connectivity_choice_default="1"
     fi
-  fi
-  connectivity_choice="$(
-    ui_choice_menu \
-      "Choose how users should connect:" \
-      "$connectivity_choice_default" \
-      "Managed Relay (Easiest)" \
-      "Public Domain / Direct HTTPS" \
-      "LAN Only"
-  )"
-  case "$connectivity_choice" in
-    1)
-      connectivity_mode="relay"
-      ;;
-    2|3)
-      connectivity_mode="direct"
-      ;;
-  esac
-  if [[ "$connectivity_choice" == "3" ]]; then
-    if [[ "$matrix_domain" == "$LEGACY_MATRIX_DOMAIN" ]] || [[ -z "$matrix_domain" ]]; then
-      matrix_domain="$RECOMMENDED_MATRIX_DOMAIN"
-    fi
-    if [[ "$matrix_public_base_url" == "$LEGACY_MATRIX_PUBLIC_BASE_URL" ]] \
-      || [[ "$matrix_public_base_url" == "$LEGACY_MATRIX_ALT_PUBLIC_BASE_URL" ]] \
-      || [[ -z "$matrix_public_base_url" ]]; then
-      matrix_public_base_url="$RECOMMENDED_MATRIX_PUBLIC_BASE_URL"
+    connectivity_choice="$(
+      ui_choice_menu \
+        "Choose how users should connect:" \
+        "$connectivity_choice_default" \
+        "Public Domain / Direct HTTPS" \
+        "LAN Only"
+    )"
+    connectivity_mode="direct"
+    if [[ "$connectivity_choice" == "2" ]]; then
+      if [[ "$matrix_domain" == "$LEGACY_MATRIX_DOMAIN" ]] || [[ -z "$matrix_domain" ]]; then
+        matrix_domain="$RECOMMENDED_MATRIX_DOMAIN"
+      fi
+      if [[ "$matrix_public_base_url" == "$LEGACY_MATRIX_PUBLIC_BASE_URL" ]] \
+        || [[ "$matrix_public_base_url" == "$LEGACY_MATRIX_ALT_PUBLIC_BASE_URL" ]] \
+        || [[ -z "$matrix_public_base_url" ]]; then
+        matrix_public_base_url="$RECOMMENDED_MATRIX_PUBLIC_BASE_URL"
+      fi
     fi
   fi
 
@@ -1753,24 +2909,8 @@ run_install_wizard() {
   imap_secret_mode="pending"
 
   ui_section "Bots"
-  while true; do
-    prompted_selected_bots=""
-    for index in "${!AVAILABLE_BOT_IDS[@]}"; do
-      if bot_list_contains "$selected_bots" "${AVAILABLE_BOT_IDS[$index]}"; then
-        bot_prompt_default="y"
-      else
-        bot_prompt_default="n"
-      fi
-      if ui_confirm "Install ${AVAILABLE_BOT_DISPLAY_NAMES[$index]}?" "$bot_prompt_default"; then
-        prompted_selected_bots="$(append_selected_bot "$prompted_selected_bots" "${AVAILABLE_BOT_IDS[$index]}")"
-      fi
-    done
-    if [[ -n "$prompted_selected_bots" ]]; then
-      selected_bots="$prompted_selected_bots"
-      break
-    fi
-    ui_warn "Select at least one bot to install."
-  done
+  prompted_selected_bots="$(prompt_bot_selection "$selected_bots")"
+  selected_bots="$prompted_selected_bots"
 
   if bot_list_contains "$selected_bots" "mail-sentinel"; then
     ui_section "Mail Sentinel"
@@ -1856,6 +2996,8 @@ run_install_wizard() {
   export SN_OPENROUTER_SECRET_MODE="$openrouter_secret_mode"
   export SN_RELAY_CONTROL_URL="${relay_control_url:-}"
   export SN_RELAY_ENROLLMENT_TOKEN="${relay_enrollment_token:-}"
+  export SN_RELAY_REQUESTED_SLUG="${relay_requested_slug:-}"
+  export SN_RELAY_REQUESTED_HOSTNAME="${relay_requested_hostname:-}"
   export SN_MATRIX_DOMAIN="$matrix_domain"
   export SN_MATRIX_PUBLIC_BASE_URL="$matrix_public_base_url"
   export SN_MATRIX_TLS_MODE="$matrix_tls_mode"
@@ -1987,7 +3129,15 @@ if (typeof state !== "string") {
 }
 
 if (state === "succeeded") {
-  process.stdout.write("succeeded\tInstall job completed successfully");
+  const warnedSteps = Array.isArray(parsed?.result?.job?.steps)
+    ? parsed.result.job.steps.filter((step) => step?.state === "warned")
+    : [];
+  if (warnedSteps.length > 0) {
+    const warnings = warnedSteps.map((step) => `${step.id}: ${step.error?.message ?? "warning"}`).join("; ");
+    process.stdout.write(`succeeded\tInstall completed with warnings: ${warnings}`);
+  } else {
+    process.stdout.write("succeeded\tInstall job completed successfully");
+  }
   process.exit(0);
 }
 
@@ -2113,12 +3263,20 @@ NODE
 }
 
 wait_for_runtime_ready() {
-  local max_attempts delay_s attempt status_output parsed readiness_flag readiness_reason
+  local max_attempts delay_s log_path attempt status_output parsed readiness_flag readiness_reason frame_index
   max_attempts="${1:-45}"
   delay_s="${2:-2}"
+  log_path="${3:-}"
+  frame_index=0
 
   for attempt in $(seq 1 "$max_attempts"); do
-    status_output="$(timeout --foreground 20s sovereign-node status --json || true)"
+    status_output="$(timeout --foreground 45s sovereign-node status --json || true)"
+    if [[ -n "$log_path" ]]; then
+      {
+        printf '%s\n' "--- runtime probe ${attempt}/${max_attempts} ---"
+        printf '%s\n\n' "$status_output"
+      } >> "$log_path"
+    fi
     parsed="$(parse_runtime_readiness "$status_output")"
     readiness_flag="${parsed%%$'\t'*}"
     readiness_reason="${parsed#*$'\t'}"
@@ -2129,13 +3287,191 @@ wait_for_runtime_ready() {
     fi
 
     if [[ "$attempt" -lt "$max_attempts" ]]; then
-      log "Runtime not ready yet (${attempt}/${max_attempts}): ${readiness_reason}"
+      if ui_is_fancy; then
+        ui_update_step "probe ${attempt}/${max_attempts}: ${readiness_reason}" "$frame_index"
+        frame_index=$((frame_index + 1))
+      else
+        log "Runtime not ready yet (${attempt}/${max_attempts}): ${readiness_reason}"
+      fi
       sleep "$delay_s"
     else
       printf '%s\n' "$status_output"
       return 1
     fi
   done
+}
+
+summarize_install_command_output() {
+  node - "$1" <<'NODE'
+const raw = process.argv[2] ?? "";
+let parsed;
+try {
+  parsed = JSON.parse(raw);
+} catch {
+  parsed = recoverJsonObject(raw);
+}
+
+const job = parsed?.result?.job ?? parsed?.job;
+if (!job || typeof job !== "object") {
+  process.exit(0);
+}
+
+const steps = Array.isArray(job.steps) ? job.steps : [];
+const completed = steps.filter((step) => step?.state === "succeeded" || step?.state === "skipped").length;
+const lines = [
+  `Job id: ${typeof job.jobId === "string" ? job.jobId : "unknown"}`,
+  `Job state: ${typeof job.state === "string" ? job.state : "unknown"}`,
+  `Installer steps: ${completed}/${steps.length} complete`,
+];
+
+if (typeof job.currentStepId === "string") {
+  lines.push(`Last recorded step: ${job.currentStepId}`);
+}
+
+process.stdout.write(lines.join("\n"));
+
+function recoverJsonObject(input) {
+  const lines = input.split(/\r?\n/);
+
+  for (let start = 0; start < lines.length; start += 1) {
+    const candidate = lines.slice(start).join("\n").trim();
+    if (!candidate.startsWith("{")) {
+      continue;
+    }
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // keep scanning
+    }
+  }
+
+  return null;
+}
+NODE
+}
+
+summarize_status_output() {
+  node - "$1" <<'NODE'
+const raw = process.argv[2] ?? "";
+let parsed;
+try {
+  parsed = JSON.parse(raw);
+} catch {
+  parsed = recoverJsonObject(raw);
+}
+
+const result = parsed?.result;
+if (!result || typeof result !== "object") {
+  process.exit(0);
+}
+
+const lines = [];
+if (typeof result.matrix?.homeserverUrl === "string") {
+  lines.push(`Matrix URL: ${result.matrix.homeserverUrl}`);
+}
+lines.push(
+  `Matrix: ${String(result.matrix?.health ?? "unknown")} (${result.matrix?.roomReachable === true ? "alert room reachable" : "alert room pending"})`,
+);
+
+const openclawVersion =
+  typeof result.openclaw?.version === "string" && result.openclaw.version.length > 0
+    ? ` ${result.openclaw.version}`
+    : "";
+lines.push(
+  `OpenClaw${openclawVersion}: ${String(result.openclaw?.health ?? "unknown")} (service ${String(result.openclaw?.serviceState ?? "unknown")})`,
+);
+
+if (result.relay?.enabled === true) {
+  const relayTarget =
+    typeof result.relay.hostname === "string" && result.relay.hostname.length > 0
+      ? result.relay.hostname
+      : typeof result.relay.publicBaseUrl === "string" && result.relay.publicBaseUrl.length > 0
+        ? result.relay.publicBaseUrl
+        : "managed relay";
+  lines.push(`Relay: ${relayTarget} (${result.relay.connected === true ? "connected" : "not connected"})`);
+}
+
+process.stdout.write(lines.join("\n"));
+
+function recoverJsonObject(input) {
+  const lines = input.split(/\r?\n/);
+
+  for (let start = 0; start < lines.length; start += 1) {
+    const candidate = lines.slice(start).join("\n").trim();
+    if (!candidate.startsWith("{")) {
+      continue;
+    }
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // keep scanning
+    }
+  }
+
+  return null;
+}
+NODE
+}
+
+summarize_doctor_output() {
+  node - "$1" <<'NODE'
+const raw = process.argv[2] ?? "";
+let parsed;
+try {
+  parsed = JSON.parse(raw);
+} catch {
+  parsed = recoverJsonObject(raw);
+}
+
+const report = parsed?.result ?? parsed;
+if (!report || typeof report !== "object") {
+  process.exit(0);
+}
+
+const checks = Array.isArray(report.checks) ? report.checks : [];
+const flagged = checks.filter((entry) => entry?.status === "warn" || entry?.status === "fail");
+const lines = [
+  `Doctor overall: ${typeof report.overall === "string" ? report.overall : "unknown"} (${checks.length} checks)`,
+];
+
+for (const entry of flagged.slice(0, 3)) {
+  const label =
+    typeof entry?.label === "string" && entry.label.length > 0
+      ? entry.label
+      : typeof entry?.id === "string" && entry.id.length > 0
+        ? entry.id
+        : "check";
+  const message =
+    typeof entry?.message === "string" && entry.message.length > 0
+      ? ` - ${entry.message}`
+      : "";
+  lines.push(`Attention: ${label}${message}`);
+}
+
+if (flagged.length > 0 && Array.isArray(report.suggestedCommands) && report.suggestedCommands.length > 0) {
+  lines.push(`Suggested command: ${String(report.suggestedCommands[0])}`);
+}
+
+process.stdout.write(lines.join("\n"));
+
+function recoverJsonObject(input) {
+  const lines = input.split(/\r?\n/);
+
+  for (let start = 0; start < lines.length; start += 1) {
+    const candidate = lines.slice(start).join("\n").trim();
+    if (!candidate.startsWith("{")) {
+      continue;
+    }
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // keep scanning
+    }
+  }
+
+  return null;
+}
+NODE
 }
 
 print_matrix_client_onboarding_guidance() {
@@ -2234,13 +3570,12 @@ NODE
   fi
 }
 
-run_install_flow() {
-  local install_output install_exit_code parsed install_state install_summary status_output doctor_output
-  local action_label
+run_install_command() {
+  local install_output install_exit_code parsed install_state install_summary
+  local action_label log_path pid frame_index
 
   if [[ "$RUN_INSTALL" != "1" ]]; then
-    log "Skipping ${ACTION:-install} run (--skip-install-run)"
-    return
+    return 0
   fi
 
   if [[ ! -f "$REQUEST_FILE" ]]; then
@@ -2248,53 +3583,207 @@ run_install_flow() {
   fi
 
   action_label="${ACTION:-install}"
-  if [[ "$action_label" == "update" ]]; then
-    log "Running Sovereign Node update"
+  if ! ui_is_fancy; then
+    if [[ "$action_label" == "update" ]]; then
+      log "Running Sovereign Node update"
+    else
+      log "Running Sovereign Node install"
+    fi
+    set +e
+    install_output="$(
+      timeout --foreground 30m env \
+        "SOVEREIGN_INTERNAL_INSTALL=1" \
+        "SOVEREIGN_NODE_SERVICE_USER=$SERVICE_USER" \
+        "SOVEREIGN_NODE_SERVICE_GROUP=$SERVICE_GROUP" \
+        sovereign-node install --request-file "$REQUEST_FILE" --json
+    )"
+    install_exit_code=$?
+    set -e
+    INSTALL_COMMAND_OUTPUT="$install_output"
+    printf '%s\n' "$install_output"
   else
-    log "Running Sovereign Node install"
-  fi
-  set +e
-  install_output="$(
+    ui_begin_step "Apply ${action_label}"
+    log_path="$(ui_step_log_path)"
+    : > "$log_path"
+    set +e
     timeout --foreground 30m env \
+      "SOVEREIGN_INTERNAL_INSTALL=1" \
       "SOVEREIGN_NODE_SERVICE_USER=$SERVICE_USER" \
       "SOVEREIGN_NODE_SERVICE_GROUP=$SERVICE_GROUP" \
-      sovereign-node install --request-file "$REQUEST_FILE" --json
-  )"
-  install_exit_code=$?
-  set -e
-  printf '%s\n' "$install_output"
+      sovereign-node install --request-file "$REQUEST_FILE" --json >"$log_path" 2>&1 &
+    pid=$!
+    frame_index=0
+    while kill -0 "$pid" 2>/dev/null; do
+      if [[ "$action_label" == "update" ]]; then
+        ui_update_step "reconciling services" "$frame_index"
+      else
+        ui_update_step "provisioning services" "$frame_index"
+      fi
+      frame_index=$((frame_index + 1))
+      sleep 0.12
+    done
+    wait "$pid"
+    install_exit_code=$?
+    set -e
+    INSTALL_COMMAND_OUTPUT="$(cat "$log_path" 2>/dev/null || true)"
+  fi
 
   if [[ "$install_exit_code" -eq 124 ]]; then
-    die "Install did not complete within 30 minutes"
+    if ui_is_fancy; then
+      ui_preserve_logs
+      ui_fail_step "timed out after 30 minutes"
+      ui_error "Step log: $log_path"
+      ui_show_log_excerpt "$log_path"
+    else
+      die "Install did not complete within 30 minutes"
+    fi
+    return 1
   fi
   if [[ "$install_exit_code" -ne 0 ]]; then
-    die "Install command exited with status ${install_exit_code}"
+    if ui_is_fancy; then
+      ui_preserve_logs
+      ui_fail_step "command exited with status ${install_exit_code}"
+      ui_error "Step log: $log_path"
+      ui_show_log_excerpt "$log_path"
+    else
+      die "Install command exited with status ${install_exit_code}"
+    fi
+    return 1
   fi
 
-  parsed="$(parse_install_result "$install_output")"
+  parsed="$(parse_install_result "$INSTALL_COMMAND_OUTPUT")"
   install_state="${parsed%%$'\t'*}"
   install_summary="${parsed#*$'\t'}"
   if [[ "$install_state" != "succeeded" ]]; then
-    if [[ "$action_label" == "update" ]]; then
-      die "Update did not complete successfully (${install_summary})"
+    if ui_is_fancy; then
+      ui_preserve_logs
+      ui_fail_step "$install_summary"
+      ui_error "Step log: $log_path"
+      ui_show_log_excerpt "$log_path"
+    else
+      die "Install did not complete successfully (${install_summary})"
     fi
-    die "Install did not complete successfully (${install_summary})"
+    return 1
   fi
 
-  if [[ "$action_label" == "update" ]]; then
-    log "Update job succeeded. Waiting for Matrix and OpenClaw runtime readiness"
+  if ui_is_fancy; then
+    if [[ "$install_summary" == *"warnings:"* ]]; then
+      ui_complete_step "job completed (with warnings)"
+      log "Warning: $install_summary"
+    else
+      ui_complete_step "job completed"
+    fi
   else
-    log "Install job succeeded. Waiting for Matrix and OpenClaw runtime readiness"
+    if [[ "$install_summary" == *"warnings:"* ]]; then
+      log "Warning: $install_summary"
+    fi
   fi
-  if ! status_output="$(wait_for_runtime_ready 45 2)"; then
-    printf '%s\n' "$status_output"
-    die "Runtime did not reach healthy state for Matrix/OpenClaw within timeout"
-  fi
-  printf '%s\n' "$status_output"
+  return 0
+}
 
-  log "Running post-install diagnostics"
-  doctor_output="$(sovereign-node doctor --json || true)"
-  printf '%s\n' "$doctor_output"
+run_runtime_readiness_step() {
+  local status_output log_path
+
+  if [[ "$RUN_INSTALL" != "1" ]]; then
+    return 0
+  fi
+
+  if ! ui_is_fancy; then
+    if ! status_output="$(wait_for_runtime_ready 20 5)"; then
+      RUNTIME_STATUS_OUTPUT="$status_output"
+      printf '%s\n' "$status_output"
+      die "Runtime did not reach healthy state for Matrix/OpenClaw within timeout"
+    fi
+    RUNTIME_STATUS_OUTPUT="$status_output"
+    printf '%s\n' "$status_output"
+    return 0
+  fi
+
+  ui_begin_step "Wait for runtime health"
+  log_path="$(ui_step_log_path)"
+  : > "$log_path"
+  if status_output="$(wait_for_runtime_ready 20 5 "$log_path")"; then
+    RUNTIME_STATUS_OUTPUT="$status_output"
+    ui_complete_step "Matrix and OpenClaw healthy"
+    return 0
+  fi
+
+  RUNTIME_STATUS_OUTPUT="$status_output"
+  ui_preserve_logs
+  ui_fail_step "runtime probes did not converge"
+  ui_error "Step log: $log_path"
+  ui_show_log_excerpt "$log_path"
+  return 1
+}
+
+run_post_install_diagnostics_step() {
+  local doctor_exit_code summary_headline log_path pid frame_index
+
+  if [[ "$RUN_INSTALL" != "1" ]]; then
+    return 0
+  fi
+
+  if ! ui_is_fancy; then
+    log "Running post-install diagnostics"
+    DOCTOR_REPORT_OUTPUT="$(sovereign-node doctor --json || true)"
+    printf '%s\n' "$DOCTOR_REPORT_OUTPUT"
+    return 0
+  fi
+
+  ui_begin_step "Run post-install diagnostics"
+  log_path="$(ui_step_log_path)"
+  : > "$log_path"
+  set +e
+  sovereign-node doctor --json >"$log_path" 2>&1 &
+  pid=$!
+  frame_index=0
+  while kill -0 "$pid" 2>/dev/null; do
+    ui_update_step "collecting health report" "$frame_index"
+    frame_index=$((frame_index + 1))
+    sleep 0.12
+  done
+  wait "$pid"
+  doctor_exit_code=$?
+  set -e
+  DOCTOR_REPORT_OUTPUT="$(cat "$log_path" 2>/dev/null || true)"
+  summary_headline="$(summarize_doctor_output "$DOCTOR_REPORT_OUTPUT")"
+  summary_headline="${summary_headline%%$'\n'*}"
+  if [[ -z "$summary_headline" ]]; then
+    summary_headline="report ready"
+  fi
+
+  ui_complete_step "$summary_headline"
+  if [[ "$doctor_exit_code" -ne 0 ]]; then
+    ui_preserve_logs
+    ui_warn "Doctor command exited with status ${doctor_exit_code}."
+    ui_warn "Step log: $log_path"
+  fi
+}
+
+run_post_install_ansible_step() {
+  local playbook ansible_exit_code
+
+  if [[ "$RUN_INSTALL" != "1" ]]; then
+    return 0
+  fi
+
+  playbook="$APP_DIR/deploy/ansible/playbooks/post-install-local.yml"
+  [[ -f "$playbook" ]] || die "Missing internal host resource playbook: $playbook"
+
+  set +e
+  timeout --foreground 15m env \
+    "ANSIBLE_CONFIG=$APP_DIR/deploy/ansible/ansible.cfg" \
+    "ANSIBLE_ROLES_PATH=$APP_DIR/deploy/ansible/roles" \
+    ansible-playbook -i localhost, -c local "$playbook"
+  ansible_exit_code=$?
+  set -e
+
+  if [[ "$ansible_exit_code" -eq 124 ]]; then
+    die "Internal host resource reconciliation timed out after 15 minutes"
+  fi
+  if [[ "$ansible_exit_code" -ne 0 ]]; then
+    die "Internal host resource reconciliation failed"
+  fi
 }
 
 main() {
@@ -2304,37 +3793,71 @@ main() {
   normalize_service_identity
   require_root
   ensure_supported_os
+  ui_setup_runtime
+  ui_configure_progress_plan
+  if ui_is_fancy; then
+    ui_print_banner
+  fi
   detect_installation_state
   resolve_action
-  resolve_source_mode
-  install_base_packages
-  install_docker_if_needed
-  install_node22_if_needed
-  ensure_service_account
-  ensure_runtime_directories
-  sync_app_source
-  sync_bots_source
-  load_available_bot_catalog
-  build_app
-  install_wrappers
-  install_systemd_unit
-  install_request_template
-  prepare_request_file
-  run_install_flow
 
-  if [[ "${ACTION:-install}" == "update" ]]; then
+  ui_run_step_foreground "Check source inputs" resolve_source_mode
+  ui_run_step_captured "Install base packages" install_base_packages
+  ui_run_step_captured "Prepare Ansible runtime" install_ansible_if_needed
+  ui_run_step_captured "Prepare Docker runtime" install_docker_if_needed
+  ui_run_step_captured "Prepare Node runtime" install_node22_if_needed
+  ui_run_step_captured "Ensure service account" ensure_service_account
+  ui_run_step_captured "Prepare runtime directories" ensure_runtime_directories
+  ui_run_step_captured "Sync application source" sync_app_source
+  ui_run_step_captured "Sync bot package source" sync_bots_source
+  ui_run_step_captured "Write install provenance" write_install_provenance
+  ui_run_step_foreground "Load bot catalog" load_available_bot_catalog
+  ui_run_step_captured "Build bot packages" build_bots
+  ui_run_step_captured "Build application" build_app
+  ui_run_step_captured "Install CLI wrappers" install_wrappers
+  ui_run_step_captured "Install systemd service" install_systemd_unit
+  ui_run_step_captured "Configure system hygiene" configure_system_hygiene
+  ui_run_step_captured "Write request template" install_request_template
+  if [[ "$NON_INTERACTIVE" == "1" ]] || ! has_tty; then
+    ui_run_step_foreground "Configure request file" prepare_request_file
+  else
+    ui_run_step_interactive "Configure request file" prepare_request_file
+  fi
+
+  if [[ "$RUN_INSTALL" == "1" ]]; then
+    run_install_command
+    ui_run_step_captured "Apply host resources" run_post_install_ansible_step
+    run_post_install_diagnostics_step
+  else
+    ui_skip_step "Apply ${ACTION:-install}" "--skip-install-run"
+    ui_skip_step "Apply host resources" "install run skipped"
+    ui_skip_step "Run post-install diagnostics" "install run skipped"
+  fi
+
+  if [[ "$RUN_INSTALL" != "1" ]]; then
+    completion_label="Bootstrap completed. Install run skipped."
+  elif [[ "${ACTION:-install}" == "update" ]]; then
     completion_label="Update completed."
   else
     completion_label="Install completed."
   fi
 
+  if ui_is_fancy; then
+    ui_break_progress_line
+    ui_title "Summary" "$completion_label"
+    ui_print_summary_block "Installer" "$(summarize_install_command_output "$INSTALL_COMMAND_OUTPUT")"
+    ui_print_summary_block "Runtime" "$(summarize_status_output "$RUNTIME_STATUS_OUTPUT")"
+    ui_print_summary_block "Diagnostics" "$(summarize_doctor_output "$DOCTOR_REPORT_OUTPUT")"
+  fi
+
+  ui_break_progress_line
   cat <<EOF
 ${completion_label}
 
 Request file: ${REQUEST_FILE}
 
 Useful commands:
-- sovereign-node install --request-file ${REQUEST_FILE} --json
+- bash ${APP_DIR}/scripts/install.sh --request-file ${REQUEST_FILE} --install --non-interactive
 - sovereign-node status --json
 - sovereign-node doctor --json
 - sovereign-node onboarding issue --json

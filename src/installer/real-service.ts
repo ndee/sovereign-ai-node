@@ -1,31 +1,31 @@
 import { randomUUID } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
-import { access, chmod, chown, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
-
-import { FilesystemBotCatalog } from "../bots/catalog.js";
+import { type Dirent, constants as fsConstants } from "node:fs";
+import {
+  access,
+  chmod,
+  chown,
+  mkdir,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import type {
   BotCatalog,
   BotConfigRecord,
   BotConfigValue,
   LoadedBotPackage,
 } from "../bots/catalog.js";
-import { CONTRACT_VERSION, type CheckResult, type ComponentHealth } from "../contracts/common.js";
-import {
-  installJobStatusResponseSchema,
-  installRequestSchema,
-  type DoctorReport,
-  type InstallJobStatusResponse,
-  type InstallRequest,
-  type MatrixOnboardingIssueResult,
-  type PreflightResult,
-  type ReconfigureResult,
-  type SovereignStatus,
-  type StartInstallResult,
-  type TestAlertResult,
-  type TestImapResult,
-  type TestMatrixResult,
-} from "../contracts/index.js";
+import { FilesystemBotCatalog } from "../bots/catalog.js";
+import type {
+  HostResourceValueExpr,
+  SovereignBotHostResource,
+  SovereignBotHostStateCheck,
+} from "../bots/host-resources.js";
+import type { SovereignPaths } from "../config/paths.js";
 import type {
   PreflightRequest,
   ReconfigureImapRequest,
@@ -35,94 +35,102 @@ import type {
   TestImapRequest,
   TestMatrixRequest,
 } from "../contracts/api.js";
-import type { Logger } from "../logging/logger.js";
-import type { SovereignPaths } from "../config/paths.js";
+import { type CheckResult, CONTRACT_VERSION, type ComponentHealth } from "../contracts/common.js";
 import {
+  type DoctorReport,
+  type InstallJobStatusResponse,
+  type InstallRequest,
+  installJobStatusResponseSchema,
+  installRequestSchema,
+  type MatrixOnboardingIssueResult,
+  type PreflightResult,
+  type ReconfigureResult,
+  type SovereignStatus,
+  type StartInstallResult,
+  type TestAlertResult,
+  type TestImapResult,
+  type TestMatrixResult,
+} from "../contracts/index.js";
+import type { Logger } from "../logging/logger.js";
+import {
+  buildMatrixOnboardingLink,
   buildMatrixOnboardingUrl,
   issueMatrixOnboardingState,
-  parseMatrixOnboardingState,
 } from "../onboarding/bootstrap-code.js";
 import {
-  resolveRequestedOpenClawVersion,
   type OpenClawBootstrapper,
+  resolveRequestedOpenClawVersion,
 } from "../openclaw/bootstrap.js";
 import type { OpenClawGatewayServiceManager } from "../openclaw/gateway-service.js";
+import {
+  extractGuardedJsonStateActorFromConversationInfoText,
+  extractGuardedJsonStateActorFromDirectSessionKey,
+  extractGuardedJsonStateActorFromUserContent,
+  extractLatestGuardedJsonStateActorFromBranch,
+  GUARDED_JSON_STATE_OPENCLAW_PLUGIN_ID,
+  GUARDED_JSON_STATE_OPENCLAW_TOOL_NAME,
+  isGuardedJsonStateRecord,
+  normalizeGuardedJsonStateMatrixActorUserId,
+  resolveGuardedJsonStateSessionContext,
+  resolveGuardedJsonStateToolContext,
+  resolveGuardedJsonStateWorkspaceDir,
+} from "../openclaw/guarded-json-state-context.js";
 import type {
   ManagedAgentRegistrationResult,
   OpenClawManagedAgentRegistrar,
 } from "../openclaw/managed-agent.js";
+import type { ExecResult, ExecRunner } from "../system/exec.js";
 import type { ImapTester } from "../system/imap.js";
 import type {
   BundledMatrixAccountsResult,
-  BundledMatrixProvisionResult,
   BundledMatrixProvisioner,
+  BundledMatrixProvisionResult,
   BundledMatrixRoomBootstrapResult,
 } from "../system/matrix.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
-import type { ExecResult, ExecRunner } from "../system/exec.js";
+import { formatGiB, parseDfAvailableBytes } from "../system/preflight.js";
 import {
-  JobRunner,
-  type InstallContext,
-  type InstallStep,
-  type JobRunnerSnapshot,
-} from "./job-runner.js";
-import {
+  type AgentTemplateManifest,
   CORE_TEMPLATE_MANIFESTS,
   CORE_TRUSTED_TEMPLATE_KEYS,
   findCoreTemplateManifest,
   formatTemplateRef,
   parseTemplateRef,
-  type AgentTemplateManifest,
   type SovereignTemplateManifest,
-  type ToolTemplateManifest,
+  type ToolTemplateDefinition,
   verifySignedTemplateManifest,
 } from "../templates/catalog.js";
-import type {
-  InstallerService,
-  ManagedAgent,
-  ManagedAgentDeleteResult,
-  ManagedAgentListResult,
-  ManagedAgentUpsertResult,
-  MatrixHumanUserDeleteResult,
-  MatrixHumanUserInviteResult,
-  SovereignBotInstantiateResult,
-  SovereignBotListResult,
-  SovereignTemplateInstallResult,
-  SovereignTemplateListResult,
-  SovereignToolInstanceDeleteResult,
-  SovereignToolInstanceListResult,
-  SovereignToolInstanceUpsertResult,
-} from "./service.js";
-import { StubInstallerService } from "./stub-service.js";
 import {
-  buildManagedAgentWorkspaceReadme,
-  renderTemplateWorkspaceContent,
-} from "./workspace-documents.js";
+  type InstallContext,
+  type InstallStep,
+  JobRunner,
+  type JobRunnerSnapshot,
+} from "./job-runner.js";
 import {
-  DEFAULT_INSTALL_REQUEST_FILE,
-  DEFAULT_OPENROUTER_MODEL,
-  DEFAULT_SERVICE_GROUP,
-  DEFAULT_SERVICE_USER,
-  INSTALLER_EXEC_TIMEOUT_MS,
-  MAIL_SENTINEL_AGENT_ID,
-  RELAY_LOCAL_EDGE_PORT,
-  RELAY_TUNNEL_DEFAULT_IMAGE,
-  RELAY_TUNNEL_SYSTEMD_UNIT,
-  RESERVED_AGENT_IDS,
-  SOVEREIGN_GATEWAY_SYSTEMD_UNIT,
   areMatrixIdentitiesEqual,
   areStringListsEqual,
   areStringRecordsEqual,
   buildSuggestedCommands,
+  type CompiledBotStatus,
+  type CompiledHostResource,
+  type CompiledHostResourceCheck,
   check,
+  DEFAULT_INSTALL_REQUEST_FILE,
+  DEFAULT_OPENROUTER_MODEL,
+  DEFAULT_SERVICE_GROUP,
+  DEFAULT_SERVICE_USER,
   defaultFetch,
   delay,
   deriveOpenClawHealth,
   describeError,
   describeVersionPin,
-  generateAgentPassword,
   ensureCoreManagedAgents,
   ensureTrailingSlash,
+  type FetchLike,
+  type GatewayState,
+  generateAgentPassword,
+  INSTALLER_EXEC_TIMEOUT_MS,
+  type InstallProvenance,
   isAlreadyExistsOutput,
   isAlreadyJoinedOrInvitedRoomError,
   isCoreAgentBindingBestEffortSkippable,
@@ -132,8 +140,9 @@ import {
   isNodeError,
   isRateLimitedMatrixLoginFailure,
   isRecord,
-  isStructuredError,
   looksLikeMissingGateway,
+  MAIL_SENTINEL_AGENT_ID,
+  MANAGED_OPENCLAW_DM_SCOPE,
   mapHealthToServiceState,
   normalizeOpenClawAgentModel,
   normalizeStringRecord,
@@ -141,10 +150,21 @@ import {
   now,
   parseEnvFile,
   parseGatewayState,
+  parseInstallProvenance,
   parseJsonDocument,
   parseJsonSafely,
   parseRuntimeConfigDocument,
+  RELAY_LOCAL_EDGE_PORT,
+  RELAY_TUNNEL_DEFAULT_IMAGE,
+  RELAY_TUNNEL_SYSTEMD_UNIT,
+  RESERVED_AGENT_IDS,
+  type RelayRuntimeConfig,
+  type RelayTunnelConfig,
+  type RuntimeAgentEntry,
+  type RuntimeBotInstance,
+  type RuntimeConfig,
   resolveVersionPinStatus,
+  SOVEREIGN_GATEWAY_SYSTEMD_UNIT,
   sanitizeExpectedMatrixLocalpart,
   sanitizeManagedAgentId,
   sanitizeManagedAgentLocalpart,
@@ -159,13 +179,31 @@ import {
   summarizeUnknown,
   textContainsId,
   truncateText,
-  type FetchLike,
-  type GatewayState,
-  type RelayRuntimeConfig,
-  type RelayTunnelConfig,
-  type RuntimeAgentEntry,
-  type RuntimeConfig,
 } from "./real-service-shared.js";
+import type {
+  InstallerService,
+  MailSentinelApplyResult,
+  MailSentinelDeleteResult,
+  MailSentinelListResult,
+  MailSentinelMigrationResult,
+  MailSentinelSummary,
+  ManagedAgent,
+  ManagedAgentDeleteResult,
+  ManagedAgentListResult,
+  ManagedAgentUpsertResult,
+  MatrixUserRemoveResult,
+  MigrationStatusResult,
+  PendingMigration,
+  SovereignBotInstantiateResult,
+  SovereignBotListResult,
+  SovereignTemplateInstallResult,
+  SovereignTemplateListResult,
+  SovereignToolInstanceDeleteResult,
+  SovereignToolInstanceListResult,
+  SovereignToolInstanceUpsertResult,
+} from "./service.js";
+import { StubInstallerService } from "./stub-service.js";
+import { renderTemplateWorkspaceContent } from "./workspace-documents.js";
 
 type PersistedInstallJobRecord = {
   version: 1;
@@ -182,8 +220,52 @@ type RelayEnrollmentResult = {
   tunnel: RelayTunnelConfig;
 };
 
+type CompiledHostPlan = {
+  resources: CompiledHostResource[];
+  botStatus: CompiledBotStatus[];
+};
+
+type HostResourceContext = {
+  runtimeConfig: RuntimeConfig;
+  botPackage: LoadedBotPackage;
+  agent: RuntimeConfig["openclawProfile"]["agents"][number];
+  botInstance?: RuntimeBotInstance;
+  toolInstanceIds: string[];
+  toolInstanceIdMap: Record<string, string>;
+};
+
+type MaterializedBotToolInstance = RuntimeConfig["sovereignTools"]["instances"][number] & {
+  botId: string;
+  botInstanceId?: string;
+  manifestToolId: string;
+};
+
+type RequestedBotInstance = RuntimeBotInstance;
+
 const OPENCLAW_EXEC_TOOL_ID = "exec";
+const OPENCLAW_SESSION_STATUS_TOOL_ID = "session_status";
 const OPENCLAW_STATUS_PROBE_TIMEOUT_MS = 5_000;
+const OPENCLAW_EMPTY_HEALTH_RETRY_ATTEMPTS = 3;
+const OPENCLAW_EMPTY_HEALTH_RETRY_DELAY_MS = 1_000;
+const OPENCLAW_RUNTIME_SETTLE_ATTEMPTS = 6;
+const OPENCLAW_RUNTIME_SETTLE_DELAY_MS = 5_000;
+const SYSTEM_GATEWAY_MATRIX_WAIT_ATTEMPTS = 120;
+const SYSTEM_GATEWAY_MATRIX_WAIT_DELAY_SECONDS = 2;
+const SYSTEM_GATEWAY_MATRIX_WAIT_TIMEOUT_SECONDS = 5;
+const DOCTOR_DISK_WARN_BYTES = 2 * 1024 * 1024 * 1024;
+const DOCTOR_DISK_FAIL_BYTES = 500 * 1024 * 1024;
+const LOBSTER_CLI_PROBE_TIMEOUT_MS = 20_000;
+const LOBSTER_CLI_INSTALL_TIMEOUT_MS = 5 * 60_000;
+const MAIL_SENTINEL_MIGRATION_ID = "mail-sentinel-instances";
+const MAIL_SENTINEL_IMAP_HOST_KEY = "imapHost";
+const MAIL_SENTINEL_IMAP_PORT_KEY = "imapPort";
+const MAIL_SENTINEL_IMAP_TLS_KEY = "imapTls";
+const MAIL_SENTINEL_IMAP_USERNAME_KEY = "imapUsername";
+const MAIL_SENTINEL_IMAP_MAILBOX_KEY = "imapMailbox";
+const MAIL_SENTINEL_IMAP_CONFIGURED_KEY = "imapConfigured";
+const MAIL_SENTINEL_IMAP_PASSWORD_SECRET_KEY = "imapPassword";
+const SOVEREIGN_PINNED_LOBSTER_PACKAGE_NAME = "@clawdbot/lobster";
+const SOVEREIGN_PINNED_LOBSTER_VERSION = "2026.1.24";
 const SOVEREIGN_EXECUTABLE_PATHS: Record<string, string> = {
   "sovereign-node": "/usr/local/bin/sovereign-node",
   "sovereign-node-api": "/usr/local/bin/sovereign-node-api",
@@ -192,6 +274,7 @@ const SOVEREIGN_EXECUTABLE_PATHS: Record<string, string> = {
 };
 
 const DEFAULT_MANAGED_RELAY_CONTROL_URL = "https://relay.sovereign-ai-node.com";
+const DEFAULT_MATRIX_USER_INVITE_TTL_MINUTES = 1_440;
 
 const RELAY_NAME_THEMES = [
   "satoshi",
@@ -233,7 +316,6 @@ type RealInstallerServiceDeps = {
   openclawBootstrapper: OpenClawBootstrapper;
   openclawGatewayServiceManager: OpenClawGatewayServiceManager;
   managedAgentRegistrar?: OpenClawManagedAgentRegistrar;
-  mailSentinelRegistrar?: OpenClawManagedAgentRegistrar;
   botCatalog?: BotCatalog;
   preflightChecker: HostPreflightChecker;
   imapTester: ImapTester;
@@ -278,7 +360,12 @@ export class RealInstallerService implements InstallerService {
     this.stubService = new StubInstallerService(logger);
     this.openclawBootstrapper = deps.openclawBootstrapper;
     this.openclawGatewayServiceManager = deps.openclawGatewayServiceManager;
-    this.managedAgentRegistrar = deps.managedAgentRegistrar ?? deps.mailSentinelRegistrar!;
+    this.managedAgentRegistrar = deps.managedAgentRegistrar ??
+      deps.managedAgentRegistrar ?? {
+        register: async () => {
+          throw new Error("RealInstallerService requires a managed agent registrar");
+        },
+      };
     this.botCatalog = deps.botCatalog ?? new FilesystemBotCatalog();
     this.preflightChecker = deps.preflightChecker;
     this.imapTester = deps.imapTester;
@@ -310,36 +397,316 @@ export class RealInstallerService implements InstallerService {
   }> {
     const defaultBotIds = await this.botCatalog.getDefaultSelectedIds();
     const selectedBotIds = this.resolveRequestedBotIds(req, defaultBotIds);
-    const packages = await Promise.all(selectedBotIds.map(async (id) => await this.getBotPackage(id)));
+    const packages = await Promise.all(
+      selectedBotIds.map(async (id) => await this.getBotPackage(id)),
+    );
     const defaultsById = Object.fromEntries(
       packages.map((entry) => [entry.manifest.id, { ...entry.manifest.configDefaults }] as const),
     );
-    const configuredByRequest = isBotConfigRecordMap(req.bots?.config)
-      ? req.bots.config
-      : {};
+    const configuredByRequest = isBotConfigRecordMap(req.bots?.config) ? req.bots.config : {};
     const mergedById = Object.fromEntries(
-      packages.map((entry) => [
-        entry.manifest.id,
-        {
-          ...defaultsById[entry.manifest.id],
-          ...(configuredByRequest[entry.manifest.id] ?? {}),
-        },
-      ] satisfies [string, BotConfigRecord]),
+      packages.map(
+        (entry) =>
+          [
+            entry.manifest.id,
+            {
+              ...defaultsById[entry.manifest.id],
+              ...(configuredByRequest[entry.manifest.id] ?? {}),
+            },
+          ] satisfies [string, BotConfigRecord],
+      ),
     );
-    if (req.mailSentinel !== undefined && mergedById["mail-sentinel"] !== undefined) {
-      mergedById["mail-sentinel"] = {
-        ...mergedById["mail-sentinel"],
-        ...compactBotConfigRecord({
-          pollInterval: req.mailSentinel.pollInterval,
-          lookbackWindow: req.mailSentinel.lookbackWindow,
-          e2eeAlertRoom: req.mailSentinel.e2eeAlertRoom,
-        }),
-      };
-    }
     return {
       packages,
       configById: mergedById,
     };
+  }
+
+  private resolveRequestedBotInstances(input: {
+    req: InstallRequest;
+    packages: LoadedBotPackage[];
+    configById: Record<string, BotConfigRecord>;
+    imap: RuntimeConfig["imap"];
+    matrixRoom: { roomId: string; roomName: string };
+    previousRuntimeConfig: RuntimeConfig | null;
+  }): RequestedBotInstance[] {
+    const explicitInstances = Array.isArray(input.req.bots?.instances)
+      ? input.req.bots.instances.map((entry) =>
+          this.normalizeRequestedBotInstance({
+            entry,
+            configById: input.configById,
+            matrixRoom: input.matrixRoom,
+            previousRuntimeConfig: input.previousRuntimeConfig,
+          }),
+        )
+      : [];
+    const normalized = explicitInstances.map((entry) =>
+      this.applyLegacyMailSentinelRequestedInstanceDefaults({
+        entry,
+        imap: input.imap,
+        matrixRoom: input.matrixRoom,
+        previousRuntimeConfig: input.previousRuntimeConfig,
+      }),
+    );
+    const hasMailSentinelInstance = normalized.some(
+      (entry) => entry.packageId === MAIL_SENTINEL_AGENT_ID,
+    );
+    if (
+      !hasMailSentinelInstance &&
+      input.packages.some((entry) => entry.manifest.id === MAIL_SENTINEL_AGENT_ID)
+    ) {
+      normalized.push(
+        this.buildLegacyMailSentinelRequestedInstance({
+          configById: input.configById,
+          imap: input.imap,
+          matrixRoom: input.matrixRoom,
+          previousRuntimeConfig: input.previousRuntimeConfig,
+        }),
+      );
+    }
+    return sortBotInstances(normalized);
+  }
+
+  private normalizeRequestedBotInstance(input: {
+    entry: NonNullable<NonNullable<InstallRequest["bots"]>["instances"]>[number];
+    configById: Record<string, BotConfigRecord>;
+    matrixRoom: { roomId: string; roomName: string };
+    previousRuntimeConfig: RuntimeConfig | null;
+  }): RequestedBotInstance {
+    const id = sanitizeManagedAgentId(input.entry.id);
+    const packageId = input.entry.packageId.trim();
+    const previous = input.previousRuntimeConfig?.bots.instances.find((entry) => entry.id === id);
+    const matrixEntry = isRecord(input.entry.matrix) ? input.entry.matrix : {};
+    const alertRoomEntry = isRecord(matrixEntry.alertRoom) ? matrixEntry.alertRoom : {};
+    const allowedUsers = normalizeMatrixUserList(
+      Array.isArray(matrixEntry.allowedUsers)
+        ? matrixEntry.allowedUsers
+        : (previous?.matrix?.allowedUsers ?? []),
+    );
+    const config = {
+      ...(input.configById[packageId] ?? {}),
+      ...(previous?.config ?? {}),
+      ...normalizeBotConfigRecord(input.entry.config),
+    };
+    const secretRefs = normalizeStringRecord({
+      ...(previous?.secretRefs ?? {}),
+      ...normalizeStringRecord(
+        isRecord(input.entry.secretRefs)
+          ? Object.fromEntries(
+              Object.entries(input.entry.secretRefs).filter(
+                (pair): pair is [string, string] =>
+                  typeof pair[0] === "string" &&
+                  pair[0].length > 0 &&
+                  typeof pair[1] === "string" &&
+                  pair[1].length > 0,
+              ),
+            )
+          : {},
+      ),
+    });
+    const localpart =
+      typeof matrixEntry.localpart === "string" && matrixEntry.localpart.trim().length > 0
+        ? sanitizeManagedAgentLocalpart(matrixEntry.localpart, id)
+        : previous?.matrix?.localpart;
+    const roomId =
+      typeof alertRoomEntry.roomId === "string" && alertRoomEntry.roomId.trim().length > 0
+        ? alertRoomEntry.roomId.trim()
+        : previous?.matrix?.alertRoom?.roomId;
+    const roomName =
+      typeof alertRoomEntry.roomName === "string" && alertRoomEntry.roomName.trim().length > 0
+        ? alertRoomEntry.roomName.trim()
+        : (previous?.matrix?.alertRoom?.roomName ??
+          (roomId === undefined ? undefined : input.matrixRoom.roomName));
+    return {
+      id,
+      packageId,
+      workspace: sanitizeManagedWorkspace(
+        input.entry.workspace,
+        previous?.workspace ?? join(this.paths.stateDir, id, "workspace"),
+      ),
+      config,
+      secretRefs,
+      ...(localpart === undefined && roomId === undefined && allowedUsers.length === 0
+        ? {}
+        : {
+            matrix: {
+              ...(localpart === undefined ? {} : { localpart }),
+              ...(roomId === undefined
+                ? {}
+                : {
+                    alertRoom: {
+                      roomId,
+                      roomName: roomName ?? input.matrixRoom.roomName,
+                    },
+                  }),
+              ...(allowedUsers.length === 0 ? {} : { allowedUsers }),
+            },
+          }),
+    };
+  }
+
+  private buildLegacyMailSentinelRequestedInstance(input: {
+    configById: Record<string, BotConfigRecord>;
+    imap: RuntimeConfig["imap"];
+    matrixRoom: { roomId: string; roomName: string };
+    previousRuntimeConfig: RuntimeConfig | null;
+  }): RequestedBotInstance {
+    const previous =
+      input.previousRuntimeConfig?.bots.instances.find(
+        (entry) => entry.id === MAIL_SENTINEL_AGENT_ID,
+      ) ?? undefined;
+    const previousAgent = input.previousRuntimeConfig?.openclawProfile.agents.find(
+      (entry) => entry.id === MAIL_SENTINEL_AGENT_ID,
+    );
+    return this.applyLegacyMailSentinelRequestedInstanceDefaults({
+      entry: {
+        id: MAIL_SENTINEL_AGENT_ID,
+        packageId: MAIL_SENTINEL_AGENT_ID,
+        workspace:
+          previous?.workspace ?? join(this.paths.stateDir, MAIL_SENTINEL_AGENT_ID, "workspace"),
+        config: {
+          ...(input.configById[MAIL_SENTINEL_AGENT_ID] ?? {}),
+          ...(previous?.config ?? {}),
+        },
+        secretRefs: previous?.secretRefs ?? {},
+        matrix: {
+          ...(previous?.matrix?.localpart === undefined
+            ? previousAgent?.matrix?.localpart === undefined
+              ? {}
+              : { localpart: previousAgent.matrix.localpart }
+            : { localpart: previous.matrix.localpart }),
+          alertRoom: previous?.matrix?.alertRoom ?? input.matrixRoom,
+          ...(previous?.matrix?.allowedUsers === undefined
+            ? {}
+            : { allowedUsers: previous.matrix.allowedUsers }),
+        },
+      },
+      imap: input.imap,
+      matrixRoom: input.matrixRoom,
+      previousRuntimeConfig: input.previousRuntimeConfig,
+    });
+  }
+
+  private applyLegacyMailSentinelRequestedInstanceDefaults(input: {
+    entry: RequestedBotInstance;
+    imap: RuntimeConfig["imap"];
+    matrixRoom: { roomId: string; roomName: string };
+    previousRuntimeConfig: RuntimeConfig | null;
+  }): RequestedBotInstance {
+    if (input.entry.packageId !== MAIL_SENTINEL_AGENT_ID) {
+      return input.entry;
+    }
+    const previous = input.previousRuntimeConfig?.bots.instances.find(
+      (entry) => entry.id === input.entry.id,
+    );
+    // The top-level `imap` section is the authoritative source for all
+    // mail-sentinel IMAP settings. Whenever it is configured, overwrite the
+    // instance's six IMAP keys unconditionally — even if they already carry
+    // plausible-looking values. Hosts that went through the earlier broken
+    // migrations accumulated stale manifest defaults (imapPort=993,
+    // imapHost="pending") both in the install-request and in the previous
+    // runtime config. PR #97's sentinel-based trigger only fired when
+    // imapConfigured itself was still a sentinel; a second update cycle
+    // could therefore leave imapPort/imapTls/imapMailbox pinned to 993 even
+    // though imapHost and imapUsername had already been corrected. Treating
+    // the top-level section as the single source of truth eliminates the
+    // drift window entirely.
+    //
+    // When the top-level imap section is still pending, fall back to the
+    // entry's own values (or the previous runtime config) so genuinely
+    // fresh installs without IMAP configured don't lose any per-instance
+    // overrides that may have been placed in the install request.
+    const isImapSentinel = (value: unknown): boolean =>
+      value === undefined || value === "pending" || value === false;
+    const topLevelImapAuthoritative = input.imap.status === "configured";
+    const next: RequestedBotInstance = {
+      ...input.entry,
+      config: {
+        ...input.entry.config,
+        ...(topLevelImapAuthoritative
+          ? {
+              [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: true,
+              [MAIL_SENTINEL_IMAP_HOST_KEY]: input.imap.host,
+              [MAIL_SENTINEL_IMAP_PORT_KEY]: input.imap.port,
+              [MAIL_SENTINEL_IMAP_TLS_KEY]: input.imap.tls,
+              [MAIL_SENTINEL_IMAP_USERNAME_KEY]: input.imap.username,
+              [MAIL_SENTINEL_IMAP_MAILBOX_KEY]: input.imap.mailbox,
+            }
+          : {
+              ...(isImapSentinel(input.entry.config[MAIL_SENTINEL_IMAP_CONFIGURED_KEY])
+                ? { [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: false }
+                : {}),
+              ...(input.entry.config[MAIL_SENTINEL_IMAP_HOST_KEY] === undefined
+                ? {
+                    [MAIL_SENTINEL_IMAP_HOST_KEY]:
+                      previous?.config[MAIL_SENTINEL_IMAP_HOST_KEY] ?? input.imap.host,
+                  }
+                : {}),
+              ...(input.entry.config[MAIL_SENTINEL_IMAP_PORT_KEY] === undefined
+                ? {
+                    [MAIL_SENTINEL_IMAP_PORT_KEY]:
+                      previous?.config[MAIL_SENTINEL_IMAP_PORT_KEY] ?? input.imap.port,
+                  }
+                : {}),
+              ...(input.entry.config[MAIL_SENTINEL_IMAP_TLS_KEY] === undefined
+                ? {
+                    [MAIL_SENTINEL_IMAP_TLS_KEY]:
+                      previous?.config[MAIL_SENTINEL_IMAP_TLS_KEY] ?? input.imap.tls,
+                  }
+                : {}),
+              ...(input.entry.config[MAIL_SENTINEL_IMAP_USERNAME_KEY] === undefined
+                ? {
+                    [MAIL_SENTINEL_IMAP_USERNAME_KEY]:
+                      previous?.config[MAIL_SENTINEL_IMAP_USERNAME_KEY] ?? input.imap.username,
+                  }
+                : {}),
+              ...(input.entry.config[MAIL_SENTINEL_IMAP_MAILBOX_KEY] === undefined
+                ? {
+                    [MAIL_SENTINEL_IMAP_MAILBOX_KEY]:
+                      previous?.config[MAIL_SENTINEL_IMAP_MAILBOX_KEY] ?? input.imap.mailbox,
+                  }
+                : {}),
+            }),
+      },
+      secretRefs: normalizeStringRecord({
+        ...input.entry.secretRefs,
+        ...(input.entry.secretRefs[MAIL_SENTINEL_IMAP_PASSWORD_SECRET_KEY] === undefined &&
+        input.imap.status === "configured"
+          ? {
+              [MAIL_SENTINEL_IMAP_PASSWORD_SECRET_KEY]:
+                previous?.secretRefs[MAIL_SENTINEL_IMAP_PASSWORD_SECRET_KEY] ??
+                input.imap.secretRef,
+            }
+          : {}),
+      }),
+      matrix: {
+        ...(input.entry.matrix ?? {}),
+        ...(input.entry.matrix?.alertRoom === undefined
+          ? { alertRoom: previous?.matrix?.alertRoom ?? input.matrixRoom }
+          : {}),
+        ...(input.entry.matrix?.allowedUsers === undefined &&
+        previous?.matrix?.allowedUsers !== undefined
+          ? { allowedUsers: previous.matrix.allowedUsers }
+          : {}),
+      },
+    };
+    return next;
+  }
+
+  private getRuntimeBotInstance(
+    runtimeConfig: RuntimeConfig,
+    id: string,
+  ): RuntimeBotInstance | undefined {
+    return runtimeConfig.bots.instances.find((entry) => entry.id === id);
+  }
+
+  private getRuntimeBotInstanceForAgent(
+    runtimeConfig: RuntimeConfig,
+    agent: RuntimeAgentEntry,
+  ): RuntimeBotInstance | undefined {
+    return agent.botInstanceId === undefined
+      ? undefined
+      : this.getRuntimeBotInstance(runtimeConfig, agent.botInstanceId);
   }
 
   private resolveSharedServiceBotLocalpart(packages: LoadedBotPackage[]): string | undefined {
@@ -347,16 +714,23 @@ export class RealInstallerService implements InstallerService {
       ?.manifest.matrixIdentity.localpartPrefix;
   }
 
-  private resolvePreferredDedicatedMatrixBot(packages: LoadedBotPackage[]): LoadedBotPackage | undefined {
-    return packages.find((entry) =>
-      entry.manifest.matrixIdentity.mode === "dedicated-account"
-      && entry.manifest.matrixRouting?.defaultAccount === true)
-      ?? packages.find((entry) => entry.manifest.matrixIdentity.mode === "dedicated-account");
+  private resolvePreferredDedicatedMatrixBot(
+    packages: LoadedBotPackage[],
+  ): LoadedBotPackage | undefined {
+    return (
+      packages.find(
+        (entry) =>
+          entry.manifest.matrixIdentity.mode === "dedicated-account" &&
+          entry.manifest.matrixRouting?.defaultAccount === true,
+      ) ?? packages.find((entry) => entry.manifest.matrixIdentity.mode === "dedicated-account")
+    );
   }
 
   private resolveBootstrapMatrixBotLocalpart(packages: LoadedBotPackage[]): string | undefined {
-    return this.resolveSharedServiceBotLocalpart(packages)
-      ?? this.resolvePreferredDedicatedMatrixBot(packages)?.manifest.matrixIdentity.localpartPrefix;
+    return (
+      this.resolveSharedServiceBotLocalpart(packages) ??
+      this.resolvePreferredDedicatedMatrixBot(packages)?.manifest.matrixIdentity.localpartPrefix
+    );
   }
 
   private resolveBotMatrixRouting(manifest: LoadedBotPackage["manifest"] | undefined): {
@@ -377,11 +751,65 @@ export class RealInstallerService implements InstallerService {
       dmEnabled: manifest?.matrixRouting?.dm?.enabled ?? true,
       alertRoom: {
         autoReply,
-        requireMention:
-          configuredRequireMention
-          ?? (autoReply ? false : true),
+        requireMention: configuredRequireMention ?? !autoReply,
       },
     };
+  }
+
+  private async listInvitedHumanMatrixUserIds(runtimeConfig: RuntimeConfig): Promise<string[]> {
+    let entries: Dirent[];
+    try {
+      entries = await readdir(this.paths.secretsDir, { withFileTypes: true });
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return [];
+      }
+      throw error;
+    }
+
+    const reservedUserIds = new Set<string>([
+      runtimeConfig.matrix.operator.userId,
+      runtimeConfig.matrix.bot.userId,
+      ...runtimeConfig.openclawProfile.agents.flatMap((entry) =>
+        entry.matrix?.userId === undefined ? [] : [entry.matrix.userId],
+      ),
+    ]);
+    const reservedLocalparts = new Set<string>(
+      [
+        runtimeConfig.matrix.operator.localpart ?? "",
+        runtimeConfig.matrix.bot.localpart ?? "",
+        ...runtimeConfig.openclawProfile.agents.flatMap((entry) =>
+          entry.matrix?.localpart === undefined ? [] : [entry.matrix.localpart],
+        ),
+      ].filter((value) => value.length > 0),
+    );
+
+    return dedupeStrings(
+      entries.flatMap((entry) => {
+        if (!entry.isFile()) {
+          return [];
+        }
+        const match = /^matrix-user-(.+)\.password$/.exec(entry.name);
+        if (match === null) {
+          return [];
+        }
+        const localpart = sanitizeExpectedMatrixLocalpart(match[1] ?? "", "");
+        if (localpart.length === 0 || reservedLocalparts.has(localpart)) {
+          return [];
+        }
+        const userId = `@${localpart}:${runtimeConfig.matrix.homeserverDomain}`;
+        if (reservedUserIds.has(userId)) {
+          return [];
+        }
+        return [userId];
+      }),
+    );
+  }
+
+  private async refreshManagedMatrixRouting(runtimeConfig: RuntimeConfig): Promise<void> {
+    await this.writeOpenClawRuntimeArtifacts(runtimeConfig);
+    this.setManagedOpenClawEnv(runtimeConfig);
+    await this.refreshGatewayAfterRuntimeConfig(runtimeConfig);
   }
 
   private syncPrimaryDedicatedMatrixBotIdentity(
@@ -398,10 +826,10 @@ export class RealInstallerService implements InstallerService {
       return false;
     }
     if (
-      current.localpart === identity.localpart
-      && current.userId === identity.userId
-      && current.passwordSecretRef === identity.passwordSecretRef
-      && current.accessTokenSecretRef === identity.accessTokenSecretRef
+      current.localpart === identity.localpart &&
+      current.userId === identity.userId &&
+      current.passwordSecretRef === identity.passwordSecretRef &&
+      current.accessTokenSecretRef === identity.accessTokenSecretRef
     ) {
       return false;
     }
@@ -417,15 +845,17 @@ export class RealInstallerService implements InstallerService {
   }
 
   private resolveRequestedBotIds(req: InstallRequest, defaultBotIds: string[]): string[] {
-    const selected = req.bots?.selected
-      ?.map((entry: string) => entry.trim())
-      .filter((entry: string) => entry.length > 0)
-      ?? [];
-    if (selected.length > 0) {
-      return dedupeStrings(selected);
-    }
-    if (req.mailSentinel !== undefined) {
-      return ["mail-sentinel"];
+    const selected =
+      req.bots?.selected
+        ?.map((entry: string) => entry.trim())
+        .filter((entry: string) => entry.length > 0) ?? [];
+    const selectedFromInstances = Array.isArray(req.bots?.instances)
+      ? req.bots.instances
+          .map((entry) => entry.packageId.trim())
+          .filter((entry) => entry.length > 0)
+      : [];
+    if (selected.length > 0 || selectedFromInstances.length > 0) {
+      return dedupeStrings([...selected, ...selectedFromInstances]);
     }
     return dedupeStrings(defaultBotIds);
   }
@@ -498,7 +928,6 @@ export class RealInstallerService implements InstallerService {
     try {
       const config = await this.readRuntimeConfig();
       const roomId = req.roomId ?? config.matrix.alertRoom.roomId;
-      const accessToken = await this.resolveSecretRef(config.matrix.bot.accessTokenSecretRef);
       const transactionId = `sovereign_${Date.now()}_${randomUUID().slice(0, 8)}`;
       const endpoint = new URL(
         `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(
@@ -507,21 +936,39 @@ export class RealInstallerService implements InstallerService {
         ensureTrailingSlash(config.matrix.adminBaseUrl),
       ).toString();
 
-      const response = await this.fetchImpl(endpoint, {
-        method: "PUT",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify({
-          msgtype: "m.text",
-          body: req.text ?? `Sovereign test alert (${now()})`,
-        }),
-      });
+      const sendMatrixTestAlert = async (): Promise<{
+        response: Response;
+        parsed: unknown;
+      }> => {
+        const accessToken = await this.resolveSecretRef(config.matrix.bot.accessTokenSecretRef);
+        const response = await this.fetchImpl(endpoint, {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({
+            msgtype: "m.text",
+            body: req.text ?? `Sovereign test alert (${now()})`,
+          }),
+        });
 
-      const rawBody = await response.text();
-      const parsed = parseJsonSafely(rawBody);
+        const rawBody = await response.text();
+        return {
+          response,
+          parsed: parseJsonSafely(rawBody),
+        };
+      };
+
+      let { response, parsed } = await sendMatrixTestAlert();
+      if ((response.status === 401 || response.status === 403) && response.ok === false) {
+        const repaired = await this.ensureManagedMatrixAccessTokens(config);
+        if (repaired) {
+          ({ response, parsed } = await sendMatrixTestAlert());
+        }
+      }
+
       if (!response.ok) {
         return {
           delivered: false,
@@ -567,32 +1014,52 @@ export class RealInstallerService implements InstallerService {
 
   async getStatus(): Promise<SovereignStatus> {
     const runtimeConfig = await this.tryReadRuntimeConfig();
+    const provenance = await this.tryReadInstallProvenance();
     const detectedOpenClaw = await this.safeDetectOpenClaw();
     const expectedAgentIds = runtimeConfig?.openclawProfile.agents.map((entry) => entry.id) ?? [];
     const expectedCronIds = runtimeConfig?.openclawProfile.crons.map((entry) => entry.id) ?? [];
 
     const gateway = await this.inspectGatewayService();
-    const relay = runtimeConfig?.relay?.enabled === true
-      ? await this.inspectRelayTunnelService()
-      : {
-          installed: false,
-          state: "unknown" as GatewayState,
-          message: undefined,
-        };
+    const relay =
+      runtimeConfig?.relay?.enabled === true
+        ? await this.inspectRelayTunnelService()
+        : {
+            installed: false,
+            state: "unknown" as GatewayState,
+            message: undefined,
+          };
     const healthProbe = await this.probeOpenClawHealth();
     const agentProbes = await Promise.all(
-      expectedAgentIds.map(async (id) => await this.inspectOpenClawListContains(["agents", "list"], id)),
+      expectedAgentIds.map(
+        async (id) =>
+          await this.inspectManagedOpenClawListContains(runtimeConfig, ["agents", "list"], id),
+      ),
     );
     const cronProbes = await Promise.all(
-      expectedCronIds.map(async (id) => await this.inspectOpenClawListContains(["cron", "list"], id)),
+      expectedCronIds.map(
+        async (id) =>
+          await this.inspectManagedOpenClawListContains(runtimeConfig, ["cron", "list"], id),
+      ),
     );
+    const managedRuntimeJson =
+      runtimeConfig === null ? null : await this.readManagedOpenClawRuntimeJson(runtimeConfig);
     const matrixStatus = await this.inspectMatrixStatus(runtimeConfig);
 
     const cliInstalled = detectedOpenClaw !== null;
     const managedBySovereign = runtimeConfig?.openclaw.managedInstallation ?? true;
     const pluginIds = runtimeConfig?.openclawProfile.plugins.allow;
-    const agentPresent = agentProbes.every((probe) => !probe.verified || probe.present);
-    const cronPresent = cronProbes.every((probe) => !probe.verified || probe.present);
+    const agentPresent = expectedAgentIds.every(
+      (id, index) =>
+        !(agentProbes[index]?.verified ?? false) ||
+        agentProbes[index]?.present === true ||
+        this.managedOpenClawRuntimeHasAgent(managedRuntimeJson, id),
+    );
+    const cronPresent = expectedCronIds.every(
+      (id, index) =>
+        !(cronProbes[index]?.verified ?? false) ||
+        cronProbes[index]?.present === true ||
+        this.managedOpenClawRuntimeHasCron(managedRuntimeJson, id),
+    );
     const openclawHealth = deriveOpenClawHealth({
       cliInstalled,
       gatewayState: gateway.state,
@@ -606,8 +1073,11 @@ export class RealInstallerService implements InstallerService {
         : relay.installed
           ? "degraded"
           : "unhealthy";
-    const sovereignHealth: ComponentHealth =
-      runtimeConfig === null ? "degraded" : "healthy";
+    const sovereignHealth: ComponentHealth = runtimeConfig === null ? "degraded" : "healthy";
+    const hostResourceStatus =
+      runtimeConfig === null
+        ? { resources: [], bots: {} }
+        : await this.inspectCompiledHostResources(runtimeConfig);
 
     return {
       mode: "bundled_matrix",
@@ -688,10 +1158,8 @@ export class RealInstallerService implements InstallerService {
         cronPresent,
         ...(pluginIds === undefined ? {} : { pluginIds }),
       },
-      mailSentinel: {
-        agentId: MAIL_SENTINEL_AGENT_ID,
-        consecutiveFailures: 0,
-      },
+      bots: hostResourceStatus.bots,
+      hostResources: hostResourceStatus.resources,
       imap: {
         authStatus: "unknown",
         ...(runtimeConfig?.imap.status !== "configured" || runtimeConfig.imap.host === undefined
@@ -702,7 +1170,7 @@ export class RealInstallerService implements InstallerService {
           : { mailbox: runtimeConfig.imap.mailbox }),
       },
       version: {
-        sovereignNode: process.env.npm_package_version ?? "0.1.0",
+        sovereignNode: process.env.npm_package_version ?? "2.0.0",
         contractVersion: CONTRACT_VERSION,
         ...(detectedOpenClaw?.version === undefined ? {} : { openclaw: detectedOpenClaw.version }),
         ...(pluginIds === undefined
@@ -712,6 +1180,7 @@ export class RealInstallerService implements InstallerService {
                 pluginIds.map((pluginId) => [pluginId, "managed-by-sovereign"]),
               ),
             }),
+        ...(provenance === null ? {} : { provenance }),
       },
     };
   }
@@ -721,21 +1190,42 @@ export class RealInstallerService implements InstallerService {
     const runtimeConfig = await this.tryReadRuntimeConfig();
     const detectedOpenClaw = await this.safeDetectOpenClaw();
     const gateway = await this.inspectGatewayService();
-    const relay = runtimeConfig?.relay?.enabled === true
-      ? await this.inspectRelayTunnelService()
-      : null;
+    const relay =
+      runtimeConfig?.relay?.enabled === true ? await this.inspectRelayTunnelService() : null;
     const healthProbe = await this.probeOpenClawHealth();
     const expectedAgentIds = runtimeConfig?.openclawProfile.agents.map((entry) => entry.id) ?? [];
     const expectedCronIds = runtimeConfig?.openclawProfile.crons.map((entry) => entry.id) ?? [];
     const agentProbes = await Promise.all(
-      expectedAgentIds.map(async (id) => await this.inspectOpenClawListContains(["agents", "list"], id)),
+      expectedAgentIds.map(
+        async (id) =>
+          await this.inspectManagedOpenClawListContains(runtimeConfig, ["agents", "list"], id),
+      ),
     );
     const cronProbes = await Promise.all(
-      expectedCronIds.map(async (id) => await this.inspectOpenClawListContains(["cron", "list"], id)),
+      expectedCronIds.map(
+        async (id) =>
+          await this.inspectManagedOpenClawListContains(runtimeConfig, ["cron", "list"], id),
+      ),
     );
-    const agentPresent = agentProbes.every((probe) => !probe.verified || probe.present);
-    const cronPresent = cronProbes.every((probe) => !probe.verified || probe.present);
+    const managedRuntimeJson =
+      runtimeConfig === null ? null : await this.readManagedOpenClawRuntimeJson(runtimeConfig);
+    const agentPresent = expectedAgentIds.every(
+      (id, index) =>
+        !(agentProbes[index]?.verified ?? false) ||
+        agentProbes[index]?.present === true ||
+        this.managedOpenClawRuntimeHasAgent(managedRuntimeJson, id),
+    );
+    const cronPresent = expectedCronIds.every(
+      (id, index) =>
+        !(cronProbes[index]?.verified ?? false) ||
+        cronProbes[index]?.present === true ||
+        this.managedOpenClawRuntimeHasCron(managedRuntimeJson, id),
+    );
     const wiringCheck = await this.inspectOpenClawRuntimeWiring(runtimeConfig);
+    const hostResourceStatus =
+      runtimeConfig === null
+        ? { resources: [], bots: {} }
+        : await this.inspectCompiledHostResources(runtimeConfig);
 
     checks.push(
       check(
@@ -781,12 +1271,14 @@ export class RealInstallerService implements InstallerService {
           ? "fail"
           : gateway.state === "running" && healthProbe.ok
             ? "pass"
-            : gateway.state === "failed" || !healthProbe.ok
-              ? "fail"
-              : "warn",
+            : gateway.state === "running" && !healthProbe.ok
+              ? "warn"
+              : "fail",
         gateway.state === "running" && healthProbe.ok
           ? "OpenClaw gateway service is running and health probe succeeded"
-          : "OpenClaw gateway service health probe failed or service is not running",
+          : gateway.state === "running" && !healthProbe.ok
+            ? "OpenClaw gateway service is running but health probe did not succeed"
+            : "OpenClaw gateway service health probe failed or service is not running",
         {
           state: gateway.state,
           healthProbe: healthProbe.message,
@@ -799,11 +1291,7 @@ export class RealInstallerService implements InstallerService {
         check(
           "relay-tunnel-service",
           "Managed relay tunnel service",
-          relay.installed && relay.state === "running"
-            ? "pass"
-            : relay.installed
-              ? "warn"
-              : "fail",
+          relay.installed && relay.state === "running" ? "pass" : relay.installed ? "warn" : "fail",
           relay.installed && relay.state === "running"
             ? "Managed relay tunnel service is connected"
             : "Managed relay tunnel service is not running",
@@ -848,7 +1336,110 @@ export class RealInstallerService implements InstallerService {
             : "fail",
         matrixStatus.health === "healthy"
           ? "Matrix homeserver probe succeeded"
-          : matrixStatus.message ?? "Matrix homeserver probe failed",
+          : (matrixStatus.message ?? "Matrix homeserver probe failed"),
+      ),
+    );
+
+    const provenance = await this.tryReadInstallProvenance();
+    if (runtimeConfig !== null) {
+      for (const resource of runtimeConfig.hostResources?.resources ?? []) {
+        const observed = hostResourceStatus.resources.find(
+          (entry) => entry.id === resource.id && entry.agentId === resource.agentId,
+        );
+        if (observed === undefined) {
+          continue;
+        }
+        for (const resourceCheck of resource.checks) {
+          if (resourceCheck.kind === "resource-state") {
+            const actual =
+              resourceCheck.property === "present"
+                ? observed.present
+                : resourceCheck.property === "enabled"
+                  ? observed.enabled
+                  : resourceCheck.property === "active"
+                    ? observed.active
+                    : resourceCheck.property === "absent"
+                      ? observed.present === undefined
+                        ? undefined
+                        : !observed.present
+                      : undefined;
+            checks.push(
+              check(
+                `host-resource:${resource.id}:${resourceCheck.id}`,
+                `${resource.agentId} ${resource.id}`,
+                actual === resourceCheck.equals
+                  ? "pass"
+                  : resourceCheck.severity === "fail"
+                    ? "fail"
+                    : "warn",
+                actual === resourceCheck.equals
+                  ? `${resourceCheck.property} matches expected state`
+                  : `${resourceCheck.property} expected ${String(resourceCheck.equals)} but got ${String(actual)}`,
+              ),
+            );
+            continue;
+          }
+          const botFields = hostResourceStatus.bots[resource.agentId]?.fields ?? {};
+          const actual = botFields[resourceCheck.field];
+          const numeric = typeof actual === "number" ? actual : undefined;
+          const failed =
+            numeric !== undefined &&
+            resourceCheck.failGte !== undefined &&
+            numeric >= resourceCheck.failGte;
+          const warned =
+            numeric !== undefined &&
+            resourceCheck.warnGte !== undefined &&
+            numeric >= resourceCheck.warnGte;
+          checks.push(
+            check(
+              `host-resource:${resource.id}:${resourceCheck.id}`,
+              `${resource.agentId} ${resourceCheck.field}`,
+              failed ? "fail" : warned ? "warn" : "pass",
+              numeric === undefined
+                ? `Field '${resourceCheck.field}' is unavailable`
+                : `${resourceCheck.field}=${String(numeric)}`,
+            ),
+          );
+        }
+      }
+    }
+    const dfResult = await this.safeExec("df", ["-Pk", "/"]);
+    if (dfResult.ok && dfResult.result.exitCode === 0) {
+      const parsed = parseDfAvailableBytes(dfResult.result.stdout);
+      if (parsed !== null) {
+        const diskStatus: CheckResult["status"] =
+          parsed.availableBytes < DOCTOR_DISK_FAIL_BYTES
+            ? "fail"
+            : parsed.availableBytes < DOCTOR_DISK_WARN_BYTES
+              ? "warn"
+              : "pass";
+        checks.push(
+          check(
+            "disk-space-root",
+            "Root filesystem free space",
+            diskStatus,
+            diskStatus === "pass"
+              ? `Sufficient disk space on / (${formatGiB(parsed.availableBytes)} GiB free)`
+              : `Low disk space on / (${formatGiB(parsed.availableBytes)} GiB free)`,
+            {
+              availableBytes: parsed.availableBytes,
+              warnThresholdBytes: DOCTOR_DISK_WARN_BYTES,
+              failThresholdBytes: DOCTOR_DISK_FAIL_BYTES,
+              mountPoint: parsed.mountPoint,
+            },
+          ),
+        );
+      }
+    }
+
+    checks.push(
+      check(
+        "install-provenance",
+        "Install provenance",
+        provenance !== null ? "pass" : "warn",
+        provenance !== null
+          ? `Install provenance recorded (${provenance.installSource}, ${provenance.nodeRef}@${provenance.nodeCommitSha.slice(0, 8)})`
+          : "Install provenance file is missing; run install.sh to generate it",
       ),
     );
 
@@ -872,7 +1463,100 @@ export class RealInstallerService implements InstallerService {
   }
 
   async reconfigureMatrix(req: ReconfigureMatrixRequest): Promise<ReconfigureResult> {
-    return this.stubService.reconfigureMatrix(req);
+    const requestedFederation = req.matrix?.federationEnabled;
+    if (requestedFederation === undefined) {
+      return this.stubService.reconfigureMatrix(req);
+    }
+
+    const runtimeConfig = await this.readRuntimeConfig();
+
+    const federationChanged = requestedFederation !== runtimeConfig.matrix.federationEnabled;
+    const changed: string[] = [];
+    let gatewayRestarted = false;
+
+    if (federationChanged) {
+      changed.push("matrix.federationEnabled");
+
+      const raw = await readFile(this.paths.configPath, "utf8");
+      const parsed = parseJsonDocument(raw);
+      if (!isRecord(parsed)) {
+        throw {
+          code: "CONFIG_INVALID",
+          message: "Sovereign runtime config does not match expected shape",
+          retryable: false,
+          details: { configPath: this.paths.configPath },
+        };
+      }
+
+      const matrixConfig = isRecord(parsed.matrix) ? parsed.matrix : {};
+      matrixConfig.federationEnabled = requestedFederation;
+      parsed.matrix = matrixConfig;
+      parsed.generatedAt = now();
+      await this.writeInstallerJsonFile(this.paths.configPath, parsed, 0o644);
+
+      const nextRuntimeConfig: RuntimeConfig = {
+        ...runtimeConfig,
+        matrix: {
+          ...runtimeConfig.matrix,
+          federationEnabled: requestedFederation,
+        },
+      };
+
+      if (
+        runtimeConfig.matrix.projectDir !== undefined &&
+        this.matrixProvisioner.updateFederationConfig !== undefined
+      ) {
+        const projectDir = runtimeConfig.matrix.projectDir;
+        await this.matrixProvisioner.updateFederationConfig({
+          federationEnabled: requestedFederation,
+          projectDir,
+          composeFilePath: join(projectDir, "compose.yaml"),
+          accessMode: runtimeConfig.matrix.accessMode,
+          homeserverDomain: runtimeConfig.matrix.homeserverDomain,
+          publicBaseUrl: runtimeConfig.matrix.publicBaseUrl,
+        });
+      }
+
+      await this.writeOpenClawRuntimeArtifacts(nextRuntimeConfig);
+      this.setManagedOpenClawEnv(nextRuntimeConfig);
+      await this.refreshGatewayAfterRuntimeConfig(nextRuntimeConfig);
+      gatewayRestarted = true;
+    }
+
+    const requestUpdate = await this.updateInstallRequestFederation({
+      federationEnabled: requestedFederation,
+      changed: federationChanged,
+    });
+    changed.push(...requestUpdate.changed);
+
+    return {
+      target: "matrix",
+      changed,
+      restartRequiredServices: gatewayRestarted
+        ? ["openclaw-gateway", ...(federationChanged ? ["synapse"] : [])]
+        : [],
+      validation: [
+        check(
+          "matrix-federation",
+          "Matrix federation config",
+          "pass",
+          federationChanged
+            ? `Matrix federation ${requestedFederation ? "enabled" : "disabled"}`
+            : "Matrix federation config already matched the requested value",
+        ),
+        ...(gatewayRestarted
+          ? [
+              check(
+                "openclaw-gateway-restart",
+                "OpenClaw gateway restart",
+                "pass",
+                "OpenClaw gateway restarted with updated federation settings",
+              ),
+            ]
+          : []),
+        ...requestUpdate.validation,
+      ],
+    };
   }
 
   async reconfigureOpenrouter(req: ReconfigureOpenrouterRequest): Promise<ReconfigureResult> {
@@ -922,12 +1606,12 @@ export class RealInstallerService implements InstallerService {
     let gatewayRestarted = false;
     if (runtimeChanged) {
       const openrouterConfig = isRecord(parsed.openrouter) ? parsed.openrouter : {};
-      openrouterConfig["provider"] = "openrouter";
-      openrouterConfig["model"] = nextModel;
-      openrouterConfig["apiKeySecretRef"] = nextSecretRef;
-      delete openrouterConfig["apiKey"];
-      parsed["openrouter"] = openrouterConfig;
-      parsed["generatedAt"] = now();
+      openrouterConfig.provider = "openrouter";
+      openrouterConfig.model = nextModel;
+      openrouterConfig.apiKeySecretRef = nextSecretRef;
+      delete openrouterConfig.apiKey;
+      parsed.openrouter = openrouterConfig;
+      parsed.generatedAt = now();
       await this.writeInstallerJsonFile(this.paths.configPath, parsed, 0o644);
 
       const nextRuntimeConfig: RuntimeConfig = {
@@ -983,7 +1667,6 @@ export class RealInstallerService implements InstallerService {
     ttlMinutes?: number;
   }): Promise<MatrixOnboardingIssueResult> {
     const runtimeConfig = await this.readRuntimeConfig();
-    this.assertMatrixOnboardingAvailable(runtimeConfig);
     const operatorPasswordSecretRef = runtimeConfig.matrix.operator.passwordSecretRef;
     if (operatorPasswordSecretRef === undefined || operatorPasswordSecretRef.length === 0) {
       throw {
@@ -992,151 +1675,421 @@ export class RealInstallerService implements InstallerService {
         retryable: false,
       };
     }
-    return await this.issueMatrixOnboardingForUser({
-      runtimeConfig,
-      userId: runtimeConfig.matrix.operator.userId,
+    const onboardingUrl = this.assertMatrixOnboardingAvailable(runtimeConfig);
+    const issued = issueMatrixOnboardingState({
       passwordSecretRef: operatorPasswordSecretRef,
+      username: runtimeConfig.matrix.operator.userId,
+      homeserverUrl: runtimeConfig.matrix.publicBaseUrl,
       ...(req?.ttlMinutes === undefined ? {} : { ttlMinutes: req.ttlMinutes }),
     });
-  }
-
-  async inviteHumanMatrixUser(req: {
-    username: string;
-    ttlMinutes?: number;
-  }): Promise<MatrixHumanUserInviteResult> {
-    const runtimeConfig = await this.readRuntimeConfig();
-    this.assertMatrixOnboardingAvailable(runtimeConfig);
-    const localpart = this.sanitizeHumanMatrixLocalpart(req.username);
-    this.assertHumanMatrixLocalpartIsNotReserved(runtimeConfig, localpart);
-
-    const operatorTokenSecretRef = runtimeConfig.matrix.operator.accessTokenSecretRef;
-    if (operatorTokenSecretRef === undefined || operatorTokenSecretRef.length === 0) {
-      throw {
-        code: "MATRIX_HUMAN_USER_INVITE_FAILED",
-        message: "Operator Matrix access token is required to invite human users",
-        retryable: false,
-      };
-    }
-
-    const userId = this.buildMatrixUserId(runtimeConfig, localpart);
-    const operatorAccessToken = await this.resolveSecretRef(operatorTokenSecretRef);
-    const password = generateAgentPassword();
-    const passwordSecretRef = await this.writeManagedSecretFile(
-      `matrix-human-${localpart}.password`,
-      password,
-    );
-    const provisionedUserId = await this.ensureSynapseUserViaAdminApi({
-      adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
-      adminAccessToken: operatorAccessToken,
-      expectedUserId: userId,
-      password,
-      failureCode: "MATRIX_HUMAN_USER_INVITE_FAILED",
-    });
-    await this.inviteMatrixUserToRoom({
-      adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
-      roomId: runtimeConfig.matrix.alertRoom.roomId,
-      inviterAccessToken: operatorAccessToken,
-      inviteeUserId: provisionedUserId,
-      failureCode: "MATRIX_HUMAN_USER_INVITE_FAILED",
-      failureMessage: `Failed to invite ${provisionedUserId} to alert room`,
-    });
-
-    const issued = await this.issueMatrixOnboardingForUser({
-      runtimeConfig,
-      userId: provisionedUserId,
-      passwordSecretRef,
-      ...(req.ttlMinutes === undefined ? {} : { ttlMinutes: req.ttlMinutes }),
-    });
-
+    await this.writeMatrixOnboardingState(runtimeConfig, issued.state);
     return {
-      localpart,
-      userId: provisionedUserId,
       code: issued.code,
-      expiresAt: issued.expiresAt,
-      onboardingUrl: issued.onboardingUrl,
-      invitedToAlertRoom: true,
+      expiresAt: issued.state.expiresAt,
+      onboardingUrl,
+      onboardingLink: buildMatrixOnboardingLink(onboardingUrl, issued.code),
+      username: runtimeConfig.matrix.operator.userId,
     };
   }
 
-  async deleteHumanMatrixUser(req: {
+  async inviteMatrixUser(req: {
     username: string;
-  }): Promise<MatrixHumanUserDeleteResult> {
+    ttlMinutes?: number;
+  }): Promise<MatrixOnboardingIssueResult> {
     const runtimeConfig = await this.readRuntimeConfig();
-    const localpart = this.sanitizeHumanMatrixLocalpart(req.username);
-    this.assertHumanMatrixLocalpartIsNotReserved(runtimeConfig, localpart);
+    const onboardingUrl = this.assertMatrixOnboardingAvailable(runtimeConfig);
+    const normalized = this.normalizeMatrixUserIdentifier(req.username, runtimeConfig);
+    this.assertHumanMatrixUserTarget(runtimeConfig, normalized, "invite");
 
     const operatorTokenSecretRef = runtimeConfig.matrix.operator.accessTokenSecretRef;
     if (operatorTokenSecretRef === undefined || operatorTokenSecretRef.length === 0) {
       throw {
-        code: "MATRIX_HUMAN_USER_DELETE_FAILED",
-        message: "Operator Matrix access token is required to remove human users",
+        code: "MATRIX_USER_INVITE_FAILED",
+        message: "Operator Matrix access token is required to invite local Matrix users",
+        retryable: false,
+      };
+    }
+    const operatorAccessToken = await this.resolveSecretRef(operatorTokenSecretRef);
+    const passwordSecretRef = await this.writeManagedSecretFile(
+      `matrix-user-${normalized.localpart}.password`,
+      generateAgentPassword(),
+    );
+    const password = await this.resolveSecretRef(passwordSecretRef);
+    const upsertedUserId = await this.ensureSynapseUserViaAdminApi({
+      adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+      adminAccessToken: operatorAccessToken,
+      expectedUserId: normalized.userId,
+      password,
+    });
+    const loginSession = await this.loginMatrixUser({
+      adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+      localpart: normalized.localpart,
+      password,
+      expectedUserId: upsertedUserId,
+    });
+    await this.ensureMatrixUserInAlertRoom({
+      adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+      roomId: runtimeConfig.matrix.alertRoom.roomId,
+      inviterAccessToken: operatorAccessToken,
+      inviteeUserId: loginSession.userId,
+      inviteeAccessToken: loginSession.accessToken,
+    });
+
+    const issued = issueMatrixOnboardingState({
+      passwordSecretRef,
+      username: loginSession.userId,
+      homeserverUrl: runtimeConfig.matrix.publicBaseUrl,
+      ttlMinutes: req.ttlMinutes ?? DEFAULT_MATRIX_USER_INVITE_TTL_MINUTES,
+    });
+    await this.writeMatrixOnboardingState(runtimeConfig, issued.state);
+    await this.refreshManagedMatrixRouting(runtimeConfig);
+    return {
+      code: issued.code,
+      expiresAt: issued.state.expiresAt,
+      onboardingUrl,
+      onboardingLink: buildMatrixOnboardingLink(onboardingUrl, issued.code),
+      username: loginSession.userId,
+    };
+  }
+
+  async removeMatrixUser(req: { username: string }): Promise<MatrixUserRemoveResult> {
+    const runtimeConfig = await this.readRuntimeConfig();
+    const normalized = this.normalizeMatrixUserIdentifier(req.username, runtimeConfig);
+    this.assertHumanMatrixUserTarget(runtimeConfig, normalized, "remove");
+
+    const operatorTokenSecretRef = runtimeConfig.matrix.operator.accessTokenSecretRef;
+    if (operatorTokenSecretRef === undefined || operatorTokenSecretRef.length === 0) {
+      throw {
+        code: "MATRIX_USER_REMOVE_FAILED",
+        message: "Operator Matrix access token is required to remove local Matrix users",
+        retryable: false,
+      };
+    }
+    const operatorAccessToken = await this.resolveSecretRef(operatorTokenSecretRef);
+    const removed = await this.deactivateSynapseUserViaAdminApi({
+      adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+      adminAccessToken: operatorAccessToken,
+      expectedUserId: normalized.userId,
+    });
+    await rm(join(this.paths.secretsDir, `matrix-user-${normalized.localpart}.password`), {
+      force: true,
+    });
+    await this.refreshManagedMatrixRouting(runtimeConfig);
+    return {
+      localpart: normalized.localpart,
+      userId: normalized.userId,
+      removed,
+    };
+  }
+
+  async getPendingMigrations(): Promise<MigrationStatusResult> {
+    const requestPath = this.getInstallRequestPath();
+    return {
+      requestFile: requestPath,
+      pending: await this.listPendingMigrations(),
+    };
+  }
+
+  async migrateLegacyMailSentinel(req: {
+    nonInteractive?: boolean;
+    matrixLocalpart?: string;
+    alertRoomId?: string;
+    alertRoomName?: string;
+    createAlertRoomName?: string;
+    allowedUsers?: string[];
+  }): Promise<MailSentinelMigrationResult> {
+    const runtimeConfig = await this.readRuntimeConfig();
+    const { requestFile, request } = await this.readSavedInstallRequestOrThrow();
+    if (!(await this.isMailSentinelMigrationPending(request, runtimeConfig))) {
+      const existing = this.getRuntimeBotInstance(runtimeConfig, MAIL_SENTINEL_AGENT_ID);
+      if (existing === undefined) {
+        throw {
+          code: "MAIL_SENTINEL_MIGRATION_NOT_REQUIRED",
+          message: "Legacy Mail Sentinel migration is not pending",
+          retryable: false,
+        };
+      }
+      return {
+        changed: false,
+        requestFile,
+        instance: this.toMailSentinelSummary(existing, runtimeConfig),
+      };
+    }
+
+    const legacyAgent = runtimeConfig.openclawProfile.agents.find(
+      (entry) => entry.id === MAIL_SENTINEL_AGENT_ID,
+    );
+    if (legacyAgent === undefined) {
+      throw {
+        code: "MAIL_SENTINEL_MIGRATION_NOT_REQUIRED",
+        message: "Legacy Mail Sentinel agent was not found in the current runtime",
         retryable: false,
       };
     }
 
-    const userId = this.buildMatrixUserId(runtimeConfig, localpart);
-    const operatorAccessToken = await this.resolveSecretRef(operatorTokenSecretRef);
-    const existingUser = await this.getSynapseUserViaAdminApi({
-      adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
-      adminAccessToken: operatorAccessToken,
-      expectedUserId: userId,
-    });
-    const deactivated =
-      existingUser === null
-        ? false
-        : await this.deactivateSynapseUserViaAdminApi({
-          adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
-          adminAccessToken: operatorAccessToken,
-          expectedUserId: existingUser,
-        });
-    const onboardingCleared = await this.clearMatrixOnboardingStateForUser(runtimeConfig, userId);
-    const passwordSecretRemoved = await this.removeManagedSecretFile(`matrix-human-${localpart}.password`);
-    const deleted = deactivated || onboardingCleared || passwordSecretRemoved;
+    const defaultAllowedUsers = normalizeMatrixUserList(
+      (req.allowedUsers ?? (await this.listInvitedHumanMatrixUserIds(runtimeConfig))).map(
+        (entry) => this.normalizeMatrixUserIdentifier(entry, runtimeConfig).userId,
+      ),
+    );
+    if (defaultAllowedUsers.length === 0) {
+      throw {
+        code: "MAIL_SENTINEL_MIGRATION_INPUT_REQUIRED",
+        message: "Provide at least one allowed Matrix user for the migrated Mail Sentinel instance",
+        retryable: false,
+      };
+    }
 
+    const alertRoom =
+      req.createAlertRoomName === undefined
+        ? {
+            roomId: req.alertRoomId?.trim() || runtimeConfig.matrix.alertRoom.roomId,
+            roomName: req.alertRoomName?.trim() || runtimeConfig.matrix.alertRoom.roomName,
+          }
+        : await this.createMatrixRoomViaClientApi({
+            runtimeConfig,
+            roomName: req.createAlertRoomName,
+          });
+    const localpart = sanitizeManagedAgentLocalpart(
+      req.matrixLocalpart ?? legacyAgent.matrix?.localpart,
+      MAIL_SENTINEL_AGENT_ID,
+    );
+
+    const legacyBotConfig = request.bots?.config?.[MAIL_SENTINEL_AGENT_ID] ?? {};
+    const migratedConfig: Record<string, BotConfigValue> = {
+      ...legacyBotConfig,
+      [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: runtimeConfig.imap.status === "configured",
+      [MAIL_SENTINEL_IMAP_HOST_KEY]: runtimeConfig.imap.host,
+      [MAIL_SENTINEL_IMAP_PORT_KEY]: runtimeConfig.imap.port,
+      [MAIL_SENTINEL_IMAP_TLS_KEY]: runtimeConfig.imap.tls,
+      [MAIL_SENTINEL_IMAP_USERNAME_KEY]: runtimeConfig.imap.username,
+      [MAIL_SENTINEL_IMAP_MAILBOX_KEY]: runtimeConfig.imap.mailbox,
+    };
+    const migratedSecretRefs: Record<string, string> = normalizeStringRecord({
+      ...(runtimeConfig.imap.status === "configured" && runtimeConfig.imap.secretRef !== undefined
+        ? { [MAIL_SENTINEL_IMAP_PASSWORD_SECRET_KEY]: runtimeConfig.imap.secretRef }
+        : {}),
+    });
+    const migratedInstance: RequestedBotInstance = {
+      id: MAIL_SENTINEL_AGENT_ID,
+      packageId: MAIL_SENTINEL_AGENT_ID,
+      workspace: legacyAgent.workspace,
+      config: migratedConfig,
+      secretRefs: migratedSecretRefs,
+      matrix: {
+        localpart,
+        alertRoom,
+        allowedUsers: defaultAllowedUsers,
+      },
+    };
+    request.bots = {
+      ...(request.bots ?? {}),
+      selected: dedupeStrings([...(request.bots?.selected ?? []), MAIL_SENTINEL_AGENT_ID]),
+      instances: sortBotInstances([
+        ...((request.bots?.instances ?? []).filter(
+          (entry) => entry.packageId !== MAIL_SENTINEL_AGENT_ID,
+        ) as RequestedBotInstance[]),
+        migratedInstance,
+      ]),
+    };
+    await this.writeSavedInstallRequest(request);
     return {
-      localpart,
-      userId,
-      deleted,
-      deactivated,
-      onboardingCleared,
+      changed: true,
+      requestFile,
+      instance: this.toMailSentinelSummary(migratedInstance, runtimeConfig),
+    };
+  }
+
+  async listMailSentinelInstances(): Promise<MailSentinelListResult> {
+    const runtimeConfig = await this.tryReadRuntimeConfig();
+    if (runtimeConfig !== null) {
+      const runtimeInstances = runtimeConfig.bots.instances.filter(
+        (entry) => entry.packageId === MAIL_SENTINEL_AGENT_ID,
+      );
+      if (runtimeInstances.length > 0) {
+        return {
+          instances: runtimeInstances.map((entry) =>
+            this.toMailSentinelSummary(entry, runtimeConfig),
+          ),
+        };
+      }
+      const legacyAgent = runtimeConfig.openclawProfile.agents.find(
+        (entry) => entry.id === MAIL_SENTINEL_AGENT_ID,
+      );
+      if (legacyAgent !== undefined) {
+        return {
+          instances: [
+            this.toMailSentinelSummary(
+              {
+                id: MAIL_SENTINEL_AGENT_ID,
+                packageId: MAIL_SENTINEL_AGENT_ID,
+                workspace: legacyAgent.workspace,
+                config: {
+                  [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: runtimeConfig.imap.status === "configured",
+                  [MAIL_SENTINEL_IMAP_HOST_KEY]: runtimeConfig.imap.host,
+                  [MAIL_SENTINEL_IMAP_PORT_KEY]: runtimeConfig.imap.port,
+                  [MAIL_SENTINEL_IMAP_TLS_KEY]: runtimeConfig.imap.tls,
+                  [MAIL_SENTINEL_IMAP_USERNAME_KEY]: runtimeConfig.imap.username,
+                  [MAIL_SENTINEL_IMAP_MAILBOX_KEY]: runtimeConfig.imap.mailbox,
+                },
+                secretRefs: {
+                  [MAIL_SENTINEL_IMAP_PASSWORD_SECRET_KEY]: runtimeConfig.imap.secretRef,
+                },
+                matrix: {
+                  ...(legacyAgent.matrix?.localpart === undefined
+                    ? {}
+                    : { localpart: legacyAgent.matrix.localpart }),
+                  alertRoom: runtimeConfig.matrix.alertRoom,
+                  allowedUsers: await this.listInvitedHumanMatrixUserIds(runtimeConfig),
+                },
+              },
+              runtimeConfig,
+            ),
+          ],
+        };
+      }
+    }
+
+    const request = await this.tryReadSavedInstallRequest();
+    return {
+      instances: (request?.request.bots?.instances ?? [])
+        .filter((entry) => entry.packageId === MAIL_SENTINEL_AGENT_ID)
+        .map((entry) =>
+          this.toMailSentinelSummary(
+            this.normalizeRequestedBotInstance({
+              entry,
+              configById: isBotConfigRecordMap(request?.request.bots?.config)
+                ? (request.request.bots?.config ?? {})
+                : {},
+              matrixRoom: {
+                roomId: "",
+                roomName: request?.request.matrix.alertRoomName ?? "Sovereign Alerts",
+              },
+              previousRuntimeConfig: runtimeConfig,
+            }),
+            runtimeConfig,
+          ),
+        ),
+    };
+  }
+
+  async createMailSentinelInstance(req: {
+    id: string;
+    imapHost: string;
+    imapPort: number;
+    imapTls: boolean;
+    imapUsername: string;
+    imapPassword?: string;
+    imapSecretRef?: string;
+    mailbox?: string;
+    matrixLocalpart?: string;
+    alertRoomId?: string;
+    alertRoomName?: string;
+    createAlertRoomName?: string;
+    allowedUsers: string[];
+    pollInterval?: string;
+    lookbackWindow?: string;
+    defaultReminderDelay?: string;
+    digestInterval?: string;
+  }): Promise<MailSentinelApplyResult> {
+    return this.applyMailSentinelInstance(req, "create");
+  }
+
+  async updateMailSentinelInstance(req: {
+    id: string;
+    imapHost?: string;
+    imapPort?: number;
+    imapTls?: boolean;
+    imapUsername?: string;
+    imapPassword?: string;
+    imapSecretRef?: string;
+    mailbox?: string;
+    matrixLocalpart?: string;
+    alertRoomId?: string;
+    alertRoomName?: string;
+    createAlertRoomName?: string;
+    allowedUsers?: string[];
+    pollInterval?: string;
+    lookbackWindow?: string;
+    defaultReminderDelay?: string;
+    digestInterval?: string;
+  }): Promise<MailSentinelApplyResult> {
+    return this.applyMailSentinelInstance(req, "update");
+  }
+
+  async deleteMailSentinelInstance(req: { id: string }): Promise<MailSentinelDeleteResult> {
+    await this.assertNoPendingMigrations();
+    const { request } = await this.readSavedInstallRequestOrThrow();
+    const id = sanitizeManagedAgentId(req.id);
+    const existingInstances = request.bots?.instances ?? [];
+    const nextInstances = existingInstances.filter((entry) => entry.id !== id);
+    if (nextInstances.length === existingInstances.length) {
+      return {
+        id,
+        deleted: false,
+      };
+    }
+    request.bots = {
+      ...(request.bots ?? {}),
+      selected: (request.bots?.selected ?? []).filter(
+        (entry) =>
+          entry !== MAIL_SENTINEL_AGENT_ID ||
+          nextInstances.some((item) => item.packageId === entry),
+      ),
+      instances: nextInstances,
+    };
+    this.syncSelectedBotsWithInstances(request);
+    await this.writeSavedInstallRequest(request);
+    const result = await this.startInstall(request);
+    return {
+      id,
+      deleted: true,
+      job: result.job,
     };
   }
 
   async listManagedAgents(): Promise<ManagedAgentListResult> {
     const runtimeConfig = await this.readRuntimeConfig();
     return {
-      agents: runtimeConfig.openclawProfile.agents.map((entry) =>
-        this.toManagedAgentOutput(entry)),
+      agents: runtimeConfig.openclawProfile.agents.map((entry) => this.toManagedAgentOutput(entry)),
     };
   }
 
   async listSovereignBots(): Promise<SovereignBotListResult> {
     const runtimeConfig = await this.tryReadRuntimeConfig();
     const installedTemplateRefs = new Set(
-      runtimeConfig?.templates.installed.map((entry) => formatTemplateRef(entry.id, entry.version)) ?? [],
+      runtimeConfig?.templates.installed.map((entry) =>
+        formatTemplateRef(entry.id, entry.version),
+      ) ?? [],
     );
     const botPackages = await this.listBotPackages();
-    const bots = await Promise.all(botPackages.map(async (botPackage) => {
-      const agent = runtimeConfig?.openclawProfile.agents.find(
-        (entry) => entry.templateRef === botPackage.templateRef || entry.botId === botPackage.manifest.id,
-      );
-      const cronJobIds = runtimeConfig?.openclawProfile.crons
-        .filter((entry) => entry.botId === botPackage.manifest.id || entry.agentId === botPackage.manifest.id)
-        .map((entry) => entry.id)
-        .sort((left, right) => left.localeCompare(right));
-      return {
-        id: botPackage.manifest.id,
-        version: botPackage.manifest.version,
-        displayName: botPackage.manifest.displayName,
-        description: botPackage.manifest.description,
-        defaultInstall: botPackage.manifest.defaultInstall === true,
-        templateRef: botPackage.templateRef,
-        installed: installedTemplateRefs.has(botPackage.templateRef),
-        instantiated: agent !== undefined,
-        ...(agent === undefined ? {} : { agentId: agent.id }),
-        ...(cronJobIds === undefined || cronJobIds.length === 0 ? {} : { cronJobIds }),
-      };
-    }));
+    const bots = await Promise.all(
+      botPackages.map(async (botPackage) => {
+        const agent = runtimeConfig?.openclawProfile.agents.find(
+          (entry) =>
+            entry.templateRef === botPackage.templateRef || entry.botId === botPackage.manifest.id,
+        );
+        const cronJobIds = runtimeConfig?.openclawProfile.crons
+          .filter(
+            (entry) =>
+              entry.botId === botPackage.manifest.id || entry.agentId === botPackage.manifest.id,
+          )
+          .map((entry) => entry.id)
+          .sort((left, right) => left.localeCompare(right));
+        return {
+          id: botPackage.manifest.id,
+          version: botPackage.manifest.version,
+          displayName: botPackage.manifest.displayName,
+          description: botPackage.manifest.description,
+          defaultInstall: botPackage.manifest.defaultInstall === true,
+          templateRef: botPackage.templateRef,
+          installed: installedTemplateRefs.has(botPackage.templateRef),
+          instantiated: agent !== undefined,
+          ...(agent === undefined ? {} : { agentId: agent.id }),
+          ...(cronJobIds === undefined || cronJobIds.length === 0 ? {} : { cronJobIds }),
+        };
+      }),
+    );
     return {
       bots: bots.sort((left, right) => left.id.localeCompare(right.id)),
     };
@@ -1148,7 +2101,7 @@ export class RealInstallerService implements InstallerService {
   }): Promise<SovereignBotInstantiateResult> {
     const runtimeConfig = await this.readRuntimeConfig();
     const botPackage = await this.getBotPackage(req.id);
-    const changedTemplate = await this.ensureBotTemplateInstalled(runtimeConfig, botPackage);
+    const changedTemplate = await this.ensureBotTemplatesInstalled(runtimeConfig, botPackage);
     if (changedTemplate) {
       await this.persistManagedAgentTopologyDocument(runtimeConfig);
     }
@@ -1163,7 +2116,9 @@ export class RealInstallerService implements InstallerService {
       },
       "create",
     );
-    const bot = (await this.listSovereignBots()).bots.find((entry) => entry.id === botPackage.manifest.id);
+    const bot = (await this.listSovereignBots()).bots.find(
+      (entry) => entry.id === botPackage.manifest.id,
+    );
     return {
       bot: bot ?? {
         id: botPackage.manifest.id,
@@ -1184,51 +2139,74 @@ export class RealInstallerService implements InstallerService {
 
   async listSovereignTemplates(): Promise<SovereignTemplateListResult> {
     const runtimeConfig = await this.tryReadRuntimeConfig();
+    const botPackages = await this.listBotPackages();
     const installedByRef = new Map(
       (runtimeConfig?.templates.installed ?? []).map((entry) => [
         formatTemplateRef(entry.id, entry.version),
         entry,
       ]),
     );
-    const coreTemplates: SovereignTemplateListResult["templates"] = CORE_TEMPLATE_MANIFESTS.map((manifest) => {
-      const verified = verifySignedTemplateManifest(manifest, CORE_TRUSTED_TEMPLATE_KEYS);
-      const ref = formatTemplateRef(manifest.id, manifest.version);
-      const installed = installedByRef.get(ref);
-      return {
-        kind: "tool",
-        id: manifest.id,
-        version: manifest.version,
-        description: manifest.description,
-        trusted: verified.trusted,
-        installed: installed !== undefined,
-        pinned: installed?.pinned ?? false,
-        keyId: verified.keyId,
-        manifestSha256: verified.manifestSha256,
-      };
-    });
-    const botTemplates: SovereignTemplateListResult["templates"] = (await this.listBotPackages()).map((botPackage) => {
-      const installed = installedByRef.get(botPackage.templateRef);
-      return {
-        kind: "agent" as const,
-        id: botPackage.template.id,
-        version: botPackage.template.version,
-        description: botPackage.template.description,
-        trusted: true,
-        installed: installed !== undefined,
-        pinned: installed?.pinned ?? false,
-        keyId: botPackage.keyId,
-        manifestSha256: botPackage.manifestSha256,
-      };
-    });
-    const templates = [...coreTemplates, ...botTemplates].sort((left, right) => `${left.kind}:${left.id}:${left.version}`.localeCompare(
-      `${right.kind}:${right.id}:${right.version}`,
-    ));
+    const coreTemplates: SovereignTemplateListResult["templates"] = CORE_TEMPLATE_MANIFESTS.map(
+      (manifest) => {
+        const verified = verifySignedTemplateManifest(manifest, CORE_TRUSTED_TEMPLATE_KEYS);
+        const ref = formatTemplateRef(manifest.id, manifest.version);
+        const installed = installedByRef.get(ref);
+        return {
+          kind: "tool",
+          id: manifest.id,
+          version: manifest.version,
+          description: manifest.description,
+          trusted: verified.trusted,
+          installed: installed !== undefined,
+          pinned: installed?.pinned ?? false,
+          keyId: verified.keyId,
+          manifestSha256: verified.manifestSha256,
+        };
+      },
+    );
+    const botAgentTemplates: SovereignTemplateListResult["templates"] = botPackages.map(
+      (botPackage) => {
+        const installed = installedByRef.get(botPackage.templateRef);
+        return {
+          kind: "agent" as const,
+          id: botPackage.template.id,
+          version: botPackage.template.version,
+          description: botPackage.template.description,
+          trusted: true,
+          installed: installed !== undefined,
+          pinned: installed?.pinned ?? false,
+          keyId: botPackage.keyId,
+          manifestSha256: botPackage.manifestSha256,
+        };
+      },
+    );
+    const botToolTemplates: SovereignTemplateListResult["templates"] = botPackages.flatMap(
+      (botPackage) =>
+        botPackage.toolTemplates.map((toolTemplate) => {
+          const installed = installedByRef.get(toolTemplate.templateRef);
+          return {
+            kind: "tool" as const,
+            id: toolTemplate.manifest.id,
+            version: toolTemplate.manifest.version,
+            description: toolTemplate.manifest.description,
+            trusted: true,
+            installed: installed !== undefined,
+            pinned: installed?.pinned ?? false,
+            keyId: toolTemplate.keyId,
+            manifestSha256: toolTemplate.manifestSha256,
+          };
+        }),
+    );
+    const templates = [...coreTemplates, ...botAgentTemplates, ...botToolTemplates].sort(
+      (left, right) =>
+        `${left.kind}:${left.id}:${left.version}`.localeCompare(
+          `${right.kind}:${right.id}:${right.version}`,
+        ),
+    );
     return { templates };
   }
 
-  async installSovereignTemplate(req: {
-    ref: string;
-  }): Promise<SovereignTemplateInstallResult> {
+  async installSovereignTemplate(req: { ref: string }): Promise<SovereignTemplateInstallResult> {
     const manifest = findCoreTemplateManifest(req.ref);
     const runtimeConfig = await this.readRuntimeConfig();
     if (manifest !== undefined) {
@@ -1273,29 +2251,58 @@ export class RealInstallerService implements InstallerService {
       };
     }
 
-    const botPackage = await this.botCatalog.findPackageByTemplateRef(req.ref);
-    if (botPackage === null) {
+    const botPackages = await this.listBotPackages();
+    const botPackage = botPackages.find((entry) => entry.templateRef === req.ref) ?? null;
+    if (botPackage !== null) {
+      const changed = await this.ensureBotTemplatesInstalled(runtimeConfig, botPackage);
+      if (changed) {
+        await this.persistManagedAgentTopologyDocument(runtimeConfig);
+      }
+      return {
+        template: {
+          kind: "agent",
+          id: botPackage.template.id,
+          version: botPackage.template.version,
+          description: botPackage.template.description,
+          trusted: true,
+          installed: true,
+          pinned: true,
+          keyId: botPackage.keyId,
+          manifestSha256: botPackage.manifestSha256,
+        },
+        changed,
+      };
+    }
+
+    const botToolTemplate = this.findBotToolTemplate(botPackages, req.ref);
+    if (botToolTemplate === null) {
       throw {
         code: "TEMPLATE_NOT_FOUND",
         message: `Template '${req.ref}' was not found in the trusted catalog`,
         retryable: false,
       };
     }
-    const changed = await this.ensureBotTemplateInstalled(runtimeConfig, botPackage);
+    const updated = this.upsertInstalledTemplateEntry(
+      runtimeConfig.templates.installed,
+      botToolTemplate.templateRef,
+      this.buildInstalledToolTemplateEntryFromBot(botToolTemplate),
+    );
+    const changed = updated.changed;
     if (changed) {
+      runtimeConfig.templates.installed = updated.installed;
       await this.persistManagedAgentTopologyDocument(runtimeConfig);
     }
     return {
       template: {
-        kind: "agent",
-        id: botPackage.template.id,
-        version: botPackage.template.version,
-        description: botPackage.template.description,
+        kind: "tool",
+        id: botToolTemplate.manifest.id,
+        version: botToolTemplate.manifest.version,
+        description: botToolTemplate.manifest.description,
         trusted: true,
         installed: true,
         pinned: true,
-        keyId: botPackage.keyId,
-        manifestSha256: botPackage.manifestSha256,
+        keyId: botToolTemplate.keyId,
+        manifestSha256: botToolTemplate.manifestSha256,
       },
       changed,
     };
@@ -1336,24 +2343,41 @@ export class RealInstallerService implements InstallerService {
     };
   }
 
-  private upsertInstalledBotTemplateEntry(
+  private buildInstalledToolTemplateEntryFromBot(
+    toolTemplate: LoadedBotPackage["toolTemplates"][number],
+  ): RuntimeConfig["templates"]["installed"][number] {
+    return {
+      kind: "tool",
+      id: toolTemplate.manifest.id,
+      version: toolTemplate.manifest.version,
+      description: toolTemplate.manifest.description,
+      trusted: true,
+      pinned: true,
+      keyId: toolTemplate.keyId,
+      manifestSha256: toolTemplate.manifestSha256,
+      installedAt: now(),
+      source: "bot-repo",
+    };
+  }
+
+  private upsertInstalledTemplateEntry(
     existing: RuntimeConfig["templates"]["installed"],
-    botPackage: LoadedBotPackage,
+    ref: string,
+    next: RuntimeConfig["templates"]["installed"][number],
   ): {
     installed: RuntimeConfig["templates"]["installed"];
     changed: boolean;
   } {
-    const ref = botPackage.templateRef;
     const current = existing.find((entry) => formatTemplateRef(entry.id, entry.version) === ref);
-    const next = this.buildInstalledTemplateEntryFromBot(botPackage);
     if (
-      current !== undefined
-      && current.description === next.description
-      && current.trusted === next.trusted
-      && current.pinned === next.pinned
-      && current.keyId === next.keyId
-      && current.manifestSha256 === next.manifestSha256
-      && current.source === next.source
+      current !== undefined &&
+      current.kind === next.kind &&
+      current.description === next.description &&
+      current.trusted === next.trusted &&
+      current.pinned === next.pinned &&
+      current.keyId === next.keyId &&
+      current.manifestSha256 === next.manifestSha256 &&
+      current.source === next.source
     ) {
       return {
         installed: existing,
@@ -1375,15 +2399,57 @@ export class RealInstallerService implements InstallerService {
     };
   }
 
-  private async ensureBotTemplateInstalled(
+  private upsertInstalledBotTemplateEntry(
+    existing: RuntimeConfig["templates"]["installed"],
+    botPackage: LoadedBotPackage,
+  ): {
+    installed: RuntimeConfig["templates"]["installed"];
+    changed: boolean;
+  } {
+    return this.upsertInstalledTemplateEntry(
+      existing,
+      botPackage.templateRef,
+      this.buildInstalledTemplateEntryFromBot(botPackage),
+    );
+  }
+
+  private upsertInstalledBotToolTemplateEntries(
+    existing: RuntimeConfig["templates"]["installed"],
+    botPackage: LoadedBotPackage,
+  ): {
+    installed: RuntimeConfig["templates"]["installed"];
+    changed: boolean;
+  } {
+    let installed = existing;
+    let changed = false;
+    for (const toolTemplate of botPackage.toolTemplates) {
+      const updated = this.upsertInstalledTemplateEntry(
+        installed,
+        toolTemplate.templateRef,
+        this.buildInstalledToolTemplateEntryFromBot(toolTemplate),
+      );
+      installed = updated.installed;
+      changed = changed || updated.changed;
+    }
+    return { installed, changed };
+  }
+
+  private async ensureBotTemplatesInstalled(
     runtimeConfig: RuntimeConfig,
     botPackage: LoadedBotPackage,
   ): Promise<boolean> {
-    const updated = this.upsertInstalledBotTemplateEntry(runtimeConfig.templates.installed, botPackage);
-    if (!updated.changed) {
+    const updatedAgent = this.upsertInstalledBotTemplateEntry(
+      runtimeConfig.templates.installed,
+      botPackage,
+    );
+    const updatedTools = this.upsertInstalledBotToolTemplateEntries(
+      updatedAgent.installed,
+      botPackage,
+    );
+    if (!updatedAgent.changed && !updatedTools.changed) {
       return false;
     }
-    runtimeConfig.templates.installed = updated.installed;
+    runtimeConfig.templates.installed = updatedTools.installed;
     return true;
   }
 
@@ -1411,9 +2477,42 @@ export class RealInstallerService implements InstallerService {
     return sortInstalledTemplates(Array.from(byRef.values()));
   }
 
+  private findBotToolTemplate(
+    botPackages: LoadedBotPackage[],
+    ref: string,
+  ): LoadedBotPackage["toolTemplates"][number] | null {
+    for (const botPackage of botPackages) {
+      const matched = botPackage.toolTemplates.find((entry) => entry.templateRef === ref);
+      if (matched !== undefined) {
+        return matched;
+      }
+    }
+    return null;
+  }
+
+  private resolveKnownToolTemplateManifest(
+    ref: string,
+    botPackages: LoadedBotPackage[],
+  ): ToolTemplateDefinition {
+    const coreTemplate = findCoreTemplateManifest(ref);
+    if (coreTemplate !== undefined && coreTemplate.kind === "sovereign-tool-template") {
+      return coreTemplate;
+    }
+    const botTemplate = this.findBotToolTemplate(botPackages, ref);
+    if (botTemplate !== null) {
+      return botTemplate.manifest;
+    }
+    throw {
+      code: "TEMPLATE_NOT_FOUND",
+      message: `Tool template '${ref}' was not found in the trusted catalog`,
+      retryable: false,
+    };
+  }
+
   private async ensureBotToolInstances(
     runtimeConfig: RuntimeConfig,
     botPackage: LoadedBotPackage,
+    botInstance?: RequestedBotInstance,
   ): Promise<string[]> {
     const requiredCoreTemplateRefs = botPackage.manifest.toolInstances
       .map((entry: LoadedBotPackage["manifest"]["toolInstances"][number]) => entry.templateRef)
@@ -1425,15 +2524,29 @@ export class RealInstallerService implements InstallerService {
       );
       await this.persistManagedAgentTopologyDocument(runtimeConfig);
     }
+    const toolInstanceIdMap = this.buildManagedBotToolInstanceIdMap(
+      botPackage,
+      botInstance?.id ?? botPackage.manifest.id,
+    );
     const toolInstanceIds: string[] = [];
     for (const tool of botPackage.manifest.toolInstances) {
-      if (!this.isBotToolInstanceEnabled(runtimeConfig, tool.enabledWhen)) {
+      if (
+        !this.isBotToolInstanceEnabled(runtimeConfig, tool.enabledWhen, {
+          botPackage,
+          botInstance,
+          toolInstanceIdMap,
+        })
+      ) {
         continue;
       }
-      const bindings = this.resolveBotToolBindings(runtimeConfig, tool);
+      const bindings = this.resolveBotToolBindings(runtimeConfig, tool, {
+        botPackage,
+        botInstance,
+        toolInstanceIdMap,
+      });
       await this.upsertSovereignToolInstance(
         {
-          id: tool.id,
+          id: toolInstanceIdMap[tool.id] ?? tool.id,
           templateRef: tool.templateRef,
           config: bindings.config,
           secretRefs: bindings.secretRefs,
@@ -1447,60 +2560,125 @@ export class RealInstallerService implements InstallerService {
 
   private buildManagedBotToolInstance(input: {
     runtimeConfig: RuntimeConfig;
+    availableBotPackages: LoadedBotPackage[];
+    botPackage: LoadedBotPackage;
+    botInstance?: RequestedBotInstance;
     tool: LoadedBotPackage["manifest"]["toolInstances"][number];
     existing: RuntimeConfig["sovereignTools"]["instances"][number] | undefined;
-  }): RuntimeConfig["sovereignTools"]["instances"][number] {
-    const template = this.resolveToolTemplateManifest(input.tool.templateRef);
-    const bindings = this.resolveBotToolBindings(input.runtimeConfig, input.tool);
+    toolInstanceIdMap: Record<string, string>;
+  }): MaterializedBotToolInstance {
+    const template = this.resolveKnownToolTemplateManifest(
+      input.tool.templateRef,
+      input.availableBotPackages,
+    );
+    const bindings = this.resolveBotToolBindings(input.runtimeConfig, input.tool, {
+      botPackage: input.botPackage,
+      botInstance: input.botInstance,
+      toolInstanceIdMap: input.toolInstanceIdMap,
+    });
+    const id = input.toolInstanceIdMap[input.tool.id] ?? input.tool.id;
     return {
-      id: input.tool.id,
+      id,
       templateRef: input.tool.templateRef,
       capabilities: [...template.capabilities],
       config: bindings.config,
       secretRefs: bindings.secretRefs,
       createdAt: input.existing?.createdAt ?? now(),
       updatedAt: now(),
+      botId: input.botPackage.manifest.id,
+      ...(input.botInstance === undefined ? {} : { botInstanceId: input.botInstance.id }),
+      manifestToolId: input.tool.id,
     };
+  }
+
+  private buildManagedBotToolInstanceIdMap(
+    botPackage: LoadedBotPackage,
+    instanceId: string,
+  ): Record<string, string> {
+    return Object.fromEntries(
+      botPackage.manifest.toolInstances.map((tool) => [
+        tool.id,
+        this.materializeManagedBotToolInstanceId(botPackage, instanceId, tool.id),
+      ]),
+    );
+  }
+
+  private materializeManagedBotToolInstanceId(
+    botPackage: LoadedBotPackage,
+    instanceId: string,
+    manifestToolId: string,
+  ): string {
+    if (instanceId === botPackage.manifest.id) {
+      return manifestToolId;
+    }
+    return sanitizeToolInstanceId(`${instanceId}-${manifestToolId}`);
   }
 
   private isBotToolInstanceEnabled(
     runtimeConfig: RuntimeConfig,
     enabledWhen: LoadedBotPackage["manifest"]["toolInstances"][number]["enabledWhen"],
+    context?: {
+      botPackage: LoadedBotPackage;
+      botInstance: RequestedBotInstance | undefined;
+      toolInstanceIdMap: Record<string, string>;
+    },
   ): boolean {
     if (enabledWhen === undefined) {
       return true;
     }
-    return this.resolveBotPathValue(runtimeConfig, enabledWhen.path) === enabledWhen.equals;
+    return (
+      this.resolveBotPathValue(runtimeConfig, enabledWhen.path, context) === enabledWhen.equals
+    );
   }
 
   private resolveBotToolBindings(
     runtimeConfig: RuntimeConfig,
     tool: LoadedBotPackage["manifest"]["toolInstances"][number],
+    context?: {
+      botPackage: LoadedBotPackage;
+      botInstance: RequestedBotInstance | undefined;
+      toolInstanceIdMap: Record<string, string>;
+    },
   ): {
     config: Record<string, string>;
     secretRefs: Record<string, string>;
   } {
     return {
       config: Object.fromEntries(
-        (Object.entries(tool.config) as Array<[string, typeof tool.config[string]]>).map(([key, binding]) => [
-          key,
-          this.stringifyBotBindingValue(
-            this.resolveRequiredBotPathValue(runtimeConfig, binding.from),
-            binding.stringify === true,
-          ),
-        ]),
+        (Object.entries(tool.config) as Array<[string, (typeof tool.config)[string]]>).map(
+          ([key, binding]) => [
+            key,
+            this.stringifyBotBindingValue(
+              this.resolveRequiredBotPathValue(runtimeConfig, binding.from, context),
+              binding.stringify === true,
+            ),
+          ],
+        ),
       ),
       secretRefs: Object.fromEntries(
-        (Object.entries(tool.secretRefs) as Array<[string, typeof tool.secretRefs[string]]>).map(([key, binding]) => [
-          key,
-          this.stringifyBotBindingValue(this.resolveRequiredBotPathValue(runtimeConfig, binding.from), true),
-        ]),
+        (Object.entries(tool.secretRefs) as Array<[string, (typeof tool.secretRefs)[string]]>).map(
+          ([key, binding]) => [
+            key,
+            this.stringifyBotBindingValue(
+              this.resolveRequiredBotPathValue(runtimeConfig, binding.from, context),
+              true,
+            ),
+          ],
+        ),
       ),
     };
   }
 
-  private resolveRequiredBotPathValue(runtimeConfig: RuntimeConfig, path: string): BotConfigValue {
-    const value = this.resolveBotPathValue(runtimeConfig, path);
+  private resolveRequiredBotPathValue(
+    runtimeConfig: RuntimeConfig,
+    path: string,
+    context?: {
+      botPackage: LoadedBotPackage;
+      botInstance: RequestedBotInstance | undefined;
+      toolInstanceIdMap: Record<string, string>;
+    },
+  ): BotConfigValue {
+    const value = this.resolveBotPathValue(runtimeConfig, path, context);
     if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
       return value;
     }
@@ -1514,13 +2692,44 @@ export class RealInstallerService implements InstallerService {
     };
   }
 
-  private resolveBotPathValue(runtimeConfig: RuntimeConfig, path: string): unknown {
-    return path.split(".").reduce<unknown>((current, segment) => {
-      if (!isRecord(current) || !(segment in current)) {
-        return undefined;
-      }
-      return current[segment];
-    }, runtimeConfig);
+  private resolveBotPathValue(
+    runtimeConfig: RuntimeConfig,
+    path: string,
+    context?: {
+      botPackage: LoadedBotPackage;
+      botInstance: RequestedBotInstance | undefined;
+      toolInstanceIdMap: Record<string, string>;
+    },
+  ): unknown {
+    const botInstance = context?.botInstance;
+    return path.split(".").reduce<unknown>(
+      (current, segment) => {
+        if (!isRecord(current) || !(segment in current)) {
+          return undefined;
+        }
+        return current[segment];
+      },
+      {
+        ...runtimeConfig,
+        ...(botInstance === undefined
+          ? {}
+          : {
+              instance: {
+                id: botInstance.id,
+                packageId: botInstance.packageId,
+                workspace: botInstance.workspace,
+                config: botInstance.config,
+                secretRefs: botInstance.secretRefs,
+                matrix: botInstance.matrix ?? {},
+                toolInstanceIds: context?.toolInstanceIdMap ?? {},
+              },
+              agent: {
+                id: botInstance.id,
+                workspace: botInstance.workspace,
+              },
+            }),
+      },
+    );
   }
 
   private stringifyBotBindingValue(value: BotConfigValue, forceString: boolean): string {
@@ -1533,16 +2742,822 @@ export class RealInstallerService implements InstallerService {
     return "";
   }
 
-  private resolveToolTemplateManifest(ref: string): ToolTemplateManifest {
-    const manifest = findCoreTemplateManifest(ref);
-    if (manifest === undefined || manifest.kind !== "sovereign-tool-template") {
-      throw {
-        code: "TEMPLATE_NOT_FOUND",
-        message: `Tool template '${ref}' was not found in the trusted core catalog`,
-        retryable: false,
+  private async compileHostResourcePlan(
+    runtimeConfig: RuntimeConfig,
+    botPackages: LoadedBotPackage[],
+  ): Promise<CompiledHostPlan> {
+    const resources: CompiledHostResource[] = [];
+    const botStatus: CompiledBotStatus[] = [];
+
+    for (const botPackage of botPackages) {
+      const agents = runtimeConfig.openclawProfile.agents.filter(
+        (entry) => entry.botId === botPackage.manifest.id || entry.id === botPackage.manifest.id,
+      );
+      if (agents.length === 0) {
+        continue;
+      }
+      for (const agent of agents) {
+        const botInstance = this.getRuntimeBotInstanceForAgent(runtimeConfig, agent);
+        const context: HostResourceContext = {
+          runtimeConfig,
+          botPackage,
+          agent,
+          ...(botInstance === undefined ? {} : { botInstance }),
+          toolInstanceIds: agent.toolInstanceIds ?? [],
+          toolInstanceIdMap: this.buildManagedBotToolInstanceIdMap(
+            botPackage,
+            botInstance?.id ?? agent.id,
+          ),
+        };
+        for (const resource of botPackage.manifest.hostResources) {
+          if (!this.isBotHostResourceEnabled(context, resource.enabledWhen)) {
+            continue;
+          }
+          const compiled = await this.compileHostResource(context, resource);
+          resources.push(...compiled.resources);
+          botStatus.push(...compiled.botStatus);
+        }
+      }
+    }
+
+    return { resources, botStatus };
+  }
+
+  private async refreshRuntimeHostResources(runtimeConfig: RuntimeConfig): Promise<void> {
+    const availableBotPackages = await this.listBotPackages();
+    const selectedBotPackages = availableBotPackages.filter((botPackage) =>
+      runtimeConfig.openclawProfile.agents.some(
+        (agent) =>
+          agent.botId === botPackage.manifest.id || agent.templateRef === botPackage.templateRef,
+      ),
+    );
+    const hostPlan = await this.compileHostResourcePlan(runtimeConfig, selectedBotPackages);
+    runtimeConfig.hostResources = {
+      planPath: join(dirname(this.paths.configPath), "host-resources.json"),
+      resources: hostPlan.resources,
+      botStatus: hostPlan.botStatus,
+    };
+    runtimeConfig.openclawProfile.crons = hostPlan.resources.flatMap((resource) =>
+      resource.kind !== "openclawCron" ||
+      resource.desiredState !== "present" ||
+      resource.spec === undefined
+        ? []
+        : [
+            {
+              id: resource.spec.id,
+              every: resource.spec.every,
+              agentId: resource.spec.agentId,
+              botId: resource.botId,
+            },
+          ],
+    );
+    if (runtimeConfig.openclawProfile.crons[0] === undefined) {
+      delete runtimeConfig.openclawProfile.cron;
+    } else {
+      runtimeConfig.openclawProfile.cron = {
+        id: runtimeConfig.openclawProfile.crons[0].id,
+        every: runtimeConfig.openclawProfile.crons[0].every,
       };
     }
-    return manifest;
+  }
+
+  private isBotHostResourceEnabled(
+    context: HostResourceContext,
+    enabledWhen: SovereignBotHostResource["enabledWhen"],
+  ): boolean {
+    if (enabledWhen === undefined) {
+      return true;
+    }
+    return this.resolveHostResourcePathValue(context, enabledWhen.path) === enabledWhen.equals;
+  }
+
+  private async compileHostResource(
+    context: HostResourceContext,
+    resource: SovereignBotHostResource,
+  ): Promise<CompiledHostPlan> {
+    const plan: CompiledHostPlan = { resources: [], botStatus: [] };
+    const checks = this.compileHostResourceChecks(resource.checks);
+    switch (resource.kind) {
+      case "directory": {
+        const compiledDirectory: CompiledHostResource = {
+          id: resource.id,
+          botId: context.botPackage.manifest.id,
+          agentId: context.agent.id,
+          kind: "directory",
+          path: this.resolveHostResourceString(context, resource.spec.path),
+          ...(resource.spec.mode === undefined ? {} : { mode: resource.spec.mode }),
+          ...(typeof context.runtimeConfig.openclaw.serviceUser === "string"
+            ? {
+                owner:
+                  resource.spec.owner === undefined
+                    ? context.runtimeConfig.openclaw.serviceUser
+                    : this.resolveHostResourceString(context, resource.spec.owner),
+              }
+            : resource.spec.owner === undefined
+              ? {}
+              : { owner: this.resolveHostResourceString(context, resource.spec.owner) }),
+          ...(typeof context.runtimeConfig.openclaw.serviceGroup === "string"
+            ? {
+                group:
+                  resource.spec.group === undefined
+                    ? context.runtimeConfig.openclaw.serviceGroup
+                    : this.resolveHostResourceString(context, resource.spec.group),
+              }
+            : resource.spec.group === undefined
+              ? {}
+              : { group: this.resolveHostResourceString(context, resource.spec.group) }),
+          checks,
+        };
+        plan.resources.push(compiledDirectory);
+        break;
+      }
+      case "managedFile":
+      case "stateFile": {
+        const path = this.resolveHostResourceString(context, resource.spec.path);
+        const content = await this.compileHostResourceContent(
+          context,
+          resource.spec.source,
+          resource.spec.inlineContent,
+        );
+        const compiledFile: CompiledHostResource = {
+          id: resource.id,
+          botId: context.botPackage.manifest.id,
+          agentId: context.agent.id,
+          kind: resource.kind,
+          path,
+          content,
+          ...(resource.spec.mode === undefined ? {} : { mode: resource.spec.mode }),
+          ...(typeof context.runtimeConfig.openclaw.serviceUser === "string"
+            ? {
+                owner:
+                  resource.spec.owner === undefined
+                    ? context.runtimeConfig.openclaw.serviceUser
+                    : this.resolveHostResourceString(context, resource.spec.owner),
+              }
+            : resource.spec.owner === undefined
+              ? {}
+              : { owner: this.resolveHostResourceString(context, resource.spec.owner) }),
+          ...(typeof context.runtimeConfig.openclaw.serviceGroup === "string"
+            ? {
+                group:
+                  resource.spec.group === undefined
+                    ? context.runtimeConfig.openclaw.serviceGroup
+                    : this.resolveHostResourceString(context, resource.spec.group),
+              }
+            : resource.spec.group === undefined
+              ? {}
+              : { group: this.resolveHostResourceString(context, resource.spec.group) }),
+          writePolicy: resource.spec.writePolicy,
+          ...(resource.kind === "stateFile" && Object.keys(resource.status.fields).length > 0
+            ? { statusFields: this.compileHostStatusFields(resource.status.fields) }
+            : {}),
+          checks,
+        };
+        plan.resources.push(compiledFile);
+        if (resource.kind === "stateFile" && Object.keys(resource.status.fields).length > 0) {
+          plan.botStatus.push({
+            botId: context.botPackage.manifest.id,
+            agentId: context.agent.id,
+            resourceId: resource.id,
+            path,
+            fields: this.compileHostStatusFields(resource.status.fields),
+          });
+        }
+        break;
+      }
+      case "systemdService": {
+        const name = this.resolveHostResourceString(context, resource.spec.name);
+        plan.resources.push({
+          id: resource.id,
+          botId: context.botPackage.manifest.id,
+          agentId: context.agent.id,
+          kind: "systemdService",
+          name,
+          content: this.renderSystemdServiceResource(context, resource),
+          desiredState: resource.spec.desiredState,
+          checks,
+        });
+        break;
+      }
+      case "systemdTimer": {
+        const name = this.resolveHostResourceString(context, resource.spec.name);
+        plan.resources.push({
+          id: resource.id,
+          botId: context.botPackage.manifest.id,
+          agentId: context.agent.id,
+          kind: "systemdTimer",
+          name,
+          content: this.renderSystemdTimerResource(context, resource),
+          desiredState: resource.spec.desiredState,
+          checks,
+        });
+        break;
+      }
+      case "openclawCron": {
+        const desiredState = resource.spec.desiredState;
+        plan.resources.push({
+          id: resource.id,
+          botId: context.botPackage.manifest.id,
+          agentId: context.agent.id,
+          kind: "openclawCron",
+          desiredState,
+          match: {
+            name: this.resolveHostResourceString(context, resource.spec.id),
+            agentId: this.resolveHostResourceString(context, resource.spec.agentId),
+          },
+          ...(desiredState === "present"
+            ? {
+                spec: {
+                  id: this.resolveHostResourceString(context, resource.spec.id),
+                  agentId: this.resolveHostResourceString(context, resource.spec.agentId),
+                  every: this.resolveHostResourceString(context, resource.spec.every),
+                  session: resource.spec.session,
+                  message: this.resolveHostResourceString(context, resource.spec.message),
+                  ...(resource.spec.announceRoomId === undefined
+                    ? {}
+                    : {
+                        announceRoomId: this.resolveHostResourceString(
+                          context,
+                          resource.spec.announceRoomId,
+                        ),
+                      }),
+                },
+              }
+            : {}),
+          checks,
+        });
+        break;
+      }
+    }
+
+    resource.supersedes.forEach((superseded, index) => {
+      if (superseded.kind === "openclawCron") {
+        plan.resources.push({
+          id: `${resource.id}::supersede::${index}`,
+          botId: context.botPackage.manifest.id,
+          agentId: context.agent.id,
+          kind: "openclawCron",
+          desiredState: "absent",
+          match: {
+            ...(superseded.match.id === undefined ? {} : { id: superseded.match.id }),
+            ...(superseded.match.name === undefined
+              ? {}
+              : { name: this.resolveHostResourceString(context, superseded.match.name) }),
+            ...(superseded.match.agentId === undefined
+              ? {}
+              : { agentId: this.resolveHostResourceString(context, superseded.match.agentId) }),
+          },
+          checks: [],
+        });
+      }
+    });
+
+    return plan;
+  }
+
+  private compileHostResourceChecks(
+    checks: SovereignBotHostStateCheck[],
+  ): CompiledHostResourceCheck[] {
+    return checks.map((entry) =>
+      entry.kind === "field-threshold"
+        ? {
+            kind: "field-threshold",
+            id: entry.id,
+            field: entry.field,
+            ...(entry.warnGte === undefined ? {} : { warnGte: entry.warnGte }),
+            ...(entry.failGte === undefined ? {} : { failGte: entry.failGte }),
+          }
+        : {
+            kind: "resource-state",
+            id: entry.id,
+            property: entry.property,
+            equals: entry.equals,
+            severity: entry.severity,
+          },
+    );
+  }
+
+  private compileHostStatusFields(
+    fields: Record<
+      string,
+      {
+        path: string;
+        type: "string" | "int" | "boolean" | "timestamp" | "object";
+        default?: string | number | boolean | undefined;
+      }
+    >,
+  ): Record<
+    string,
+    {
+      path: string;
+      type: "string" | "int" | "boolean" | "timestamp" | "object";
+      default?: string | number | boolean | undefined;
+    }
+  > {
+    return Object.fromEntries(
+      Object.entries(fields).map(([fieldName, field]) => [
+        fieldName,
+        {
+          path: field.path,
+          type: field.type,
+          ...(field.default === undefined ? {} : { default: field.default }),
+        },
+      ]),
+    );
+  }
+
+  private resolveHostResourceValue(
+    context: HostResourceContext,
+    expr: HostResourceValueExpr,
+  ): string | number | boolean {
+    if (typeof expr === "string" || typeof expr === "number" || typeof expr === "boolean") {
+      return expr;
+    }
+    if ("from" in expr) {
+      const value = this.resolveHostResourcePathValue(context, expr.from);
+      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+        return value;
+      }
+      throw new Error(`Host resource binding '${expr.from}' did not resolve to a primitive value`);
+    }
+    if ("join" in expr) {
+      return expr.join.map((part) => String(this.resolveHostResourceValue(context, part))).join("");
+    }
+    if ("default" in expr) {
+      const resolved = this.resolveHostResourceValue(context, expr.default[0]);
+      if (typeof resolved === "string" && resolved.length === 0) {
+        return expr.default[1];
+      }
+      return resolved ?? expr.default[1];
+    }
+    if ("convert" in expr) {
+      const value = String(this.resolveHostResourceValue(context, expr.value));
+      if (expr.convert === "duration.toSystemd") {
+        return toSystemdDuration(value);
+      }
+    }
+    throw new Error("Unsupported host resource expression");
+  }
+
+  private resolveHostResourceString(
+    context: HostResourceContext,
+    expr: HostResourceValueExpr,
+  ): string {
+    return String(this.resolveHostResourceValue(context, expr));
+  }
+
+  private resolveHostResourcePathValue(context: HostResourceContext, path: string): unknown {
+    const alertRoom =
+      context.botInstance?.matrix?.alertRoom ?? context.runtimeConfig.matrix.alertRoom;
+    const values = {
+      node: {
+        paths: {
+          configPath: this.paths.configPath,
+          secretsDir: this.paths.secretsDir,
+          stateDir: this.paths.stateDir,
+          logsDir: this.paths.logsDir,
+        },
+        openclaw: {
+          serviceUser: context.runtimeConfig.openclaw.serviceUser,
+          serviceGroup: context.runtimeConfig.openclaw.serviceGroup,
+          serviceHome: this.paths.openclawServiceHome,
+          runtimeConfigPath: context.runtimeConfig.openclaw.runtimeConfigPath,
+        },
+      },
+      bot: {
+        id: context.botPackage.manifest.id,
+        version: context.botPackage.manifest.version,
+        config: context.runtimeConfig.bots.config[context.botPackage.manifest.id] ?? {},
+      },
+      instance:
+        context.botInstance === undefined
+          ? undefined
+          : {
+              id: context.botInstance.id,
+              packageId: context.botInstance.packageId,
+              workspace: context.botInstance.workspace,
+              config: context.botInstance.config,
+              secretRefs: context.botInstance.secretRefs,
+              matrix: context.botInstance.matrix ?? {},
+              toolInstanceIds: context.toolInstanceIdMap,
+            },
+      agent: {
+        id: context.agent.id,
+        workspace: context.agent.workspace,
+      },
+      matrix: {
+        homeserver: context.runtimeConfig.matrix.publicBaseUrl,
+        alertRoomId: alertRoom.roomId,
+        operatorUserId: context.runtimeConfig.matrix.operator.userId,
+      },
+      tools: {
+        ids: context.toolInstanceIds,
+      },
+      runtime: context.runtimeConfig,
+    };
+    return path.split(".").reduce<unknown>((current, segment) => {
+      if (!isRecord(current) || !(segment in current)) {
+        return undefined;
+      }
+      return current[segment];
+    }, values);
+  }
+
+  private async compileHostResourceContent(
+    context: HostResourceContext,
+    source: string | undefined,
+    inlineContent: string | undefined,
+  ): Promise<string> {
+    const alertRoom =
+      context.botInstance?.matrix?.alertRoom ?? context.runtimeConfig.matrix.alertRoom;
+    const raw =
+      source !== undefined
+        ? await readFile(join(context.botPackage.rootDir, source), "utf8")
+        : (inlineContent ?? "");
+    const toolSection = await this.buildManagedBotToolSection(
+      context.runtimeConfig,
+      context.toolInstanceIds,
+    );
+    return `${renderTemplateWorkspaceContent({
+      content: stripSingleTrailingNewline(raw),
+      agentId: context.agent.id,
+      matrixHomeserver: context.runtimeConfig.matrix.publicBaseUrl,
+      matrixAlertRoomId: alertRoom.roomId,
+      matrixOperatorUserId: context.runtimeConfig.matrix.operator.userId,
+      toolSection,
+    })}\n`;
+  }
+
+  private async buildManagedBotToolSection(
+    runtimeConfig: RuntimeConfig,
+    toolInstanceIds: string[],
+  ): Promise<string> {
+    const boundTools = this.resolveBoundToolInstances(runtimeConfig, toolInstanceIds);
+    const toolLines =
+      boundTools.length === 0
+        ? ["No bound tool instances."]
+        : ["Use only the documented OpenClaw tools or CLI commands listed below.", ""];
+    for (const tool of boundTools) {
+      const manifest = await this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef);
+      toolLines.push(
+        `- \`${tool.id}\``,
+        `  template: \`${tool.templateRef}\``,
+        `  capabilities: ${manifest.capabilities.join(", ")}`,
+        ...this.listDocumentedOpenClawToolNames(manifest).map(
+          (toolName) => `  openclaw-tool: \`${toolName}\``,
+        ),
+        ...this.listDocumentedSovereignToolCommands(runtimeConfig, tool.id, manifest).map(
+          (command) => `  command: \`${command}\``,
+        ),
+        ...this.listDocumentedSovereignToolNotes(manifest),
+      );
+    }
+    return toolLines.join("\n");
+  }
+
+  private renderSystemdServiceResource(
+    context: HostResourceContext,
+    resource: Extract<SovereignBotHostResource, { kind: "systemdService" }>,
+  ): string {
+    const lines = [
+      "[Unit]",
+      `Description=${this.resolveHostResourceString(context, resource.spec.description)}`,
+      ...resource.spec.after.map(
+        (entry) => `After=${this.resolveHostResourceString(context, entry)}`,
+      ),
+      ...resource.spec.wants.map(
+        (entry) => `Wants=${this.resolveHostResourceString(context, entry)}`,
+      ),
+      "",
+      "[Service]",
+      `Type=${resource.spec.type}`,
+      ...(resource.spec.user === undefined
+        ? []
+        : [`User=${this.resolveHostResourceString(context, resource.spec.user)}`]),
+      ...(resource.spec.group === undefined
+        ? []
+        : [`Group=${this.resolveHostResourceString(context, resource.spec.group)}`]),
+      ...(resource.spec.workingDirectory === undefined
+        ? []
+        : [
+            `WorkingDirectory=${this.resolveHostResourceString(context, resource.spec.workingDirectory)}`,
+          ]),
+      ...Object.entries(resource.spec.environment).map(
+        ([key, value]) => `Environment=${key}=${this.resolveHostResourceString(context, value)}`,
+      ),
+      `ExecStart=${resource.spec.execStart.map((entry) => this.resolveHostResourceString(context, entry)).join(" ")}`,
+      ...(resource.spec.timeoutStartSec === undefined
+        ? []
+        : [`TimeoutStartSec=${String(resource.spec.timeoutStartSec)}`]),
+      ...(resource.spec.restart === undefined ? [] : [`Restart=${resource.spec.restart}`]),
+      ...(resource.spec.restartSec === undefined
+        ? []
+        : [`RestartSec=${this.resolveHostResourceString(context, resource.spec.restartSec)}`]),
+      "",
+      "[Install]",
+      ...resource.spec.wantedBy.map(
+        (entry) => `WantedBy=${this.resolveHostResourceString(context, entry)}`,
+      ),
+      "",
+    ];
+    return lines.join("\n");
+  }
+
+  private renderSystemdTimerResource(
+    context: HostResourceContext,
+    resource: Extract<SovereignBotHostResource, { kind: "systemdTimer" }>,
+  ): string {
+    const lines = [
+      "[Unit]",
+      `Description=${this.resolveHostResourceString(context, resource.spec.description)}`,
+      "",
+      "[Timer]",
+      ...(resource.spec.unit === undefined
+        ? []
+        : [`Unit=${this.resolveHostResourceString(context, resource.spec.unit)}`]),
+      ...(resource.spec.onActiveSec === undefined
+        ? []
+        : [`OnActiveSec=${this.resolveHostResourceString(context, resource.spec.onActiveSec)}`]),
+      ...(resource.spec.onBootSec === undefined
+        ? []
+        : [`OnBootSec=${this.resolveHostResourceString(context, resource.spec.onBootSec)}`]),
+      ...(resource.spec.onUnitActiveSec === undefined
+        ? []
+        : [
+            `OnUnitActiveSec=${this.resolveHostResourceString(context, resource.spec.onUnitActiveSec)}`,
+          ]),
+      ...(resource.spec.accuracySec === undefined
+        ? []
+        : [`AccuracySec=${this.resolveHostResourceString(context, resource.spec.accuracySec)}`]),
+      ...(resource.spec.persistent === undefined
+        ? []
+        : [`Persistent=${resource.spec.persistent ? "true" : "false"}`]),
+      "",
+      "[Install]",
+      ...resource.spec.wantedBy.map(
+        (entry) => `WantedBy=${this.resolveHostResourceString(context, entry)}`,
+      ),
+      "",
+    ];
+    return lines.join("\n");
+  }
+
+  private async inspectCompiledHostResources(runtimeConfig: RuntimeConfig): Promise<{
+    resources: Array<{
+      id: string;
+      botId: string;
+      agentId: string;
+      kind:
+        | "directory"
+        | "managedFile"
+        | "stateFile"
+        | "systemdService"
+        | "systemdTimer"
+        | "openclawCron";
+      target: string;
+      present?: boolean;
+      enabled?: boolean;
+      active?: boolean;
+      health: ComponentHealth;
+      message?: string;
+    }>;
+    bots: Record<
+      string,
+      {
+        fields: Record<string, string | number | boolean | Record<string, unknown>>;
+        health: ComponentHealth;
+      }
+    >;
+  }> {
+    const resources: Array<{
+      id: string;
+      botId: string;
+      agentId: string;
+      kind:
+        | "directory"
+        | "managedFile"
+        | "stateFile"
+        | "systemdService"
+        | "systemdTimer"
+        | "openclawCron";
+      target: string;
+      present?: boolean;
+      enabled?: boolean;
+      active?: boolean;
+      health: ComponentHealth;
+      message?: string;
+    }> = [];
+    const bots: Record<
+      string,
+      {
+        fields: Record<string, string | number | boolean | Record<string, unknown>>;
+        health: ComponentHealth;
+      }
+    > = {};
+    const cronJobs = await this.listOpenClawCronJobsForStatus(runtimeConfig);
+
+    for (const resource of runtimeConfig.hostResources?.resources ?? []) {
+      const currentBot = bots[resource.agentId] ?? {
+        fields: {},
+        health: "healthy" as ComponentHealth,
+      };
+      bots[resource.agentId] = currentBot;
+      switch (resource.kind) {
+        case "directory":
+        case "managedFile":
+        case "stateFile": {
+          let present = false;
+          let message: string | undefined;
+          try {
+            const info = await stat(resource.path);
+            present = resource.kind === "directory" ? info.isDirectory() : info.isFile();
+            if (!present) {
+              message =
+                resource.kind === "directory" ? "Path is not a directory" : "Path is not a file";
+            }
+          } catch (error) {
+            if (!isNodeError(error) || error.code !== "ENOENT") {
+              message = error instanceof Error ? error.message : String(error);
+            }
+          }
+          const health: ComponentHealth = present ? "healthy" : "unhealthy";
+          resources.push({
+            id: resource.id,
+            botId: resource.botId,
+            agentId: resource.agentId,
+            kind: resource.kind,
+            target: resource.path,
+            present,
+            health,
+            ...(message === undefined ? {} : { message }),
+          });
+          if (resource.kind === "stateFile" && present && resource.statusFields !== undefined) {
+            try {
+              const parsed = JSON.parse(await readFile(resource.path, "utf8")) as unknown;
+              for (const [fieldName, fieldSpec] of Object.entries(resource.statusFields)) {
+                const raw = this.extractNestedValue(parsed, fieldSpec.path);
+                const nextValue =
+                  raw === undefined
+                    ? fieldSpec.default
+                    : this.coerceBotStatusValue(raw, fieldSpec.type);
+                if (nextValue !== undefined) {
+                  currentBot.fields[fieldName] = nextValue;
+                }
+              }
+            } catch (error) {
+              currentBot.fields[`${resource.id}Error`] = {
+                code: "STATE_FILE_READ_FAILED",
+                message: error instanceof Error ? error.message : String(error),
+              };
+              currentBot.health = "degraded";
+            }
+          }
+          if (health === "unhealthy") {
+            currentBot.health = "unhealthy";
+          }
+          break;
+        }
+        case "systemdService":
+        case "systemdTimer": {
+          const enabled = await this.inspectSystemdBool(resource.name, "is-enabled");
+          const active = await this.inspectSystemdActive(resource.name);
+          const matchesDesiredState =
+            enabled === resource.desiredState.enabled && active === resource.desiredState.active;
+          const health: ComponentHealth = matchesDesiredState ? "healthy" : "unhealthy";
+          resources.push({
+            id: resource.id,
+            botId: resource.botId,
+            agentId: resource.agentId,
+            kind: resource.kind,
+            target: resource.name,
+            enabled,
+            active,
+            health,
+          });
+          if (health === "unhealthy") {
+            currentBot.health = "unhealthy";
+          }
+          break;
+        }
+        case "openclawCron": {
+          const matches = cronJobs.filter(
+            (entry) =>
+              (resource.match.id === undefined ||
+                entry.id === resource.match.id ||
+                entry.name === resource.match.id) &&
+              (resource.match.name === undefined || entry.name === resource.match.name) &&
+              (resource.match.agentId === undefined || entry.agentId === resource.match.agentId),
+          );
+          const present = matches.length > 0;
+          const health: ComponentHealth =
+            resource.desiredState === "absent"
+              ? present
+                ? "unhealthy"
+                : "healthy"
+              : present
+                ? "healthy"
+                : "unhealthy";
+          resources.push({
+            id: resource.id,
+            botId: resource.botId,
+            agentId: resource.agentId,
+            kind: resource.kind,
+            target: resource.match.name ?? resource.match.id ?? resource.id,
+            present,
+            health,
+          });
+          if (health === "unhealthy") {
+            currentBot.health = "unhealthy";
+          }
+          break;
+        }
+      }
+    }
+
+    return { resources, bots };
+  }
+
+  private async inspectSystemdBool(
+    unitName: string,
+    verb: "is-enabled" | "is-active",
+  ): Promise<boolean> {
+    const result = await this.safeExec("systemctl", [verb, unitName]);
+    if (!result.ok || result.result.exitCode !== 0) {
+      return false;
+    }
+    const normalized = result.result.stdout.trim().toLowerCase();
+    return normalized === "enabled" || normalized === "active";
+  }
+
+  private async inspectSystemdActive(unitName: string): Promise<boolean> {
+    const result = await this.safeExec("systemctl", ["is-active", unitName]);
+    if (!result.ok || result.result.exitCode !== 0) {
+      return false;
+    }
+    return result.result.stdout.trim().toLowerCase() === "active";
+  }
+
+  private async listOpenClawCronJobsForStatus(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<Array<{ id: string; name: string; agentId?: string }>> {
+    try {
+      let stdout = "";
+      await this.withManagedOpenClawServiceIdentityEnv(runtimeConfig, async () => {
+        const result = await this.safeExec("openclaw", ["cron", "list", "--json"]);
+        if (result.ok && result.result.exitCode === 0) {
+          stdout = result.result.stdout;
+        }
+      });
+      if (stdout.length === 0) {
+        return [];
+      }
+      const parsed = parseJsonSafely(stdout);
+      const jobs = Array.isArray(parsed)
+        ? parsed
+        : isRecord(parsed) && Array.isArray(parsed.jobs)
+          ? parsed.jobs
+          : [];
+      return jobs.flatMap((entry) => {
+        if (!isRecord(entry) || typeof entry.id !== "string" || typeof entry.name !== "string") {
+          return [];
+        }
+        return [
+          {
+            id: entry.id,
+            name: entry.name,
+            ...(typeof entry.agentId === "string" ? { agentId: entry.agentId } : {}),
+          },
+        ];
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  private extractNestedValue(value: unknown, path: string): unknown {
+    return path.split(".").reduce<unknown>((current, segment) => {
+      if (!isRecord(current) || !(segment in current)) {
+        return undefined;
+      }
+      return current[segment];
+    }, value);
+  }
+
+  private coerceBotStatusValue(
+    value: unknown,
+    type: "string" | "int" | "boolean" | "timestamp" | "object",
+  ): string | number | boolean | Record<string, unknown> | undefined {
+    switch (type) {
+      case "string":
+      case "timestamp":
+        return typeof value === "string" ? value : undefined;
+      case "int":
+        return typeof value === "number" && Number.isInteger(value) ? value : undefined;
+      case "boolean":
+        return typeof value === "boolean" ? value : undefined;
+      case "object":
+        return isRecord(value) ? value : undefined;
+    }
   }
 
   async listSovereignToolInstances(): Promise<SovereignToolInstanceListResult> {
@@ -1578,7 +3593,9 @@ export class RealInstallerService implements InstallerService {
     return this.upsertSovereignToolInstance(req, "update");
   }
 
-  async deleteSovereignToolInstance(req: { id: string }): Promise<SovereignToolInstanceDeleteResult> {
+  async deleteSovereignToolInstance(req: {
+    id: string;
+  }): Promise<SovereignToolInstanceDeleteResult> {
     const runtimeConfig = await this.readRuntimeConfig();
     const id = sanitizeToolInstanceId(req.id);
     const existing = runtimeConfig.sovereignTools.instances.find((entry) => entry.id === id);
@@ -1640,7 +3657,7 @@ export class RealInstallerService implements InstallerService {
         retryable: false,
       };
     }
-    const toolTemplate = this.resolveInstalledToolTemplate(runtimeConfig, nextTemplateRef);
+    const toolTemplate = await this.resolveInstalledToolTemplate(runtimeConfig, nextTemplateRef);
     const nextConfig = normalizeStringRecord(req.config ?? existing?.config ?? {});
     const nextSecretRefs = normalizeStringRecord(req.secretRefs ?? existing?.secretRefs ?? {});
     this.validateToolInstanceBindings({
@@ -1657,11 +3674,12 @@ export class RealInstallerService implements InstallerService {
       createdAt: existing?.createdAt ?? now(),
       updatedAt: now(),
     };
-    const changed = existing === undefined
-      || existing.templateRef !== nextTool.templateRef
-      || !areStringListsEqual(existing.capabilities, nextTool.capabilities)
-      || !areStringRecordsEqual(existing.config, nextTool.config)
-      || !areStringRecordsEqual(existing.secretRefs, nextTool.secretRefs);
+    const changed =
+      existing === undefined ||
+      existing.templateRef !== nextTool.templateRef ||
+      !areStringListsEqual(existing.capabilities, nextTool.capabilities) ||
+      !areStringRecordsEqual(existing.config, nextTool.config) ||
+      !areStringRecordsEqual(existing.secretRefs, nextTool.secretRefs);
     if (!changed) {
       return {
         tool: {
@@ -1705,10 +3723,10 @@ export class RealInstallerService implements InstallerService {
     };
   }
 
-  private resolveInstalledToolTemplate(
+  private async resolveInstalledToolTemplate(
     runtimeConfig: RuntimeConfig,
     ref: string,
-  ): ToolTemplateManifest {
+  ): Promise<ToolTemplateDefinition> {
     const parsed = parseTemplateRef(ref);
     const installed = runtimeConfig.templates.installed.find(
       (entry) => entry.id === parsed.id && entry.version === parsed.version,
@@ -1734,23 +3752,41 @@ export class RealInstallerService implements InstallerService {
         retryable: false,
       };
     }
-    const manifest = findCoreTemplateManifest(ref);
-    if (manifest === undefined || manifest.kind !== "sovereign-tool-template") {
+    const coreManifest = findCoreTemplateManifest(ref);
+    if (coreManifest !== undefined && coreManifest.kind === "sovereign-tool-template") {
+      const verified = verifySignedTemplateManifest(coreManifest, CORE_TRUSTED_TEMPLATE_KEYS);
+      if (
+        verified.manifestSha256 !== installed.manifestSha256 ||
+        verified.keyId !== installed.keyId
+      ) {
+        throw {
+          code: "TEMPLATE_PIN_MISMATCH",
+          message: `Pinned metadata does not match trusted manifest for '${ref}'`,
+          retryable: false,
+        };
+      }
+      return coreManifest;
+    }
+
+    const botTemplate = this.findBotToolTemplate(await this.listBotPackages(), ref);
+    if (botTemplate === null) {
       throw {
         code: "TEMPLATE_MANIFEST_UNAVAILABLE",
         message: `Trusted manifest for '${ref}' is unavailable`,
         retryable: false,
       };
     }
-    const verified = verifySignedTemplateManifest(manifest, CORE_TRUSTED_TEMPLATE_KEYS);
-    if (verified.manifestSha256 !== installed.manifestSha256 || verified.keyId !== installed.keyId) {
+    if (
+      botTemplate.manifestSha256 !== installed.manifestSha256 ||
+      botTemplate.keyId !== installed.keyId
+    ) {
       throw {
         code: "TEMPLATE_PIN_MISMATCH",
         message: `Pinned metadata does not match trusted manifest for '${ref}'`,
         retryable: false,
       };
     }
-    return manifest;
+    return botTemplate.manifest;
   }
 
   private async resolveInstalledAgentTemplate(
@@ -1791,8 +3827,8 @@ export class RealInstallerService implements InstallerService {
       };
     }
     if (
-      botPackage.manifestSha256 !== installed.manifestSha256
-      || botPackage.keyId !== installed.keyId
+      botPackage.manifestSha256 !== installed.manifestSha256 ||
+      botPackage.keyId !== installed.keyId
     ) {
       throw {
         code: "TEMPLATE_PIN_MISMATCH",
@@ -1809,28 +3845,675 @@ export class RealInstallerService implements InstallerService {
   ): RuntimeConfig["sovereignTools"]["instances"] {
     return toolInstanceIds
       .map((id) => runtimeConfig.sovereignTools.instances.find((entry) => entry.id === id))
-      .filter((entry): entry is RuntimeConfig["sovereignTools"]["instances"][number] => entry !== undefined);
+      .filter(
+        (entry): entry is RuntimeConfig["sovereignTools"]["instances"][number] =>
+          entry !== undefined,
+      );
   }
 
-  private renderSovereignToolCommand(toolInstanceId: string, command: string): string {
-    const rendered = command.replaceAll("<tool-instance-id>", toolInstanceId);
+  private resolveSovereignToolCommandContext(
+    runtimeConfig: RuntimeConfig,
+    toolInstanceId: string,
+  ): {
+    agentWorkspace?: string;
+  } {
+    const tool = runtimeConfig.sovereignTools.instances.find(
+      (entry) => entry.id === toolInstanceId,
+    );
+    const configuredAgentId = tool?.config.agentId;
+    const agent =
+      (typeof configuredAgentId === "string"
+        ? runtimeConfig.openclawProfile.agents.find((entry) => entry.id === configuredAgentId)
+        : undefined) ??
+      runtimeConfig.openclawProfile.agents.find((entry) =>
+        entry.toolInstanceIds?.includes(toolInstanceId),
+      );
+    return {
+      ...(agent === undefined ? {} : { agentWorkspace: agent.workspace }),
+    };
+  }
+
+  private renderSovereignToolCommand(
+    runtimeConfig: RuntimeConfig,
+    toolInstanceId: string,
+    command: string,
+  ): string {
+    const context = this.resolveSovereignToolCommandContext(runtimeConfig, toolInstanceId);
+    let rendered = command.replaceAll("<tool-instance-id>", toolInstanceId);
+    if (rendered.includes("<agent-workspace>")) {
+      if (context.agentWorkspace === undefined) {
+        throw new Error(`Tool instance '${toolInstanceId}' is missing an agent workspace binding`);
+      }
+      rendered = rendered.replaceAll("<agent-workspace>", context.agentWorkspace);
+    }
     const [executable, ...rest] = rendered.split(" ");
     const resolvedExecutable =
       executable === undefined ? "" : (SOVEREIGN_EXECUTABLE_PATHS[executable] ?? executable);
     return [resolvedExecutable, ...rest].filter((part) => part.length > 0).join(" ");
   }
 
-  private listAgentExecAllowlistPatterns(
+  private listDocumentedSovereignToolCommands(
+    runtimeConfig: RuntimeConfig,
+    toolInstanceId: string,
+    manifest: ToolTemplateDefinition,
+  ): string[] {
+    const commands = manifest.allowedCommands.map((command) =>
+      this.renderSovereignToolCommand(runtimeConfig, toolInstanceId, command),
+    );
+    if (manifest.id === "node-cli-ops") {
+      commands.push(
+        this.renderSovereignToolCommand(
+          runtimeConfig,
+          toolInstanceId,
+          "sovereign-node onboarding issue --ttl-minutes <minutes> --json",
+        ),
+        this.renderSovereignToolCommand(
+          runtimeConfig,
+          toolInstanceId,
+          "sovereign-node users invite <username> --json",
+        ),
+        this.renderSovereignToolCommand(
+          runtimeConfig,
+          toolInstanceId,
+          "sovereign-node users invite <username> --ttl-minutes <minutes> --json",
+        ),
+        this.renderSovereignToolCommand(
+          runtimeConfig,
+          toolInstanceId,
+          "sovereign-node users remove <username> --json",
+        ),
+      );
+    }
+    return Array.from(new Set(commands));
+  }
+
+  private listDocumentedSovereignToolNotes(manifest: ToolTemplateDefinition): string[] {
+    if (manifest.id === "imap-readonly") {
+      return [
+        "  note: searches already run inside the configured mailbox",
+        "  note: use `--query ALL` for the whole mailbox and do not prefix the query with `INBOX`",
+      ];
+    }
+    if (manifest.id === "guarded-json-state") {
+      return [
+        `  note: use the OpenClaw tool \`${GUARDED_JSON_STATE_OPENCLAW_TOOL_NAME}\` for all reads and mutations; do not use \`exec\` or direct file tools`,
+        "  note: the guarded tool resolves the current Matrix sender from the active OpenClaw session on its own; never pass `--actor` or session metadata manually",
+        "  note: for upserts, pass mutation fields through the tool's `input` object and never as raw shell JSON",
+        "  note: if the policy defines a generated self key for the entity, you may omit the id field in the tool `input`; the CLI will generate it",
+        "  note: for string-array fields, prefer JSON arrays; the CLI also normalizes a single scalar into a one-item array",
+        "  note: the CLI also normalizes numeric and boolean scalar inputs into strings",
+        "  note: use `show` or `list` for reads and reserve `upsert-self` / `delete-self` for creator-owned mutations",
+      ];
+    }
+    if (manifest.id === "node-cli-ops") {
+      return [
+        "  note: use `sovereign-node onboarding issue` when the operator wants to sign into an existing account on another device",
+        `  note: use bare localparts like \`satoshi\`; \`users invite\` defaults to ${String(DEFAULT_MATRIX_USER_INVITE_TTL_MINUTES)} minutes`,
+      ];
+    }
+    if (manifest.id === "mail-sentinel-tool") {
+      return [
+        "  note: use the Mail Sentinel workspace helper `scan` command for background polling; do not summarize the inbox manually during cron runs",
+        "  note: use the Mail Sentinel workspace helper `list-alerts --view today` for 'What is important today?' requests",
+        "  note: use the Mail Sentinel workspace helper `feedback --latest` only when the user clearly refers to the newest alert; otherwise pass `--alert-id` explicitly",
+      ];
+    }
+    return [];
+  }
+
+  private listDocumentedOpenClawToolNames(manifest: ToolTemplateDefinition): string[] {
+    return dedupeStrings(manifest.openclawToolNames ?? []);
+  }
+
+  private listDeclaredOpenClawPluginIds(manifest: ToolTemplateDefinition): string[] {
+    return dedupeStrings([
+      ...(manifest.openclawPlugins ?? []),
+      ...(manifest.openclawBundledPlugins ?? []),
+    ]);
+  }
+
+  private listLoadableOpenClawPluginIds(manifest: ToolTemplateDefinition): string[] {
+    return dedupeStrings(manifest.openclawPlugins ?? []);
+  }
+
+  private listRequiredOpenClawPluginIds(botPackages: LoadedBotPackage[]): string[] {
+    return dedupeStrings([
+      "matrix",
+      ...botPackages.flatMap((botPackage) =>
+        botPackage.toolTemplates.flatMap((toolTemplate) =>
+          this.listDeclaredOpenClawPluginIds(toolTemplate.manifest),
+        ),
+      ),
+    ]);
+  }
+
+  private async listManagedOpenClawPluginIds(runtimeConfig: RuntimeConfig): Promise<string[]> {
+    const pluginIds = new Set<string>();
+    for (const agent of runtimeConfig.openclawProfile.agents) {
+      for (const tool of this.resolveBoundToolInstances(
+        runtimeConfig,
+        agent.toolInstanceIds ?? [],
+      )) {
+        const manifest = await this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef);
+        for (const pluginId of this.listDeclaredOpenClawPluginIds(manifest)) {
+          pluginIds.add(pluginId);
+        }
+      }
+    }
+    return Array.from(pluginIds).sort();
+  }
+
+  private async listManagedLoadableOpenClawPluginIds(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<string[]> {
+    const pluginIds = new Set<string>();
+    for (const agent of runtimeConfig.openclawProfile.agents) {
+      for (const tool of this.resolveBoundToolInstances(
+        runtimeConfig,
+        agent.toolInstanceIds ?? [],
+      )) {
+        const manifest = await this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef);
+        for (const pluginId of this.listLoadableOpenClawPluginIds(manifest)) {
+          pluginIds.add(pluginId);
+        }
+      }
+    }
+    return Array.from(pluginIds).sort();
+  }
+
+  private async listManagedOpenClawPluginLoadPaths(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<string[]> {
+    const pluginIds = await this.listManagedLoadableOpenClawPluginIds(runtimeConfig);
+    return pluginIds.map((pluginId) =>
+      join(runtimeConfig.openclaw.openclawHome, "extensions", pluginId),
+    );
+  }
+
+  private shouldEnsureLobsterCli(botPackages: LoadedBotPackage[]): boolean {
+    return botPackages.some((botPackage) =>
+      botPackage.toolTemplates.some((toolTemplate) => {
+        const manifest = toolTemplate.manifest;
+        return (
+          this.listDeclaredOpenClawPluginIds(manifest).includes("lobster") ||
+          this.listDocumentedOpenClawToolNames(manifest).includes("lobster")
+        );
+      }),
+    );
+  }
+
+  private async shouldEnsureLobsterCliForRuntime(runtimeConfig: RuntimeConfig): Promise<boolean> {
+    return (
+      runtimeConfig.openclawProfile.agents.some((agent) => agent.id === MAIL_SENTINEL_AGENT_ID) ||
+      (await this.listManagedOpenClawPluginIds(runtimeConfig)).includes("lobster")
+    );
+  }
+
+  private async detectInstalledLobsterCli(): Promise<{
+    binaryPath: string;
+    version: string | null;
+    commands: string[];
+  } | null> {
+    if (this.execRunner === null) {
+      return null;
+    }
+    const probe = await this.execRunner.run({
+      command: "lobster",
+      args: ["commands.list | json"],
+      options: {
+        timeout: LOBSTER_CLI_PROBE_TIMEOUT_MS,
+        env: {
+          CI: "1",
+        },
+      },
+    });
+    if (probe.exitCode !== 0) {
+      return null;
+    }
+    const parsed = parseJsonSafely(probe.stdout);
+    const commands = Array.isArray(parsed)
+      ? parsed.filter((entry): entry is string => typeof entry === "string")
+      : [];
+    const versionResult = await this.execRunner.run({
+      command: "npm",
+      args: ["list", "-g", SOVEREIGN_PINNED_LOBSTER_PACKAGE_NAME, "--json", "--depth=0"],
+      options: {
+        timeout: LOBSTER_CLI_PROBE_TIMEOUT_MS,
+        env: {
+          CI: "1",
+        },
+      },
+    });
+    const versionPayload = parseJsonSafely(versionResult.stdout);
+    const dependencyRecord =
+      isRecord(versionPayload) && isRecord(versionPayload.dependencies)
+        ? versionPayload.dependencies[SOVEREIGN_PINNED_LOBSTER_PACKAGE_NAME]
+        : undefined;
+    const version =
+      isRecord(dependencyRecord) && typeof dependencyRecord.version === "string"
+        ? dependencyRecord.version
+        : null;
+    return {
+      binaryPath: "lobster",
+      version,
+      commands,
+    };
+  }
+
+  private async ensureLobsterCliInstalled(): Promise<void> {
+    if (this.execRunner === null) {
+      throw {
+        code: "LOBSTER_INSTALL_FAILED",
+        message: "Exec runner unavailable; cannot install or probe Lobster CLI",
+        retryable: false,
+      };
+    }
+    const requiredCommands = ["clawd.invoke"];
+    const detected = await this.detectInstalledLobsterCli();
+    if (detected !== null) {
+      const versionVerified = detected.version === SOVEREIGN_PINNED_LOBSTER_VERSION;
+      const commandsVerified =
+        detected.commands.length > 0 &&
+        requiredCommands.every((commandName) => detected.commands.includes(commandName));
+      if (versionVerified || commandsVerified) {
+        return;
+      }
+      this.logger.info(
+        "Lobster CLI binary found but could not verify version or required commands; reinstalling",
+      );
+    }
+
+    const installResult = await this.execRunner.run({
+      command: "npm",
+      args: [
+        "install",
+        "-g",
+        `${SOVEREIGN_PINNED_LOBSTER_PACKAGE_NAME}@${SOVEREIGN_PINNED_LOBSTER_VERSION}`,
+      ],
+      options: {
+        timeout: LOBSTER_CLI_INSTALL_TIMEOUT_MS,
+        env: {
+          CI: "1",
+        },
+      },
+    });
+    if (installResult.exitCode !== 0) {
+      throw {
+        code: "LOBSTER_INSTALL_FAILED",
+        message: "npm install for Lobster CLI exited with non-zero status",
+        retryable: true,
+        details: {
+          command: installResult.command,
+          exitCode: installResult.exitCode,
+          stdout: truncateText(installResult.stdout, 2000),
+          stderr: truncateText(installResult.stderr, 4000),
+        },
+      };
+    }
+
+    const verified = await this.detectInstalledLobsterCli();
+    const verifiedByVersion = verified?.version === SOVEREIGN_PINNED_LOBSTER_VERSION;
+    const verifiedByCommands =
+      verified !== null &&
+      requiredCommands.every((commandName) => verified.commands.includes(commandName));
+    if (!verifiedByVersion && !verifiedByCommands) {
+      throw {
+        code: "LOBSTER_INSTALL_FAILED",
+        message: "Lobster CLI installed but required workflow commands are unavailable",
+        retryable: true,
+        details: {
+          requiredCommands,
+          detectedCommands: verified?.commands ?? [],
+          version: verified?.version ?? null,
+        },
+      };
+    }
+  }
+
+  private renderGuardedJsonStateWorkspacePluginManifest(): string {
+    return JSON.stringify(
+      {
+        id: GUARDED_JSON_STATE_OPENCLAW_PLUGIN_ID,
+        configSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {},
+        },
+      },
+      null,
+      2,
+    );
+  }
+
+  private renderGuardedJsonStateWorkspacePluginConfig(input: {
+    workspaceBindings: Record<string, string[]>;
+    runtimeConfigPath: string;
+  }): string {
+    return JSON.stringify(
+      {
+        executablePath: SOVEREIGN_EXECUTABLE_PATHS["sovereign-tool"],
+        runtimeConfigPath: input.runtimeConfigPath,
+        workspaceBindings: Object.fromEntries(
+          Object.entries(input.workspaceBindings)
+            .map(
+              ([workspace, toolInstanceIds]) =>
+                [workspace, dedupeStrings(toolInstanceIds)] as const,
+            )
+            .sort(([left], [right]) => left.localeCompare(right)),
+        ),
+      },
+      null,
+      2,
+    );
+  }
+
+  private renderGuardedJsonStateWorkspacePluginRuntime(): string {
+    const exports = [
+      ["isGuardedJsonStateRecord", isGuardedJsonStateRecord],
+      ["normalizeGuardedJsonStateMatrixActorUserId", normalizeGuardedJsonStateMatrixActorUserId],
+      [
+        "extractGuardedJsonStateActorFromDirectSessionKey",
+        extractGuardedJsonStateActorFromDirectSessionKey,
+      ],
+      ["resolveGuardedJsonStateWorkspaceDir", resolveGuardedJsonStateWorkspaceDir],
+      [
+        "extractGuardedJsonStateActorFromConversationInfoText",
+        extractGuardedJsonStateActorFromConversationInfoText,
+      ],
+      ["extractGuardedJsonStateActorFromUserContent", extractGuardedJsonStateActorFromUserContent],
+      [
+        "extractLatestGuardedJsonStateActorFromBranch",
+        extractLatestGuardedJsonStateActorFromBranch,
+      ],
+      ["resolveGuardedJsonStateSessionContext", resolveGuardedJsonStateSessionContext],
+      ["resolveGuardedJsonStateToolContext", resolveGuardedJsonStateToolContext],
+    ] as const;
+    return `${exports.map(([name, fn]) => `export const ${name} = ${fn.toString()};`).join("\n\n")}\n`;
+  }
+
+  private renderGuardedJsonStateWorkspacePluginIndex(): string {
+    return `import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
+
+import {
+  resolveGuardedJsonStateToolContext,
+  resolveGuardedJsonStateWorkspaceDir,
+} from "./runtime.js";
+
+const TOOL_NAME = ${JSON.stringify(GUARDED_JSON_STATE_OPENCLAW_TOOL_NAME)};
+const ACTIONS = ["show", "list", "upsert-self", "delete-self"];
+
+let cachedConfig;
+const loadConfig = async () => {
+  if (cachedConfig !== undefined) {
+    return cachedConfig;
+  }
+  cachedConfig = JSON.parse(await readFile(new URL("./plugin-config.json", import.meta.url), "utf8"));
+  return cachedConfig;
+};
+
+const runCommand = async (command, args) =>
+  await new Promise((resolve) => {
+    const child = spawn(command, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", (error) => {
+      resolve({
+        exitCode: 127,
+        stdout,
+        stderr: stderr.length > 0 ? stderr : String(error?.message ?? error),
+      });
+    });
+    child.on("close", (exitCode) => {
+      resolve({
+        exitCode: typeof exitCode === "number" ? exitCode : 1,
+        stdout,
+        stderr,
+      });
+    });
+  });
+
+const readJsonText = (value) => {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  return trimmed.length === 0 ? undefined : trimmed;
+};
+
+const requireString = (value, label) => {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(\`Expected \${label}\`);
+  }
+  return value.trim();
+};
+
+const normalizeInput = (value) => {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Expected input to be a JSON object");
+  }
+  return value;
+};
+
+const buildCommandArgs = (params, config, sessionContext) => {
+  const args = ["json-state", params.action, "--instance", requireString(params.instance, "instance")];
+  if (typeof config.runtimeConfigPath === "string" && config.runtimeConfigPath.length > 0) {
+    args.push("--config-path", config.runtimeConfigPath);
+  }
+  if (params.action === "show") {
+    args.push("--json");
+    return args;
+  }
+  args.push("--entity", requireString(params.entity, "entity"));
+  if (params.action === "list") {
+    args.push("--json");
+    return args;
+  }
+  if (sessionContext === undefined) {
+    throw new Error("Missing current Matrix session context for mutation");
+  }
+  if (typeof sessionContext.sessionKey === "string" && sessionContext.sessionKey.length > 0) {
+    args.push("--session-key", sessionContext.sessionKey);
+  }
+  if (typeof sessionContext.originFrom === "string" && sessionContext.originFrom.length > 0) {
+    args.push("--origin-from", sessionContext.originFrom);
+  }
+  if (params.action === "delete-self") {
+    args.push("--id", requireString(params.id, "id"), "--json");
+    return args;
+  }
+  const input = normalizeInput(params.input);
+  args.push("--input-json", JSON.stringify(input ?? {}), "--json");
+  return args;
+};
+
+const parseCommandOutput = (stdout) => {
+  const text = readJsonText(stdout);
+  if (text === undefined) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+};
+
+export default function (api) {
+  api.registerTool(
+    (toolContext) => ({
+      name: TOOL_NAME,
+      label: TOOL_NAME,
+      description: "Read and mutate guarded JSON state for this agent's bound tool instances. Matrix actor resolution is derived from the active OpenClaw session.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["instance", "action"],
+        properties: {
+          instance: {
+            type: "string",
+            description: "Bound guarded state tool instance id",
+          },
+          action: {
+            type: "string",
+            enum: ACTIONS,
+            description: "State operation to perform",
+          },
+          entity: {
+            type: "string",
+            description: "Entity id for list or mutation calls",
+          },
+          id: {
+            type: "string",
+            description: "Record id for delete-self",
+          },
+          input: {
+            type: "object",
+            additionalProperties: true,
+            description: "Mutation payload for upsert-self",
+          },
+        },
+      },
+      async execute(_toolCallId, params) {
+        const config = await loadConfig();
+        const workspaceDir = resolveGuardedJsonStateWorkspaceDir(toolContext?.workspaceDir);
+        const allowedInstanceIds = Array.isArray(config.workspaceBindings?.[workspaceDir])
+          ? config.workspaceBindings[workspaceDir]
+          : [];
+        if (!allowedInstanceIds.includes(params.instance)) {
+          return {
+            content: [{ type: "text", text: \`Instance '\${String(params.instance ?? "")}' is not bound to this agent.\` }],
+            details: {
+              status: "failed",
+              exitCode: 2,
+              command: TOOL_NAME,
+            },
+          };
+        }
+
+        let sessionContext;
+        if (params.action === "upsert-self" || params.action === "delete-self") {
+          sessionContext = resolveGuardedJsonStateToolContext(toolContext ?? {});
+        }
+
+        const args = buildCommandArgs(params, config, sessionContext);
+        const result = await runCommand(config.executablePath, args);
+        const parsed = parseCommandOutput(result.stdout);
+        const text =
+          readJsonText(result.stdout)
+          ?? readJsonText(result.stderr)
+          ?? \`\${TOOL_NAME} exited with code \${String(result.exitCode)}\`;
+        return {
+          content: [{ type: "text", text }],
+          details: {
+            status: result.exitCode === 0 ? "completed" : "failed",
+            exitCode: result.exitCode,
+            command: [config.executablePath, ...args].join(" "),
+            ...(sessionContext === undefined
+              ? {}
+              : {
+                  actor: sessionContext.actor,
+                  ...(typeof sessionContext.sessionKey === "string"
+                    ? { sessionKey: sessionContext.sessionKey }
+                    : {}),
+                  ...(typeof sessionContext.originFrom === "string"
+                    ? { originFrom: sessionContext.originFrom }
+                    : {}),
+                }),
+            ...(parsed === undefined ? {} : { parsed }),
+          },
+        };
+      },
+    }),
+    { optional: true },
+  );
+}
+`;
+  }
+
+  private async writeManagedOpenClawExtensions(input: {
+    runtimeConfig: RuntimeConfig;
+  }): Promise<void> {
+    const workspaceBindings: Record<string, string[]> = {};
+    for (const agent of input.runtimeConfig.openclawProfile.agents) {
+      const toolInstanceIds = agent.toolInstanceIds ?? [];
+      if (toolInstanceIds.length === 0) {
+        continue;
+      }
+      for (const tool of this.resolveBoundToolInstances(input.runtimeConfig, toolInstanceIds)) {
+        const manifest = await this.resolveInstalledToolTemplate(
+          input.runtimeConfig,
+          tool.templateRef,
+        );
+        if (
+          !manifest.openclawPlugins?.includes(GUARDED_JSON_STATE_OPENCLAW_PLUGIN_ID) &&
+          !manifest.openclawToolNames?.includes(GUARDED_JSON_STATE_OPENCLAW_TOOL_NAME)
+        ) {
+          continue;
+        }
+        workspaceBindings[agent.workspace] = [
+          ...(workspaceBindings[agent.workspace] ?? []),
+          tool.id,
+        ];
+      }
+    }
+    if (Object.keys(workspaceBindings).length === 0) {
+      return;
+    }
+
+    const extensionDir = join(
+      input.runtimeConfig.openclaw.openclawHome,
+      "extensions",
+      GUARDED_JSON_STATE_OPENCLAW_PLUGIN_ID,
+    );
+    await mkdir(extensionDir, { recursive: true });
+    await this.applyTrustedOpenClawExtensionOwnership(extensionDir);
+    const files = [
+      {
+        path: join(extensionDir, "openclaw.plugin.json"),
+        content: this.renderGuardedJsonStateWorkspacePluginManifest(),
+      },
+      {
+        path: join(extensionDir, "plugin-config.json"),
+        content: this.renderGuardedJsonStateWorkspacePluginConfig({
+          workspaceBindings,
+          runtimeConfigPath: this.paths.configPath,
+        }),
+      },
+      {
+        path: join(extensionDir, "runtime.js"),
+        content: this.renderGuardedJsonStateWorkspacePluginRuntime(),
+      },
+      {
+        path: join(extensionDir, "index.js"),
+        content: this.renderGuardedJsonStateWorkspacePluginIndex(),
+      },
+    ];
+    for (const file of files) {
+      await writeFile(file.path, `${file.content}\n`, "utf8");
+      await this.applyTrustedOpenClawExtensionOwnership(file.path);
+    }
+  }
+
+  private async listAgentExecAllowlistPatterns(
     runtimeConfig: RuntimeConfig,
     toolInstanceIds: string[],
-  ): string[] {
+  ): Promise<string[]> {
     const patterns = new Set<string>();
     for (const tool of this.resolveBoundToolInstances(runtimeConfig, toolInstanceIds)) {
-      const manifest = this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef);
+      const manifest = await this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef);
       for (const command of manifest.allowedCommands) {
-        const rendered = this.renderSovereignToolCommand(tool.id, command);
+        const rendered = this.renderSovereignToolCommand(runtimeConfig, tool.id, command);
         const [executable] = rendered.split(" ");
-        if (executable !== undefined && executable.startsWith("/")) {
+        if (executable?.startsWith("/")) {
           patterns.add(executable);
         }
       }
@@ -1838,33 +4521,56 @@ export class RealInstallerService implements InstallerService {
     return Array.from(patterns);
   }
 
-  private buildOpenClawAgentToolPolicy(
+  private async buildOpenClawAgentToolPolicy(
     runtimeConfig: RuntimeConfig,
     toolInstanceIds: string[],
-  ): {
+  ): Promise<{
     allow: string[];
-    exec: {
+    elevated?: {
+      enabled: boolean;
+    };
+    exec?: {
       host: "gateway";
       security: "allowlist";
       ask: "off";
     };
-  } | null {
-    const execPatterns = this.listAgentExecAllowlistPatterns(runtimeConfig, toolInstanceIds);
-    if (execPatterns.length === 0) {
+  } | null> {
+    const boundToolManifests = await Promise.all(
+      this.resolveBoundToolInstances(runtimeConfig, toolInstanceIds).map(
+        async (tool) => await this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef),
+      ),
+    );
+    const openclawToolNames = dedupeStrings(
+      boundToolManifests.flatMap((manifest) => manifest.openclawToolNames ?? []),
+    );
+    const execPatterns = await this.listAgentExecAllowlistPatterns(runtimeConfig, toolInstanceIds);
+    if (execPatterns.length === 0 && openclawToolNames.length === 0) {
       return null;
     }
+    const allow = dedupeStrings([
+      ...(openclawToolNames.length === 0 ? [] : [OPENCLAW_SESSION_STATUS_TOOL_ID]),
+      ...openclawToolNames,
+      ...(execPatterns.length === 0 ? [] : [OPENCLAW_EXEC_TOOL_ID]),
+    ]);
     return {
-      allow: [OPENCLAW_EXEC_TOOL_ID],
-      exec: {
-        host: "gateway",
-        security: "allowlist",
-        ask: "off",
+      allow,
+      elevated: {
+        enabled: true,
       },
+      ...(execPatterns.length === 0
+        ? {}
+        : {
+            exec: {
+              host: "gateway",
+              security: "allowlist",
+              ask: "off",
+            } as const,
+          }),
     };
   }
 
   private validateToolInstanceBindings(input: {
-    template: ToolTemplateManifest;
+    template: ToolTemplateDefinition;
     config: Record<string, string>;
     secretRefs: Record<string, string>;
   }): void {
@@ -1915,7 +4621,10 @@ export class RealInstallerService implements InstallerService {
       };
     }
 
-    const template = await this.resolveInstalledAgentTemplate(input.runtimeConfig, input.templateRef);
+    const template = await this.resolveInstalledAgentTemplate(
+      input.runtimeConfig,
+      input.templateRef,
+    );
     const boundRefs = new Set(
       toolInstanceIds.flatMap((id) => {
         const tool = input.runtimeConfig.sovereignTools.instances.find((entry) => entry.id === id);
@@ -1923,14 +4632,13 @@ export class RealInstallerService implements InstallerService {
       }),
     );
     const requiredRefs = template.requiredToolTemplates.map((entry) =>
-      formatTemplateRef(entry.id, entry.version));
-    const missingRequiredRefs = requiredRefs.filter((ref) => !boundRefs.has(ref));
-    const allowedRefs = new Set(
-      [
-        ...requiredRefs,
-        ...template.optionalToolTemplates.map((entry) => formatTemplateRef(entry.id, entry.version)),
-      ],
+      formatTemplateRef(entry.id, entry.version),
     );
+    const missingRequiredRefs = requiredRefs.filter((ref) => !boundRefs.has(ref));
+    const allowedRefs = new Set([
+      ...requiredRefs,
+      ...template.optionalToolTemplates.map((entry) => formatTemplateRef(entry.id, entry.version)),
+    ]);
     const disallowedBindings = Array.from(boundRefs).filter((ref) => !allowedRefs.has(ref));
     if (missingRequiredRefs.length > 0 || disallowedBindings.length > 0) {
       throw {
@@ -1961,7 +4669,10 @@ export class RealInstallerService implements InstallerService {
     }
     try {
       const template = await this.resolveInstalledAgentTemplate(runtimeConfig, entry.templateRef);
-      const templatePrefix = sanitizeManagedAgentLocalpart(template.matrix.localpartPrefix, fallback);
+      const templatePrefix = sanitizeManagedAgentLocalpart(
+        template.matrix.localpartPrefix,
+        fallback,
+      );
       const agentLocalpart = sanitizeManagedAgentLocalpart(agentId, fallback);
       if (agentLocalpart === templatePrefix || agentLocalpart.startsWith(`${templatePrefix}-`)) {
         return agentLocalpart;
@@ -2059,10 +4770,11 @@ export class RealInstallerService implements InstallerService {
               toolInstanceIds: nextToolInstanceIds,
             },
       );
-      const changed = existing.workspace !== workspace
-        || existing.botId !== req.botId
-        || existing.templateRef !== nextTemplateRef
-        || !areStringListsEqual(existing.toolInstanceIds ?? [], validated.toolInstanceIds);
+      const changed =
+        existing.workspace !== workspace ||
+        existing.botId !== req.botId ||
+        existing.templateRef !== nextTemplateRef ||
+        !areStringListsEqual(existing.toolInstanceIds ?? [], validated.toolInstanceIds);
       if (changed) {
         existing.workspace = workspace;
         if (req.botId === undefined) {
@@ -2079,6 +4791,7 @@ export class RealInstallerService implements InstallerService {
         runtimeConfig.openclawProfile.agents = ensureCoreManagedAgents(
           runtimeConfig.openclawProfile.agents,
         );
+        await this.refreshRuntimeHostResources(runtimeConfig);
         await this.ensureManagedAgentWorkspace({
           id,
           workspace,
@@ -2121,10 +4834,11 @@ export class RealInstallerService implements InstallerService {
               toolInstanceIds: nextToolInstanceIds,
             },
       );
-      const changed = existing.workspace !== workspace
-        || (req.botId !== undefined && existing.botId !== req.botId)
-        || existing.templateRef !== nextTemplateRef
-        || !areStringListsEqual(existing.toolInstanceIds ?? [], validated.toolInstanceIds);
+      const changed =
+        existing.workspace !== workspace ||
+        (req.botId !== undefined && existing.botId !== req.botId) ||
+        existing.templateRef !== nextTemplateRef ||
+        !areStringListsEqual(existing.toolInstanceIds ?? [], validated.toolInstanceIds);
       if (changed) {
         existing.workspace = workspace;
         if (req.botId !== undefined) {
@@ -2139,6 +4853,7 @@ export class RealInstallerService implements InstallerService {
         runtimeConfig.openclawProfile.agents = ensureCoreManagedAgents(
           runtimeConfig.openclawProfile.agents,
         );
+        await this.refreshRuntimeHostResources(runtimeConfig);
         await this.ensureManagedAgentWorkspace({
           id,
           workspace,
@@ -2182,6 +4897,7 @@ export class RealInstallerService implements InstallerService {
           : { toolInstanceIds: validated.toolInstanceIds }),
       },
     ]);
+    await this.refreshRuntimeHostResources(runtimeConfig);
     await this.ensureManagedAgentWorkspace({
       id,
       workspace,
@@ -2212,6 +4928,7 @@ export class RealInstallerService implements InstallerService {
     runtimeConfig.openclawProfile.agents = ensureCoreManagedAgents(
       runtimeConfig.openclawProfile.agents,
     );
+    await this.refreshRuntimeHostResources(runtimeConfig);
     for (const agent of runtimeConfig.openclawProfile.agents) {
       await this.ensureManagedAgentWorkspace({
         id: agent.id,
@@ -2220,6 +4937,7 @@ export class RealInstallerService implements InstallerService {
       });
     }
 
+    await this.applyCompiledSystemdResources(runtimeConfig);
     await this.persistManagedAgentTopologyDocument(runtimeConfig);
     await this.writeOpenClawRuntimeArtifacts(runtimeConfig);
     this.setManagedOpenClawEnv(runtimeConfig);
@@ -2240,10 +4958,13 @@ export class RealInstallerService implements InstallerService {
       };
     }
 
-    parsed["generatedAt"] = now();
-    parsed["openclawProfile"] = {
+    parsed.generatedAt = now();
+    parsed.openclawProfile = {
       plugins: {
         allow: runtimeConfig.openclawProfile.plugins.allow,
+      },
+      session: {
+        dmScope: runtimeConfig.openclawProfile.session?.dmScope ?? MANAGED_OPENCLAW_DM_SCOPE,
       },
       channels: {
         matrix: {
@@ -2263,11 +4984,11 @@ export class RealInstallerService implements InstallerService {
             },
           }),
     };
-    parsed["bots"] = runtimeConfig.bots;
-    parsed["templates"] = runtimeConfig.templates;
-    parsed["sovereignTools"] = runtimeConfig.sovereignTools;
-    parsed["matrix"] = {
-      ...(isRecord(parsed["matrix"]) ? parsed["matrix"] : {}),
+    parsed.bots = runtimeConfig.bots;
+    parsed.templates = runtimeConfig.templates;
+    parsed.sovereignTools = runtimeConfig.sovereignTools;
+    parsed.matrix = {
+      ...(isRecord(parsed.matrix) ? parsed.matrix : {}),
       bot: {
         localpart: runtimeConfig.matrix.bot.localpart,
         userId: runtimeConfig.matrix.bot.userId,
@@ -2290,22 +5011,215 @@ export class RealInstallerService implements InstallerService {
     await mkdir(input.workspace, { recursive: true });
     const openclawWorkspaceStateDir = join(input.workspace, ".openclaw");
     await mkdir(openclawWorkspaceStateDir, { recursive: true });
-    const agent = input.runtimeConfig.openclawProfile.agents.find((entry) => entry.id === input.id);
-    if (agent?.templateRef !== undefined) {
-      const template = await this.resolveInstalledAgentTemplate(input.runtimeConfig, agent.templateRef);
-      await this.writeTemplateWorkspaceFiles({
-        workspaceDir: input.workspace,
-        runtimeConfig: input.runtimeConfig,
-        agentId: input.id,
-        template,
-        toolInstanceIds: agent.toolInstanceIds ?? [],
-      });
-    } else {
-      const readme = buildManagedAgentWorkspaceReadme(input.id);
-      await writeFile(join(input.workspace, "README.md"), `${readme}\n`, "utf8");
-    }
+    await this.applyLocalWorkspaceHostResources(input.runtimeConfig, input.id, input.workspace);
     await this.applyRuntimeOwnership(openclawWorkspaceStateDir);
     await this.applyRuntimeOwnership(input.workspace);
+  }
+
+  private async applyLocalWorkspaceHostResources(
+    runtimeConfig: RuntimeConfig,
+    agentId: string,
+    workspaceDir: string,
+  ): Promise<void> {
+    const agent = runtimeConfig.openclawProfile.agents.find((entry) => entry.id === agentId);
+    if (agent?.botId === undefined) {
+      return;
+    }
+    const normalizedWorkspace = workspaceDir.endsWith("/") ? workspaceDir : `${workspaceDir}/`;
+    for (const resource of runtimeConfig.hostResources?.resources ?? []) {
+      if (resource.agentId !== agent.id) {
+        continue;
+      }
+      if (resource.kind === "directory") {
+        if (!resource.path.startsWith(normalizedWorkspace) && resource.path !== workspaceDir) {
+          continue;
+        }
+        await mkdir(resource.path, { recursive: true });
+        if (resource.mode !== undefined) {
+          await chmod(resource.path, Number.parseInt(resource.mode, 8));
+        }
+        await this.applyRuntimeOwnership(resource.path);
+        continue;
+      }
+      if (resource.kind !== "managedFile" && resource.kind !== "stateFile") {
+        continue;
+      }
+      if (!resource.path.startsWith(normalizedWorkspace)) {
+        continue;
+      }
+      await mkdir(dirname(resource.path), { recursive: true });
+      if (resource.writePolicy === "ifMissing") {
+        try {
+          await access(resource.path, fsConstants.F_OK);
+          continue;
+        } catch (error) {
+          if (!isNodeError(error) || error.code !== "ENOENT") {
+            throw error;
+          }
+        }
+      }
+      await writeFile(resource.path, resource.content, "utf8");
+      if (resource.mode !== undefined) {
+        await chmod(resource.path, Number.parseInt(resource.mode, 8));
+      }
+      await this.applyRuntimeOwnership(resource.path);
+    }
+  }
+
+  private async applyCompiledSystemdResources(runtimeConfig: RuntimeConfig): Promise<void> {
+    if (typeof process.getuid !== "function" || process.getuid() !== 0) {
+      return;
+    }
+
+    const systemdResources = (runtimeConfig.hostResources?.resources ?? []).filter(
+      (
+        resource,
+      ): resource is Extract<typeof resource, { kind: "systemdService" | "systemdTimer" }> =>
+        resource.kind === "systemdService" || resource.kind === "systemdTimer",
+    );
+    if (systemdResources.length === 0) {
+      return;
+    }
+
+    const changedUnits: Array<{
+      name: string;
+      desiredState: { enabled: boolean; active: boolean };
+    }> = [];
+    for (const resource of systemdResources) {
+      const systemdDir =
+        process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR?.trim() || "/etc/systemd/system";
+      const unitPath = join(systemdDir, resource.name);
+      let existingContent: string | undefined;
+      try {
+        existingContent = await readFile(unitPath, "utf8");
+      } catch (error) {
+        if (!isNodeError(error) || error.code !== "ENOENT") {
+          this.logger.warn(
+            {
+              unitPath,
+              error: describeError(error),
+            },
+            "Failed to read existing systemd unit for comparison",
+          );
+        }
+      }
+      if (existingContent === resource.content) {
+        continue;
+      }
+      try {
+        await writeFile(unitPath, resource.content, "utf8");
+      } catch (error) {
+        this.logger.warn(
+          {
+            unitPath,
+            error: describeError(error),
+          },
+          "Failed to write bot systemd unit",
+        );
+        continue;
+      }
+      changedUnits.push({
+        name: resource.name,
+        desiredState: resource.desiredState,
+      });
+      this.logger.info(
+        { unitName: resource.name, botId: resource.botId },
+        "Updated bot systemd unit",
+      );
+    }
+
+    if (changedUnits.length === 0) {
+      return;
+    }
+
+    const reloadResult = await this.safeExec("systemctl", ["daemon-reload"]);
+    if (!reloadResult.ok || reloadResult.result.exitCode !== 0) {
+      this.logger.warn("systemctl daemon-reload failed after writing bot systemd units");
+      return;
+    }
+
+    for (const unit of changedUnits) {
+      if (unit.desiredState.enabled) {
+        await this.safeExec("systemctl", ["enable", unit.name]);
+      }
+      if (unit.desiredState.active) {
+        await this.safeExec("systemctl", ["restart", unit.name]);
+      }
+    }
+  }
+
+  private resolveManagedAgentSessionsDir(runtimeConfig: RuntimeConfig, agentId: string): string {
+    return join(runtimeConfig.openclaw.openclawHome, ".openclaw", "agents", agentId, "sessions");
+  }
+
+  private async resetManagedAgentSessions(
+    runtimeConfig: RuntimeConfig,
+    agentId: string,
+  ): Promise<void> {
+    const sessionsDir = this.resolveManagedAgentSessionsDir(runtimeConfig, agentId);
+    let sessionsStat: Awaited<ReturnType<typeof stat>>;
+    try {
+      sessionsStat = await stat(sessionsDir);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        await mkdir(sessionsDir, { recursive: true });
+        await this.applyRuntimeOwnership(sessionsDir);
+        this.logger.info(
+          { agentId, sessionsDir },
+          "Created managed agent sessions directory (first install)",
+        );
+        return;
+      }
+      throw error;
+    }
+    if (!sessionsStat.isDirectory()) {
+      return;
+    }
+
+    const resetSuffix = now().replaceAll(":", "-").replaceAll(".", "-");
+    const resetPath = `${sessionsDir}.reset.${resetSuffix}`;
+    await rename(sessionsDir, resetPath);
+    await mkdir(sessionsDir, { recursive: true });
+    await this.applyRuntimeOwnership(sessionsDir);
+    this.logger.info(
+      {
+        agentId,
+        sessionsDir,
+        resetPath,
+      },
+      "Reset managed agent sessions to apply refreshed workspace instructions",
+    );
+  }
+
+  private resolveManagedAgentAlertRoom(
+    runtimeConfig: RuntimeConfig,
+    entry: RuntimeAgentEntry,
+  ): { roomId: string; roomName: string } {
+    return (
+      this.getRuntimeBotInstanceForAgent(runtimeConfig, entry)?.matrix?.alertRoom ??
+      runtimeConfig.matrix.alertRoom
+    );
+  }
+
+  private async ensureManagedAgentAllowedUsersInAlertRoom(input: {
+    runtimeConfig: RuntimeConfig;
+    entry: RuntimeAgentEntry;
+    roomId: string;
+    inviterAccessToken: string;
+  }): Promise<void> {
+    const botInstance = this.getRuntimeBotInstanceForAgent(input.runtimeConfig, input.entry);
+    const allowedUsers = botInstance?.matrix?.allowedUsers ?? [];
+    for (const user of allowedUsers) {
+      const normalized = this.normalizeMatrixUserIdentifier(user, input.runtimeConfig);
+      await this.inviteMatrixUserToRoom({
+        adminBaseUrl: input.runtimeConfig.matrix.adminBaseUrl,
+        roomId: input.roomId,
+        inviterAccessToken: input.inviterAccessToken,
+        inviteeUserId: normalized.userId,
+        failureCode: "MATRIX_AGENT_IDENTITY_FAILED",
+        failureMessage: `Failed to invite ${normalized.userId} into bot alert room`,
+      });
+    }
   }
 
   private async ensureManagedAgentMatrixIdentity(
@@ -2318,14 +5232,14 @@ export class RealInstallerService implements InstallerService {
     }
     const botPackage = await this.findBotPackageByTemplateRef(entry.templateRef);
     if (
-      botPackage?.manifest.matrixIdentity.mode === "service-account"
-      || (botPackage === null && agentId === MAIL_SENTINEL_AGENT_ID)
+      botPackage?.manifest.matrixIdentity.mode === "service-account" ||
+      (botPackage === null && agentId === MAIL_SENTINEL_AGENT_ID)
     ) {
       const mappedIdentity = {
         localpart:
-          runtimeConfig.matrix.bot.localpart
-          ?? botPackage?.manifest.matrixIdentity.localpartPrefix
-          ?? "service-bot",
+          runtimeConfig.matrix.bot.localpart ??
+          botPackage?.manifest.matrixIdentity.localpartPrefix ??
+          "service-bot",
         userId: runtimeConfig.matrix.bot.userId,
         ...(runtimeConfig.matrix.bot.passwordSecretRef === undefined
           ? {}
@@ -2344,7 +5258,11 @@ export class RealInstallerService implements InstallerService {
       entry,
       agentId,
     );
-    const localpart = sanitizeManagedAgentLocalpart(entry.matrix?.localpart, fallbackLocalpart);
+    const localpart = sanitizeManagedAgentLocalpart(
+      this.getRuntimeBotInstanceForAgent(runtimeConfig, entry)?.matrix?.localpart ??
+        entry.matrix?.localpart,
+      fallbackLocalpart,
+    );
     const expectedUserId = `@${localpart}:${runtimeConfig.matrix.homeserverDomain}`;
 
     let passwordSecretRef = entry.matrix?.passwordSecretRef;
@@ -2378,17 +5296,25 @@ export class RealInstallerService implements InstallerService {
       password,
       expectedUserId: upsertedUserId,
     });
-    const accessTokenSecretRef = await this.writeManagedSecretFile(
+    const accessTokenSecretRef = await this.writeManagedAgentAccessTokenFile(
+      runtimeConfig,
       `matrix-agent-${agentId}-access-token`,
       loginSession.accessToken,
     );
+    const alertRoom = this.resolveManagedAgentAlertRoom(runtimeConfig, entry);
 
     await this.ensureMatrixUserInAlertRoom({
       adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
-      roomId: runtimeConfig.matrix.alertRoom.roomId,
+      roomId: alertRoom.roomId,
       inviterAccessToken: operatorAccessToken,
       inviteeUserId: loginSession.userId,
       inviteeAccessToken: loginSession.accessToken,
+    });
+    await this.ensureManagedAgentAllowedUsersInAlertRoom({
+      runtimeConfig,
+      entry,
+      roomId: alertRoom.roomId,
+      inviterAccessToken: operatorAccessToken,
     });
 
     const nextIdentity = {
@@ -2399,7 +5325,10 @@ export class RealInstallerService implements InstallerService {
     };
     const changed = !areMatrixIdentitiesEqual(entry.matrix, nextIdentity);
     entry.matrix = nextIdentity;
-    const primaryBotChanged = this.syncPrimaryDedicatedMatrixBotIdentity(runtimeConfig, nextIdentity);
+    const primaryBotChanged = this.syncPrimaryDedicatedMatrixBotIdentity(
+      runtimeConfig,
+      nextIdentity,
+    );
     return {
       runtimeConfig,
       changed: changed || primaryBotChanged,
@@ -2450,90 +5379,16 @@ export class RealInstallerService implements InstallerService {
     return input.expectedUserId;
   }
 
-  private async getSynapseUserViaAdminApi(input: {
-    adminBaseUrl: string;
-    adminAccessToken: string;
-    expectedUserId: string;
-  }): Promise<string | null> {
-    const endpoint = new URL(
-      `/_synapse/admin/v2/users/${encodeURIComponent(input.expectedUserId)}`,
-      ensureTrailingSlash(input.adminBaseUrl),
-    ).toString();
-    const response = await this.fetchImpl(endpoint, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${input.adminAccessToken}`,
-        Accept: "application/json",
-      },
-    });
-    const bodyText = await response.text();
-    const parsed = parseJsonSafely(bodyText);
-    if (response.status === 404) {
-      return null;
-    }
-    if (!response.ok) {
-      throw {
-        code: "MATRIX_HUMAN_USER_DELETE_FAILED",
-        message: `Failed to query Matrix account ${input.expectedUserId}`,
-        retryable: true,
-        details: {
-          endpoint,
-          status: response.status,
-          body: summarizeUnknown(parsed),
-        },
-      };
-    }
-    if (isRecord(parsed) && typeof parsed.name === "string" && parsed.name.length > 0) {
-      return parsed.name;
-    }
-    return input.expectedUserId;
-  }
-
-  private async deactivateSynapseUserViaAdminApi(input: {
-    adminBaseUrl: string;
-    adminAccessToken: string;
-    expectedUserId: string;
-  }): Promise<boolean> {
-    const endpoint = new URL(
-      `/_synapse/admin/v1/deactivate/${encodeURIComponent(input.expectedUserId)}`,
-      ensureTrailingSlash(input.adminBaseUrl),
-    ).toString();
-    const response = await this.fetchImpl(endpoint, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${input.adminAccessToken}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({ erase: false }),
-    });
-    const bodyText = await response.text();
-    const parsed = parseJsonSafely(bodyText);
-    if (response.status === 404) {
-      return false;
-    }
-    if (!response.ok) {
-      throw {
-        code: "MATRIX_HUMAN_USER_DELETE_FAILED",
-        message: `Failed to deactivate Matrix account ${input.expectedUserId}`,
-        retryable: true,
-        details: {
-          endpoint,
-          status: response.status,
-          body: summarizeUnknown(parsed),
-        },
-      };
-    }
-    return true;
-  }
-
   private async loginMatrixUser(input: {
     adminBaseUrl: string;
     localpart: string;
     password: string;
     expectedUserId: string;
   }): Promise<{ userId: string; accessToken: string }> {
-    const endpoint = new URL("/_matrix/client/v3/login", ensureTrailingSlash(input.adminBaseUrl)).toString();
+    const endpoint = new URL(
+      "/_matrix/client/v3/login",
+      ensureTrailingSlash(input.adminBaseUrl),
+    ).toString();
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const response = await this.fetchImpl(endpoint, {
         method: "POST",
@@ -2553,12 +5408,12 @@ export class RealInstallerService implements InstallerService {
       const bodyText = await response.text();
       const parsed = parseJsonSafely(bodyText);
       if (response.ok) {
-        const userId = isRecord(parsed) && typeof parsed.user_id === "string"
-          ? parsed.user_id
-          : input.expectedUserId;
-        const accessToken = isRecord(parsed) && typeof parsed.access_token === "string"
-          ? parsed.access_token
-          : "";
+        const userId =
+          isRecord(parsed) && typeof parsed.user_id === "string"
+            ? parsed.user_id
+            : input.expectedUserId;
+        const accessToken =
+          isRecord(parsed) && typeof parsed.access_token === "string" ? parsed.access_token : "";
         if (accessToken.length === 0) {
           throw {
             code: "MATRIX_AGENT_IDENTITY_FAILED",
@@ -2570,10 +5425,10 @@ export class RealInstallerService implements InstallerService {
       }
 
       if (
-        response.status === 429
-        && isRecord(parsed)
-        && typeof parsed.retry_after_ms === "number"
-        && Number.isFinite(parsed.retry_after_ms)
+        response.status === 429 &&
+        isRecord(parsed) &&
+        typeof parsed.retry_after_ms === "number" &&
+        Number.isFinite(parsed.retry_after_ms)
       ) {
         await delay(Math.min(Math.max(Math.trunc(parsed.retry_after_ms), 100), 5_000));
         continue;
@@ -2664,7 +5519,10 @@ export class RealInstallerService implements InstallerService {
     });
     const inviteText = await inviteResponse.text();
     const inviteParsed = parseJsonSafely(inviteText);
-    if (!inviteResponse.ok && !isAlreadyJoinedOrInvitedRoomError(inviteResponse.status, inviteParsed)) {
+    if (
+      !inviteResponse.ok &&
+      !isAlreadyJoinedOrInvitedRoomError(inviteResponse.status, inviteParsed)
+    ) {
       throw {
         code: input.failureCode ?? "MATRIX_AGENT_IDENTITY_FAILED",
         message: input.failureMessage ?? `Failed to invite ${input.inviteeUserId} to alert room`,
@@ -2678,57 +5536,139 @@ export class RealInstallerService implements InstallerService {
     }
   }
 
-  private async writeTemplateWorkspaceFiles(input: {
-    workspaceDir: string;
-    runtimeConfig: RuntimeConfig;
-    agentId: string;
-    template: AgentTemplateManifest;
-    toolInstanceIds: string[];
-  }): Promise<void> {
-    const boundTools = this.resolveBoundToolInstances(input.runtimeConfig, input.toolInstanceIds);
-    const toolLines = boundTools.length === 0
-      ? ["No bound tool instances."]
-      : [
-          "Run the listed commands with the OpenClaw `exec` tool.",
-          "",
-          ...boundTools.flatMap((tool) => {
-            const manifest = this.resolveInstalledToolTemplate(input.runtimeConfig, tool.templateRef);
-            return [
-              `- \`${tool.id}\``,
-              `  template: \`${tool.templateRef}\``,
-              `  capabilities: ${manifest.capabilities.join(", ")}`,
-              ...manifest.allowedCommands.map((command) =>
-                `  command: \`${this.renderSovereignToolCommand(tool.id, command)}\``),
-              ...(manifest.id === "node-cli-ops"
-                ? [
-                    `  command: \`${this.renderSovereignToolCommand(tool.id, "sovereign-node users invite <username> --ttl-minutes <minutes> --json")}\``,
-                    `  command: \`${this.renderSovereignToolCommand(tool.id, "sovereign-node users remove <username> --json")}\``,
-                    "  note: user invite/remove commands are restricted to direct messages from the configured operator",
-                  ]
-                : []),
-              ...(manifest.id === "imap-readonly"
-                ? [
-                    "  note: searches already run inside the configured mailbox",
-                    "  note: use `--query ALL` for the whole mailbox and do not prefix the query with `INBOX`",
-                  ]
-                : []),
-            ];
-          }),
-        ];
-    for (const file of input.template.workspaceFiles) {
-      const targetPath = join(input.workspaceDir, file.path);
-      await mkdir(dirname(targetPath), { recursive: true });
-      const rendered = renderTemplateWorkspaceContent({
-        content: file.content,
-        agentId: input.agentId,
-        matrixHomeserver: input.runtimeConfig.matrix.publicBaseUrl,
-        matrixAlertRoomId: input.runtimeConfig.matrix.alertRoom.roomId,
-        matrixOperatorUserId: input.runtimeConfig.matrix.operator.userId,
-        toolSection: toolLines.join("\n"),
-      });
-      await writeFile(targetPath, `${rendered}\n`, "utf8");
-      await this.applyRuntimeOwnership(targetPath);
+  private async deactivateSynapseUserViaAdminApi(input: {
+    adminBaseUrl: string;
+    adminAccessToken: string;
+    expectedUserId: string;
+  }): Promise<boolean> {
+    const endpoint = new URL(
+      `/_synapse/admin/v1/deactivate/${encodeURIComponent(input.expectedUserId)}`,
+      ensureTrailingSlash(input.adminBaseUrl),
+    ).toString();
+    const response = await this.fetchImpl(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${input.adminAccessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+    const bodyText = await response.text();
+    const parsed = parseJsonSafely(bodyText);
+    if (response.ok) {
+      return true;
     }
+    if (response.status === 404) {
+      return false;
+    }
+    throw {
+      code: "MATRIX_USER_REMOVE_FAILED",
+      message: `Failed to deactivate Matrix account ${input.expectedUserId}`,
+      retryable: true,
+      details: {
+        endpoint,
+        status: response.status,
+        body: summarizeUnknown(parsed),
+      },
+    };
+  }
+
+  private normalizeMatrixUserIdentifier(
+    rawUsername: string,
+    runtimeConfig: RuntimeConfig,
+  ): { localpart: string; userId: string } {
+    const candidate = rawUsername.trim();
+    if (candidate.length === 0) {
+      throw {
+        code: "MATRIX_USER_INVALID",
+        message: "Provide a local Matrix username or same-server Matrix user ID",
+        retryable: false,
+      };
+    }
+
+    const withoutAt = candidate.startsWith("@") ? candidate.slice(1) : candidate;
+    const separatorIndex = withoutAt.indexOf(":");
+    const localpartInput = separatorIndex >= 0 ? withoutAt.slice(0, separatorIndex) : withoutAt;
+    const homeserverInput = separatorIndex >= 0 ? withoutAt.slice(separatorIndex + 1) : "";
+    if (homeserverInput.length > 0 && homeserverInput !== runtimeConfig.matrix.homeserverDomain) {
+      throw {
+        code: "MATRIX_USER_INVALID",
+        message: "Only local Matrix users on this node can be invited or removed",
+        retryable: false,
+        details: {
+          requestedDomain: homeserverInput,
+          expectedDomain: runtimeConfig.matrix.homeserverDomain,
+        },
+      };
+    }
+
+    const localpart = sanitizeExpectedMatrixLocalpart(localpartInput, "");
+    if (localpart.length === 0) {
+      throw {
+        code: "MATRIX_USER_INVALID",
+        message: "Provide a valid Matrix username/localpart",
+        retryable: false,
+        details: {
+          input: rawUsername,
+        },
+      };
+    }
+
+    return {
+      localpart,
+      userId: `@${localpart}:${runtimeConfig.matrix.homeserverDomain}`,
+    };
+  }
+
+  private assertHumanMatrixUserTarget(
+    runtimeConfig: RuntimeConfig,
+    target: { localpart: string; userId: string },
+    action: "invite" | "remove",
+  ): void {
+    const reservedUserIds = new Set<string>([
+      runtimeConfig.matrix.operator.userId,
+      runtimeConfig.matrix.bot.userId,
+      ...runtimeConfig.openclawProfile.agents.flatMap((entry) =>
+        entry.matrix?.userId === undefined ? [] : [entry.matrix.userId],
+      ),
+    ]);
+    const reservedLocalparts = new Set<string>(
+      [
+        runtimeConfig.matrix.operator.localpart ?? "",
+        runtimeConfig.matrix.bot.localpart ?? "",
+        ...runtimeConfig.openclawProfile.agents.flatMap((entry) =>
+          entry.matrix?.localpart === undefined ? [] : [entry.matrix.localpart],
+        ),
+      ].filter((value) => value.length > 0),
+    );
+    if (!reservedUserIds.has(target.userId) && !reservedLocalparts.has(target.localpart)) {
+      return;
+    }
+    if (
+      target.userId === runtimeConfig.matrix.operator.userId ||
+      target.localpart === runtimeConfig.matrix.operator.localpart
+    ) {
+      throw {
+        code: action === "invite" ? "MATRIX_USER_REQUIRES_ONBOARDING" : "MATRIX_USER_PROTECTED",
+        message:
+          action === "invite"
+            ? "The operator account already exists; use 'sovereign-node onboarding issue' for another operator device"
+            : "The operator account cannot be removed with 'sovereign-node users remove'",
+        retryable: false,
+        details: {
+          userId: target.userId,
+        },
+      };
+    }
+    throw {
+      code: "MATRIX_USER_PROTECTED",
+      message: "Reserved Matrix service accounts cannot be managed with the human-user commands",
+      retryable: false,
+      details: {
+        userId: target.userId,
+      },
+    };
   }
 
   private async tryReadRuntimeConfig(): Promise<RuntimeConfig | null> {
@@ -2747,6 +5687,66 @@ export class RealInstallerService implements InstallerService {
         "Failed to read runtime config for status/doctor probes",
       );
       return null;
+    }
+  }
+
+  private async tryReadInstallProvenance(): Promise<InstallProvenance | null> {
+    try {
+      const raw = await readFile(this.paths.provenancePath, "utf8");
+      return parseInstallProvenance(raw);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return null;
+      }
+      this.logger.warn(
+        {
+          provenancePath: this.paths.provenancePath,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Failed to read install provenance",
+      );
+      return null;
+    }
+  }
+
+  /**
+   * The bot configuration step may change the bot user's Synapse password via the
+   * admin API and store it under a different secret file name (matrix-agent-*-password)
+   * than what bootstrapAccounts expects (matrix-<localpart>.password).
+   * Sync the runtime config's bot password to the bootstrap file so the next
+   * bootstrapAccounts call uses the current password.
+   */
+  private async syncBotPasswordFromRuntimeConfig(
+    homeserverDomain: string,
+    botLocalpart: string,
+  ): Promise<void> {
+    try {
+      const runtimeConfig = await this.tryReadRuntimeConfig();
+      if (runtimeConfig === null) {
+        return;
+      }
+      if (runtimeConfig.matrix.homeserverDomain !== homeserverDomain) {
+        return;
+      }
+      const botPasswordRef = runtimeConfig.matrix.bot.passwordSecretRef;
+      if (botPasswordRef === undefined || botPasswordRef.length === 0) {
+        return;
+      }
+      const bootstrapFileName = `matrix-${botLocalpart}.password`;
+      const bootstrapRef = `file:${join(this.paths.secretsDir, bootstrapFileName)}`;
+      if (botPasswordRef === bootstrapRef) {
+        return;
+      }
+      const currentBotPassword = await this.resolveSecretRef(botPasswordRef);
+      if (currentBotPassword.length > 0) {
+        await this.writeManagedSecretFile(bootstrapFileName, currentBotPassword);
+        this.logger.info(
+          { botLocalpart, from: botPasswordRef, to: bootstrapRef },
+          "Synced bot password from runtime config to bootstrap file",
+        );
+      }
+    } catch {
+      // best-effort: if we can't sync, bootstrapAccounts will try its normal flow
     }
   }
 
@@ -2779,11 +5779,11 @@ export class RealInstallerService implements InstallerService {
     const operator = runtimeConfig.matrix.operator;
     const bot = runtimeConfig.matrix.bot;
     if (
-      operator.localpart !== expectedOperatorLocalpart
-      || bot.localpart !== expectedBotLocalpart
-      || operator.passwordSecretRef === undefined
-      || operator.accessTokenSecretRef === undefined
-      || bot.passwordSecretRef === undefined
+      operator.localpart !== expectedOperatorLocalpart ||
+      bot.localpart !== expectedBotLocalpart ||
+      operator.passwordSecretRef === undefined ||
+      operator.accessTokenSecretRef === undefined ||
+      bot.passwordSecretRef === undefined
     ) {
       return null;
     }
@@ -2832,14 +5832,17 @@ export class RealInstallerService implements InstallerService {
     error: unknown;
     botLocalpart?: string;
   }): Promise<BundledMatrixAccountsResult | null> {
-    if (!isRateLimitedMatrixLoginFailure(input.error) || this.matrixProvisioner.resetState === undefined) {
+    if (
+      !isRateLimitedMatrixLoginFailure(input.error) ||
+      this.matrixProvisioner.resetState === undefined
+    ) {
       return null;
     }
 
     const runtimeConfig = await this.tryReadRuntimeConfig();
     if (
-      runtimeConfig === null
-      || runtimeConfig.matrix.homeserverDomain === input.provision.homeserverDomain
+      runtimeConfig === null ||
+      runtimeConfig.matrix.homeserverDomain === input.provision.homeserverDomain
     ) {
       return null;
     }
@@ -2859,53 +5862,10 @@ export class RealInstallerService implements InstallerService {
     });
   }
 
-  private async tryReadMailSentinelRegistration(): Promise<
-    | {
-        agentId: string;
-        cronJobId: string;
-      }
-    | null
-  > {
-    const registrationFile = join(
-      this.paths.stateDir,
-      "mail-sentinel",
-      "registration.json",
-    );
-    try {
-      const raw = await readFile(registrationFile, "utf8");
-      const parsed = parseJsonDocument(raw);
-      if (!isRecord(parsed)) {
-        return null;
-      }
-      if (typeof parsed.agentId !== "string" || typeof parsed.cronJobId !== "string") {
-        return null;
-      }
-      return {
-        agentId: parsed.agentId,
-        cronJobId: parsed.cronJobId,
-      };
-    } catch (error) {
-      if (isNodeError(error) && error.code === "ENOENT") {
-        return null;
-      }
-      this.logger.warn(
-        {
-          registrationFile,
-          error: error instanceof Error ? error.message : String(error),
-        },
-        "Failed to read Mail Sentinel registration file",
-      );
-      return null;
-    }
-  }
-
-  private async safeDetectOpenClaw(): Promise<
-    | {
-        binaryPath: string;
-        version: string;
-      }
-    | null
-  > {
+  private async safeDetectOpenClaw(): Promise<{
+    binaryPath: string;
+    version: string;
+  } | null> {
     try {
       return await this.openclawBootstrapper.detectInstalled();
     } catch (error) {
@@ -2936,9 +5896,9 @@ export class RealInstallerService implements InstallerService {
       const output = `${openclawGatewayStatus.result.stdout}\n${openclawGatewayStatus.result.stderr}`;
       const state = parseGatewayState(output);
       if (
-        openclawGatewayStatus.result.exitCode === 0
-        || state !== "unknown"
-        || !looksLikeMissingGateway(output)
+        openclawGatewayStatus.result.exitCode === 0 ||
+        state !== "unknown" ||
+        !looksLikeMissingGateway(output)
       ) {
         return {
           installed: !looksLikeMissingGateway(output),
@@ -2959,13 +5919,12 @@ export class RealInstallerService implements InstallerService {
     return {
       installed: false,
       state: "unknown",
-      message:
-        openclawGatewayStatus.ok
-          ? summarizeText(
-              `${openclawGatewayStatus.result.stdout}\n${openclawGatewayStatus.result.stderr}`,
-              220,
-            )
-          : openclawGatewayStatus.error,
+      message: openclawGatewayStatus.ok
+        ? summarizeText(
+            `${openclawGatewayStatus.result.stdout}\n${openclawGatewayStatus.result.stderr}`,
+            220,
+          )
+        : openclawGatewayStatus.error,
     };
   }
 
@@ -3016,25 +5975,46 @@ export class RealInstallerService implements InstallerService {
     ok: boolean;
     message: string;
   }> {
-    const probe = await this.safeExec("openclaw", ["health"], {
-      timeoutMs: OPENCLAW_STATUS_PROBE_TIMEOUT_MS,
-    });
-    if (!probe.ok) {
-      return {
-        ok: false,
-        message: probe.error,
-      };
-    }
-    if (probe.result.exitCode === 0) {
-      return {
-        ok: true,
-        message: summarizeText(probe.result.stdout, 220) || "openclaw health ok",
-      };
+    for (let attempt = 1; attempt <= OPENCLAW_EMPTY_HEALTH_RETRY_ATTEMPTS; attempt += 1) {
+      const probe = await this.safeExec("openclaw", ["health"], {
+        timeoutMs: OPENCLAW_STATUS_PROBE_TIMEOUT_MS,
+      });
+      if (!probe.ok) {
+        return {
+          ok: false,
+          message: probe.error,
+        };
+      }
+      const body = `${probe.result.stdout}\n${probe.result.stderr}`;
+      if (probe.result.exitCode === 0 || this.looksLikeHealthyOpenClawHealth(body)) {
+        return {
+          ok: true,
+          message: summarizeText(probe.result.stdout || body, 220) || "openclaw health ok",
+        };
+      }
+      if (body.trim().length > 0 || attempt === OPENCLAW_EMPTY_HEALTH_RETRY_ATTEMPTS) {
+        return {
+          ok: false,
+          message: summarizeText(body, 220),
+        };
+      }
+      await delay(OPENCLAW_EMPTY_HEALTH_RETRY_DELAY_MS);
     }
     return {
       ok: false,
-      message: summarizeText(`${probe.result.stdout}\n${probe.result.stderr}`, 220),
+      message: "",
     };
+  }
+
+  private looksLikeHealthyOpenClawHealth(value: string): boolean {
+    const normalized = value.toLowerCase();
+    if (!/matrix:\s*ok/.test(normalized)) {
+      return false;
+    }
+    if (!/agents?:/.test(normalized)) {
+      return false;
+    }
+    return !/\bunhealthy\b|\bfailed\b|\berror\b|\bpanic\b/.test(normalized);
   }
 
   private async inspectOpenClawListContains(
@@ -3042,6 +6022,7 @@ export class RealInstallerService implements InstallerService {
     expectedId: string,
   ): Promise<{ present: boolean; verified: boolean }> {
     const attempts = [baseArgs, [...baseArgs, "--json"]];
+    let verified = false;
     for (const args of attempts) {
       const probe = await this.safeExec("openclaw", args, {
         timeoutMs: OPENCLAW_STATUS_PROBE_TIMEOUT_MS,
@@ -3052,22 +6033,95 @@ export class RealInstallerService implements InstallerService {
       if (probe.result.exitCode !== 0) {
         continue;
       }
+      verified = true;
       const body = `${probe.result.stdout}\n${probe.result.stderr}`;
-      return {
-        present: textContainsId(body, expectedId),
-        verified: true,
-      };
+      if (textContainsId(body, expectedId)) {
+        return {
+          present: true,
+          verified: true,
+        };
+      }
     }
 
     return {
       present: false,
-      verified: false,
+      verified,
     };
   }
 
-  private async inspectMatrixStatus(
+  private async inspectManagedOpenClawListContains(
     runtimeConfig: RuntimeConfig | null,
-  ): Promise<{
+    baseArgs: string[],
+    expectedId: string,
+  ): Promise<{ present: boolean; verified: boolean }> {
+    if (runtimeConfig === null) {
+      return await this.inspectOpenClawListContains(baseArgs, expectedId);
+    }
+
+    let result: { present: boolean; verified: boolean } = { present: false, verified: false };
+    await this.withManagedOpenClawServiceIdentityEnv(runtimeConfig, async () => {
+      result = await this.inspectOpenClawListContains(baseArgs, expectedId);
+    });
+    return result;
+  }
+
+  private async waitForOpenClawListContains(
+    baseArgs: string[],
+    expectedId: string,
+  ): Promise<{ present: boolean; verified: boolean }> {
+    let last = { present: false, verified: false };
+    for (let attempt = 1; attempt <= OPENCLAW_RUNTIME_SETTLE_ATTEMPTS; attempt += 1) {
+      last = await this.inspectOpenClawListContains(baseArgs, expectedId);
+      if (last.present || !last.verified || attempt === OPENCLAW_RUNTIME_SETTLE_ATTEMPTS) {
+        return last;
+      }
+      await delay(OPENCLAW_RUNTIME_SETTLE_DELAY_MS);
+    }
+    return last;
+  }
+
+  private async readManagedOpenClawRuntimeJson(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<Record<string, unknown> | null> {
+    try {
+      const raw = await readFile(runtimeConfig.openclaw.runtimeConfigPath, "utf8");
+      const parsed = parseJsonSafely(raw);
+      return isRecord(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private managedOpenClawRuntimeHasAgent(
+    runtimeJson: Record<string, unknown> | null,
+    agentId: string,
+  ): boolean {
+    const agents = runtimeJson?.agents;
+    if (!isRecord(agents) || !Array.isArray(agents.list)) {
+      return false;
+    }
+    return agents.list.some((entry) => isRecord(entry) && entry.id === agentId);
+  }
+
+  private managedOpenClawRuntimeHasCron(
+    runtimeJson: Record<string, unknown> | null,
+    cronId: string,
+  ): boolean {
+    const cron = runtimeJson?.cron;
+    if (!isRecord(cron)) {
+      return false;
+    }
+    const jobs = cron.jobs;
+    if (Array.isArray(jobs)) {
+      return jobs.some(
+        (entry) => isRecord(entry) && (entry.id === cronId || entry.name === cronId),
+      );
+    }
+    const singleId = cron.id;
+    return singleId === cronId;
+  }
+
+  private async inspectMatrixStatus(runtimeConfig: RuntimeConfig | null): Promise<{
     health: ComponentHealth;
     roomReachable: boolean;
     message?: string;
@@ -3137,7 +6191,8 @@ export class RealInstallerService implements InstallerService {
       const env = parseEnvFile(envRaw);
       const configRef = env.OPENCLAW_CONFIG ?? env.OPENCLAW_CONFIG_PATH;
       const homeRef = env.OPENCLAW_HOME;
-      const matches = configRef === runtimeConfigPath && homeRef === openclawHome;
+      const expectedOpenclawHome = dirname(openclawHome);
+      const matches = configRef === runtimeConfigPath && homeRef === expectedOpenclawHome;
 
       return check(
         "openclaw-runtime-wiring",
@@ -3148,7 +6203,7 @@ export class RealInstallerService implements InstallerService {
           : "OpenClaw runtime env wiring is present but does not match expected paths",
         {
           expectedConfigPath: runtimeConfigPath,
-          expectedOpenclawHome: openclawHome,
+          expectedOpenclawHome,
           envConfigPath: configRef,
           envOpenclawHome: homeRef,
         },
@@ -3167,9 +6222,293 @@ export class RealInstallerService implements InstallerService {
     }
   }
 
+  private async validateAndRefreshMatrixIdentityToken(
+    input: {
+      label: string;
+      adminBaseUrl: string;
+      localpart?: string | undefined;
+      userId: string;
+      accessTokenSecretRef?: string | undefined;
+      passwordSecretRef?: string | undefined;
+    },
+    runtimeConfig: RuntimeConfig,
+  ): Promise<boolean> {
+    const tokenRef = input.accessTokenSecretRef;
+    const passwordRef = input.passwordSecretRef;
+    if (tokenRef === undefined || passwordRef === undefined) {
+      return false;
+    }
+
+    let currentToken: string;
+    try {
+      currentToken = await this.resolveSecretRef(tokenRef);
+    } catch {
+      this.logger.warn(
+        {
+          label: input.label,
+          userId: input.userId,
+        },
+        "Matrix access token file is missing or empty; will attempt re-login",
+      );
+      currentToken = "";
+    }
+
+    if (currentToken.length > 0) {
+      const whoamiEndpoint = new URL(
+        "/_matrix/client/v3/account/whoami",
+        ensureTrailingSlash(input.adminBaseUrl),
+      ).toString();
+      try {
+        const response = await this.fetchImpl(whoamiEndpoint, {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${currentToken}`,
+            Accept: "application/json",
+          },
+        });
+        if (response.ok) {
+          return false;
+        }
+        if (response.status !== 401 && response.status !== 403) {
+          this.logger.warn(
+            {
+              label: input.label,
+              userId: input.userId,
+              status: response.status,
+            },
+            "Matrix access token validation returned a non-auth failure; skipping token refresh",
+          );
+          return false;
+        }
+      } catch (error) {
+        this.logger.warn(
+          {
+            label: input.label,
+            userId: input.userId,
+            error: describeError(error),
+          },
+          "Matrix access token validation failed before refresh attempt",
+        );
+        return false;
+      }
+      this.logger.warn(
+        {
+          label: input.label,
+          userId: input.userId,
+        },
+        "Matrix access token is invalid; re-logging in to refresh",
+      );
+    }
+
+    const localpart = input.localpart;
+    if (localpart === undefined || localpart.length === 0) {
+      this.logger.warn(
+        {
+          label: input.label,
+          userId: input.userId,
+        },
+        "Matrix localpart is not set; cannot refresh token",
+      );
+      return false;
+    }
+    let password: string;
+    try {
+      password = await this.resolveSecretRef(passwordRef);
+    } catch {
+      this.logger.warn(
+        {
+          label: input.label,
+          userId: input.userId,
+        },
+        "Matrix password secret is missing; cannot refresh token",
+      );
+      return false;
+    }
+
+    const expectedUserId = input.userId;
+    const session = await this.loginMatrixUser({
+      adminBaseUrl: input.adminBaseUrl,
+      localpart,
+      password,
+      expectedUserId,
+    });
+
+    const tokenFileName = tokenRef.startsWith("file:")
+      ? basename(tokenRef.slice("file:".length)) || "matrix-bot-access-token"
+      : "matrix-bot-access-token";
+    if (isManagedAgentMatrixAccessTokenFileName(tokenFileName)) {
+      await this.writeManagedAgentAccessTokenFile(
+        runtimeConfig,
+        tokenFileName,
+        session.accessToken,
+      );
+    } else {
+      await this.writeManagedSecretFile(tokenFileName, session.accessToken);
+    }
+
+    this.logger.info(
+      {
+        label: input.label,
+        userId: session.userId,
+      },
+      "Refreshed Matrix access token after detecting stale credentials",
+    );
+
+    return true;
+  }
+
+  private async ensureManagedMatrixAccessTokens(runtimeConfig: RuntimeConfig): Promise<boolean> {
+    const candidates = [
+      {
+        label: "primary bot",
+        adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+        localpart: runtimeConfig.matrix.bot.localpart,
+        userId: runtimeConfig.matrix.bot.userId,
+        accessTokenSecretRef: runtimeConfig.matrix.bot.accessTokenSecretRef,
+        passwordSecretRef: runtimeConfig.matrix.bot.passwordSecretRef,
+      },
+      ...ensureCoreManagedAgents(runtimeConfig.openclawProfile.agents)
+        .filter((agent) => agent.matrix !== undefined)
+        .map((agent) => ({
+          label: `managed bot ${agent.id}`,
+          adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+          localpart: agent.matrix?.localpart,
+          userId: agent.matrix?.userId ?? "",
+          accessTokenSecretRef: agent.matrix?.accessTokenSecretRef,
+          passwordSecretRef: agent.matrix?.passwordSecretRef,
+        })),
+    ];
+
+    const seen = new Set<string>();
+    let refreshed = false;
+    for (const candidate of candidates) {
+      if (candidate.userId.length === 0) {
+        continue;
+      }
+      const dedupeKey = [
+        candidate.userId,
+        candidate.localpart ?? "",
+        candidate.accessTokenSecretRef ?? "",
+        candidate.passwordSecretRef ?? "",
+      ].join("\u0000");
+      if (seen.has(dedupeKey)) {
+        continue;
+      }
+      seen.add(dedupeKey);
+      refreshed =
+        (await this.validateAndRefreshMatrixIdentityToken(candidate, runtimeConfig)) || refreshed;
+    }
+
+    if (!refreshed) {
+      return false;
+    }
+
+    await this.refreshManagedMatrixRuntimeArtifacts(runtimeConfig);
+    await this.refreshGatewayAfterRuntimeConfig(runtimeConfig);
+
+    return true;
+  }
+
+  private async refreshManagedMatrixRuntimeArtifacts(runtimeConfig: RuntimeConfig): Promise<void> {
+    const canPatchExistingRuntime =
+      (await this.pathExists(runtimeConfig.openclaw.runtimeConfigPath)) &&
+      (await this.pathExists(runtimeConfig.openclaw.gatewayEnvPath));
+    if (!canPatchExistingRuntime) {
+      await this.writeOpenClawRuntimeArtifacts(runtimeConfig);
+      return;
+    }
+
+    await this.patchManagedMatrixRuntimeArtifacts(runtimeConfig);
+  }
+
+  private async patchManagedMatrixRuntimeArtifacts(runtimeConfig: RuntimeConfig): Promise<void> {
+    const tokenByUserId = new Map<string, string>();
+    tokenByUserId.set(
+      runtimeConfig.matrix.bot.userId,
+      await this.resolveSecretRef(runtimeConfig.matrix.bot.accessTokenSecretRef),
+    );
+    for (const agent of ensureCoreManagedAgents(runtimeConfig.openclawProfile.agents)) {
+      if (agent.matrix?.accessTokenSecretRef === undefined || agent.matrix.userId.length === 0) {
+        continue;
+      }
+      tokenByUserId.set(
+        agent.matrix.userId,
+        await this.resolveSecretRef(agent.matrix.accessTokenSecretRef),
+      );
+    }
+
+    const runtimeRaw = await readFile(runtimeConfig.openclaw.runtimeConfigPath, "utf8");
+    const parsedRuntime = parseJsonDocument(runtimeRaw);
+    if (!isRecord(parsedRuntime)) {
+      throw {
+        code: "OPENCLAW_CONFIG_WRITE_FAILED",
+        message: "OpenClaw runtime config is not a JSON object",
+        retryable: true,
+        details: {
+          runtimeConfigPath: runtimeConfig.openclaw.runtimeConfigPath,
+        },
+      };
+    }
+
+    const channels = isRecord(parsedRuntime.channels) ? parsedRuntime.channels : null;
+    const matrix = channels !== null && isRecord(channels.matrix) ? channels.matrix : null;
+    const accounts = matrix !== null && isRecord(matrix.accounts) ? matrix.accounts : null;
+    let runtimeChanged = false;
+    if (accounts !== null) {
+      for (const entry of Object.values(accounts)) {
+        if (!isRecord(entry) || typeof entry.userId !== "string") {
+          continue;
+        }
+        const nextToken = tokenByUserId.get(entry.userId);
+        if (nextToken === undefined || entry.accessToken === nextToken) {
+          continue;
+        }
+        entry.accessToken = nextToken;
+        runtimeChanged = true;
+      }
+    }
+    if (runtimeChanged) {
+      await this.writeProtectedJsonFile(
+        runtimeConfig.openclaw.runtimeConfigPath,
+        parsedRuntime,
+        runtimeConfig,
+      );
+    }
+
+    const primaryToken = tokenByUserId.get(runtimeConfig.matrix.bot.userId) ?? "";
+    const envRaw = await readFile(runtimeConfig.openclaw.gatewayEnvPath, "utf8");
+    const env = parseEnvFile(envRaw);
+    env.MATRIX_HOMESERVER = runtimeConfig.matrix.adminBaseUrl;
+    env.MATRIX_USER_ID = runtimeConfig.matrix.bot.userId;
+    env.MATRIX_ACCESS_TOKEN = primaryToken;
+    const envTempPath = `${runtimeConfig.openclaw.gatewayEnvPath}.${randomUUID()}.tmp`;
+    await writeFile(
+      envTempPath,
+      `${Object.entries(env)
+        .map(([key, value]) => `${key}=${value}`)
+        .join("\n")}
+`,
+      "utf8",
+    );
+    await chmod(envTempPath, 0o600);
+    await rename(envTempPath, runtimeConfig.openclaw.gatewayEnvPath);
+    await this.applyConfiguredRuntimeOwnership(
+      runtimeConfig.openclaw.gatewayEnvPath,
+      runtimeConfig,
+    );
+  }
+
   private async probeMatrixRoomReachable(runtimeConfig: RuntimeConfig): Promise<boolean> {
     try {
-      const accessToken = await this.resolveSecretRef(runtimeConfig.matrix.bot.accessTokenSecretRef);
+      await this.ensureManagedMatrixAccessTokens(runtimeConfig);
+    } catch {
+      return false;
+    }
+
+    try {
+      const accessToken = await this.resolveSecretRef(
+        runtimeConfig.matrix.bot.accessTokenSecretRef,
+      );
       const endpoint = new URL(
         `/_matrix/client/v3/rooms/${encodeURIComponent(runtimeConfig.matrix.alertRoom.roomId)}/joined_members`,
         ensureTrailingSlash(runtimeConfig.matrix.adminBaseUrl),
@@ -3210,24 +6549,27 @@ export class RealInstallerService implements InstallerService {
       };
     }
 
-    const openclawEnv =
-      command === "openclaw" ? await this.resolveManagedOpenClawEnv() : null;
+    const openclawEnv = command === "openclaw" ? await this.resolveManagedOpenClawEnv() : null;
     const openclawServiceUser =
       command === "openclaw" ? await this.resolveManagedOpenClawServiceUser() : null;
     const shouldRunOpenClawAsServiceUser =
-      command === "openclaw"
-      && typeof process.getuid === "function"
-      && process.getuid() === 0
-      && openclawServiceUser !== null
-      && openclawServiceUser !== "root";
+      command === "openclaw" &&
+      typeof process.getuid === "function" &&
+      process.getuid() === 0 &&
+      openclawServiceUser !== null &&
+      openclawServiceUser !== "root";
+    const delegatedCommand =
+      shouldRunOpenClawAsServiceUser && command === "openclaw"
+        ? ((await resolveExecutablePath(command)) ?? command)
+        : command;
     const effectiveCommand = shouldRunOpenClawAsServiceUser ? "sudo" : command;
     const effectiveArgs = shouldRunOpenClawAsServiceUser
       ? [
           "-u",
           openclawServiceUser,
-          "--preserve-env=OPENCLAW_HOME,OPENCLAW_CONFIG,OPENCLAW_CONFIG_PATH,SOVEREIGN_NODE_CONFIG,CI,TMPDIR,TMP,TEMP",
+          "--preserve-env=HOME,OPENCLAW_HOME,OPENCLAW_CONFIG,OPENCLAW_CONFIG_PATH,SOVEREIGN_NODE_CONFIG,SOVEREIGN_NODE_SERVICE_USER,SOVEREIGN_NODE_SERVICE_GROUP,CI,TMPDIR,TMP,TEMP,PATH",
           "--",
-          command,
+          delegatedCommand,
           ...args,
         ]
       : args;
@@ -3242,6 +6584,7 @@ export class RealInstallerService implements InstallerService {
             ? {
                 env: {
                   CI: "1",
+                  PATH: process.env.PATH ?? "",
                   ...(openclawEnv ?? {}),
                 },
               }
@@ -3279,15 +6622,21 @@ export class RealInstallerService implements InstallerService {
     return {
       openclawHome,
       runtimeConfigPath: join(openclawHome, "openclaw.json5"),
-      runtimeProfilePath: join(this.paths.openclawServiceHome, "profiles", "sovereign-runtime-profile.json5"),
+      runtimeProfilePath: join(
+        this.paths.openclawServiceHome,
+        "profiles",
+        "sovereign-runtime-profile.json5",
+      ),
       gatewayEnvPath: join(this.paths.openclawServiceHome, "gateway.env"),
     };
   }
 
   private buildManagedOpenClawEnv(runtimeConfig: RuntimeConfig): Record<string, string> {
     const tempDir = this.getManagedOpenClawTempDir(runtimeConfig);
+    const openclawServiceHome = dirname(runtimeConfig.openclaw.openclawHome);
     return {
-      OPENCLAW_HOME: runtimeConfig.openclaw.openclawHome,
+      HOME: openclawServiceHome,
+      OPENCLAW_HOME: openclawServiceHome,
       OPENCLAW_CONFIG: runtimeConfig.openclaw.runtimeConfigPath,
       OPENCLAW_CONFIG_PATH: runtimeConfig.openclaw.runtimeConfigPath,
       SOVEREIGN_NODE_CONFIG: this.paths.configPath,
@@ -3311,6 +6660,30 @@ export class RealInstallerService implements InstallerService {
         continue;
       }
       process.env[key] = value;
+    }
+  }
+
+  private async withManagedOpenClawServiceIdentityEnv<T>(
+    runtimeConfig: RuntimeConfig,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    const priorUser = process.env.SOVEREIGN_NODE_SERVICE_USER;
+    const priorGroup = process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+    process.env.SOVEREIGN_NODE_SERVICE_USER = runtimeConfig.openclaw.serviceUser;
+    process.env.SOVEREIGN_NODE_SERVICE_GROUP = runtimeConfig.openclaw.serviceGroup;
+    try {
+      return await action();
+    } finally {
+      if (priorUser === undefined) {
+        delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+      } else {
+        process.env.SOVEREIGN_NODE_SERVICE_USER = priorUser;
+      }
+      if (priorGroup === undefined) {
+        delete process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+      } else {
+        process.env.SOVEREIGN_NODE_SERVICE_GROUP = priorGroup;
+      }
     }
   }
 
@@ -3405,8 +6778,30 @@ export class RealInstallerService implements InstallerService {
         },
       },
       {
+        id: "openclaw_bundled_plugin_tools",
+        label: "Install bundled plugin CLI tools",
+        run: async () => {
+          if (stepState.selectedBots === undefined) {
+            stepState.selectedBots = (
+              await this.resolveRequestedBots(stepState.effectiveRequest ?? req)
+            ).packages;
+          }
+          if (!this.shouldEnsureLobsterCli(stepState.selectedBots)) {
+            return;
+          }
+          if (this.execRunner === null) {
+            this.logger.warn(
+              "Exec runner unavailable; skipping explicit Lobster CLI capability gate during install",
+            );
+            return;
+          }
+          await this.ensureLobsterCliInstalled();
+        },
+      },
+      {
         id: "imap_validate",
         label: "Validate IMAP",
+        softFail: true,
         run: async () => {
           if (req.imap === undefined) {
             this.logger.info(
@@ -3460,12 +6855,19 @@ export class RealInstallerService implements InstallerService {
             };
           }
           if (stepState.selectedBots === undefined) {
-            stepState.selectedBots = (await this.resolveRequestedBots(stepState.effectiveRequest ?? req))
-              .packages;
+            stepState.selectedBots = (
+              await this.resolveRequestedBots(stepState.effectiveRequest ?? req)
+            ).packages;
           }
           const bootstrapBotLocalpart = this.resolveBootstrapMatrixBotLocalpart(
             stepState.selectedBots,
           );
+          if (bootstrapBotLocalpart !== undefined) {
+            await this.syncBotPasswordFromRuntimeConfig(
+              stepState.matrixProvision.homeserverDomain,
+              bootstrapBotLocalpart,
+            );
+          }
           try {
             stepState.matrixAccounts = await this.matrixProvisioner.bootstrapAccounts(
               stepState.effectiveRequest ?? req,
@@ -3525,10 +6927,20 @@ export class RealInstallerService implements InstallerService {
               retryable: false,
             };
           }
+          const previousRuntimeConfig = await this.tryReadRuntimeConfig();
+          const previousAlertRoom =
+            previousRuntimeConfig !== null &&
+            previousRuntimeConfig.matrix.homeserverDomain ===
+              stepState.matrixProvision.homeserverDomain &&
+            previousRuntimeConfig.matrix.alertRoom.roomId.length > 0
+              ? previousRuntimeConfig.matrix.alertRoom
+              : undefined;
+
           stepState.matrixRoom = await this.matrixProvisioner.bootstrapRoom(
             stepState.effectiveRequest ?? req,
             stepState.matrixProvision,
             stepState.matrixAccounts,
+            previousAlertRoom !== undefined ? { previousAlertRoom } : undefined,
           );
         },
       },
@@ -3609,9 +7021,11 @@ export class RealInstallerService implements InstallerService {
               ? {}
               : { relayEnrollment: stepState.relayEnrollment }),
           });
+          await this.ensureManagedMatrixAccessTokens(runtimeConfig);
           if (stepState.selectedBots === undefined) {
-            stepState.selectedBots = (await this.resolveRequestedBots(stepState.effectiveRequest ?? req))
-              .packages;
+            stepState.selectedBots = (
+              await this.resolveRequestedBots(stepState.effectiveRequest ?? req)
+            ).packages;
           }
           for (const agent of runtimeConfig.openclawProfile.agents) {
             await this.ensureManagedAgentWorkspace({
@@ -3619,6 +7033,7 @@ export class RealInstallerService implements InstallerService {
               workspace: agent.workspace,
               runtimeConfig,
             });
+            await this.resetManagedAgentSessions(runtimeConfig, agent.id);
           }
           let topologyChanged = false;
           for (const agent of runtimeConfig.openclawProfile.agents) {
@@ -3642,13 +7057,22 @@ export class RealInstallerService implements InstallerService {
           if (topologyChanged) {
             await this.persistManagedAgentTopologyDocument(runtimeConfig);
           }
+          await this.applyCompiledSystemdResources(runtimeConfig);
           await this.writeOpenClawRuntimeArtifacts(runtimeConfig);
           stepState.runtimeConfig = runtimeConfig;
           this.setManagedOpenClawEnv(runtimeConfig);
+          if (await this.shouldEnsureLobsterCliForRuntime(runtimeConfig)) {
+            if (this.execRunner === null) {
+              this.logger.warn(
+                "Exec runner unavailable; skipping Lobster CLI verification during OpenClaw configure",
+              );
+            } else {
+              await this.ensureLobsterCliInstalled();
+            }
+          }
           if (runtimeConfig.relay?.enabled === true) {
-            stepState.relayTunnelServiceInstalled = await this.ensureRelayTunnelService(
-              runtimeConfig,
-            );
+            stepState.relayTunnelServiceInstalled =
+              await this.ensureRelayTunnelService(runtimeConfig);
           }
 
           if (stepState.gatewayServiceSkipped === true) {
@@ -3664,7 +7088,7 @@ export class RealInstallerService implements InstallerService {
           }
 
           try {
-            await this.openclawGatewayServiceManager.restart();
+            await this.refreshGatewayAfterRuntimeConfig(runtimeConfig);
           } catch (error) {
             if (isGatewayUserSystemdUnavailableError(error)) {
               stepState.gatewayServiceSkipped = true;
@@ -3676,28 +7100,7 @@ export class RealInstallerService implements InstallerService {
               );
               return;
             }
-
-            this.logger.warn(
-              {
-                error: error instanceof Error ? error.message : String(error),
-              },
-              "OpenClaw gateway restart failed after runtime configure; retrying with start",
-            );
-            try {
-              await this.openclawGatewayServiceManager.start();
-            } catch (startError) {
-              if (isGatewayUserSystemdUnavailableError(startError)) {
-                stepState.gatewayServiceSkipped = true;
-                this.logger.warn(
-                  {
-                    error: describeError(startError),
-                  },
-                  "OpenClaw gateway start skipped because systemd user services are unavailable",
-                );
-                return;
-              }
-              throw startError;
-            }
+            throw error;
           }
         },
       },
@@ -3734,7 +7137,7 @@ export class RealInstallerService implements InstallerService {
           }
           await this.runSmokeChecks(
             stepState.matrixProvision,
-            stepState.runtimeConfig ?? await this.readRuntimeConfig(),
+            stepState.runtimeConfig ?? (await this.readRuntimeConfig()),
             stepState.gatewayServiceSkipped ?? false,
             stepState.relayEnrollment !== undefined,
           );
@@ -3816,11 +7219,48 @@ export class RealInstallerService implements InstallerService {
     }
   }
 
+  private tryUsePreEnrolledRelay(
+    relay: NonNullable<InstallRequest["relay"]>,
+  ): RelayEnrollmentResult | null {
+    if (!relay.hostname || !relay.publicBaseUrl || !relay.tunnel) {
+      return null;
+    }
+    const t = relay.tunnel;
+    if (!t.serverAddr || !t.token || !t.proxyName) {
+      return null;
+    }
+    return {
+      controlUrl: relay.controlUrl,
+      hostname: relay.hostname,
+      publicBaseUrl: relay.publicBaseUrl,
+      tunnel: {
+        serverAddr: t.serverAddr,
+        serverPort: t.serverPort ?? 7000,
+        token: t.token,
+        proxyName: t.proxyName,
+        ...(t.subdomain === undefined ? {} : { subdomain: t.subdomain }),
+        type: "http",
+        localIp: "127.0.0.1",
+        localPort: RELAY_LOCAL_EDGE_PORT,
+      },
+    };
+  }
+
   private async resolveRelayEnrollment(
     req: InstallRequest,
     installationId: string,
   ): Promise<RelayEnrollmentResult> {
     const relay = this.getRelayRequest(req);
+
+    const preEnrolled = this.tryUsePreEnrolledRelay(relay);
+    if (preEnrolled !== null) {
+      this.logger.info(
+        { hostname: preEnrolled.hostname, publicBaseUrl: preEnrolled.publicBaseUrl },
+        "Using pre-enrolled relay configuration from request file",
+      );
+      return preEnrolled;
+    }
+
     const reused = await this.tryReuseExistingRelayEnrollment(relay);
     if (reused !== null) {
       this.logger.info(
@@ -3835,9 +7275,12 @@ export class RealInstallerService implements InstallerService {
 
     const enrollmentToken = relay.enrollmentToken?.trim();
     const usesManagedPublicEnroll =
-      this.isDefaultManagedRelayControlUrl(relay.controlUrl)
-      && (enrollmentToken === undefined || enrollmentToken.length === 0);
-    if (!usesManagedPublicEnroll && (enrollmentToken === undefined || enrollmentToken.length === 0)) {
+      this.isDefaultManagedRelayControlUrl(relay.controlUrl) &&
+      (enrollmentToken === undefined || enrollmentToken.length === 0);
+    if (
+      !usesManagedPublicEnroll &&
+      (enrollmentToken === undefined || enrollmentToken.length === 0)
+    ) {
       throw {
         code: "RELAY_CONFIG_MISSING",
         message: "Custom relay mode requires relay.enrollmentToken",
@@ -3866,7 +7309,7 @@ export class RealInstallerService implements InstallerService {
           body: JSON.stringify({
             ...(usesManagedPublicEnroll ? { installationId } : { enrollmentToken }),
             requestedSlug,
-            version: process.env.npm_package_version ?? "0.1.0",
+            version: process.env.npm_package_version ?? "2.0.0",
           }),
         });
       } catch (error) {
@@ -3884,16 +7327,12 @@ export class RealInstallerService implements InstallerService {
         };
         const responseTextLower = responseText.toLowerCase();
         const slugConflict =
-          response.status === 409
-          || (
-            (response.status === 400 || response.status === 422)
-            && responseTextLower.includes("slug")
-            && (
-              responseTextLower.includes("taken")
-              || responseTextLower.includes("already")
-              || responseTextLower.includes("exists")
-            )
-          );
+          response.status === 409 ||
+          ((response.status === 400 || response.status === 422) &&
+            responseTextLower.includes("slug") &&
+            (responseTextLower.includes("taken") ||
+              responseTextLower.includes("already") ||
+              responseTextLower.includes("exists")));
         if (slugConflict && attempt < 6) {
           this.logger.warn(
             {
@@ -3920,8 +7359,7 @@ export class RealInstallerService implements InstallerService {
 
       const parsed = parseJsonDocument(responseText);
       const payload =
-        isRecord(parsed)
-        && isRecord(parsed.result)
+        isRecord(parsed) && isRecord(parsed.result)
           ? parsed.result
           : isRecord(parsed)
             ? parsed
@@ -3944,7 +7382,9 @@ export class RealInstallerService implements InstallerService {
             ? tunnel.serverHost.trim()
             : "";
       const serverPort =
-        tunnel !== null && typeof tunnel.serverPort === "number" && Number.isFinite(tunnel.serverPort)
+        tunnel !== null &&
+        typeof tunnel.serverPort === "number" &&
+        Number.isFinite(tunnel.serverPort)
           ? Math.trunc(tunnel.serverPort)
           : 7000;
       const token =
@@ -3960,16 +7400,18 @@ export class RealInstallerService implements InstallerService {
             ? `relay-${hostname.replace(/[^a-zA-Z0-9-]/g, "-")}`
             : "";
       const subdomain =
-        tunnel !== null && typeof tunnel.subdomain === "string" && tunnel.subdomain.trim().length > 0
+        tunnel !== null &&
+        typeof tunnel.subdomain === "string" &&
+        tunnel.subdomain.trim().length > 0
           ? tunnel.subdomain.trim()
           : undefined;
 
       if (
-        hostname.length === 0
-        || publicBaseUrl.length === 0
-        || serverAddr.length === 0
-        || token.length === 0
-        || proxyName.length === 0
+        hostname.length === 0 ||
+        publicBaseUrl.length === 0 ||
+        serverAddr.length === 0 ||
+        token.length === 0 ||
+        proxyName.length === 0
       ) {
         throw {
           code: "RELAY_ENROLL_INVALID",
@@ -4034,13 +7476,16 @@ export class RealInstallerService implements InstallerService {
       return values[index] ?? values[0] ?? "node";
     };
     const suffix = entropy.slice(0, 4);
-    const raw = `${pick(RELAY_NAME_MOODS, 0)}-${pick(RELAY_NAME_THEMES, 2)}-${pick(RELAY_NAME_MASCOTS, 4)}-${suffix}`.toLowerCase();
+    const raw =
+      `${pick(RELAY_NAME_MOODS, 0)}-${pick(RELAY_NAME_THEMES, 2)}-${pick(RELAY_NAME_MASCOTS, 4)}-${suffix}`.toLowerCase();
     const normalized = raw
       .replace(/[^a-z0-9-]/g, "-")
       .replace(/-{2,}/g, "-")
       .replace(/^-+/, "")
       .replace(/-+$/, "");
-    return normalized.length === 0 ? `sovereign-node-${suffix}` : normalized.slice(0, 63).replace(/-+$/, "");
+    return normalized.length === 0
+      ? `sovereign-node-${suffix}`
+      : normalized.slice(0, 63).replace(/-+$/, "");
   }
 
   private buildRelayProvisionRequest(
@@ -4057,7 +7502,7 @@ export class RealInstallerService implements InstallerService {
         ...req.matrix,
         homeserverDomain: enrollment.hostname,
         publicBaseUrl: enrollment.publicBaseUrl,
-        federationEnabled: false,
+        federationEnabled: req.matrix.federationEnabled ?? false,
       },
     };
   }
@@ -4308,29 +7753,44 @@ export class RealInstallerService implements InstallerService {
       const cronEntry = runtimeConfig.openclawProfile.crons.find(
         (entry) => entry.botId === botPackage.manifest.id || entry.agentId === agent.id,
       );
+      const compiledCron = (runtimeConfig.hostResources?.resources ?? []).find(
+        (entry) =>
+          entry.kind === "openclawCron" &&
+          entry.desiredState === "present" &&
+          entry.botId === botPackage.manifest.id &&
+          entry.spec?.agentId === agent.id,
+      );
       try {
-        const registration = await this.managedAgentRegistrar.register({
-          agentId: agent.id,
-          workspaceDir: agent.workspace,
-          ...(cronEntry === undefined || botPackage.manifest.openclaw.cron === undefined
-            ? {}
-            : {
-                cron: {
-                  id: cronEntry.id,
-                  every: cronEntry.every,
-                  message: botPackage.manifest.openclaw.cron.message,
-                  announceRoomId: runtimeConfig.matrix.alertRoom.roomId,
-                  ...(botPackage.manifest.openclaw.cron.session === undefined
-                    ? {}
-                    : { session: botPackage.manifest.openclaw.cron.session }),
-                },
-              }),
-        });
+        const registration = await this.withManagedOpenClawServiceIdentityEnv(
+          runtimeConfig,
+          async () =>
+            await this.managedAgentRegistrar.register({
+              agentId: agent.id,
+              workspaceDir: agent.workspace,
+              ...(cronEntry === undefined ||
+              compiledCron?.kind !== "openclawCron" ||
+              compiledCron.spec === undefined
+                ? {}
+                : {
+                    cron: {
+                      id: cronEntry.id,
+                      every: cronEntry.every,
+                      message: compiledCron.spec.message,
+                      ...(compiledCron.spec.announceRoomId === undefined
+                        ? {}
+                        : { announceRoomId: compiledCron.spec.announceRoomId }),
+                      ...(compiledCron.spec.session === undefined
+                        ? {}
+                        : { session: compiledCron.spec.session }),
+                    },
+                  }),
+            }),
+        );
         registrations.push(registration);
       } catch (error) {
         if (
-          options?.allowGatewayUnavailableFallback !== true
-          || !isMailSentinelGatewayUnavailableError(error)
+          options?.allowGatewayUnavailableFallback !== true ||
+          !isMailSentinelGatewayUnavailableError(error)
         ) {
           throw error;
         }
@@ -4387,8 +7847,8 @@ export class RealInstallerService implements InstallerService {
           agentId: registration.agentId,
           ...(registration.cronJobId === undefined ? {} : { cronJobId: registration.cronJobId }),
           deferred:
-            registration.agentCommand.startsWith("deferred:")
-            || registration.cronCommand?.startsWith("deferred:") === true,
+            registration.agentCommand.startsWith("deferred:") ||
+            registration.cronCommand?.startsWith("deferred:") === true,
         },
         0o600,
       );
@@ -4439,8 +7899,10 @@ export class RealInstallerService implements InstallerService {
       }
       const botPackage = await this.findBotPackageByTemplateRef(agent.templateRef);
       const usesSharedServiceIdentity =
-        agent.matrix.userId === runtimeConfig.matrix.bot.userId
-        && botPackage?.manifest.matrixIdentity.mode === "service-account";
+        agent.matrix.userId === runtimeConfig.matrix.bot.userId &&
+        botPackage?.manifest.matrixIdentity.mode === "service-account";
+      const usesPrimaryDedicatedIdentity =
+        !usesSharedServiceIdentity && agent.matrix.userId === runtimeConfig.matrix.bot.userId;
       await this.runOpenClawCommandAlternatives({
         label: `${agent.id}-agent`,
         commands: [
@@ -4456,35 +7918,21 @@ export class RealInstallerService implements InstallerService {
       await this.runOpenClawCommandAlternatives({
         label: `${agent.id}-matrix-bind`,
         commands: usesSharedServiceIdentity
-          ? [[
-              "agents",
-              "bind",
-              "--agent",
-              agent.id,
-              "--bind",
-              "matrix",
-            ]]
+          ? [["agents", "bind", "--agent", agent.id, "--bind", "matrix"]]
           : [
-              [
-                "agents",
-                "bind",
-                "--agent",
-                agent.id,
-                "--bind",
-                `matrix:${agent.id}`,
-              ],
-              [
-                "agents",
-                "bind",
-                "--agent",
-                agent.id,
-                "--bind",
-                "matrix",
-              ],
+              ["agents", "bind", "--agent", agent.id, "--bind", `matrix:${agent.id}`],
+              ["agents", "bind", "--agent", agent.id, "--bind", "matrix"],
             ],
         allowAlreadyExists: true,
       });
-      for (const pattern of this.listAgentExecAllowlistPatterns(
+      if (usesPrimaryDedicatedIdentity) {
+        await this.runOpenClawCommandAlternatives({
+          label: `${agent.id}-matrix-default-bind`,
+          commands: [["agents", "bind", "--agent", agent.id, "--bind", "matrix"]],
+          allowAlreadyExists: true,
+        });
+      }
+      for (const pattern of await this.listAgentExecAllowlistPatterns(
         runtimeConfig,
         agent.toolInstanceIds ?? [],
       )) {
@@ -4625,15 +8073,22 @@ export class RealInstallerService implements InstallerService {
 
     const serviceIdentity = this.getConfiguredServiceIdentity(runtimeConfig);
     const managedTempDir = this.getManagedOpenClawTempDir(runtimeConfig);
+    const openclawCommand = (await resolveExecutablePath("openclaw")) ?? "openclaw";
     const unitName = SOVEREIGN_GATEWAY_SYSTEMD_UNIT;
+    const waitsForLocalMatrix = shouldGateSystemGatewayOnLocalMatrix(
+      runtimeConfig.matrix.adminBaseUrl,
+    );
     const unitPath =
-      process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH?.trim()
-      || `/etc/systemd/system/${unitName}`;
+      process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH?.trim() ||
+      `/etc/systemd/system/${unitName}`;
     const unitContents = [
       "[Unit]",
       "Description=Sovereign OpenClaw Gateway",
-      "After=network-online.target",
+      waitsForLocalMatrix
+        ? "After=network-online.target docker.service"
+        : "After=network-online.target",
       "Wants=network-online.target",
+      ...(waitsForLocalMatrix ? ["Requires=docker.service"] : []),
       "",
       "[Service]",
       "Type=simple",
@@ -4641,11 +8096,17 @@ export class RealInstallerService implements InstallerService {
       `Group=${serviceIdentity.group}`,
       `WorkingDirectory=${this.paths.openclawServiceHome}`,
       `Environment=HOME=${this.paths.openclawServiceHome}`,
+      `Environment=PATH=${process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}`,
       `Environment=TMPDIR=${managedTempDir}`,
       `Environment=TMP=${managedTempDir}`,
       `Environment=TEMP=${managedTempDir}`,
       `EnvironmentFile=-${runtimeConfig.openclaw.gatewayEnvPath}`,
-      "ExecStart=/usr/bin/env openclaw gateway run --allow-unconfigured --bind loopback",
+      ...(waitsForLocalMatrix
+        ? [
+            `ExecStartPre=${renderSystemGatewayMatrixWaitCommand(runtimeConfig.matrix.adminBaseUrl)}`,
+          ]
+        : []),
+      `ExecStart=${openclawCommand} gateway run --allow-unconfigured --bind loopback`,
       "Restart=always",
       "RestartSec=3",
       "",
@@ -4657,9 +8118,10 @@ export class RealInstallerService implements InstallerService {
     try {
       await mkdir(this.paths.openclawServiceHome, { recursive: true });
       await mkdir(managedTempDir, { recursive: true });
+      await this.cleanStaleTempEntries(managedTempDir);
       await chmod(managedTempDir, 0o700);
-      await this.applyRuntimeOwnership(this.paths.openclawServiceHome);
-      await this.applyRuntimeOwnership(managedTempDir);
+      await this.applyConfiguredRuntimeOwnership(this.paths.openclawServiceHome, runtimeConfig);
+      await this.applyConfiguredRuntimeOwnership(managedTempDir, runtimeConfig);
       await mkdir(dirname(unitPath), { recursive: true });
       await writeFile(unitPath, unitContents, "utf8");
     } catch (error) {
@@ -4692,6 +8154,11 @@ export class RealInstallerService implements InstallerService {
         return false;
       }
       if (result.result.exitCode !== 0) {
+        const output = `${result.result.stdout}\n${result.result.stderr}`;
+        const systemctlStillStarting = args[0] === "is-active" && /\bactivating\b/i.test(output);
+        if (systemctlStillStarting) {
+          continue;
+        }
         this.logger.warn(
           {
             command: result.result.command,
@@ -4816,14 +8283,21 @@ export class RealInstallerService implements InstallerService {
 
       const health = await this.probeOpenClawHealth();
       if (!health.ok) {
-        throw {
-          code: "SMOKE_CHECKS_FAILED",
-          message: "OpenClaw health probe failed during smoke checks",
-          retryable: true,
-          details: {
-            health: health.message,
-          },
-        };
+        if (gateway.state === "running") {
+          this.logger.warn(
+            { health: health.message },
+            "OpenClaw health probe failed during smoke checks but gateway service is running; continuing",
+          );
+        } else {
+          throw {
+            code: "SMOKE_CHECKS_FAILED",
+            message: "OpenClaw health probe failed during smoke checks",
+            retryable: true,
+            details: {
+              health: health.message,
+            },
+          };
+        }
       }
 
       const requiredAgentIds = dedupeStrings(
@@ -4832,21 +8306,34 @@ export class RealInstallerService implements InstallerService {
       const missingAgentIds: string[] = [];
       let verifiedAgentProbe = false;
       for (const agentId of requiredAgentIds) {
-        const agentProbe = await this.inspectOpenClawListContains(["agents", "list"], agentId);
+        const agentProbe = await this.waitForOpenClawListContains(["agents", "list"], agentId);
         verifiedAgentProbe = verifiedAgentProbe || agentProbe.verified;
         if (agentProbe.verified && !agentProbe.present) {
           missingAgentIds.push(agentId);
         }
       }
       if (verifiedAgentProbe && missingAgentIds.length > 0) {
-        throw {
-          code: "SMOKE_CHECKS_FAILED",
-          message: "One or more managed agents are missing from OpenClaw runtime",
-          retryable: true,
-          details: {
-            missingAgentIds,
-          },
-        };
+        const runtimeJson = await this.readManagedOpenClawRuntimeJson(runtimeConfig);
+        const unresolvedAgentIds = missingAgentIds.filter(
+          (agentId) => !this.managedOpenClawRuntimeHasAgent(runtimeJson, agentId),
+        );
+        if (unresolvedAgentIds.length === 0) {
+          this.logger.warn(
+            {
+              missingAgentIds,
+            },
+            "OpenClaw CLI agent listing did not reflect all managed agents yet, but the managed runtime config already contains them; continuing",
+          );
+        } else {
+          throw {
+            code: "SMOKE_CHECKS_FAILED",
+            message: "One or more managed agents are missing from OpenClaw runtime",
+            retryable: true,
+            details: {
+              missingAgentIds: unresolvedAgentIds,
+            },
+          };
+        }
       }
 
       const expectedCronIds = dedupeStrings(
@@ -4855,21 +8342,39 @@ export class RealInstallerService implements InstallerService {
       const missingCronJobIds: string[] = [];
       let verifiedCronProbe = false;
       for (const cronJobId of expectedCronIds) {
-        const cronProbe = await this.inspectOpenClawListContains(["cron", "list"], cronJobId);
+        const cronProbe = await this.waitForOpenClawListContains(["cron", "list"], cronJobId);
         verifiedCronProbe = verifiedCronProbe || cronProbe.verified;
         if (cronProbe.verified && !cronProbe.present) {
           missingCronJobIds.push(cronJobId);
         }
       }
       if (verifiedCronProbe && missingCronJobIds.length > 0) {
-        throw {
-          code: "SMOKE_CHECKS_FAILED",
-          message: "One or more managed cron jobs are missing from OpenClaw runtime",
-          retryable: true,
-          details: {
-            missingCronJobIds,
-          },
-        };
+        const runtimeJson = await this.readManagedOpenClawRuntimeJson(runtimeConfig);
+        const configuredCronIds = new Set(
+          runtimeConfig.openclawProfile.crons.map((entry) => entry.id),
+        );
+        const unresolvedCronJobIds = missingCronJobIds.filter(
+          (cronId) =>
+            !this.managedOpenClawRuntimeHasCron(runtimeJson, cronId) &&
+            !configuredCronIds.has(cronId),
+        );
+        if (unresolvedCronJobIds.length === 0) {
+          this.logger.warn(
+            {
+              missingCronJobIds,
+            },
+            "OpenClaw CLI cron listing did not reflect all managed cron jobs yet, but the managed runtime config already contains them; continuing",
+          );
+        } else {
+          throw {
+            code: "SMOKE_CHECKS_FAILED",
+            message: "One or more managed cron jobs are missing from OpenClaw runtime",
+            retryable: true,
+            details: {
+              missingCronJobIds: unresolvedCronJobIds,
+            },
+          };
+        }
       }
     }
   }
@@ -4924,10 +8429,10 @@ export class RealInstallerService implements InstallerService {
     };
   }
 
-  private assertMatrixOnboardingAvailable(runtimeConfig: RuntimeConfig): void {
+  private assertMatrixOnboardingAvailable(runtimeConfig: RuntimeConfig): string {
     if (
-      runtimeConfig.matrix.accessMode !== "relay"
-      && !runtimeConfig.matrix.publicBaseUrl.startsWith("https://")
+      runtimeConfig.matrix.accessMode !== "relay" &&
+      !runtimeConfig.matrix.publicBaseUrl.startsWith("https://")
     ) {
       throw {
         code: "MATRIX_ONBOARDING_UNAVAILABLE",
@@ -4940,116 +8445,18 @@ export class RealInstallerService implements InstallerService {
         },
       };
     }
+    return buildMatrixOnboardingUrl(runtimeConfig.matrix.publicBaseUrl);
   }
 
-  private buildMatrixUserId(runtimeConfig: RuntimeConfig, localpart: string): string {
-    return `@${localpart}:${runtimeConfig.matrix.homeserverDomain}`;
-  }
-
-  private sanitizeHumanMatrixLocalpart(value: string): string {
-    const trimmed = value.trim();
-    const withoutSigil = trimmed.startsWith("@") ? trimmed.slice(1) : trimmed;
-    const [localpartCandidate = ""] = withoutSigil.split(":");
-    const localpart = sanitizeExpectedMatrixLocalpart(localpartCandidate, "");
-    if (localpart.length > 0) {
-      return localpart;
-    }
-    throw {
-      code: "MATRIX_HUMAN_USER_INVALID",
-      message: "Matrix username must include at least one valid localpart character",
-      retryable: false,
-      details: {
-        input: value,
-      },
-    };
-  }
-
-  private assertHumanMatrixLocalpartIsNotReserved(
+  private async writeMatrixOnboardingState(
     runtimeConfig: RuntimeConfig,
-    localpart: string,
-  ): void {
-    const reservedByLocalpart = new Map<string, string>([
-      ...(
-        runtimeConfig.matrix.operator.localpart === undefined
-          ? []
-          : [[runtimeConfig.matrix.operator.localpart, runtimeConfig.matrix.operator.userId] satisfies [string, string]]
-      ),
-      ...(
-        runtimeConfig.matrix.bot.localpart === undefined
-          ? []
-          : [[runtimeConfig.matrix.bot.localpart, runtimeConfig.matrix.bot.userId] satisfies [string, string]]
-      ),
-      ...runtimeConfig.openclawProfile.agents.flatMap((agent) =>
-        agent.matrix?.localpart === undefined || agent.matrix.userId === undefined
-          ? []
-          : [[agent.matrix.localpart, agent.matrix.userId] satisfies [string, string]]),
-    ]);
-    const reservedUserId = reservedByLocalpart.get(localpart);
-    if (reservedUserId === undefined) {
-      return;
-    }
-    throw {
-      code: "MATRIX_HUMAN_USER_RESERVED",
-      message: `Matrix user '${reservedUserId}' is reserved for node operations and cannot be managed as a human account`,
-      retryable: false,
-      details: {
-        localpart,
-        userId: reservedUserId,
-      },
-    };
-  }
-
-  private async issueMatrixOnboardingForUser(input: {
-    runtimeConfig: RuntimeConfig;
-    userId: string;
-    passwordSecretRef: string;
-    ttlMinutes?: number;
-  }): Promise<MatrixOnboardingIssueResult> {
-    const statePath = this.getMatrixOnboardingStatePath(input.runtimeConfig);
-    const issued = issueMatrixOnboardingState({
-      passwordSecretRef: input.passwordSecretRef,
-      username: input.userId,
-      homeserverUrl: input.runtimeConfig.matrix.publicBaseUrl,
-      ...(input.ttlMinutes === undefined ? {} : { ttlMinutes: input.ttlMinutes }),
-    });
-    await this.writeInstallerJsonFile(statePath, issued.state, 0o600);
-    return {
-      code: issued.code,
-      expiresAt: issued.state.expiresAt,
-      onboardingUrl: buildMatrixOnboardingUrl(input.runtimeConfig.matrix.publicBaseUrl),
-      username: input.userId,
-    };
-  }
-
-  private async clearMatrixOnboardingStateForUser(
-    runtimeConfig: RuntimeConfig,
-    userId: string,
-  ): Promise<boolean> {
-    const statePath = this.getMatrixOnboardingStatePath(runtimeConfig);
-    let raw = "";
-    try {
-      raw = await readFile(statePath, "utf8");
-    } catch (error) {
-      if (isNodeError(error) && error.code === "ENOENT") {
-        return false;
-      }
-      throw {
-        code: "MATRIX_HUMAN_USER_DELETE_FAILED",
-        message: "Failed to read Matrix onboarding state",
-        retryable: false,
-        details: {
-          statePath,
-          error: describeError(error),
-        },
-      };
-    }
-
-    const parsed = parseMatrixOnboardingState(parseJsonSafely(raw));
-    if (parsed === null || parsed.username !== userId) {
-      return false;
-    }
-    await rm(statePath, { force: true });
-    return true;
+    state: unknown,
+  ): Promise<void> {
+    await this.writeInstallerJsonFile(
+      this.getMatrixOnboardingStatePath(runtimeConfig),
+      state,
+      0o600,
+    );
   }
 
   private getInstallRequestPath(): string {
@@ -5064,11 +8471,403 @@ export class RealInstallerService implements InstallerService {
     return DEFAULT_INSTALL_REQUEST_FILE;
   }
 
-  private async writeInstallerJsonFile(
-    path: string,
-    value: unknown,
-    mode: number,
-  ): Promise<void> {
+  private async tryReadSavedInstallRequest(): Promise<{
+    requestFile: string;
+    request: InstallRequest;
+  } | null> {
+    const requestFile = this.getInstallRequestPath();
+    let raw = "";
+    try {
+      raw = await readFile(requestFile, "utf8");
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return null;
+      }
+      throw {
+        code: "REQUEST_READ_FAILED",
+        message: "Failed to read the saved install request file",
+        retryable: false,
+        details: {
+          requestFile,
+          error: describeError(error),
+        },
+      };
+    }
+
+    const parsed = parseJsonDocument(raw);
+    const validated = installRequestSchema.safeParse(parsed);
+    if (!validated.success) {
+      throw {
+        code: "REQUEST_INVALID",
+        message: "Saved install request file is invalid",
+        retryable: false,
+        details: {
+          requestFile,
+        },
+      };
+    }
+    return {
+      requestFile,
+      request: validated.data,
+    };
+  }
+
+  private async readSavedInstallRequestOrThrow(): Promise<{
+    requestFile: string;
+    request: InstallRequest;
+  }> {
+    const loaded = await this.tryReadSavedInstallRequest();
+    if (loaded !== null) {
+      return loaded;
+    }
+    const requestFile = this.getInstallRequestPath();
+    throw {
+      code: "REQUEST_NOT_FOUND",
+      message: "Saved install request file was not found",
+      retryable: false,
+      details: {
+        requestFile,
+      },
+    };
+  }
+
+  private async writeSavedInstallRequest(request: InstallRequest): Promise<string> {
+    const requestFile = this.getInstallRequestPath();
+    await this.writeInstallerJsonFile(requestFile, request, 0o640);
+    return requestFile;
+  }
+
+  private async listPendingMigrations(): Promise<PendingMigration[]> {
+    const request = await this.tryReadSavedInstallRequest();
+    const runtimeConfig = await this.tryReadRuntimeConfig();
+    const pending: PendingMigration[] = [];
+    if (await this.isMailSentinelMigrationPending(request?.request ?? null, runtimeConfig)) {
+      pending.push({
+        id: MAIL_SENTINEL_MIGRATION_ID,
+        description: "Migrate the legacy single mail-sentinel into bot-instance configuration",
+        interactive: true,
+      });
+    }
+    return pending;
+  }
+
+  private async isMailSentinelMigrationPending(
+    request: InstallRequest | null,
+    runtimeConfig: RuntimeConfig | null,
+  ): Promise<boolean> {
+    if (request === null || runtimeConfig === null) {
+      return false;
+    }
+    const hasLegacyMailSentinel =
+      runtimeConfig.openclawProfile.agents.some((entry) => entry.id === MAIL_SENTINEL_AGENT_ID) ||
+      request.bots?.selected?.includes(MAIL_SENTINEL_AGENT_ID) === true ||
+      request.bots?.config?.[MAIL_SENTINEL_AGENT_ID] !== undefined ||
+      request.imap !== undefined;
+    const hasInstanceConfig =
+      request.bots?.instances?.some((entry) => entry.packageId === MAIL_SENTINEL_AGENT_ID) === true;
+    return hasLegacyMailSentinel && !hasInstanceConfig;
+  }
+
+  private async assertNoPendingMigrations(): Promise<void> {
+    const pending = await this.listPendingMigrations();
+    if (pending.length === 0) {
+      return;
+    }
+    throw {
+      code: "MIGRATION_REQUIRED",
+      message: `Pending migration '${pending[0]?.id ?? MAIL_SENTINEL_MIGRATION_ID}' must be completed before this command can run`,
+      retryable: false,
+      details: {
+        command: "sovereign-node migrate",
+      },
+    };
+  }
+
+  private async createMatrixRoomViaClientApi(input: {
+    runtimeConfig: RuntimeConfig;
+    roomName: string;
+  }): Promise<{ roomId: string; roomName: string }> {
+    const operatorTokenSecretRef = input.runtimeConfig.matrix.operator.accessTokenSecretRef;
+    if (operatorTokenSecretRef === undefined || operatorTokenSecretRef.length === 0) {
+      throw {
+        code: "MATRIX_ROOM_CREATE_FAILED",
+        message: "Operator Matrix access token is required to create a Mail Sentinel alert room",
+        retryable: false,
+      };
+    }
+    const operatorAccessToken = await this.resolveSecretRef(operatorTokenSecretRef);
+    const endpoint = new URL(
+      "/_matrix/client/v3/createRoom",
+      ensureTrailingSlash(input.runtimeConfig.matrix.adminBaseUrl),
+    ).toString();
+    const response = await this.fetchImpl(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${operatorAccessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        name: input.roomName,
+        preset: "private_chat",
+        visibility: "private",
+      }),
+    });
+    const bodyText = await response.text();
+    const parsed = parseJsonSafely(bodyText);
+    if (!response.ok) {
+      throw {
+        code: "MATRIX_ROOM_CREATE_FAILED",
+        message: "Failed to create a Mail Sentinel alert room",
+        retryable: true,
+        details: {
+          endpoint,
+          status: response.status,
+          body: summarizeUnknown(parsed),
+        },
+      };
+    }
+    const roomId = isRecord(parsed) && typeof parsed.room_id === "string" ? parsed.room_id : "";
+    if (roomId.length === 0) {
+      throw {
+        code: "MATRIX_ROOM_CREATE_FAILED",
+        message: "Matrix room creation returned an invalid room id",
+        retryable: true,
+      };
+    }
+    return {
+      roomId,
+      roomName: input.roomName,
+    };
+  }
+
+  private toMailSentinelSummary(
+    instance: RequestedBotInstance | RuntimeBotInstance,
+    runtimeConfig: RuntimeConfig | null,
+  ): MailSentinelSummary {
+    const agent = runtimeConfig?.openclawProfile.agents.find(
+      (entry) => entry.botInstanceId === instance.id || entry.id === instance.id,
+    );
+    return {
+      id: instance.id,
+      packageId: instance.packageId,
+      workspace: instance.workspace,
+      ...(instance.matrix?.localpart === undefined
+        ? agent?.matrix?.localpart === undefined
+          ? {}
+          : { matrixLocalpart: agent.matrix.localpart }
+        : { matrixLocalpart: instance.matrix.localpart }),
+      ...(agent?.matrix?.userId === undefined ? {} : { matrixUserId: agent.matrix.userId }),
+      ...(instance.matrix?.alertRoom?.roomId === undefined
+        ? {}
+        : { alertRoomId: instance.matrix.alertRoom.roomId }),
+      ...(instance.matrix?.alertRoom?.roomName === undefined
+        ? {}
+        : { alertRoomName: instance.matrix.alertRoom.roomName }),
+      allowedUsers: instance.matrix?.allowedUsers ?? [],
+      ...(typeof instance.config[MAIL_SENTINEL_IMAP_HOST_KEY] === "string"
+        ? { imapHost: instance.config[MAIL_SENTINEL_IMAP_HOST_KEY] }
+        : {}),
+      ...(typeof instance.config[MAIL_SENTINEL_IMAP_USERNAME_KEY] === "string"
+        ? { imapUsername: instance.config[MAIL_SENTINEL_IMAP_USERNAME_KEY] }
+        : {}),
+      ...(typeof instance.config[MAIL_SENTINEL_IMAP_MAILBOX_KEY] === "string"
+        ? { mailbox: instance.config[MAIL_SENTINEL_IMAP_MAILBOX_KEY] }
+        : {}),
+      ...(typeof instance.config.pollInterval === "string"
+        ? { pollInterval: instance.config.pollInterval }
+        : {}),
+    };
+  }
+
+  private syncSelectedBotsWithInstances(request: InstallRequest): void {
+    const explicitPackageIds = dedupeStrings(
+      (request.bots?.instances ?? [])
+        .map((entry) => entry.packageId.trim())
+        .filter((entry) => entry.length > 0),
+    );
+    const selected = request.bots?.selected ?? [];
+    request.bots = {
+      ...(request.bots ?? {}),
+      selected: dedupeStrings([
+        ...selected.filter((entry) => !explicitPackageIds.includes(entry)),
+        ...explicitPackageIds,
+      ]),
+    };
+  }
+
+  private async applyMailSentinelInstance(
+    req: {
+      id: string;
+      imapHost?: string;
+      imapPort?: number;
+      imapTls?: boolean;
+      imapUsername?: string;
+      imapPassword?: string;
+      imapSecretRef?: string;
+      mailbox?: string;
+      matrixLocalpart?: string;
+      alertRoomId?: string;
+      alertRoomName?: string;
+      createAlertRoomName?: string;
+      allowedUsers?: string[];
+      pollInterval?: string;
+      lookbackWindow?: string;
+      defaultReminderDelay?: string;
+      digestInterval?: string;
+    },
+    mode: "create" | "update",
+  ): Promise<MailSentinelApplyResult> {
+    await this.assertNoPendingMigrations();
+    const runtimeConfig = await this.readRuntimeConfig();
+    const { request } = await this.readSavedInstallRequestOrThrow();
+    const id = sanitizeManagedAgentId(req.id);
+    const existingRaw = (request.bots?.instances ?? []).find((entry) => entry.id === id) as
+      | NonNullable<NonNullable<InstallRequest["bots"]>["instances"]>[number]
+      | undefined;
+    if (mode === "create" && existingRaw !== undefined) {
+      throw {
+        code: "MAIL_SENTINEL_EXISTS",
+        message: `Mail Sentinel instance '${id}' already exists`,
+        retryable: false,
+      };
+    }
+    if (mode === "update" && existingRaw === undefined) {
+      throw {
+        code: "MAIL_SENTINEL_NOT_FOUND",
+        message: `Mail Sentinel instance '${id}' does not exist`,
+        retryable: false,
+      };
+    }
+    const base =
+      existingRaw === undefined
+        ? this.applyLegacyMailSentinelRequestedInstanceDefaults({
+            entry: {
+              id,
+              packageId: MAIL_SENTINEL_AGENT_ID,
+              workspace: join(this.paths.stateDir, id, "workspace"),
+              config: {},
+              secretRefs: {},
+              matrix: {
+                allowedUsers: [],
+              },
+            },
+            imap: runtimeConfig.imap,
+            matrixRoom: runtimeConfig.matrix.alertRoom,
+            previousRuntimeConfig: runtimeConfig,
+          })
+        : this.normalizeRequestedBotInstance({
+            entry: existingRaw,
+            configById: isBotConfigRecordMap(request.bots?.config)
+              ? (request.bots?.config ?? {})
+              : {},
+            matrixRoom: runtimeConfig.matrix.alertRoom,
+            previousRuntimeConfig: runtimeConfig,
+          });
+    const imapSecretRef =
+      req.imapPassword === undefined
+        ? (req.imapSecretRef ?? base.secretRefs[MAIL_SENTINEL_IMAP_PASSWORD_SECRET_KEY])
+        : await this.writeManagedSecretFile(`mail-sentinel-${id}-imap-password`, req.imapPassword);
+    if (imapSecretRef === undefined || imapSecretRef.length === 0) {
+      throw {
+        code: "MAIL_SENTINEL_IMAP_SECRET_REQUIRED",
+        message: "Provide --imap-secret-ref or --imap-password for the Mail Sentinel instance",
+        retryable: false,
+      };
+    }
+    const alertRoom =
+      req.createAlertRoomName === undefined
+        ? {
+            roomId:
+              req.alertRoomId?.trim() ||
+              base.matrix?.alertRoom?.roomId ||
+              runtimeConfig.matrix.alertRoom.roomId,
+            roomName:
+              req.alertRoomName?.trim() ||
+              base.matrix?.alertRoom?.roomName ||
+              runtimeConfig.matrix.alertRoom.roomName,
+          }
+        : await this.createMatrixRoomViaClientApi({
+            runtimeConfig,
+            roomName: req.createAlertRoomName,
+          });
+    const allowedUsers = normalizeMatrixUserList(
+      (req.allowedUsers ?? base.matrix?.allowedUsers ?? []).map(
+        (entry) => this.normalizeMatrixUserIdentifier(entry, runtimeConfig).userId,
+      ),
+    );
+    if (allowedUsers.length === 0) {
+      throw {
+        code: "MAIL_SENTINEL_ALLOWED_USERS_REQUIRED",
+        message: "Provide at least one allowed Matrix user for the Mail Sentinel instance",
+        retryable: false,
+      };
+    }
+    const next: RequestedBotInstance = {
+      ...base,
+      config: {
+        ...base.config,
+        [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: true,
+        [MAIL_SENTINEL_IMAP_HOST_KEY]:
+          req.imapHost ?? String(base.config[MAIL_SENTINEL_IMAP_HOST_KEY] ?? ""),
+        [MAIL_SENTINEL_IMAP_PORT_KEY]:
+          req.imapPort ?? Number(base.config[MAIL_SENTINEL_IMAP_PORT_KEY] ?? 0),
+        [MAIL_SENTINEL_IMAP_TLS_KEY]:
+          req.imapTls ?? Boolean(base.config[MAIL_SENTINEL_IMAP_TLS_KEY] ?? false),
+        [MAIL_SENTINEL_IMAP_USERNAME_KEY]:
+          req.imapUsername ?? String(base.config[MAIL_SENTINEL_IMAP_USERNAME_KEY] ?? ""),
+        [MAIL_SENTINEL_IMAP_MAILBOX_KEY]:
+          req.mailbox ?? base.config[MAIL_SENTINEL_IMAP_MAILBOX_KEY] ?? "INBOX",
+        ...(req.pollInterval === undefined ? {} : { pollInterval: req.pollInterval }),
+        ...(req.lookbackWindow === undefined ? {} : { lookbackWindow: req.lookbackWindow }),
+        ...(req.defaultReminderDelay === undefined
+          ? {}
+          : { defaultReminderDelay: req.defaultReminderDelay }),
+        ...(req.digestInterval === undefined ? {} : { digestInterval: req.digestInterval }),
+      },
+      secretRefs: normalizeStringRecord({
+        ...base.secretRefs,
+        [MAIL_SENTINEL_IMAP_PASSWORD_SECRET_KEY]: imapSecretRef,
+      }),
+      matrix: {
+        localpart: sanitizeManagedAgentLocalpart(req.matrixLocalpart ?? base.matrix?.localpart, id),
+        alertRoom,
+        allowedUsers,
+      },
+    };
+    if (
+      typeof next.config[MAIL_SENTINEL_IMAP_HOST_KEY] !== "string" ||
+      typeof next.config[MAIL_SENTINEL_IMAP_PORT_KEY] !== "number" ||
+      typeof next.config[MAIL_SENTINEL_IMAP_TLS_KEY] !== "boolean" ||
+      typeof next.config[MAIL_SENTINEL_IMAP_USERNAME_KEY] !== "string"
+    ) {
+      throw {
+        code: "MAIL_SENTINEL_IMAP_CONFIG_INVALID",
+        message: "Mail Sentinel IMAP host, port, tls, and username must be configured",
+        retryable: false,
+      };
+    }
+    request.bots = {
+      ...(request.bots ?? {}),
+      selected: dedupeStrings([...(request.bots?.selected ?? []), MAIL_SENTINEL_AGENT_ID]),
+      instances: sortBotInstances([
+        ...((request.bots?.instances ?? []).filter(
+          (entry) => entry.id !== id,
+        ) as RequestedBotInstance[]),
+        next,
+      ]),
+    };
+    this.syncSelectedBotsWithInstances(request);
+    await this.writeSavedInstallRequest(request);
+    const result = await this.startInstall(request);
+    return {
+      instance: this.toMailSentinelSummary(next, runtimeConfig),
+      changed: true,
+      job: result.job,
+    };
+  }
+
+  private async writeInstallerJsonFile(path: string, value: unknown, mode: number): Promise<void> {
     const tempPath = `${path}.${randomUUID()}.tmp`;
     await mkdir(dirname(path), { recursive: true });
     await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
@@ -5193,6 +8992,101 @@ export class RealInstallerService implements InstallerService {
     };
   }
 
+  private async updateInstallRequestFederation(input: {
+    federationEnabled: boolean;
+    changed: boolean;
+  }): Promise<{ changed: string[]; validation: CheckResult[] }> {
+    const requestPath = this.getInstallRequestPath();
+    let raw = "";
+    try {
+      raw = await readFile(requestPath, "utf8");
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return {
+          changed: [],
+          validation: [
+            check(
+              "install-request-sync",
+              "Saved install request sync",
+              "warn",
+              "Saved install request file was not found; future installer updates will keep the previous federation settings until the request file is refreshed",
+              { requestFile: requestPath },
+            ),
+          ],
+        };
+      }
+      throw {
+        code: "REQUEST_UPDATE_FAILED",
+        message: "Failed to read the saved install request file",
+        retryable: false,
+        details: { requestFile: requestPath, error: describeError(error) },
+      };
+    }
+
+    const parsed = parseJsonDocument(raw);
+    const validated = installRequestSchema.safeParse(parsed);
+    if (!validated.success) {
+      return {
+        changed: [],
+        validation: [
+          check(
+            "install-request-sync",
+            "Saved install request sync",
+            "warn",
+            "Saved install request could not be updated because it is invalid",
+            { requestFile: requestPath },
+          ),
+        ],
+      };
+    }
+
+    const requestPayload = validated.data;
+    const changed: string[] = [];
+    if (input.changed && requestPayload.matrix.federationEnabled !== input.federationEnabled) {
+      requestPayload.matrix.federationEnabled = input.federationEnabled;
+      changed.push("request.matrix.federationEnabled");
+    }
+
+    if (changed.length === 0) {
+      return {
+        changed,
+        validation: [
+          check(
+            "install-request-sync",
+            "Saved install request sync",
+            "pass",
+            "Saved install request already matched the current federation settings",
+            { requestFile: requestPath },
+          ),
+        ],
+      };
+    }
+
+    try {
+      await this.writeInstallerJsonFile(requestPath, requestPayload, 0o640);
+    } catch (error) {
+      throw {
+        code: "REQUEST_UPDATE_FAILED",
+        message: "Failed to write the saved install request file",
+        retryable: false,
+        details: { requestFile: requestPath, error: describeError(error) },
+      };
+    }
+
+    return {
+      changed,
+      validation: [
+        check(
+          "install-request-sync",
+          "Saved install request sync",
+          "pass",
+          "Saved install request updated to match the new federation settings",
+          { requestFile: requestPath },
+        ),
+      ],
+    };
+  }
+
   private async refreshGatewayAfterRuntimeConfig(runtimeConfig: RuntimeConfig): Promise<void> {
     if (this.shouldPreferSystemGatewayService(runtimeConfig)) {
       const started = await this.ensureSystemGatewayServiceFallback(runtimeConfig);
@@ -5208,21 +9102,81 @@ export class RealInstallerService implements InstallerService {
 
     try {
       await this.openclawGatewayServiceManager.restart();
-      return;
     } catch (error) {
       if (isGatewayUserSystemdUnavailableError(error)) {
-        throw {
-          code: "OPENCLAW_GATEWAY_RESTART_FAILED",
-          message: "OpenClaw gateway restart is unavailable because systemd user services are unavailable in this context",
-          retryable: true,
-          details: {
-            error: describeError(error),
-          },
-        };
+        throw error;
+      }
+      this.logger.warn(
+        {
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "OpenClaw gateway restart failed after runtime configure; retrying with start",
+      );
+      await this.openclawGatewayServiceManager.start();
+    }
+
+    if (this.execRunner === null) {
+      return;
+    }
+
+    let gatewayState = await this.inspectGatewayRuntimeState();
+    if (gatewayState.health.ok) {
+      return;
+    }
+
+    for (let probe = 1; probe <= 5; probe += 1) {
+      await delay(2000);
+      gatewayState = await this.inspectGatewayRuntimeState();
+      if (gatewayState.health.ok) {
+        this.logger.info({ probe }, "OpenClaw gateway became healthy after post-restart wait");
+        return;
       }
     }
 
-    await this.openclawGatewayServiceManager.start();
+    this.logger.warn(
+      {
+        state: gatewayState.gateway.state,
+        message: gatewayState.gateway.message,
+        health: gatewayState.health.message,
+      },
+      "OpenClaw gateway did not become healthy after runtime configure; trying system-level fallback",
+    );
+    const fallbackStarted = await this.ensureSystemGatewayServiceFallback(runtimeConfig);
+    if (fallbackStarted) {
+      return;
+    }
+
+    throw {
+      code: "OPENCLAW_GATEWAY_RESTART_FAILED",
+      message: "OpenClaw gateway did not become healthy after runtime configure",
+      retryable: true,
+      details: {
+        state: gatewayState.gateway.state,
+        message: gatewayState.gateway.message,
+        health: gatewayState.health.message,
+      },
+    };
+  }
+
+  private async inspectGatewayRuntimeState(): Promise<{
+    gateway: {
+      installed: boolean;
+      state: GatewayState;
+      message?: string;
+    };
+    health: {
+      ok: boolean;
+      message: string;
+    };
+  }> {
+    const [gateway, health] = await Promise.all([
+      this.inspectGatewayService(),
+      this.probeOpenClawHealth(),
+    ]);
+    return {
+      gateway,
+      health,
+    };
   }
 
   private async resolveSecretRef(secretRef: string): Promise<string> {
@@ -5302,22 +9256,30 @@ export class RealInstallerService implements InstallerService {
       allBotPackages.flatMap((entry) =>
         entry.manifest.toolInstances.map(
           (tool: LoadedBotPackage["manifest"]["toolInstances"][number]) => tool.id,
-        )),
+        ),
+      ),
     );
     const requiredCoreTemplateRefs = dedupeStrings(
-      selectedBotPackages.flatMap((entry) => [
-        ...entry.manifest.toolInstances.map(
-          (tool: LoadedBotPackage["manifest"]["toolInstances"][number]) => tool.templateRef,
-        ),
-        ...entry.template.requiredToolTemplates.map((tool) => formatTemplateRef(tool.id, tool.version)),
-        ...entry.template.optionalToolTemplates.map((tool) => formatTemplateRef(tool.id, tool.version)),
-      ]).filter((ref: string) => findCoreTemplateManifest(ref) !== undefined),
+      selectedBotPackages
+        .flatMap((entry) => [
+          ...entry.manifest.toolInstances.map(
+            (tool: LoadedBotPackage["manifest"]["toolInstances"][number]) => tool.templateRef,
+          ),
+          ...entry.template.requiredToolTemplates.map((tool) =>
+            formatTemplateRef(tool.id, tool.version),
+          ),
+          ...entry.template.optionalToolTemplates.map((tool) =>
+            formatTemplateRef(tool.id, tool.version),
+          ),
+        ])
+        .filter((ref: string) => findCoreTemplateManifest(ref) !== undefined),
     );
+    const requiredPluginIds = this.listRequiredOpenClawPluginIds(selectedBotPackages);
     const preservedUserAgents =
       previousRuntimeConfig?.openclawProfile.agents.filter(
         (entry) =>
-          !allBotTemplateRefs.has(entry.templateRef ?? "")
-          && !selectedBotPackages.some((botPackage) => botPackage.manifest.id === entry.botId),
+          !allBotTemplateRefs.has(entry.templateRef ?? "") &&
+          !selectedBotPackages.some((botPackage) => botPackage.manifest.id === entry.botId),
       ) ?? [];
     const preservedInstalledTemplates = previousRuntimeConfig?.templates.installed ?? [];
     const preservedToolInstances = previousRuntimeConfig?.sovereignTools.instances ?? [];
@@ -5330,10 +9292,14 @@ export class RealInstallerService implements InstallerService {
         installedTemplates,
         botPackage,
       ).installed;
+      installedTemplates = this.upsertInstalledBotToolTemplateEntries(
+        installedTemplates,
+        botPackage,
+      ).installed;
     }
 
     const baseMatrixConfig = {
-      accessMode: input.relayEnrollment === undefined ? "direct" as const : "relay" as const,
+      accessMode: input.relayEnrollment === undefined ? ("direct" as const) : ("relay" as const),
       homeserverDomain: input.matrixProvision.homeserverDomain,
       federationEnabled: input.matrixProvision.federationEnabled,
       publicBaseUrl: input.matrixProvision.publicBaseUrl,
@@ -5375,7 +9341,10 @@ export class RealInstallerService implements InstallerService {
       },
       openclawProfile: {
         plugins: {
-          allow: ["matrix"],
+          allow: requiredPluginIds,
+        },
+        session: {
+          dmScope: MANAGED_OPENCLAW_DM_SCOPE,
         },
         agents: [],
         crons: [],
@@ -5392,12 +9361,18 @@ export class RealInstallerService implements InstallerService {
       matrix: baseMatrixConfig,
       bots: {
         config: selectedBotConfig,
+        instances: [],
       },
       templates: {
         installed: installedTemplates,
       },
       sovereignTools: {
         instances: [],
+      },
+      hostResources: {
+        planPath: join(dirname(this.paths.configPath), "host-resources.json"),
+        resources: [],
+        botStatus: [],
       },
       ...(input.relayEnrollment === undefined
         ? {}
@@ -5425,114 +9400,220 @@ export class RealInstallerService implements InstallerService {
             } satisfies RelayRuntimeConfig,
           }),
     };
-    const preservedUserToolInstances = preservedToolInstances.filter(
-      (entry) => !allManagedBotToolIds.has(entry.id),
+    const requestedBotInstances = this.resolveRequestedBotInstances({
+      req: input.req,
+      packages: selectedBotPackages,
+      configById: selectedBotConfig,
+      imap: imapConfig,
+      matrixRoom: input.matrixRoom,
+      previousRuntimeConfig,
+    });
+    provisionalRuntimeConfig.bots.instances = requestedBotInstances;
+    const managedBotToolInstances = selectedBotPackages.flatMap((botPackage) => {
+      const instances = requestedBotInstances.filter(
+        (entry) => entry.packageId === botPackage.manifest.id,
+      );
+      if (instances.length === 0) {
+        const toolInstanceIdMap = this.buildManagedBotToolInstanceIdMap(
+          botPackage,
+          botPackage.manifest.id,
+        );
+        return botPackage.manifest.toolInstances.flatMap(
+          (tool: LoadedBotPackage["manifest"]["toolInstances"][number]) =>
+            this.isBotToolInstanceEnabled(provisionalRuntimeConfig, tool.enabledWhen, {
+              botPackage,
+              botInstance: undefined,
+              toolInstanceIdMap,
+            })
+              ? [
+                  this.buildManagedBotToolInstance({
+                    runtimeConfig: provisionalRuntimeConfig,
+                    availableBotPackages: selectedBotPackages,
+                    botPackage,
+                    tool,
+                    existing: preservedToolInstances.find(
+                      (entry) => entry.id === (toolInstanceIdMap[tool.id] ?? tool.id),
+                    ),
+                    toolInstanceIdMap,
+                  }),
+                ]
+              : [],
+        );
+      }
+      return instances.flatMap((botInstance) => {
+        const toolInstanceIdMap = this.buildManagedBotToolInstanceIdMap(botPackage, botInstance.id);
+        return botPackage.manifest.toolInstances.flatMap(
+          (tool: LoadedBotPackage["manifest"]["toolInstances"][number]) =>
+            this.isBotToolInstanceEnabled(provisionalRuntimeConfig, tool.enabledWhen, {
+              botPackage,
+              botInstance,
+              toolInstanceIdMap,
+            })
+              ? [
+                  this.buildManagedBotToolInstance({
+                    runtimeConfig: provisionalRuntimeConfig,
+                    availableBotPackages: selectedBotPackages,
+                    botPackage,
+                    botInstance,
+                    tool,
+                    existing: preservedToolInstances.find(
+                      (entry) => entry.id === (toolInstanceIdMap[tool.id] ?? tool.id),
+                    ),
+                    toolInstanceIdMap,
+                  }),
+                ]
+              : [],
+        );
+      });
+    });
+    const previousManagedBotToolIds = new Set(
+      previousRuntimeConfig?.openclawProfile.agents
+        .filter((agent) =>
+          allBotPackages.some(
+            (botPackage) =>
+              agent.botId === botPackage.manifest.id ||
+              agent.templateRef === botPackage.templateRef,
+          ),
+        )
+        .flatMap((agent) => agent.toolInstanceIds ?? []) ?? [],
     );
-    const managedBotToolInstances = selectedBotPackages.flatMap((botPackage) =>
-      botPackage.manifest.toolInstances.flatMap(
-        (tool: LoadedBotPackage["manifest"]["toolInstances"][number]) =>
-        this.isBotToolInstanceEnabled(provisionalRuntimeConfig, tool.enabledWhen)
-          ? [
-              this.buildManagedBotToolInstance({
-                runtimeConfig: provisionalRuntimeConfig,
-                tool,
-                existing: preservedToolInstances.find((entry) => entry.id === tool.id),
-              }),
-            ]
-          : [],
-      ));
+    const managedBotToolIds = new Set([
+      ...previousManagedBotToolIds,
+      ...managedBotToolInstances.map((entry) => entry.id),
+      ...Array.from(allManagedBotToolIds),
+    ]);
+    const preservedUserToolInstances = preservedToolInstances.filter(
+      (entry) => !managedBotToolIds.has(entry.id),
+    );
     provisionalRuntimeConfig.sovereignTools.instances = sortToolInstances([
       ...preservedUserToolInstances,
-      ...managedBotToolInstances,
+      ...managedBotToolInstances.map(
+        ({
+          botId: _botId,
+          botInstanceId: _botInstanceId,
+          manifestToolId: _manifestToolId,
+          ...tool
+        }) => tool,
+      ),
     ]);
-    const managedBotAgents = selectedBotPackages.map((botPackage) => {
-      const toolInstanceIds = managedBotToolInstances
-        .filter((tool: RuntimeConfig["sovereignTools"]["instances"][number]) =>
-          botPackage.manifest.toolInstances.some(
-            (definition: LoadedBotPackage["manifest"]["toolInstances"][number]) => definition.id === tool.id,
-          ))
-        .map((tool: RuntimeConfig["sovereignTools"]["instances"][number]) => tool.id);
-      return {
-        id: botPackage.manifest.id,
-        workspace: join(this.paths.stateDir, botPackage.manifest.id, "workspace"),
-        templateRef: botPackage.templateRef,
-        botId: botPackage.manifest.id,
-        ...(toolInstanceIds.length === 0 ? {} : { toolInstanceIds }),
-        ...(botPackage.manifest.matrixIdentity.mode !== "service-account"
-          ? {}
-          : {
-              matrix: {
-                localpart: input.matrixAccounts.bot.localpart,
-                userId: input.matrixAccounts.bot.userId,
-                ...(input.matrixAccounts.bot.passwordSecretRef === undefined
-                  ? {}
-                  : { passwordSecretRef: input.matrixAccounts.bot.passwordSecretRef }),
-                accessTokenSecretRef: botTokenSecretRef,
-              },
-            }),
-      };
+    const managedBotAgents = selectedBotPackages.flatMap((botPackage) => {
+      const instances = requestedBotInstances.filter(
+        (entry) => entry.packageId === botPackage.manifest.id,
+      );
+      if (instances.length === 0) {
+        const toolInstanceIds = managedBotToolInstances
+          .filter(
+            (tool) => tool.botId === botPackage.manifest.id && tool.botInstanceId === undefined,
+          )
+          .map((tool) => tool.id);
+        const configuredModel =
+          selectedBotConfig[botPackage.manifest.id]?.model ?? botPackage.template.model;
+        return [
+          {
+            id: botPackage.manifest.id,
+            workspace: join(this.paths.stateDir, botPackage.manifest.id, "workspace"),
+            ...(typeof configuredModel === "string" && configuredModel.trim().length > 0
+              ? { model: configuredModel.trim() }
+              : {}),
+            templateRef: botPackage.templateRef,
+            botId: botPackage.manifest.id,
+            ...(toolInstanceIds.length === 0 ? {} : { toolInstanceIds }),
+            ...(botPackage.manifest.matrixIdentity.mode !== "service-account"
+              ? {}
+              : {
+                  matrix: {
+                    localpart: input.matrixAccounts.bot.localpart,
+                    userId: input.matrixAccounts.bot.userId,
+                    ...(input.matrixAccounts.bot.passwordSecretRef === undefined
+                      ? {}
+                      : { passwordSecretRef: input.matrixAccounts.bot.passwordSecretRef }),
+                    accessTokenSecretRef: botTokenSecretRef,
+                  },
+                }),
+          },
+        ];
+      }
+      return instances.map((botInstance) => {
+        const toolInstanceIds = managedBotToolInstances
+          .filter(
+            (tool) =>
+              tool.botId === botPackage.manifest.id && tool.botInstanceId === botInstance.id,
+          )
+          .map((tool) => tool.id);
+        const configuredModel =
+          typeof botInstance.config.model === "string" && botInstance.config.model.trim().length > 0
+            ? botInstance.config.model.trim()
+            : (selectedBotConfig[botPackage.manifest.id]?.model ?? botPackage.template.model);
+        return {
+          id: botInstance.id,
+          workspace: botInstance.workspace,
+          ...(typeof configuredModel === "string" && configuredModel.trim().length > 0
+            ? { model: configuredModel }
+            : {}),
+          templateRef: botPackage.templateRef,
+          botId: botPackage.manifest.id,
+          botInstanceId: botInstance.id,
+          ...(toolInstanceIds.length === 0 ? {} : { toolInstanceIds }),
+          ...(botPackage.manifest.matrixIdentity.mode !== "service-account"
+            ? {}
+            : {
+                matrix: {
+                  localpart: input.matrixAccounts.bot.localpart,
+                  userId: input.matrixAccounts.bot.userId,
+                  ...(input.matrixAccounts.bot.passwordSecretRef === undefined
+                    ? {}
+                    : { passwordSecretRef: input.matrixAccounts.bot.passwordSecretRef }),
+                  accessTokenSecretRef: botTokenSecretRef,
+                },
+              }),
+        };
+      });
     });
-    const managedAgents = ensureCoreManagedAgents([
-      ...preservedUserAgents,
-      ...managedBotAgents,
-    ]);
+    const managedAgents = ensureCoreManagedAgents([...preservedUserAgents, ...managedBotAgents]);
     const runtimeConfig: RuntimeConfig = {
       ...provisionalRuntimeConfig,
       openclawProfile: {
         plugins: {
-          allow: ["matrix"],
+          allow: requiredPluginIds,
+        },
+        session: {
+          dmScope:
+            provisionalRuntimeConfig.openclawProfile.session?.dmScope ?? MANAGED_OPENCLAW_DM_SCOPE,
         },
         agents: managedAgents,
-        crons: selectedBotPackages.flatMap((botPackage) => {
-          const cron = botPackage.manifest.openclaw.cron;
-          if (cron === undefined) {
-            return [];
-          }
-          const configuredEvery = selectedBotConfig[botPackage.manifest.id]?.[cron.everyConfigKey ?? ""];
-          const every =
-            typeof configuredEvery === "string" && configuredEvery.length > 0
-              ? configuredEvery
-              : cron.defaultEvery ?? "5m";
-          return [{
-            id: cron.id,
-            every,
-            agentId: botPackage.manifest.id,
-            botId: botPackage.manifest.id,
-          }];
-        }),
-        ...(selectedBotPackages.flatMap((botPackage) => {
-          const cron = botPackage.manifest.openclaw.cron;
-          if (cron === undefined) {
-            return [];
-          }
-          const configuredEvery = selectedBotConfig[botPackage.manifest.id]?.[cron.everyConfigKey ?? ""];
-          const every =
-            typeof configuredEvery === "string" && configuredEvery.length > 0
-              ? configuredEvery
-              : cron.defaultEvery ?? "5m";
-          return [{ id: cron.id, every }];
-        })[0] === undefined
-          ? {}
-          : {
-              cron: selectedBotPackages.flatMap((botPackage) => {
-                const cron = botPackage.manifest.openclaw.cron;
-                if (cron === undefined) {
-                  return [];
-                }
-                const configuredEvery =
-                  selectedBotConfig[botPackage.manifest.id]?.[cron.everyConfigKey ?? ""];
-                const every =
-                  typeof configuredEvery === "string" && configuredEvery.length > 0
-                    ? configuredEvery
-                    : cron.defaultEvery ?? "5m";
-                return [{ id: cron.id, every }];
-              })[0],
-            }),
+        crons: [],
       },
       sovereignTools: {
         instances: provisionalRuntimeConfig.sovereignTools.instances,
       },
     };
+
+    const hostPlan = await this.compileHostResourcePlan(runtimeConfig, selectedBotPackages);
+    runtimeConfig.hostResources = {
+      planPath: join(dirname(this.paths.configPath), "host-resources.json"),
+      resources: hostPlan.resources,
+      botStatus: hostPlan.botStatus,
+    };
+    runtimeConfig.openclawProfile.crons = hostPlan.resources.flatMap((resource) =>
+      resource.kind !== "openclawCron" ||
+      resource.desiredState !== "present" ||
+      resource.spec === undefined
+        ? []
+        : [
+            {
+              id: resource.spec.id,
+              every: resource.spec.every,
+              agentId: resource.spec.agentId,
+              botId: resource.botId,
+            },
+          ],
+    );
+    if (runtimeConfig.openclawProfile.crons[0] !== undefined) {
+      runtimeConfig.openclawProfile.cron = {
+        id: runtimeConfig.openclawProfile.crons[0].id,
+        every: runtimeConfig.openclawProfile.crons[0].every,
+      };
+    }
 
     const configPayload = {
       contractVersion: CONTRACT_VERSION,
@@ -5556,6 +9637,9 @@ export class RealInstallerService implements InstallerService {
       openclawProfile: {
         plugins: {
           allow: runtimeConfig.openclawProfile.plugins.allow,
+        },
+        session: {
+          dmScope: runtimeConfig.openclawProfile.session?.dmScope ?? MANAGED_OPENCLAW_DM_SCOPE,
         },
         channels: {
           matrix: {
@@ -5641,6 +9725,7 @@ export class RealInstallerService implements InstallerService {
             },
           }),
       bots: runtimeConfig.bots,
+      hostResources: runtimeConfig.hostResources,
       templates: runtimeConfig.templates,
       sovereignTools: runtimeConfig.sovereignTools,
     };
@@ -5653,6 +9738,14 @@ export class RealInstallerService implements InstallerService {
       await chmod(tempPath, 0o644);
       await rename(tempPath, this.paths.configPath);
       await this.applyRuntimeOwnership(this.paths.configPath);
+      if (runtimeConfig.hostResources !== undefined) {
+        await this.writeInstallerJsonFile(
+          runtimeConfig.hostResources.planPath,
+          runtimeConfig.hostResources,
+          0o644,
+        );
+        await this.applyRuntimeOwnership(runtimeConfig.hostResources.planPath);
+      }
     } catch (error) {
       throw {
         code: "OPENCLAW_CONFIG_WRITE_FAILED",
@@ -5669,33 +9762,61 @@ export class RealInstallerService implements InstallerService {
   }
 
   private async writeOpenClawRuntimeArtifacts(runtimeConfig: RuntimeConfig): Promise<void> {
+    await this.writeManagedOpenClawExtensions({ runtimeConfig });
     const openrouterApiKey = await this.resolveSecretRef(runtimeConfig.openrouter.apiKeySecretRef);
-    const managedAgents = ensureCoreManagedAgents(
-      runtimeConfig.openclawProfile.agents,
-    );
+    const existingRuntimePayload = await this.readManagedOpenClawRuntimeJson(runtimeConfig);
+    const preservedMeta = isRecord(existingRuntimePayload?.meta)
+      ? existingRuntimePayload.meta
+      : undefined;
+    const preservedGatewayAuth =
+      isRecord(existingRuntimePayload?.gateway) && isRecord(existingRuntimePayload.gateway.auth)
+        ? existingRuntimePayload.gateway.auth
+        : undefined;
+    const managedAgents = ensureCoreManagedAgents(runtimeConfig.openclawProfile.agents);
     const operatorAllowlist = [runtimeConfig.matrix.operator.userId];
     const managedAgentPackages = new Map(
       await Promise.all(
-        managedAgents.map(async (agent) => [
-          agent.id,
-          await this.findBotPackageByTemplateRef(agent.templateRef),
-        ] as const),
+        managedAgents.map(
+          async (agent) =>
+            [agent.id, await this.findBotPackageByTemplateRef(agent.templateRef)] as const,
+        ),
       ),
     );
     const hasSharedServiceBot = managedAgents.some((agent) => {
       const botPackage = managedAgentPackages.get(agent.id);
       return botPackage?.manifest.matrixIdentity.mode === "service-account";
     });
+    const dedicatedBotPackages = Array.from(managedAgentPackages.values()).filter(
+      (entry): entry is LoadedBotPackage => entry !== null,
+    );
     const preferredDefaultAccountId =
-      this.resolvePreferredDedicatedMatrixBot(
-        Array.from(managedAgentPackages.values())
-          .filter((entry): entry is LoadedBotPackage => entry !== null),
-      )?.manifest.id;
+      this.resolvePreferredDedicatedMatrixBot(dedicatedBotPackages)?.manifest.id;
+    const matrixParticipantAllowlist = dedupeStrings([
+      ...operatorAllowlist,
+      ...(await this.listInvitedHumanMatrixUserIds(runtimeConfig)),
+    ]);
+    const federationOpen = runtimeConfig.matrix.federationEnabled;
     const pluginEntries: Record<string, unknown> = {
       matrix: {
         enabled: true,
       },
     };
+    for (const pluginId of await this.listManagedOpenClawPluginIds(runtimeConfig)) {
+      pluginEntries[pluginId] = {
+        enabled: true,
+        ...(pluginId !== "llm-task"
+          ? {}
+          : {
+              config: {
+                defaultProvider: "openrouter",
+                defaultModel: runtimeConfig.openrouter.model,
+                allowedModels: [`openrouter/${runtimeConfig.openrouter.model}`],
+                timeoutMs: 30_000,
+              },
+            }),
+      };
+    }
+    const managedPluginLoadPaths = await this.listManagedOpenClawPluginLoadPaths(runtimeConfig);
     const matrixAccounts: Record<
       string,
       {
@@ -5704,10 +9825,10 @@ export class RealInstallerService implements InstallerService {
         accessToken: string;
         dm?: {
           enabled: boolean;
-          policy: "allowlist";
-          allowFrom: string[];
+          policy?: "allowlist" | "open";
+          allowFrom?: string[];
         };
-        groupPolicy?: "allowlist";
+        groupPolicy?: "allowlist" | "open";
         groupAllowFrom?: string[];
         groups?: Record<
           string,
@@ -5721,118 +9842,236 @@ export class RealInstallerService implements InstallerService {
         >;
       }
     > = {};
+    const buildMatrixGroupEntries = (input: {
+      roomId: string;
+      users: string[];
+      autoReply: boolean;
+      requireMention: boolean;
+    }): Record<
+      string,
+      {
+        enabled: boolean;
+        allow: boolean;
+        autoReply?: boolean;
+        requireMention?: boolean;
+        users: string[];
+      }
+    > => ({
+      "*": {
+        enabled: true,
+        allow: true,
+        autoReply: input.autoReply,
+        requireMention: input.requireMention,
+        users: input.users,
+      },
+      [input.roomId]: {
+        enabled: true,
+        allow: true,
+        autoReply: input.autoReply,
+        requireMention: input.requireMention,
+        users: input.users,
+      },
+    });
+    const matrixBindings: Array<{
+      agentId: string;
+      match: {
+        channel: "matrix";
+        accountId?: string;
+      };
+    }> = [];
     for (const agent of managedAgents) {
       if (agent.matrix === undefined || agent.matrix.accessTokenSecretRef === undefined) {
         continue;
       }
       const botPackage = managedAgentPackages.get(agent.id);
       const usesSharedServiceIdentity =
-        agent.matrix.userId === runtimeConfig.matrix.bot.userId
-        && botPackage?.manifest.matrixIdentity.mode === "service-account";
+        agent.matrix.userId === runtimeConfig.matrix.bot.userId &&
+        botPackage?.manifest.matrixIdentity.mode === "service-account";
       if (usesSharedServiceIdentity) {
+        matrixBindings.push({
+          agentId: agent.id,
+          match: {
+            channel: "matrix",
+          },
+        });
         continue;
       }
+      matrixBindings.push({
+        agentId: agent.id,
+        match: {
+          channel: "matrix",
+          accountId: agent.id,
+        },
+      });
+      if (agent.matrix.userId === runtimeConfig.matrix.bot.userId) {
+        matrixBindings.push({
+          agentId: agent.id,
+          match: {
+            channel: "matrix",
+          },
+        });
+      }
       const routing = this.resolveBotMatrixRouting(botPackage?.manifest);
+      const botInstance = this.getRuntimeBotInstanceForAgent(runtimeConfig, agent);
+      const alertRoom = botInstance?.matrix?.alertRoom ?? runtimeConfig.matrix.alertRoom;
+      const explicitAllowlist = botInstance?.matrix?.allowedUsers;
+      const agentAllowlist = explicitAllowlist ?? matrixParticipantAllowlist;
       matrixAccounts[agent.id] = {
         homeserver: runtimeConfig.matrix.adminBaseUrl,
         userId: agent.matrix.userId,
         accessToken: await this.resolveSecretRef(agent.matrix.accessTokenSecretRef),
-        dm: {
-          enabled: routing.dmEnabled,
-          policy: "allowlist",
-          allowFrom: operatorAllowlist,
-        },
-        groupPolicy: "allowlist",
-        groupAllowFrom: operatorAllowlist,
-        groups: {
-          [runtimeConfig.matrix.alertRoom.roomId]: {
-            enabled: true,
-            allow: true,
-            autoReply: routing.alertRoom.autoReply,
-            requireMention: routing.alertRoom.requireMention,
-            users: operatorAllowlist,
-          },
-        },
+        ...(explicitAllowlist !== undefined || !federationOpen
+          ? {
+              dm: {
+                enabled: routing.dmEnabled,
+                policy: "allowlist" as const,
+                allowFrom: agentAllowlist,
+              },
+              groupPolicy: "allowlist" as const,
+              groupAllowFrom: agentAllowlist,
+              groups: buildMatrixGroupEntries({
+                roomId: alertRoom.roomId,
+                users: agentAllowlist,
+                autoReply: routing.alertRoom.autoReply,
+                requireMention: routing.alertRoom.requireMention,
+              }),
+            }
+          : {
+              dm: {
+                enabled: routing.dmEnabled,
+                policy: "open" as const,
+              },
+              groupPolicy: "open" as const,
+              groups: buildMatrixGroupEntries({
+                roomId: alertRoom.roomId,
+                users: [],
+                autoReply: routing.alertRoom.autoReply,
+                requireMention: routing.alertRoom.requireMention,
+              }),
+            }),
       };
     }
     if (hasSharedServiceBot || Object.keys(matrixAccounts).length === 0) {
-      matrixAccounts["default"] = {
+      matrixAccounts.default = {
         homeserver: runtimeConfig.matrix.adminBaseUrl,
         userId: runtimeConfig.matrix.bot.userId,
         accessToken: await this.resolveSecretRef(runtimeConfig.matrix.bot.accessTokenSecretRef),
-        dm: {
-          enabled: true,
-          policy: "allowlist",
-          allowFrom: operatorAllowlist,
-        },
-        groupPolicy: "allowlist",
-        groupAllowFrom: operatorAllowlist,
-        groups: {
-          [runtimeConfig.matrix.alertRoom.roomId]: {
-            enabled: true,
-            allow: true,
-            autoReply: true,
-            users: operatorAllowlist,
-          },
-        },
+        ...(federationOpen
+          ? {
+              dm: {
+                enabled: true,
+                policy: "open" as const,
+              },
+              groupPolicy: "open" as const,
+              groups: buildMatrixGroupEntries({
+                roomId: runtimeConfig.matrix.alertRoom.roomId,
+                users: [],
+                autoReply: true,
+                requireMention: false,
+              }),
+            }
+          : {
+              dm: {
+                enabled: true,
+                policy: "allowlist" as const,
+                allowFrom: matrixParticipantAllowlist,
+              },
+              groupPolicy: "allowlist" as const,
+              groupAllowFrom: matrixParticipantAllowlist,
+              groups: buildMatrixGroupEntries({
+                roomId: runtimeConfig.matrix.alertRoom.roomId,
+                users: matrixParticipantAllowlist,
+                autoReply: true,
+                requireMention: false,
+              }),
+            }),
       };
     }
 
     const runtimePayload = {
+      ...(preservedMeta === undefined ? {} : { meta: preservedMeta }),
       gateway: {
         bind: "loopback" as const,
+        ...(preservedGatewayAuth === undefined ? {} : { auth: preservedGatewayAuth }),
+      },
+      session: {
+        dmScope: runtimeConfig.openclawProfile.session?.dmScope ?? MANAGED_OPENCLAW_DM_SCOPE,
       },
       plugins: {
         allow: runtimeConfig.openclawProfile.plugins.allow,
+        ...(managedPluginLoadPaths.length === 0
+          ? {}
+          : {
+              load: {
+                paths: managedPluginLoadPaths,
+              },
+            }),
         entries: pluginEntries,
       },
+      ...(matrixBindings[0] === undefined ? {} : { bindings: matrixBindings }),
       channels: {
         matrix: {
           enabled: true,
           homeserver: runtimeConfig.matrix.adminBaseUrl,
-          userId: runtimeConfig.matrix.bot.userId,
-          ...(
-            !hasSharedServiceBot
-            && preferredDefaultAccountId !== undefined
-              ? { defaultAccount: preferredDefaultAccountId }
-              : {}
-          ),
+          threadReplies: "always",
+          ...(!hasSharedServiceBot && preferredDefaultAccountId !== undefined
+            ? { defaultAccount: preferredDefaultAccountId }
+            : {}),
           ...(Object.keys(matrixAccounts).length === 0
             ? {}
             : {
                 accounts: matrixAccounts,
               }),
-          dm: {
-            policy: "allowlist" as const,
-            allowFrom: operatorAllowlist,
-          },
-          groupPolicy: "allowlist" as const,
-          groupAllowFrom: operatorAllowlist,
-          groups: {
-            [runtimeConfig.matrix.alertRoom.roomId]: {
-              enabled: true,
-              allow: true,
-              autoReply: true,
-              users: operatorAllowlist,
-            },
-          },
+          ...(federationOpen
+            ? {
+                dm: {
+                  policy: "open" as const,
+                },
+                groupPolicy: "open" as const,
+                groups: buildMatrixGroupEntries({
+                  roomId: runtimeConfig.matrix.alertRoom.roomId,
+                  users: [],
+                  autoReply: true,
+                  requireMention: false,
+                }),
+              }
+            : {
+                dm: {
+                  policy: "allowlist" as const,
+                  allowFrom: matrixParticipantAllowlist,
+                },
+                groupPolicy: "allowlist" as const,
+                groupAllowFrom: matrixParticipantAllowlist,
+                groups: buildMatrixGroupEntries({
+                  roomId: runtimeConfig.matrix.alertRoom.roomId,
+                  users: matrixParticipantAllowlist,
+                  autoReply: true,
+                  requireMention: false,
+                }),
+              }),
         },
       },
       agents: {
         defaults: {
           model: normalizeOpenClawAgentModel(runtimeConfig.openrouter.model),
         },
-        list: managedAgents.map((entry) => {
-          const tools = this.buildOpenClawAgentToolPolicy(
-            runtimeConfig,
-            entry.toolInstanceIds ?? [],
-          );
-          return {
-            id: entry.id,
-            workspace: entry.workspace,
-            ...(tools === null ? {} : { tools }),
-          };
-        }),
+        list: await Promise.all(
+          managedAgents.map(async (entry) => {
+            const tools = await this.buildOpenClawAgentToolPolicy(
+              runtimeConfig,
+              entry.toolInstanceIds ?? [],
+            );
+            return {
+              id: entry.id,
+              workspace: entry.workspace,
+              ...(entry.default === true ? { default: true } : {}),
+              ...(entry.model === undefined
+                ? {}
+                : { model: normalizeOpenClawAgentModel(entry.model) }),
+              ...(tools === null ? {} : { tools }),
+            };
+          }),
+        ),
       },
       cron: {
         enabled: true,
@@ -5864,21 +10103,30 @@ export class RealInstallerService implements InstallerService {
       await mkdir(dirname(runtimeConfig.openclaw.runtimeProfilePath), { recursive: true });
       await mkdir(managedTempDir, { recursive: true });
       await chmod(managedTempDir, 0o700);
-      await this.applyRuntimeOwnership(this.paths.openclawServiceHome);
-      await this.applyRuntimeOwnership(runtimeConfig.openclaw.openclawHome);
-      await this.applyRuntimeOwnership(dirname(runtimeConfig.openclaw.runtimeProfilePath));
-      await this.applyRuntimeOwnership(managedTempDir);
+      await this.applyConfiguredRuntimeOwnership(this.paths.openclawServiceHome, runtimeConfig);
+      await this.applyConfiguredRuntimeOwnership(
+        runtimeConfig.openclaw.openclawHome,
+        runtimeConfig,
+      );
+      await this.applyConfiguredRuntimeOwnership(
+        dirname(runtimeConfig.openclaw.runtimeProfilePath),
+        runtimeConfig,
+      );
+      await this.applyConfiguredRuntimeOwnership(managedTempDir, runtimeConfig);
       await this.writeProtectedJsonFile(
         runtimeConfig.openclaw.runtimeConfigPath,
         runtimePayload,
+        runtimeConfig,
       );
       await this.writeProtectedJsonFile(
         runtimeConfig.openclaw.runtimeProfilePath,
         profilePayload,
+        runtimeConfig,
       );
 
       const envFileLines = [
-        `OPENCLAW_HOME=${runtimeConfig.openclaw.openclawHome}`,
+        `HOME=${this.paths.openclawServiceHome}`,
+        `OPENCLAW_HOME=${this.paths.openclawServiceHome}`,
         `OPENCLAW_CONFIG=${runtimeConfig.openclaw.runtimeConfigPath}`,
         `OPENCLAW_CONFIG_PATH=${runtimeConfig.openclaw.runtimeConfigPath}`,
         `SOVEREIGN_NODE_CONFIG=${this.paths.configPath}`,
@@ -5897,7 +10145,10 @@ export class RealInstallerService implements InstallerService {
       await writeFile(envTempPath, `${envFileLines.join("\n")}\n`, "utf8");
       await chmod(envTempPath, 0o600);
       await rename(envTempPath, runtimeConfig.openclaw.gatewayEnvPath);
-      await this.applyRuntimeOwnership(runtimeConfig.openclaw.gatewayEnvPath);
+      await this.applyConfiguredRuntimeOwnership(
+        runtimeConfig.openclaw.gatewayEnvPath,
+        runtimeConfig,
+      );
     } catch (error) {
       throw {
         code: "OPENCLAW_CONFIG_WRITE_FAILED",
@@ -5914,17 +10165,23 @@ export class RealInstallerService implements InstallerService {
     }
   }
 
-  private async writeProtectedJsonFile(path: string, value: unknown): Promise<void> {
+  private async writeProtectedJsonFile(
+    path: string,
+    value: unknown,
+    runtimeConfig?: RuntimeConfig,
+  ): Promise<void> {
     const tempPath = `${path}.${randomUUID()}.tmp`;
     await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
     await chmod(tempPath, 0o600);
     await rename(tempPath, path);
-    await this.applyRuntimeOwnership(path);
+    if (runtimeConfig === undefined) {
+      await this.applyRuntimeOwnership(path);
+      return;
+    }
+    await this.applyConfiguredRuntimeOwnership(path, runtimeConfig);
   }
 
-  private async resolveImapConfig(
-    imap: InstallRequest["imap"],
-  ): Promise<RuntimeConfig["imap"]> {
+  private async resolveImapConfig(imap: InstallRequest["imap"]): Promise<RuntimeConfig["imap"]> {
     if (imap === undefined) {
       return {
         status: "pending",
@@ -5989,7 +10246,8 @@ export class RealInstallerService implements InstallerService {
 
     throw {
       code: "OPENROUTER_SECRET_MISSING",
-      message: "OpenRouter credentials are missing (provide openrouter.apiKey or openrouter.secretRef)",
+      message:
+        "OpenRouter credentials are missing (provide openrouter.apiKey or openrouter.secretRef)",
       retryable: false,
     };
   }
@@ -6001,7 +10259,7 @@ export class RealInstallerService implements InstallerService {
     await writeFile(tempPath, `${value}\n`, "utf8");
     await chmod(tempPath, 0o600);
     await rename(tempPath, filePath);
-    await this.applyRuntimeOwnership(filePath);
+    await this.applyServiceOwnership(filePath);
     return `file:${filePath}`;
   }
 
@@ -6009,7 +10267,7 @@ export class RealInstallerService implements InstallerService {
     try {
       await mkdir(this.paths.secretsDir, { recursive: true });
       await chmod(this.paths.secretsDir, 0o700);
-      await this.applyRuntimeOwnership(this.paths.secretsDir);
+      await this.applyServiceOwnership(this.paths.secretsDir);
       await access(this.paths.secretsDir, fsConstants.W_OK);
     } catch (error) {
       throw {
@@ -6028,42 +10286,50 @@ export class RealInstallerService implements InstallerService {
     await writeFile(tempPath, `${value}\n`, "utf8");
     await chmod(tempPath, 0o600);
     await rename(tempPath, filePath);
-    await this.applyRuntimeOwnership(filePath);
+    await this.applyServiceOwnership(filePath);
     return `file:${filePath}`;
   }
 
-  private async removeManagedSecretFile(fileName: string): Promise<boolean> {
-    const filePath = join(this.paths.secretsDir, fileName);
+  private async writeManagedAgentAccessTokenFile(
+    runtimeConfig: RuntimeConfig,
+    fileName: string,
+    value: string,
+  ): Promise<string> {
+    const secretsDir = await this.ensureManagedAgentAccessTokenDir(runtimeConfig);
+    const filePath = join(secretsDir, fileName);
+    const tempPath = `${filePath}.${randomUUID()}.tmp`;
+    await writeFile(tempPath, `${value}\n`, "utf8");
+    await chmod(tempPath, 0o640);
+    await rename(tempPath, filePath);
+    await this.applyManagedAgentAccessTokenOwnership(filePath, runtimeConfig);
+    return `file:${filePath}`;
+  }
+
+  private async ensureManagedAgentAccessTokenDir(runtimeConfig: RuntimeConfig): Promise<string> {
+    const dir = this.getManagedAgentAccessTokenDir();
     try {
-      await access(filePath, fsConstants.F_OK);
+      await mkdir(dir, { recursive: true });
+      // The API user owns this directory while the configured service group can read tokens.
+      await chmod(dir, 0o2750);
+      await this.applyManagedAgentAccessTokenOwnership(dir, runtimeConfig);
+      await access(dir, fsConstants.W_OK);
+      return dir;
     } catch (error) {
-      if (isNodeError(error) && error.code === "ENOENT") {
-        return false;
-      }
       throw {
         code: "SECRET_WRITE_FAILED",
-        message: "Failed to access managed secret file",
+        message:
+          "Managed agent access token directory is not writable; rerun with sufficient privileges",
         retryable: false,
         details: {
-          filePath,
+          secretsDir: dir,
           error: describeError(error),
         },
       };
     }
-    try {
-      await rm(filePath);
-      return true;
-    } catch (error) {
-      throw {
-        code: "SECRET_WRITE_FAILED",
-        message: "Failed to remove managed secret file",
-        retryable: false,
-        details: {
-          filePath,
-          error: describeError(error),
-        },
-      };
-    }
+  }
+
+  private getManagedAgentAccessTokenDir(): string {
+    return join(dirname(this.paths.configPath), "matrix-agent-access-tokens");
   }
 
   private async ensureSecretsDir(): Promise<string> {
@@ -6074,7 +10340,7 @@ export class RealInstallerService implements InstallerService {
     try {
       await mkdir(this.paths.secretsDir, { recursive: true });
       await chmod(this.paths.secretsDir, 0o700);
-      await this.applyRuntimeOwnership(this.paths.secretsDir);
+      await this.applyServiceOwnership(this.paths.secretsDir);
       await access(this.paths.secretsDir, fsConstants.W_OK);
       this.resolvedSecretsDir = this.paths.secretsDir;
       return this.resolvedSecretsDir;
@@ -6095,25 +10361,32 @@ export class RealInstallerService implements InstallerService {
     }
   }
 
-  private getConfiguredServiceIdentity(
-    runtimeConfig?: RuntimeConfig,
-  ): { user: string; group: string } {
+  private getConfiguredServiceIdentity(runtimeConfig?: RuntimeConfig): {
+    user: string;
+    group: string;
+  } {
     const envUser = process.env.SOVEREIGN_NODE_SERVICE_USER?.trim();
     const envGroup = process.env.SOVEREIGN_NODE_SERVICE_GROUP?.trim();
     const configUser = runtimeConfig?.openclaw.serviceUser?.trim();
     const configGroup = runtimeConfig?.openclaw.serviceGroup?.trim();
+    const sudoUser =
+      typeof process.getuid === "function" && process.getuid() === 0
+        ? process.env.SUDO_USER?.trim()
+        : undefined;
+    const fallbackUser =
+      sudoUser !== undefined && sudoUser.length > 0 && sudoUser !== "root" ? sudoUser : undefined;
     const user =
-      (envUser !== undefined && envUser.length > 0
+      envUser !== undefined && envUser.length > 0
         ? envUser
         : configUser !== undefined && configUser.length > 0
           ? configUser
-          : DEFAULT_SERVICE_USER);
+          : (fallbackUser ?? DEFAULT_SERVICE_USER);
     const group =
-      (envGroup !== undefined && envGroup.length > 0
+      envGroup !== undefined && envGroup.length > 0
         ? envGroup
         : configGroup !== undefined && configGroup.length > 0
           ? configGroup
-          : user || DEFAULT_SERVICE_GROUP);
+          : user || DEFAULT_SERVICE_GROUP;
     return {
       user,
       group,
@@ -6153,11 +10426,7 @@ export class RealInstallerService implements InstallerService {
         };
         return this.resolvedRuntimeOwnership;
       } catch (error) {
-        if (
-          isNodeError(error)
-          && (error.code === "ENOENT" || error.code === "ENOTDIR")
-        ) {
-          continue;
+        if (isNodeError(error) && (error.code === "ENOENT" || error.code === "ENOTDIR")) {
         }
       }
     }
@@ -6166,8 +10435,159 @@ export class RealInstallerService implements InstallerService {
     return null;
   }
 
+  private async resolveManagedAgentAccessTokenOwnership(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<{ uid: number; gid: number } | null> {
+    const serviceOwnership = await this.resolveConfiguredRuntimeOwnership(runtimeConfig);
+    if (serviceOwnership === null) {
+      return null;
+    }
+
+    let ownerUid: number | null = null;
+    for (const candidate of [dirname(this.paths.configPath), this.paths.secretsDir]) {
+      try {
+        ownerUid = (await stat(candidate)).uid;
+        break;
+      } catch (error) {
+        if (isNodeError(error) && (error.code === "ENOENT" || error.code === "ENOTDIR")) {
+        }
+      }
+    }
+
+    return {
+      uid: ownerUid ?? serviceOwnership.uid,
+      gid: serviceOwnership.gid,
+    };
+  }
+
   private async applyRuntimeOwnership(path: string): Promise<void> {
     const ownership = await this.resolveRuntimeOwnership();
+    await this.applyOwnership(path, ownership);
+  }
+
+  private async applyManagedAgentAccessTokenOwnership(
+    path: string,
+    runtimeConfig: RuntimeConfig,
+  ): Promise<void> {
+    const ownership = await this.resolveManagedAgentAccessTokenOwnership(runtimeConfig);
+    await this.applyOwnership(path, ownership);
+  }
+
+  private async applyServiceOwnership(path: string, runtimeConfig?: RuntimeConfig): Promise<void> {
+    const ownership = await this.resolveServiceOwnership(runtimeConfig);
+    if (ownership !== null) {
+      this.resolvedRuntimeOwnership = ownership;
+      await this.applyOwnership(path, ownership);
+      return;
+    }
+    await this.applyRuntimeOwnership(path);
+  }
+
+  private async resolveConfiguredRuntimeOwnership(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<{ uid: number; gid: number } | null> {
+    return this.resolveServiceOwnership(runtimeConfig);
+  }
+
+  private async resolveServiceOwnership(
+    runtimeConfig?: RuntimeConfig,
+  ): Promise<{ uid: number; gid: number } | null> {
+    if (typeof process.getuid !== "function" || process.getuid() !== 0) {
+      return null;
+    }
+
+    const serviceIdentity = this.getConfiguredServiceIdentity(runtimeConfig);
+    if (serviceIdentity.user === "root" && serviceIdentity.group === "root") {
+      return { uid: 0, gid: 0 };
+    }
+    if (this.execRunner === null) {
+      return null;
+    }
+
+    try {
+      const passwdResult = await this.execRunner.run({
+        command: "getent",
+        args: ["passwd", serviceIdentity.user],
+        options: {
+          timeout: INSTALLER_EXEC_TIMEOUT_MS,
+        },
+      });
+      if (passwdResult.exitCode !== 0) {
+        return null;
+      }
+
+      const passwdFields = passwdResult.stdout.trim().split(":");
+      const uid = Number.parseInt(passwdFields[2] ?? "", 10);
+      const primaryGid = Number.parseInt(passwdFields[3] ?? "", 10);
+      if (!Number.isInteger(uid) || !Number.isInteger(primaryGid)) {
+        return null;
+      }
+
+      if (serviceIdentity.group.length === 0 || serviceIdentity.group === serviceIdentity.user) {
+        return { uid, gid: primaryGid };
+      }
+
+      const groupResult = await this.execRunner.run({
+        command: "getent",
+        args: ["group", serviceIdentity.group],
+        options: {
+          timeout: INSTALLER_EXEC_TIMEOUT_MS,
+        },
+      });
+      if (groupResult.exitCode !== 0) {
+        return { uid, gid: primaryGid };
+      }
+
+      const groupFields = groupResult.stdout.trim().split(":");
+      const groupGid = Number.parseInt(groupFields[2] ?? "", 10);
+      if (!Number.isInteger(groupGid)) {
+        return { uid, gid: primaryGid };
+      }
+
+      return { uid, gid: groupGid };
+    } catch {
+      return null;
+    }
+  }
+
+  private async cleanStaleTempEntries(tempDir: string): Promise<void> {
+    try {
+      const entries = await readdir(tempDir);
+      for (const entry of entries) {
+        try {
+          await rm(join(tempDir, entry), { recursive: true, force: true });
+        } catch {
+          // best-effort cleanup
+        }
+      }
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return;
+      }
+      this.logger.debug(
+        { tempDir, error: describeError(error) },
+        "Failed to clean stale temp entries",
+      );
+    }
+  }
+
+  private async applyConfiguredRuntimeOwnership(
+    path: string,
+    runtimeConfig: RuntimeConfig,
+  ): Promise<void> {
+    const ownership = await this.resolveConfiguredRuntimeOwnership(runtimeConfig);
+    if (ownership !== null) {
+      this.resolvedRuntimeOwnership = ownership;
+      await this.applyOwnership(path, ownership);
+      return;
+    }
+    await this.applyRuntimeOwnership(path);
+  }
+
+  private async applyOwnership(
+    path: string,
+    ownership: { uid: number; gid: number } | null,
+  ): Promise<void> {
     if (ownership === null) {
       return;
     }
@@ -6176,8 +10596,8 @@ export class RealInstallerService implements InstallerService {
       await chown(path, ownership.uid, ownership.gid);
     } catch (error) {
       if (
-        isNodeError(error)
-        && (error.code === "ENOENT" || error.code === "EPERM" || error.code === "EACCES")
+        isNodeError(error) &&
+        (error.code === "ENOENT" || error.code === "EPERM" || error.code === "EACCES")
       ) {
         return;
       }
@@ -6187,6 +10607,30 @@ export class RealInstallerService implements InstallerService {
           error: describeError(error),
         },
         "Failed to apply runtime ownership to installer artifact",
+      );
+    }
+  }
+
+  private async applyTrustedOpenClawExtensionOwnership(path: string): Promise<void> {
+    if (typeof process.getuid !== "function" || process.getuid() !== 0) {
+      return;
+    }
+
+    try {
+      await chown(path, 0, 0);
+    } catch (error) {
+      if (
+        isNodeError(error) &&
+        (error.code === "ENOENT" || error.code === "EPERM" || error.code === "EACCES")
+      ) {
+        return;
+      }
+      this.logger.debug(
+        {
+          path,
+          error: describeError(error),
+        },
+        "Failed to apply trusted ownership to OpenClaw extension artifact",
       );
     }
   }
@@ -6206,28 +10650,83 @@ const resolveExpectedBundledBotLocalpart = (
   return operatorLocalpart === desiredLocalpart ? `${desiredLocalpart}-bot` : desiredLocalpart;
 };
 
-const compactBotConfigRecord = (
-  value: Record<string, BotConfigValue | undefined>,
-): BotConfigRecord =>
-  Object.fromEntries(
-    Object.entries(value).filter(
-      (entry): entry is [string, BotConfigValue] =>
-        entry[1] !== undefined
-        && (typeof entry[1] === "string" || typeof entry[1] === "number" || typeof entry[1] === "boolean"),
-    ),
-  );
+const toSystemdDuration = (value: string): string => {
+  const match = value.match(/^(\d+)\s*(m|h|d|s)/i);
+  if (match === null || match[1] === undefined || match[2] === undefined) {
+    return "30min";
+  }
+  const systemdUnit = match[2].toLowerCase() === "m" ? "min" : match[2].toLowerCase();
+  return `${match[1]}${systemdUnit}`;
+};
 
-const isBotConfigRecordMap = (
-  value: unknown,
-): value is Record<string, BotConfigRecord> => {
+const isManagedAgentMatrixAccessTokenFileName = (fileName: string): boolean =>
+  /^matrix-agent-.+-access-token$/.test(fileName);
+
+const shouldGateSystemGatewayOnLocalMatrix = (adminBaseUrl: string): boolean => {
+  try {
+    const parsed = new URL(adminBaseUrl);
+    const hostname = parsed.hostname.replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
+    return (
+      parsed.protocol === "http:" &&
+      (hostname === "127.0.0.1" || hostname === "::1" || hostname === "localhost")
+    );
+  } catch {
+    return false;
+  }
+};
+
+const renderSystemGatewayMatrixWaitCommand = (adminBaseUrl: string): string => {
+  const versionsUrl = new URL(
+    "/_matrix/client/versions",
+    ensureTrailingSlash(adminBaseUrl),
+  ).toString();
+  return [
+    "/usr/bin/env",
+    "sh",
+    "-lc",
+    `'attempt=0; while [ "$attempt" -lt ${SYSTEM_GATEWAY_MATRIX_WAIT_ATTEMPTS} ]; do curl -fsS --max-time ${SYSTEM_GATEWAY_MATRIX_WAIT_TIMEOUT_SECONDS} "${versionsUrl}" >/dev/null 2>&1 && exit 0; attempt=$((attempt + 1)); sleep ${SYSTEM_GATEWAY_MATRIX_WAIT_DELAY_SECONDS}; done; exit 1'`,
+  ].join(" ");
+};
+
+const isBotConfigRecordMap = (value: unknown): value is Record<string, BotConfigRecord> => {
   if (!isRecord(value)) {
     return false;
   }
-  return Object.values(value).every((entry) =>
-    isRecord(entry)
-    && Object.values(entry).every((item) =>
-      typeof item === "string" || typeof item === "number" || typeof item === "boolean"));
+  return Object.values(value).every(
+    (entry) =>
+      isRecord(entry) &&
+      Object.values(entry).every(
+        (item) => typeof item === "string" || typeof item === "number" || typeof item === "boolean",
+      ),
+  );
 };
+
+const normalizeBotConfigRecord = (value: unknown): BotConfigRecord =>
+  !isRecord(value)
+    ? {}
+    : Object.fromEntries(
+        Object.entries(value)
+          .filter(
+            (entry): entry is [string, BotConfigValue] =>
+              typeof entry[0] === "string" &&
+              entry[0].length > 0 &&
+              (typeof entry[1] === "string" ||
+                typeof entry[1] === "number" ||
+                typeof entry[1] === "boolean"),
+          )
+          .sort(([left], [right]) => left.localeCompare(right)),
+      );
+
+const normalizeMatrixUserList = (values: string[]): string[] =>
+  dedupeStrings(
+    values
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0)
+      .sort((left, right) => left.localeCompare(right)),
+  );
+
+const sortBotInstances = (entries: RequestedBotInstance[]): RequestedBotInstance[] =>
+  [...entries].sort((left, right) => left.id.localeCompare(right.id));
 
 const sortInstalledTemplates = (
   entries: RuntimeConfig["templates"]["installed"],
@@ -6235,9 +10734,30 @@ const sortInstalledTemplates = (
   [...entries].sort((left, right) =>
     `${left.kind}:${left.id}:${left.version}`.localeCompare(
       `${right.kind}:${right.id}:${right.version}`,
-    ));
+    ),
+  );
 
 const sortToolInstances = (
   entries: RuntimeConfig["sovereignTools"]["instances"],
 ): RuntimeConfig["sovereignTools"]["instances"] =>
   [...entries].sort((left, right) => left.id.localeCompare(right.id));
+
+const resolveExecutablePath = async (command: string): Promise<string | null> => {
+  if (command.includes("/")) {
+    return command;
+  }
+
+  const pathValue = process.env.PATH ?? "";
+  for (const entry of pathValue.split(delimiter)) {
+    if (entry.length === 0) {
+      continue;
+    }
+    const candidate = join(entry, command);
+    try {
+      await access(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {}
+  }
+
+  return null;
+};

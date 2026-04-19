@@ -81,15 +81,25 @@ export const registerToolsCommand = (program: Command, app: AppContainer): void 
     .description("Create a tool instance")
     .argument("<id>", "Tool instance ID")
     .requiredOption("--template <ref>", "Template ref (<id>@<version>)")
-    .option("--config <key=value>", "Config binding (repeatable)", (value, prev: string[] = []) => [...prev, value])
-    .option("--secret-ref <key=value>", "Secret ref binding (repeatable)", (value, prev: string[] = []) => [...prev, value])
+    .option("--config <key=value>", "Config binding (repeatable)", (value, prev: string[] = []) => [
+      ...prev,
+      value,
+    ])
+    .option(
+      "--secret-ref <key=value>",
+      "Secret ref binding (repeatable)",
+      (value, prev: string[] = []) => [...prev, value],
+    )
     .option("--json", "Emit JSON output")
     .action(async (id: string, opts: ToolOptions) => {
       const command = "tools create";
       try {
+        if (opts.template === undefined) {
+          throw new Error("Missing required option --template");
+        }
         const result = await app.installerService.createSovereignToolInstance({
           id,
-          templateRef: opts.template!,
+          templateRef: opts.template,
           config: parseKeyValueEntries(opts.config, "config"),
           secretRefs: parseKeyValueEntries(opts.secretRef, "secretRef"),
         });
@@ -105,8 +115,15 @@ export const registerToolsCommand = (program: Command, app: AppContainer): void 
     .description("Update a tool instance")
     .argument("<id>", "Tool instance ID")
     .option("--template <ref>", "Template ref (<id>@<version>)")
-    .option("--config <key=value>", "Config binding (repeatable)", (value, prev: string[] = []) => [...prev, value])
-    .option("--secret-ref <key=value>", "Secret ref binding (repeatable)", (value, prev: string[] = []) => [...prev, value])
+    .option("--config <key=value>", "Config binding (repeatable)", (value, prev: string[] = []) => [
+      ...prev,
+      value,
+    ])
+    .option(
+      "--secret-ref <key=value>",
+      "Secret ref binding (repeatable)",
+      (value, prev: string[] = []) => [...prev, value],
+    )
     .option("--json", "Emit JSON output")
     .action(async (id: string, opts: ToolOptions) => {
       const command = "tools update";
@@ -114,7 +131,9 @@ export const registerToolsCommand = (program: Command, app: AppContainer): void 
         const result = await app.installerService.updateSovereignToolInstance({
           id,
           ...(opts.template === undefined ? {} : { templateRef: opts.template }),
-          ...(opts.config === undefined ? {} : { config: parseKeyValueEntries(opts.config, "config") }),
+          ...(opts.config === undefined
+            ? {}
+            : { config: parseKeyValueEntries(opts.config, "config") }),
           ...(opts.secretRef === undefined
             ? {}
             : { secretRefs: parseKeyValueEntries(opts.secretRef, "secretRef") }),

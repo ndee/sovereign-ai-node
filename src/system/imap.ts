@@ -4,11 +4,7 @@ import type { TestImapRequest } from "../contracts/api.js";
 import type { ErrorDetail } from "../contracts/common.js";
 import type { TestImapResult } from "../contracts/index.js";
 import type { Logger } from "../logging/logger.js";
-import {
-  ImapConnectionError,
-  listImapCapabilities,
-  runWithImapClient,
-} from "./imap-client.js";
+import { ImapConnectionError, listImapCapabilities, runWithImapClient } from "./imap-client.js";
 
 const DEFAULT_IMAP_TIMEOUT_MS = 10_000;
 
@@ -178,9 +174,7 @@ const normalizeImapTestError = (error: unknown): ErrorDetail => {
 
   if (error instanceof Error) {
     return {
-      code: /mailbox/i.test(error.message)
-        ? "IMAP_MAILBOX_OPEN_FAILED"
-        : "IMAP_CONNECTION_FAILED",
+      code: /mailbox/i.test(error.message) ? "IMAP_MAILBOX_OPEN_FAILED" : "IMAP_CONNECTION_FAILED",
       message: error.message,
       retryable: false,
     };
@@ -193,5 +187,4 @@ const normalizeImapTestError = (error: unknown): ErrorDetail => {
   };
 };
 
-const stripSingleTrailingNewline = (value: string): string =>
-  value.replace(/\r?\n$/, "");
+const stripSingleTrailingNewline = (value: string): string => value.replace(/\r?\n$/, "");

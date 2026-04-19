@@ -36,9 +36,7 @@ type AgentOptions = {
 };
 
 export const registerAgentsCommand = (program: Command, app: AppContainer): void => {
-  const agents = program
-    .command("agents")
-    .description("Manage Sovereign/OpenClaw agents");
+  const agents = program.command("agents").description("Manage Sovereign/OpenClaw agents");
 
   agents
     .command("list")

@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -21,7 +21,7 @@ const buildInstallRequest = (): InstallRequest => ({
     runOnboard: false,
   },
   openrouter: {
-    model: "openai/gpt-5-nano",
+    model: "qwen/qwen3.5-9b",
     apiKey: "sk-or-test",
   },
   imap: {
@@ -79,6 +79,8 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       logsDir: join(tempRoot, "logs"),
       installJobsDir: join(tempRoot, "install-jobs"),
       openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
     };
 
     const provisioner = new DockerComposeBundledMatrixProvisioner(
@@ -106,7 +108,10 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(synapseDirStat.mode & 0o777).toBe(0o777);
       expect(postgresDirStat.mode & 0o777).toBe(0o777);
 
-      const homeserverText = await readFile(join(result.projectDir, "synapse", "homeserver.yaml"), "utf8");
+      const homeserverText = await readFile(
+        join(result.projectDir, "synapse", "homeserver.yaml"),
+        "utf8",
+      );
       expect(homeserverText).toContain('server_name: "matrix.local.test"');
       expect(homeserverText).toContain('public_baseurl: "http://matrix.local.test:8008/"');
       expect(homeserverText).toContain("allow_unsafe_locale: true");
@@ -158,6 +163,8 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       logsDir: join(tempRoot, "logs"),
       installJobsDir: join(tempRoot, "install-jobs"),
       openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
     };
 
     const provisioner = new DockerComposeBundledMatrixProvisioner(
@@ -210,6 +217,8 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       logsDir: join(tempRoot, "logs"),
       installJobsDir: join(tempRoot, "install-jobs"),
       openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
     };
 
     const provisioner = new DockerComposeBundledMatrixProvisioner(
@@ -238,11 +247,17 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(composeText).toContain('"80:80"');
       expect(composeText).toContain('"443:443"');
 
-      const homeserverText = await readFile(join(result.projectDir, "synapse", "homeserver.yaml"), "utf8");
+      const homeserverText = await readFile(
+        join(result.projectDir, "synapse", "homeserver.yaml"),
+        "utf8",
+      );
       expect(homeserverText).toContain('public_baseurl: "https://matrix.example.org/"');
       expect(homeserverText).toContain("x_forwarded: true");
 
-      const caddyText = await readFile(join(result.projectDir, "reverse-proxy", "Caddyfile"), "utf8");
+      const caddyText = await readFile(
+        join(result.projectDir, "reverse-proxy", "Caddyfile"),
+        "utf8",
+      );
       expect(caddyText).toContain("matrix.example.org {");
       expect(caddyText).toContain("@onboard path /onboard /onboard/ /onboard/index.html");
       expect(caddyText).toContain("@onboardApi path /onboard/api /onboard/api/*");
@@ -273,9 +288,12 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(onboardPage).toContain("Copy Username");
       expect(onboardPage).toContain("Unlock Password");
       expect(onboardPage).toContain("/onboard/api/redeem");
-      expect(onboardPage).toContain("The password is not embedded in this page.");
+      expect(onboardPage).toContain("The username and password are not embedded in this page.");
       expect(onboardPage).toContain("sudo sovereign-node onboarding issue");
       expect(onboardPage).toContain("Bestätigung nicht möglich?");
+      expect(onboardPage).toContain("After login: message the right bot");
+      expect(onboardPage).toContain("Node Operator");
+      expect(onboardPage).toContain("Mail Sentinel");
       expect(onboardPage).toContain("<svg");
       expect(onboardPage).not.toContain("/downloads/caddy-root-ca.crt");
       expect(recordedExecCalls).toHaveLength(2);
@@ -334,7 +352,10 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(composeText).toContain('"8448:443"');
       expect(composeText).not.toContain('"80:80"');
 
-      const caddyText = await readFile(join(result.projectDir, "reverse-proxy", "Caddyfile"), "utf8");
+      const caddyText = await readFile(
+        join(result.projectDir, "reverse-proxy", "Caddyfile"),
+        "utf8",
+      );
       expect(caddyText).toContain("192.168.0.54 {");
       expect(caddyText).toContain("default_sni 192.168.0.54");
       expect(caddyText).toContain("tls internal");
@@ -356,11 +377,14 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(onboardPage).toContain("package=im.vector.app");
       expect(onboardPage).toContain("Copy Server URL");
       expect(onboardPage).toContain("Unlock Password");
-      expect(onboardPage).toContain("The password is not embedded in this page.");
+      expect(onboardPage).toContain("The username and password are not embedded in this page.");
       expect(onboardPage).toContain("Native Android Matrix apps may still reject local CAs");
       expect(onboardPage).toContain("Do not type only 192.168.0.54:8448.");
       expect(onboardPage).toContain("Vanadium and Brave may behave differently");
       expect(onboardPage).toContain("Bestätigung nicht möglich?");
+      expect(onboardPage).toContain("After login: message the right bot");
+      expect(onboardPage).toContain("Node Operator");
+      expect(onboardPage).toContain("Mail Sentinel");
       expect(onboardPage).toContain("<svg");
       expect(recordedExecCalls).toHaveLength(2);
       expect(recordedExecCalls.some((call) => call.command === "qrencode")).toBe(true);
@@ -401,6 +425,8 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       logsDir: join(tempRoot, "logs"),
       installJobsDir: join(tempRoot, "install-jobs"),
       openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
     };
 
     const provisioner = new DockerComposeBundledMatrixProvisioner(
@@ -420,7 +446,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       };
       req.matrix.homeserverDomain = "node-abc.relay.example.com";
       req.matrix.publicBaseUrl = "https://node-abc.relay.example.com";
-      req.matrix.federationEnabled = false;
+      req.matrix.federationEnabled = true;
       req.matrix.tlsMode = "auto";
 
       const result = await provisioner.provision(req);
@@ -432,11 +458,26 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(composeText).not.toContain('"80:80"');
       expect(composeText).not.toContain(':443"');
 
-      const caddyText = await readFile(join(result.projectDir, "reverse-proxy", "Caddyfile"), "utf8");
+      const caddyText = await readFile(
+        join(result.projectDir, "reverse-proxy", "Caddyfile"),
+        "utf8",
+      );
+      const envText = await readFile(join(result.projectDir, ".env"), "utf8");
+      const homeserverYaml = await readFile(
+        join(result.projectDir, "synapse", "homeserver.yaml"),
+        "utf8",
+      );
+      const wellKnownServer = await readFile(
+        join(result.projectDir, "well-known", ".well-known", "matrix", "server"),
+        "utf8",
+      );
       expect(caddyText).toContain(":80 {");
       expect(caddyText).not.toContain("tls internal");
       expect(caddyText).not.toContain("/downloads/caddy-root-ca.crt");
       expect(caddyText).toContain("@onboardApi path /onboard/api /onboard/api/*");
+      expect(envText).toContain("MATRIX_FEDERATION_ENABLED=true");
+      expect(homeserverYaml).not.toContain("federation_domain_whitelist: []");
+      expect(wellKnownServer).toContain('"m.server": "node-abc.relay.example.com:443"');
 
       const onboardPage = await readFile(
         join(result.projectDir, "well-known", "onboard", "index.html"),
@@ -445,7 +486,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(onboardPage).toContain("Connect via Element Web");
       expect(onboardPage).toContain("Open in Element Android App");
       expect(onboardPage).toContain("Unlock Password");
-      expect(onboardPage).toContain("The password is not embedded in this page.");
+      expect(onboardPage).toContain("The username and password are not embedded in this page.");
       expect(onboardPage).not.toContain("/downloads/caddy-root-ca.crt");
       expect(recordedExecCalls).toHaveLength(2);
     } finally {
@@ -464,9 +505,9 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
         if (input.command === "docker") {
           const args = input.args ?? [];
           if (
-            args.includes("config")
-            || args.includes("up")
-            || args.includes("register_new_matrix_user")
+            args.includes("config") ||
+            args.includes("up") ||
+            args.includes("register_new_matrix_user")
           ) {
             return {
               command: [input.command, ...args].join(" "),
@@ -531,6 +572,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       const req = buildInstallRequest();
       req.matrix.publicBaseUrl = "https://192.168.0.54:8448";
       req.matrix.tlsMode = "internal";
+      req.matrix.alertRoomName = "Alerts";
       const provision = await provisioner.provision(req);
       const accounts = await provisioner.bootstrapAccounts(req, provision);
       const room = await provisioner.bootstrapRoom(req, provision, accounts);
@@ -540,7 +582,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(accounts.operator.passwordSecretRef.startsWith("file:")).toBe(true);
       expect(accounts.bot.passwordSecretRef.startsWith("file:")).toBe(true);
       expect(room.roomId).toBe("!alerts:matrix.local.test");
-      expect(room.roomName).toBe("Sovereign Alerts");
+      expect(room.roomName).toBe("Alerts");
 
       const operatorSecretPath = accounts.operator.passwordSecretRef.slice("file:".length);
       const botSecretPath = accounts.bot.passwordSecretRef.slice("file:".length);
@@ -554,9 +596,12 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       );
       expect(onboardPage).toContain("Copy Password");
       expect(onboardPage).toContain("Unlock Password");
-      expect(onboardPage).toContain("The password is not embedded in this page.");
+      expect(onboardPage).toContain("The username and password are not embedded in this page.");
       expect(onboardPage).not.toContain(operatorPassword);
       expect(onboardPage).toContain("Open Alert Room in Element Web");
+      expect(onboardPage).toContain("existing Alerts room");
+      expect(onboardPage).toContain("Use <code>Alerts</code> for notifications");
+      expect(onboardPage).not.toContain("existing Sovereign Alerts room");
 
       const composeUpCalls = recordedExecCalls.filter(
         (call) => call.command === "docker" && (call.args ?? []).includes("up"),
@@ -591,10 +636,10 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
         if (input.command === "docker") {
           const args = input.args ?? [];
           if (
-            args.includes("config")
-            || args.includes("up")
-            || args.includes("down")
-            || args.includes("register_new_matrix_user")
+            args.includes("config") ||
+            args.includes("up") ||
+            args.includes("down") ||
+            args.includes("register_new_matrix_user")
           ) {
             return {
               command: [input.command, ...args].join(" "),
@@ -681,10 +726,10 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
         if (input.command === "docker") {
           const args = input.args ?? [];
           if (
-            args.includes("config")
-            || args.includes("up")
-            || args.includes("down")
-            || args.includes("register_new_matrix_user")
+            args.includes("config") ||
+            args.includes("up") ||
+            args.includes("down") ||
+            args.includes("register_new_matrix_user")
           ) {
             return {
               command: [input.command, ...args].join(" "),
@@ -784,10 +829,10 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
         if (input.command === "docker") {
           const args = input.args ?? [];
           if (
-            args.includes("config")
-            || args.includes("up")
-            || args.includes("down")
-            || args.includes("register_new_matrix_user")
+            args.includes("config") ||
+            args.includes("up") ||
+            args.includes("down") ||
+            args.includes("register_new_matrix_user")
           ) {
             return {
               command: [input.command, ...args].join(" "),
@@ -960,6 +1005,141 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       await rm(tempRoot, { recursive: true, force: true });
     }
   });
+
+  it("removes federation_domain_whitelist from homeserver.yaml when enabling federation", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-test-"));
+    const paths = buildPaths(tempRoot);
+    const synapseDir = join(tempRoot, "project", "synapse");
+    const projectDir = join(tempRoot, "project");
+    const wellKnownDir = join(projectDir, "well-known", ".well-known", "matrix");
+    const composeFilePath = join(projectDir, "compose.yaml");
+
+    await mkdir(synapseDir, { recursive: true });
+    await mkdir(wellKnownDir, { recursive: true });
+    await writeFile(
+      join(synapseDir, "homeserver.yaml"),
+      [
+        'server_name: "matrix.example.org"',
+        "report_stats: false",
+        "federation_domain_whitelist: []",
+        'log_config: "/data/log.config"',
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      join(projectDir, ".env"),
+      [
+        "POSTGRES_PASSWORD=secret",
+        "MATRIX_FEDERATION_ENABLED=false",
+        "MATRIX_HOMESERVER_DOMAIN=matrix.example.org",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      join(wellKnownDir, "server"),
+      '{\n  "m.server": "node-abc.relay.example.com"\n}\n',
+      "utf8",
+    );
+    await writeFile(composeFilePath, "version: '3'\nservices:\n  synapse: {}", "utf8");
+
+    const execRunner: ExecRunner = {
+      run: async () => ({
+        command: "docker compose restart synapse",
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      }),
+    };
+    const provisioner = new DockerComposeBundledMatrixProvisioner(
+      execRunner,
+      createLogger(),
+      paths,
+    );
+
+    try {
+      await provisioner.updateFederationConfig({
+        federationEnabled: true,
+        projectDir,
+        composeFilePath,
+        accessMode: "relay",
+        homeserverDomain: "node-abc.relay.example.com",
+        publicBaseUrl: "https://node-abc.relay.example.com",
+      });
+
+      const yaml = await readFile(join(synapseDir, "homeserver.yaml"), "utf8");
+      expect(yaml).not.toContain("federation_domain_whitelist");
+
+      const env = await readFile(join(projectDir, ".env"), "utf8");
+      expect(env).toContain("MATRIX_FEDERATION_ENABLED=true");
+
+      const wellKnownServer = await readFile(join(wellKnownDir, "server"), "utf8");
+      expect(wellKnownServer).toContain('"m.server": "node-abc.relay.example.com:443"');
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("adds federation_domain_whitelist to homeserver.yaml when disabling federation", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-test-"));
+    const paths = buildPaths(tempRoot);
+    const synapseDir = join(tempRoot, "project", "synapse");
+    const projectDir = join(tempRoot, "project");
+    const composeFilePath = join(projectDir, "compose.yaml");
+
+    await mkdir(synapseDir, { recursive: true });
+    await writeFile(
+      join(synapseDir, "homeserver.yaml"),
+      [
+        'server_name: "matrix.example.org"',
+        "report_stats: false",
+        'log_config: "/data/log.config"',
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      join(projectDir, ".env"),
+      [
+        "POSTGRES_PASSWORD=secret",
+        "MATRIX_FEDERATION_ENABLED=true",
+        "MATRIX_HOMESERVER_DOMAIN=matrix.example.org",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(composeFilePath, "version: '3'\nservices:\n  synapse: {}", "utf8");
+
+    const execRunner: ExecRunner = {
+      run: async () => ({
+        command: "docker compose restart synapse",
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      }),
+    };
+    const provisioner = new DockerComposeBundledMatrixProvisioner(
+      execRunner,
+      createLogger(),
+      paths,
+    );
+
+    try {
+      await provisioner.updateFederationConfig({
+        federationEnabled: false,
+        projectDir,
+        composeFilePath,
+        accessMode: "direct",
+        homeserverDomain: "matrix.example.org",
+        publicBaseUrl: "https://matrix.example.org",
+      });
+
+      const yaml = await readFile(join(synapseDir, "homeserver.yaml"), "utf8");
+      expect(yaml).toContain("federation_domain_whitelist: []");
+
+      const env = await readFile(join(projectDir, ".env"), "utf8");
+      expect(env).toContain("MATRIX_FEDERATION_ENABLED=false");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 const buildPaths = (tempRoot: string): SovereignPaths => ({
@@ -969,6 +1149,8 @@ const buildPaths = (tempRoot: string): SovereignPaths => ({
   logsDir: join(tempRoot, "logs"),
   installJobsDir: join(tempRoot, "install-jobs"),
   openclawServiceHome: join(tempRoot, "openclaw-home"),
+  provenancePath: join(tempRoot, "install-provenance.json"),
+  backupsDir: join(tempRoot, "backups"),
 });
 
 const jsonResponse = (payload: unknown, status = 200): Response =>

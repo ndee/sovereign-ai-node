@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
-export const DEFAULT_MATRIX_ONBOARDING_TTL_MINUTES = 10;
+export const DEFAULT_MATRIX_ONBOARDING_TTL_MINUTES = 21;
 export const MAX_MATRIX_ONBOARDING_FAILED_ATTEMPTS = 5;
 const MATRIX_ONBOARDING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
@@ -22,6 +22,7 @@ export type MatrixOnboardingIssueResult = {
   code: string;
   expiresAt: string;
   onboardingUrl: string;
+  onboardingLink: string;
   username: string;
 };
 
@@ -41,10 +42,11 @@ const nowIso = (): string => new Date().toISOString();
 export const buildMatrixOnboardingUrl = (homeserverUrl: string): string =>
   `${homeserverUrl.replace(/\/+$/, "")}/onboard`;
 
+export const buildMatrixOnboardingLink = (onboardingUrl: string, code: string): string =>
+  `${onboardingUrl}#code=${encodeURIComponent(code)}`;
+
 export const normalizeMatrixOnboardingCode = (value: string): string =>
-  value
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, "");
+  value.toUpperCase().replace(/[^A-Z0-9]/g, "");
 
 export const generateMatrixOnboardingCode = (): string => {
   const bytes = randomBytes(12);
@@ -72,7 +74,10 @@ export const issueMatrixOnboardingState = (input: {
   now?: Date;
 }): { state: MatrixOnboardingState; code: string } => {
   const issuedAt = input.now ?? new Date();
-  const ttlMinutes = Math.max(1, Math.trunc(input.ttlMinutes ?? DEFAULT_MATRIX_ONBOARDING_TTL_MINUTES));
+  const ttlMinutes = Math.max(
+    1,
+    Math.trunc(input.ttlMinutes ?? DEFAULT_MATRIX_ONBOARDING_TTL_MINUTES),
+  );
   const expiresAt = new Date(issuedAt.getTime() + ttlMinutes * 60_000);
   const code = generateMatrixOnboardingCode();
   const salt = randomBytes(16).toString("hex");
@@ -98,26 +103,23 @@ export const parseMatrixOnboardingState = (value: unknown): MatrixOnboardingStat
     return null;
   }
   const candidate = value as Record<string, unknown>;
+  const legacyPasswordSecretRef =
+    typeof candidate.operatorPasswordSecretRef === "string"
+      ? candidate.operatorPasswordSecretRef
+      : "";
   if (
-    candidate.version !== 1
-    || typeof candidate.issuedAt !== "string"
-    || typeof candidate.expiresAt !== "string"
-    || typeof candidate.failedAttempts !== "number"
-    || typeof candidate.maxAttempts !== "number"
-    || typeof candidate.codeSalt !== "string"
-    || typeof candidate.codeHash !== "string"
-    || typeof candidate.username !== "string"
-    || typeof candidate.homeserverUrl !== "string"
+    candidate.version !== 1 ||
+    typeof candidate.issuedAt !== "string" ||
+    typeof candidate.expiresAt !== "string" ||
+    typeof candidate.failedAttempts !== "number" ||
+    typeof candidate.maxAttempts !== "number" ||
+    typeof candidate.codeSalt !== "string" ||
+    typeof candidate.codeHash !== "string" ||
+    (typeof candidate.passwordSecretRef !== "string" &&
+      typeof candidate.operatorPasswordSecretRef !== "string") ||
+    typeof candidate.username !== "string" ||
+    typeof candidate.homeserverUrl !== "string"
   ) {
-    return null;
-  }
-  const passwordSecretRef =
-    typeof candidate.passwordSecretRef === "string"
-      ? candidate.passwordSecretRef
-      : typeof candidate.operatorPasswordSecretRef === "string"
-        ? candidate.operatorPasswordSecretRef
-        : null;
-  if (passwordSecretRef === null) {
     return null;
   }
   return {
@@ -129,7 +131,10 @@ export const parseMatrixOnboardingState = (value: unknown): MatrixOnboardingStat
     maxAttempts: Math.max(1, Math.trunc(candidate.maxAttempts)),
     codeSalt: candidate.codeSalt,
     codeHash: candidate.codeHash,
-    passwordSecretRef,
+    passwordSecretRef:
+      typeof candidate.passwordSecretRef === "string"
+        ? candidate.passwordSecretRef
+        : legacyPasswordSecretRef,
     username: candidate.username,
     homeserverUrl: candidate.homeserverUrl,
   };
@@ -155,8 +160,8 @@ export const redeemMatrixOnboardingCode = (input: {
 
   const actualHash = Buffer.from(hashMatrixOnboardingCode(input.code, current.codeSalt), "hex");
   const expectedHash = Buffer.from(current.codeHash, "hex");
-  const hashMatches = actualHash.length === expectedHash.length
-    && timingSafeEqual(actualHash, expectedHash);
+  const hashMatches =
+    actualHash.length === expectedHash.length && timingSafeEqual(actualHash, expectedHash);
 
   if (!hashMatches) {
     return {

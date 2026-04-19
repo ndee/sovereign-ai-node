@@ -35,4 +35,3 @@ export const cliLogEventSchema = z.object({
 });
 
 export type CliLogEvent = z.infer<typeof cliLogEventSchema>;
-

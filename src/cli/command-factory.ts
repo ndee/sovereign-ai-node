@@ -2,16 +2,20 @@ import { Command } from "commander";
 
 import type { AppContainer } from "../app/create-app.js";
 import { registerAgentsCommand } from "./commands/agents.js";
+import { registerBackupCommand } from "./commands/backup.js";
 import { registerBotsCommand } from "./commands/bots.js";
 import { registerDoctorCommand } from "./commands/doctor.js";
 import { registerInstallCommand } from "./commands/install.js";
 import { registerLogsCommand } from "./commands/logs.js";
+import { registerMailSentinelsCommand } from "./commands/mail-sentinels.js";
+import { registerMigrateCommand } from "./commands/migrate.js";
 import { registerOnboardingCommand } from "./commands/onboarding.js";
 import { registerReconfigureCommand } from "./commands/reconfigure.js";
 import { registerStatusCommand } from "./commands/status.js";
 import { registerTemplatesCommand } from "./commands/templates.js";
 import { registerTestAlertCommand } from "./commands/test-alert.js";
 import { registerToolsCommand } from "./commands/tools.js";
+import { registerUpdateCommand } from "./commands/update.js";
 import { registerUsersCommand } from "./commands/users.js";
 
 export const createCliProgram = (app: AppContainer): Command => {
@@ -20,22 +24,26 @@ export const createCliProgram = (app: AppContainer): Command => {
   program
     .name("sovereign-node")
     .description("Sovereign Node operator CLI (TypeScript scaffold)")
-    .version("0.1.0")
+    .version("2.0.0")
     .option("--config <path>", "Path to sovereign-node config")
     .option("--verbose", "Enable verbose output");
 
   registerInstallCommand(program, app);
   registerStatusCommand(program, app);
   registerOnboardingCommand(program, app);
+  registerBackupCommand(program, app);
   registerBotsCommand(program, app);
+  registerMailSentinelsCommand(program, app);
+  registerMigrateCommand(program, app);
   registerAgentsCommand(program, app);
+  registerUsersCommand(program, app);
   registerTemplatesCommand(program, app);
   registerToolsCommand(program, app);
-  registerUsersCommand(program, app);
   registerDoctorCommand(program, app);
   registerLogsCommand(program);
   registerTestAlertCommand(program, app);
   registerReconfigureCommand(program, app);
+  registerUpdateCommand(program, app);
 
   return program;
 };

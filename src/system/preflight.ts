@@ -4,7 +4,7 @@ import type { PreflightRequest } from "../contracts/api.js";
 import type { CheckResult } from "../contracts/common.js";
 import type { PreflightResult } from "../contracts/index.js";
 import type { Logger } from "../logging/logger.js";
-import type { ExecRunner, ExecResult } from "./exec.js";
+import type { ExecResult, ExecRunner } from "./exec.js";
 
 const MIN_NODE_MAJOR = 22;
 const MIN_DISK_FREE_BYTES = 10 * 1024 * 1024 * 1024;
@@ -101,12 +101,9 @@ export class ShellHostPreflightChecker implements HostPreflightChecker {
   private async checkDiskSpace(): Promise<CheckResult> {
     const df = await this.safeExec("df", ["-Pk", "/"]);
     if (!df.ok) {
-      return check(
-        "disk-space-root",
-        "Could not inspect free disk space on /",
-        "warn",
-        { error: df.error },
-      );
+      return check("disk-space-root", "Could not inspect free disk space on /", "warn", {
+        error: df.error,
+      });
     }
     if (df.result.exitCode !== 0) {
       return check(
@@ -122,17 +119,13 @@ export class ShellHostPreflightChecker implements HostPreflightChecker {
 
     const parsed = parseDfAvailableBytes(df.result.stdout);
     if (parsed === null) {
-      return check(
-        "disk-space-root",
-        "Unable to parse free disk space from df output",
-        "warn",
-        {
-          stdout: summarizeText(df.result.stdout),
-        },
-      );
+      return check("disk-space-root", "Unable to parse free disk space from df output", "warn", {
+        stdout: summarizeText(df.result.stdout),
+      });
     }
 
-    const status: PreflightCheckStatus = parsed.availableBytes >= MIN_DISK_FREE_BYTES ? "pass" : "warn";
+    const status: PreflightCheckStatus =
+      parsed.availableBytes >= MIN_DISK_FREE_BYTES ? "pass" : "warn";
     const message =
       status === "pass"
         ? `Sufficient disk space detected on / (${formatGiB(parsed.availableBytes)} GiB free)`
@@ -158,15 +151,10 @@ export class ShellHostPreflightChecker implements HostPreflightChecker {
       );
     }
     if (docker.result.exitCode !== 0) {
-      return check(
-        "docker-cli",
-        "Docker CLI is present but not working",
-        "warn",
-        {
-          exitCode: docker.result.exitCode,
-          stderr: summarizeText(docker.result.stderr),
-        },
-      );
+      return check("docker-cli", "Docker CLI is present but not working", "warn", {
+        exitCode: docker.result.exitCode,
+        stderr: summarizeText(docker.result.stderr),
+      });
     }
     return check("docker-cli", "Docker CLI detected", "pass", {
       versionOutput: summarizeText(docker.result.stdout),
@@ -195,12 +183,12 @@ export class ShellHostPreflightChecker implements HostPreflightChecker {
       "Docker Compose not detected (bundled_matrix provisioning uses Docker Compose)",
       "warn",
       {
-        dockerComposePluginError:
-          plugin.ok ? summarizeText(plugin.result.stderr || plugin.result.stdout) : plugin.error,
-        dockerComposeBinaryError:
-          standalone.ok
-            ? summarizeText(standalone.result.stderr || standalone.result.stdout)
-            : standalone.error,
+        dockerComposePluginError: plugin.ok
+          ? summarizeText(plugin.result.stderr || plugin.result.stdout)
+          : plugin.error,
+        dockerComposeBinaryError: standalone.ok
+          ? summarizeText(standalone.result.stderr || standalone.result.stdout)
+          : standalone.error,
       },
     );
   }
@@ -208,12 +196,9 @@ export class ShellHostPreflightChecker implements HostPreflightChecker {
   private async checkPorts80And443(): Promise<CheckResult> {
     const portScan = await this.listListeningTcpPorts();
     if (portScan.status === "unknown") {
-      return check(
-        "ports-80-443",
-        "Could not inspect listening TCP ports 80/443",
-        "warn",
-        { error: portScan.message },
-      );
+      return check("ports-80-443", "Could not inspect listening TCP ports 80/443", "warn", {
+        error: portScan.message,
+      });
     }
 
     const busy = [80, 443].filter((port) => portScan.ports.has(port));
@@ -229,11 +214,7 @@ export class ShellHostPreflightChecker implements HostPreflightChecker {
     );
   }
 
-  private async checkDnsLookup(
-    hostname: string,
-    id: string,
-    label: string,
-  ): Promise<CheckResult> {
+  private async checkDnsLookup(hostname: string, id: string, label: string): Promise<CheckResult> {
     try {
       const resolved = await lookup(hostname);
       return check(id, `${label} resolved (${resolved.address})`, "pass", {
@@ -308,8 +289,7 @@ export class ShellHostPreflightChecker implements HostPreflightChecker {
   }
 
   private async listListeningTcpPorts(): Promise<
-    | { status: "ok"; ports: Set<number> }
-    | { status: "unknown"; message: string }
+    { status: "ok"; ports: Set<number> } | { status: "unknown"; message: string }
   > {
     const ss = await this.safeExec("ss", ["-ltnH"]);
     if (ss.ok && ss.result.exitCode === 0) {
@@ -403,10 +383,14 @@ const buildRecommendedActions = (checks: CheckResult[]): string[] => {
         break;
       case "docker-cli":
       case "docker-compose":
-        add("Install Docker Engine and Docker Compose on the host for bundled Matrix provisioning.");
+        add(
+          "Install Docker Engine and Docker Compose on the host for bundled Matrix provisioning.",
+        );
         break;
       case "ports-80-443":
-        add("Free ports 80/443 or plan an alternate reverse-proxy setup before bundled Matrix install.");
+        add(
+          "Free ports 80/443 or plan an alternate reverse-proxy setup before bundled Matrix install.",
+        );
         break;
       case "openclaw-dns":
         add("Confirm outbound DNS/network access to openclaw.ai from the host.");
@@ -444,7 +428,7 @@ const deriveMatrixHostname = (input?: PreflightRequest): string | null => {
   }
 };
 
-const parseDfAvailableBytes = (
+export const parseDfAvailableBytes = (
   stdout: string,
 ): { availableBytes: number; mountPoint: string } | null => {
   const lines = stdout
@@ -490,4 +474,4 @@ const summarizeText = (value: string): string => {
   return singleLine.length > 240 ? `${singleLine.slice(0, 240)}...(truncated)` : singleLine;
 };
 
-const formatGiB = (bytes: number): string => (bytes / (1024 ** 3)).toFixed(1);
+export const formatGiB = (bytes: number): string => (bytes / 1024 ** 3).toFixed(1);

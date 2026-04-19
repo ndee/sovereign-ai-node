@@ -1,3 +1,7 @@
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { createLogger } from "../logging/logger.js";
@@ -56,8 +60,23 @@ describe("ShellOpenClawGatewayServiceManager", () => {
     const calls: ExecInput[] = [];
     const priorSudoUser = process.env.SUDO_USER;
     const priorSudoUid = process.env.SUDO_UID;
+    const priorPath = process.env.PATH;
+    const priorOpenClawHome = process.env.OPENCLAW_HOME;
+    const priorOpenClawConfig = process.env.OPENCLAW_CONFIG;
+    const priorOpenClawConfigPath = process.env.OPENCLAW_CONFIG_PATH;
+    const priorSovereignNodeConfig = process.env.SOVEREIGN_NODE_CONFIG;
+    const commandDir = await mkdtemp(join(tmpdir(), "openclaw-bin-"));
+    const resolvedOpenclaw = join(commandDir, "openclaw");
+    await writeFile(resolvedOpenclaw, "#!/bin/sh\nexit 0\n", "utf8");
+    await chmod(resolvedOpenclaw, 0o755);
     process.env.SUDO_USER = "user1";
     process.env.SUDO_UID = "1000";
+    process.env.PATH = priorPath ? `${commandDir}${delimiter}${priorPath}` : commandDir;
+    process.env.OPENCLAW_HOME = "/var/lib/sovereign-node/openclaw-home/.openclaw";
+    process.env.OPENCLAW_CONFIG = "/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5";
+    process.env.OPENCLAW_CONFIG_PATH =
+      "/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5";
+    process.env.SOVEREIGN_NODE_CONFIG = "/etc/sovereign-node/config.json5";
     try {
       const execRunner: ExecRunner = {
         run: async (input): Promise<ExecResult> => {
@@ -90,14 +109,25 @@ describe("ShellOpenClawGatewayServiceManager", () => {
       });
       expect(calls[1]).toMatchObject({
         command: "sudo",
-        args: ["-u", "user1", "--", "openclaw", "gateway", "install"],
+        args: [
+          "-u",
+          "user1",
+          "--",
+          "/usr/bin/env",
+          "CI=1",
+          "XDG_RUNTIME_DIR=/run/user/1000",
+          "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
+          "OPENCLAW_HOME=/var/lib/sovereign-node/openclaw-home/.openclaw",
+          "OPENCLAW_CONFIG=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5",
+          "OPENCLAW_CONFIG_PATH=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5",
+          "SOVEREIGN_NODE_CONFIG=/etc/sovereign-node/config.json5",
+          process.execPath,
+          resolvedOpenclaw,
+          "gateway",
+          "install",
+        ],
         options: {
           timeout: 120000,
-          env: {
-            CI: "1",
-            XDG_RUNTIME_DIR: "/run/user/1000",
-            DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
-          },
         },
       });
     } finally {
@@ -111,6 +141,32 @@ describe("ShellOpenClawGatewayServiceManager", () => {
       } else {
         process.env.SUDO_UID = priorSudoUid;
       }
+      if (priorPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = priorPath;
+      }
+      if (priorOpenClawHome === undefined) {
+        delete process.env.OPENCLAW_HOME;
+      } else {
+        process.env.OPENCLAW_HOME = priorOpenClawHome;
+      }
+      if (priorOpenClawConfig === undefined) {
+        delete process.env.OPENCLAW_CONFIG;
+      } else {
+        process.env.OPENCLAW_CONFIG = priorOpenClawConfig;
+      }
+      if (priorOpenClawConfigPath === undefined) {
+        delete process.env.OPENCLAW_CONFIG_PATH;
+      } else {
+        process.env.OPENCLAW_CONFIG_PATH = priorOpenClawConfigPath;
+      }
+      if (priorSovereignNodeConfig === undefined) {
+        delete process.env.SOVEREIGN_NODE_CONFIG;
+      } else {
+        process.env.SOVEREIGN_NODE_CONFIG = priorSovereignNodeConfig;
+      }
+      await rm(commandDir, { recursive: true, force: true });
     }
   });
 });

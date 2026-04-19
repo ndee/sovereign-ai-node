@@ -1,4 +1,4 @@
-import { Command } from "commander";
+import type { Command } from "commander";
 
 import type { AppContainer } from "../../app/create-app.js";
 import { reconfigureResultSchema } from "../../contracts/index.js";
@@ -11,10 +11,7 @@ type ReconfigureOpenrouterOptions = {
   json?: boolean;
 };
 
-export const registerReconfigureCommand = (
-  program: Command,
-  app: AppContainer,
-): void => {
+export const registerReconfigureCommand = (program: Command, app: AppContainer): void => {
   const reconfigure = program
     .command("reconfigure")
     .description("Reconfigure installer-managed settings (scaffold)");
@@ -45,21 +42,19 @@ export const registerReconfigureCommand = (
 
   reconfigure
     .command("matrix")
-    .description("Reconfigure Matrix settings (scaffold)")
+    .description("Reconfigure Matrix settings")
+    .option("--federation", "Enable Matrix federation (allows users from other homeservers)")
+    .option("--no-federation", "Disable Matrix federation")
     .option("--json", "Emit JSON output")
-    .action(async (opts: { json?: boolean }) => {
+    .action(async (opts: { federation?: boolean; json?: boolean }) => {
       const command = "reconfigure matrix";
       try {
+        if (opts.federation === undefined) {
+          throw new Error("Provide --federation or --no-federation");
+        }
         const result = await app.installerService.reconfigureMatrix({
           matrix: {
-            publicBaseUrl: "https://matrix.example.org",
-          },
-          bots: {
-            config: {
-              "mail-sentinel": {
-                e2eeAlertRoom: false,
-              },
-            },
+            federationEnabled: opts.federation,
           },
         });
         writeCliSuccess(command, result, reconfigureResultSchema, Boolean(opts.json));
@@ -73,7 +68,10 @@ export const registerReconfigureCommand = (
     .command("openrouter")
     .description("Set the OpenRouter model and/or API key for the installed runtime")
     .option("--model <model>", "OpenRouter model id")
-    .option("--api-key <key>", "OpenRouter API key (writes /etc/sovereign-node/secrets/openrouter-api-key)")
+    .option(
+      "--api-key <key>",
+      "OpenRouter API key (writes /etc/sovereign-node/secrets/openrouter-api-key)",
+    )
     .option("--secret-ref <ref>", "Existing secret ref to use instead of writing a new key")
     .option("--json", "Emit JSON output")
     .action(async (opts: ReconfigureOpenrouterOptions) => {

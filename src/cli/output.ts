@@ -1,17 +1,12 @@
 import { randomUUID } from "node:crypto";
 
 import type { ZodType } from "zod";
-
-import {
-  CONTRACT_VERSION,
-  normalizeErrorDetail,
-  type ErrorDetail,
-} from "../contracts/common.js";
 import {
   cliAnySuccessEnvelopeSchema,
   cliErrorEnvelopeSchema,
   cliLogEventSchema,
 } from "../contracts/cli.js";
+import { CONTRACT_VERSION, type ErrorDetail, normalizeErrorDetail } from "../contracts/common.js";
 
 const now = () => new Date().toISOString();
 

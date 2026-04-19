@@ -87,7 +87,6 @@ The broader multi-bot system is the platform direction. Mail Sentinel is the fir
 ## Why Matrix
 
 Matrix is the control plane because it gives the system:
-
 * rooms as natural operator surfaces
 * bot-native interaction
 * local or self-hosted deployment options

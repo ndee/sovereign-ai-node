@@ -9,23 +9,18 @@ type OnboardingIssueOptions = {
   json?: boolean;
 };
 
-export const registerOnboardingCommand = (
-  program: Command,
-  app: AppContainer,
-): void => {
-  const onboarding = program
-    .command("onboarding")
-    .description("Manage Matrix onboarding access");
+export const registerOnboardingCommand = (program: Command, app: AppContainer): void => {
+  const onboarding = program.command("onboarding").description("Manage Matrix onboarding access");
 
   onboarding
     .command("issue")
     .description("Issue a one-time Matrix onboarding code")
-    .option("--ttl-minutes <minutes>", "Override code lifetime in minutes", "10")
+    .option("--ttl-minutes <minutes>", "Override code lifetime in minutes", "21")
     .option("--json", "Emit JSON output")
     .action(async (opts: OnboardingIssueOptions) => {
       const command = "onboarding issue";
       try {
-        const ttlMinutes = Number.parseInt(opts.ttlMinutes ?? "10", 10);
+        const ttlMinutes = Number.parseInt(opts.ttlMinutes ?? "21", 10);
         if (!Number.isFinite(ttlMinutes) || ttlMinutes <= 0) {
           throw new Error("Provide a positive integer for --ttl-minutes");
         }
@@ -40,6 +35,7 @@ export const registerOnboardingCommand = (
             `Code: ${result.code}`,
             `Expires: ${result.expiresAt}`,
             `Onboarding URL: ${result.onboardingUrl}`,
+            `Shareable link: ${result.onboardingLink}`,
             `Username: ${result.username}`,
             "Regenerate: sudo sovereign-node onboarding issue",
             "",

@@ -9,13 +9,13 @@
   "openclaw": {
     "manageInstallation": true,
     "installMethod": "install_sh",
-    "version": "2026.3.1",
+    "version": "2026.3.13",
     "skipIfCompatibleInstalled": true,
     "forceReinstall": false,
     "runOnboard": false
   },
   "openrouter": {
-    "model": "openai/gpt-5-nano",
+    "model": "qwen/qwen3.5-9b",
     "secretRef": "file:/etc/sovereign-node/secrets/openrouter-api-key"
   },
   "matrix": {
@@ -34,8 +34,8 @@
     ],
     "config": {
       "mail-sentinel": {
-        "pollInterval": "5m",
-        "lookbackWindow": "15m",
+        "pollInterval": "30m",
+        "lookbackWindow": "1h",
         "e2eeAlertRoom": false
       }
     }

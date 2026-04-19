@@ -1,0 +1,6 @@
+[Unit]
+Description=Sovereign Node disk space check
+
+[Service]
+Type=oneshot
+ExecStart=__SCRIPTS_DIR__/sovereign-node-disk-check.sh

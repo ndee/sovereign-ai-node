@@ -33,6 +33,7 @@ export const imapReadMailResultSchema = z.object({
   mailbox: z.string().min(1),
   selectedBy: z.enum(["uid", "message-id"]),
   message: imapMessageSummarySchema.extend({
+    headers: z.record(z.string(), z.string()).default({}),
     text: z.string(),
     textTruncated: z.boolean(),
     htmlAvailable: z.boolean(),
@@ -44,3 +45,41 @@ export const imapReadMailResultSchema = z.object({
 export type ImapSearchMailResult = z.infer<typeof imapSearchMailResultSchema>;
 export type ImapReadMailResult = z.infer<typeof imapReadMailResultSchema>;
 
+export const guardedJsonStateRecordSchema = z.record(z.string(), z.unknown());
+
+export const guardedJsonStateShowResultSchema = z.object({
+  instanceId: z.string().min(1),
+  statePath: z.string().min(1),
+  policyPath: z.string().min(1),
+  state: guardedJsonStateRecordSchema,
+});
+
+export const guardedJsonStateListResultSchema = z.object({
+  instanceId: z.string().min(1),
+  entity: z.string().min(1),
+  count: z.number().int().nonnegative(),
+  items: z.array(
+    z.object({
+      id: z.string().min(1).optional(),
+      ownerMatrixUserId: z.string().min(1).optional(),
+      parentKey: z.string().min(1).optional(),
+      record: guardedJsonStateRecordSchema,
+    }),
+  ),
+});
+
+export const guardedJsonStateMutationResultSchema = z.object({
+  instanceId: z.string().min(1),
+  entity: z.string().min(1),
+  actor: z.string().min(1),
+  action: z.enum(["upsert-self", "delete-self"]),
+  id: z.string().min(1),
+  changed: z.boolean(),
+  created: z.boolean().optional(),
+  deleted: z.boolean().optional(),
+  record: guardedJsonStateRecordSchema.optional(),
+});
+
+export type GuardedJsonStateShowResult = z.infer<typeof guardedJsonStateShowResultSchema>;
+export type GuardedJsonStateListResult = z.infer<typeof guardedJsonStateListResultSchema>;
+export type GuardedJsonStateMutationResult = z.infer<typeof guardedJsonStateMutationResultSchema>;

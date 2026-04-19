@@ -20,7 +20,7 @@ const buildInstallRequest = (): InstallRequest => ({
     runOnboard: false,
   },
   openrouter: {
-    model: "openai/gpt-5-nano",
+    model: "qwen/qwen3.5-9b",
     apiKey: "sk-or-test",
   },
   imap: {
@@ -53,6 +53,8 @@ const buildPaths = (root: string): SovereignPaths => ({
   logsDir: join(root, "logs"),
   installJobsDir: join(root, "install-jobs"),
   openclawServiceHome: join(root, "openclaw-home"),
+  provenancePath: join(root, "install-provenance.json"),
+  backupsDir: join(root, "backups"),
 });
 
 const jsonResponse = (body: unknown, status = 200): Response =>

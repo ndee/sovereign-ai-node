@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto";
-
-import { CONTRACT_VERSION, type CheckResult } from "../contracts/common.js";
+import type {
+  PreflightRequest,
+  ReconfigureImapRequest,
+  ReconfigureMatrixRequest,
+  ReconfigureOpenrouterRequest,
+  TestAlertRequest,
+  TestImapRequest,
+  TestMatrixRequest,
+} from "../contracts/api.js";
+import { type CheckResult, CONTRACT_VERSION } from "../contracts/common.js";
 import type {
   DoctorReport,
   InstallJobStatusResponse,
@@ -14,21 +22,19 @@ import type {
   TestImapResult,
   TestMatrixResult,
 } from "../contracts/index.js";
-import type {
-  PreflightRequest,
-  ReconfigureImapRequest,
-  ReconfigureMatrixRequest,
-  ReconfigureOpenrouterRequest,
-  TestAlertRequest,
-  TestImapRequest,
-  TestMatrixRequest,
-} from "../contracts/api.js";
 import type { Logger } from "../logging/logger.js";
 import type {
   InstallerService,
+  MailSentinelApplyResult,
+  MailSentinelDeleteResult,
+  MailSentinelListResult,
+  MailSentinelMigrationResult,
   ManagedAgentDeleteResult,
   ManagedAgentListResult,
   ManagedAgentUpsertResult,
+  MatrixUserRemoveResult,
+  MigrationStatusResult,
+  PendingMigration,
   SovereignBotInstantiateResult,
   SovereignBotListResult,
   SovereignTemplateInstallResult,
@@ -40,7 +46,11 @@ import type {
 
 const now = () => new Date().toISOString();
 
-const check = (id: string, message: string, status: CheckResult["status"] = "pass"): CheckResult => ({
+const check = (
+  id: string,
+  message: string,
+  status: CheckResult["status"] = "pass",
+): CheckResult => ({
   id,
   name: id,
   status,
@@ -208,15 +218,20 @@ export class StubInstallerService implements InstallerService {
         agentPresent: false,
         cronPresent: false,
       },
-      mailSentinel: {
-        agentId: "mail-sentinel",
-        consecutiveFailures: 0,
+      bots: {
+        "mail-sentinel": {
+          fields: {
+            consecutiveFailures: 0,
+          },
+          health: "unknown",
+        },
       },
+      hostResources: [],
       imap: {
         authStatus: "unknown",
       },
       version: {
-        sovereignNode: "0.1.0",
+        sovereignNode: "2.0.0",
         contractVersion: CONTRACT_VERSION,
       },
     };
@@ -230,10 +245,7 @@ export class StubInstallerService implements InstallerService {
         check("openclaw-version-pin", "OpenClaw version pin check not implemented", "warn"),
         check("gateway-service", "OpenClaw gateway service check not implemented", "warn"),
       ],
-      suggestedCommands: [
-        "pnpm install",
-        "pnpm dev:cli -- doctor --json",
-      ],
+      suggestedCommands: ["pnpm install", "pnpm dev:cli -- doctor --json"],
     };
   }
 
@@ -269,48 +281,125 @@ export class StubInstallerService implements InstallerService {
       code: "SCFD-0000-0000",
       expiresAt: now(),
       onboardingUrl: "https://matrix.example.org/onboard",
+      onboardingLink: "https://matrix.example.org/onboard#code=SCFD-0000-0000",
       username: "@operator:matrix.example.org",
     };
   }
 
-  async inviteHumanMatrixUser(req: {
+  async inviteMatrixUser(req: {
     username: string;
     ttlMinutes?: number;
-  }): Promise<{
-    localpart: string;
-    userId: string;
-    code: string;
-    expiresAt: string;
-    onboardingUrl: string;
-    invitedToAlertRoom: boolean;
-  }> {
-    const localpart = req.username.trim().replace(/^@/, "").split(":")[0] ?? "user";
+  }): Promise<MatrixOnboardingIssueResult> {
     return {
-      localpart,
-      userId: `@${localpart}:matrix.example.org`,
-      code: "SCFD-0000-0000",
+      code: "SCFD-1111-2222",
       expiresAt: now(),
       onboardingUrl: "https://matrix.example.org/onboard",
-      invitedToAlertRoom: true,
+      onboardingLink: "https://matrix.example.org/onboard#code=SCFD-1111-2222",
+      username: req.username.startsWith("@") ? req.username : `@${req.username}:matrix.example.org`,
     };
   }
 
-  async deleteHumanMatrixUser(req: {
-    username: string;
-  }): Promise<{
-    localpart: string;
-    userId: string;
-    deleted: boolean;
-    deactivated: boolean;
-    onboardingCleared: boolean;
-  }> {
-    const localpart = req.username.trim().replace(/^@/, "").split(":")[0] ?? "user";
+  async removeMatrixUser(req: { username: string }): Promise<MatrixUserRemoveResult> {
+    const localpart = req.username.replace(/^@/, "").split(":")[0] ?? req.username;
     return {
       localpart,
       userId: `@${localpart}:matrix.example.org`,
+      removed: true,
+    };
+  }
+
+  async getPendingMigrations(): Promise<MigrationStatusResult> {
+    const pending: PendingMigration[] = [];
+    return {
+      requestFile: "/etc/sovereign-node/install-request.json",
+      pending,
+    };
+  }
+
+  async migrateLegacyMailSentinel(): Promise<MailSentinelMigrationResult> {
+    return {
+      changed: false,
+      requestFile: "/etc/sovereign-node/install-request.json",
+      instance: {
+        id: "mail-sentinel",
+        packageId: "mail-sentinel",
+        workspace: "/var/lib/sovereign-node/mail-sentinel/workspace",
+        matrixLocalpart: "mail-sentinel",
+        matrixUserId: "@mail-sentinel:matrix.example.org",
+        alertRoomId: "!alerts:matrix.example.org",
+        alertRoomName: "Sovereign Alerts",
+        allowedUsers: ["@operator:matrix.example.org"],
+        imapHost: "imap.example.org",
+        imapUsername: "mailbox@example.org",
+        mailbox: "INBOX",
+        pollInterval: "30m",
+      },
+    };
+  }
+
+  async listMailSentinelInstances(): Promise<MailSentinelListResult> {
+    return {
+      instances: [
+        {
+          id: "mail-sentinel",
+          packageId: "mail-sentinel",
+          workspace: "/var/lib/sovereign-node/mail-sentinel/workspace",
+          matrixLocalpart: "mail-sentinel",
+          matrixUserId: "@mail-sentinel:matrix.example.org",
+          alertRoomId: "!alerts:matrix.example.org",
+          alertRoomName: "Sovereign Alerts",
+          allowedUsers: ["@operator:matrix.example.org"],
+          imapHost: "imap.example.org",
+          imapUsername: "mailbox@example.org",
+          mailbox: "INBOX",
+          pollInterval: "30m",
+        },
+      ],
+    };
+  }
+
+  async createMailSentinelInstance(req: { id: string }): Promise<MailSentinelApplyResult> {
+    return {
+      instance: {
+        id: req.id,
+        packageId: "mail-sentinel",
+        workspace: `/var/lib/sovereign-node/${req.id}/workspace`,
+        allowedUsers: [],
+      },
+      changed: true,
+      job: (
+        await this.startInstall({
+          mode: "bundled_matrix",
+          openrouter: { secretRef: "env:OPENROUTER_API_KEY" },
+          matrix: {
+            homeserverDomain: "matrix.example.org",
+            publicBaseUrl: "https://matrix.example.org",
+          },
+          operator: { username: "operator" },
+        })
+      ).job,
+    };
+  }
+
+  async updateMailSentinelInstance(req: { id: string }): Promise<MailSentinelApplyResult> {
+    return await this.createMailSentinelInstance(req);
+  }
+
+  async deleteMailSentinelInstance(req: { id: string }): Promise<MailSentinelDeleteResult> {
+    return {
+      id: req.id,
       deleted: true,
-      deactivated: true,
-      onboardingCleared: true,
+      job: (
+        await this.startInstall({
+          mode: "bundled_matrix",
+          openrouter: { secretRef: "env:OPENROUTER_API_KEY" },
+          matrix: {
+            homeserverDomain: "matrix.example.org",
+            publicBaseUrl: "https://matrix.example.org",
+          },
+          operator: { username: "operator" },
+        })
+      ).job,
     };
   }
 
@@ -376,7 +465,7 @@ export class StubInstallerService implements InstallerService {
           id: "mail-sentinel",
           version: "1.0.0",
           displayName: "Mail Sentinel",
-          description: "Conversational inbox sentinel for read-only IMAP triage and Matrix summaries.",
+          description: "Inbox triage bot for read-only IMAP summaries and Matrix alerting.",
           defaultInstall: true,
           templateRef: "mail-sentinel@1.0.0",
           installed: true,
@@ -388,7 +477,7 @@ export class StubInstallerService implements InstallerService {
           id: "node-operator",
           version: "1.0.0",
           displayName: "Node Operator",
-          description: "Conversational operator that manages Sovereign Node and managed agents.",
+          description: "Primary conversational operator for Sovereign Node and managed agents.",
           defaultInstall: false,
           templateRef: "node-operator@1.0.0",
           installed: false,
@@ -453,14 +542,12 @@ export class StubInstallerService implements InstallerService {
     };
   }
 
-  async createSovereignToolInstance(
-    req: {
-      id: string;
-      templateRef: string;
-      config?: Record<string, string>;
-      secretRefs?: Record<string, string>;
-    },
-  ): Promise<SovereignToolInstanceUpsertResult> {
+  async createSovereignToolInstance(req: {
+    id: string;
+    templateRef: string;
+    config?: Record<string, string>;
+    secretRefs?: Record<string, string>;
+  }): Promise<SovereignToolInstanceUpsertResult> {
     return {
       tool: {
         id: req.id,
@@ -473,14 +560,12 @@ export class StubInstallerService implements InstallerService {
     };
   }
 
-  async updateSovereignToolInstance(
-    req: {
-      id: string;
-      templateRef?: string;
-      config?: Record<string, string>;
-      secretRefs?: Record<string, string>;
-    },
-  ): Promise<SovereignToolInstanceUpsertResult> {
+  async updateSovereignToolInstance(req: {
+    id: string;
+    templateRef?: string;
+    config?: Record<string, string>;
+    secretRefs?: Record<string, string>;
+  }): Promise<SovereignToolInstanceUpsertResult> {
     return {
       tool: {
         id: req.id,

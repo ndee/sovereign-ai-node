@@ -1,9 +1,19 @@
+import { constants as fsConstants } from "node:fs";
+import { access } from "node:fs/promises";
+import { delimiter, join } from "node:path";
+
 import type { Logger } from "../logging/logger.js";
 import type { ExecResult, ExecRunner } from "../system/exec.js";
 
 const OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS = 90_000;
-const OPENCLAW_GATEWAY_RETRY_ATTEMPTS = 15;
-const OPENCLAW_GATEWAY_RETRY_DELAY_MS = 2_000;
+const OPENCLAW_GATEWAY_RETRY_ATTEMPTS = 20;
+const OPENCLAW_GATEWAY_RETRY_DELAY_MS = 3_000;
+const MANAGED_OPENCLAW_ENV_KEYS = [
+  "OPENCLAW_HOME",
+  "OPENCLAW_CONFIG",
+  "OPENCLAW_CONFIG_PATH",
+  "SOVEREIGN_NODE_CONFIG",
+] as const;
 
 export type ManagedAgentRegistrationInput = {
   agentId: string;
@@ -30,6 +40,17 @@ type CronListJob = {
   name?: string;
   agentId?: string;
 };
+
+type PreferredManagedOpenClawUser =
+  | {
+      mode: "service-user";
+      user: string;
+    }
+  | {
+      mode: "sudo-user-bus";
+      user: string;
+      uid: string;
+    };
 
 export interface OpenClawManagedAgentRegistrar {
   register(input: ManagedAgentRegistrationInput): Promise<ManagedAgentRegistrationResult>;
@@ -89,8 +110,8 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
 
   private async removeExistingCronJobs(agentId: string, cronJobId: string): Promise<void> {
     const jobs = await this.listCronJobs();
-    const staleJobs = jobs.filter((job) =>
-      job.name === cronJobId && (job.agentId === undefined || job.agentId === agentId)
+    const staleJobs = jobs.filter(
+      (job) => job.name === cronJobId && (job.agentId === undefined || job.agentId === agentId),
     );
     for (const job of staleJobs) {
       const result = await this.execRunner.run({
@@ -156,40 +177,17 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
   }
 
   private async listCronJobs(): Promise<CronListJob[]> {
-    let lastJsonResult: ExecResult | null = null;
-    let lastTextResult: ExecResult | null = null;
-
-    for (let attempt = 1; attempt <= OPENCLAW_GATEWAY_RETRY_ATTEMPTS; attempt += 1) {
-      const jsonResult = await this.runOpenClawCommandWithGatewayRetry(["cron", "list", "--json"]);
-      lastJsonResult = jsonResult;
-      if (jsonResult.exitCode === 0) {
-        const parsed = parseCronListJson(jsonResult.stdout);
-        if (parsed !== null) {
-          return parsed;
-        }
+    const jsonResult = await this.runOpenClawCommandWithGatewayRetry(["cron", "list", "--json"]);
+    if (jsonResult.exitCode === 0) {
+      const parsed = parseCronListJson(jsonResult.stdout);
+      if (parsed !== null) {
+        return parsed;
       }
+    }
 
-      const textResult = await this.runOpenClawCommandWithGatewayRetry(["cron", "list"]);
-      lastTextResult = textResult;
-      if (textResult.exitCode === 0) {
-        return parseCronListTable(textResult.stdout);
-      }
-
-      const gatewayUnavailable =
-        isGatewayUnavailableResult(jsonResult) || isGatewayUnavailableResult(textResult);
-      if (!gatewayUnavailable || attempt >= OPENCLAW_GATEWAY_RETRY_ATTEMPTS) {
-        break;
-      }
-      this.logger.warn(
-        {
-          attempt,
-          maxAttempts: OPENCLAW_GATEWAY_RETRY_ATTEMPTS,
-          jsonExitCode: jsonResult.exitCode,
-          textExitCode: textResult.exitCode,
-        },
-        "OpenClaw gateway unavailable while listing cron jobs; retrying",
-      );
-      await delay(OPENCLAW_GATEWAY_RETRY_DELAY_MS);
+    const textResult = await this.runOpenClawCommandWithGatewayRetry(["cron", "list"]);
+    if (textResult.exitCode === 0) {
+      return parseCronListTable(textResult.stdout);
     }
 
     throw {
@@ -198,33 +196,53 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
       retryable: true,
       details: {
         attempts: OPENCLAW_GATEWAY_RETRY_ATTEMPTS,
-        jsonCommand: lastJsonResult?.command ?? "openclaw cron list --json",
-        jsonExitCode: lastJsonResult?.exitCode ?? -1,
-        jsonStdout: truncateText(lastJsonResult?.stdout ?? "", 1200),
-        jsonStderr: truncateText(lastJsonResult?.stderr ?? "", 1200),
-        textCommand: lastTextResult?.command ?? "openclaw cron list",
-        textExitCode: lastTextResult?.exitCode ?? -1,
-        textStdout: truncateText(lastTextResult?.stdout ?? "", 1200),
-        textStderr: truncateText(lastTextResult?.stderr ?? "", 1200),
+        jsonCommand: jsonResult.command,
+        jsonExitCode: jsonResult.exitCode,
+        jsonStdout: truncateText(jsonResult.stdout, 1200),
+        jsonStderr: truncateText(jsonResult.stderr, 1200),
+        textCommand: textResult.command,
+        textExitCode: textResult.exitCode,
+        textStdout: truncateText(textResult.stdout, 1200),
+        textStderr: truncateText(textResult.stderr, 1200),
       },
     };
   }
 
   private async runOpenClawCommandWithGatewayRetry(args: string[]): Promise<ExecResult> {
     let result: ExecResult | null = null;
+    const preferredUser = resolvePreferredManagedOpenClawUser();
     for (let attempt = 1; attempt <= OPENCLAW_GATEWAY_RETRY_ATTEMPTS; attempt += 1) {
-      result = await this.execRunner.run({
-        command: "openclaw",
-        args,
-        options: {
-          timeout: OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS,
-          env: {
-            CI: "1",
+      if (preferredUser !== null) {
+        const delegatedResult = await this.runOpenClawCommandViaPreferredUser(args, preferredUser);
+        result = delegatedResult;
+        if (delegatedResult.exitCode === 0 || !isGatewayUnavailableResult(delegatedResult)) {
+          return delegatedResult;
+        }
+      } else {
+        const primaryResult = await this.execRunner.run({
+          command: "openclaw",
+          args,
+          options: {
+            timeout: OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS,
+            env: {
+              CI: "1",
+            },
           },
-        },
-      });
-      if (result.exitCode === 0 || !isGatewayUnavailableResult(result)) {
-        return result;
+        });
+        result = primaryResult;
+        if (primaryResult.exitCode === 0) {
+          return primaryResult;
+        }
+
+        const sudoUserRetry = await this.retryGatewayCommandViaSudoUser(args, primaryResult);
+        if (sudoUserRetry !== null) {
+          result = sudoUserRetry;
+          if (sudoUserRetry.exitCode === 0 || !isGatewayUnavailableResult(sudoUserRetry)) {
+            return sudoUserRetry;
+          }
+        } else if (!isGatewayUnavailableResult(primaryResult)) {
+          return primaryResult;
+        }
       }
       if (attempt >= OPENCLAW_GATEWAY_RETRY_ATTEMPTS) {
         break;
@@ -241,12 +259,85 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
       await delay(OPENCLAW_GATEWAY_RETRY_DELAY_MS);
     }
 
-    return result ?? {
-      command: `openclaw ${args.join(" ")}`,
-      exitCode: 1,
-      stdout: "",
-      stderr: "openclaw command did not execute",
-    };
+    return (
+      result ?? {
+        command: `openclaw ${args.join(" ")}`,
+        exitCode: 1,
+        stdout: "",
+        stderr: "openclaw command did not execute",
+      }
+    );
+  }
+
+  private async retryGatewayCommandViaSudoUser(
+    args: string[],
+    result: ExecResult,
+  ): Promise<ExecResult | null> {
+    if (!isGatewayUnavailableResult(result)) {
+      return null;
+    }
+
+    const fallback = resolveSudoUserFallback();
+    if (fallback === null) {
+      return null;
+    }
+
+    const retry = await this.runOpenClawCommandViaSudoUser(args, fallback);
+    if (retry.exitCode === 0) {
+      this.logger.warn(
+        {
+          user: fallback.user,
+          uid: fallback.uid,
+          command: result.command,
+        },
+        "OpenClaw managed-agent command failed as root; retry succeeded via invoking sudo user",
+      );
+    }
+
+    return retry;
+  }
+
+  private async runOpenClawCommandViaSudoUser(
+    args: string[],
+    fallback: { user: string; uid: string },
+  ): Promise<ExecResult> {
+    return await this.runOpenClawCommandViaPreferredUser(args, {
+      mode: "sudo-user-bus",
+      user: fallback.user,
+      uid: fallback.uid,
+    });
+  }
+
+  private async runOpenClawCommandViaPreferredUser(
+    args: string[],
+    preferredUser: PreferredManagedOpenClawUser,
+  ): Promise<ExecResult> {
+    const sudoGatewayCommand = (await resolveExecutablePath("openclaw")) ?? "openclaw";
+    const sudoGatewayEnv =
+      preferredUser.mode === "sudo-user-bus"
+        ? [
+            "CI=1",
+            `XDG_RUNTIME_DIR=/run/user/${preferredUser.uid}`,
+            `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${preferredUser.uid}/bus`,
+            ...resolveManagedOpenClawEnvArgs(),
+          ]
+        : ["CI=1", ...resolveManagedOpenClawEnvArgs()];
+    return await this.execRunner.run({
+      command: "sudo",
+      args: [
+        "-u",
+        preferredUser.user,
+        "--",
+        "/usr/bin/env",
+        ...sudoGatewayEnv,
+        process.execPath,
+        sudoGatewayCommand,
+        ...args,
+      ],
+      options: {
+        timeout: OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS,
+      },
+    });
   }
 }
 
@@ -268,9 +359,10 @@ const buildCronCommands = (input: ManagedAgentRegistrationInput): string[][] => 
     "--message",
     input.cron.message,
   ];
-  const announceArgs = input.cron.announceRoomId === undefined
-    ? []
-    : ["--announce", "--channel", "matrix", "--to", input.cron.announceRoomId];
+  const announceArgs =
+    input.cron.announceRoomId === undefined
+      ? []
+      : ["--announce", "--channel", "matrix", "--to", input.cron.announceRoomId];
   return [
     [...sharedArgs, ...announceArgs, "--replace"],
     [...sharedArgs, ...announceArgs],
@@ -289,9 +381,72 @@ const isGatewayUnavailableResult = (result: ExecResult): boolean =>
   isGatewayUnavailableOutput(`${result.stderr}\n${result.stdout}`);
 
 const isGatewayUnavailableOutput = (value: string): boolean =>
-  /gateway\s+closed|gateway\s+unavailable|abnormal\s+closure|econnrefused|connect\s+econnrefused|socket\s+hang\s+up/i.test(
+  /gateway\s+closed|gateway\s+unavailable|abnormal\s+closure|econnrefused|connect\s+econnrefused|socket\s+hang\s+up|device\s+token\s+mismatch/i.test(
     value.toLowerCase(),
   );
+
+const resolveExecutablePath = async (command: string): Promise<string | null> => {
+  if (command.includes("/")) {
+    return command;
+  }
+
+  const pathValue = process.env.PATH ?? "";
+  for (const entry of pathValue.split(delimiter)) {
+    if (entry.length === 0) {
+      continue;
+    }
+    const candidate = join(entry, command);
+    try {
+      await access(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {}
+  }
+
+  return null;
+};
+
+const resolveManagedOpenClawEnvArgs = (): string[] =>
+  MANAGED_OPENCLAW_ENV_KEYS.flatMap((key) => {
+    const value = process.env[key];
+    return typeof value === "string" && value.length > 0 ? [`${key}=${value}`] : [];
+  });
+
+const resolveSudoUserFallback = (): { user: string; uid: string } | null => {
+  const user = process.env.SUDO_USER?.trim() ?? "";
+  const uid = process.env.SUDO_UID?.trim() ?? "";
+  if (user.length === 0 || user === "root") {
+    return null;
+  }
+  if (!/^[0-9]+$/.test(uid)) {
+    return null;
+  }
+  return { user, uid };
+};
+
+const resolvePreferredManagedOpenClawUser = (): PreferredManagedOpenClawUser | null => {
+  const serviceUser = process.env.SOVEREIGN_NODE_SERVICE_USER?.trim() ?? "";
+  if (serviceUser.length === 0 || serviceUser === "root") {
+    return null;
+  }
+
+  const fallback = resolveSudoUserFallback();
+  if (fallback !== null && serviceUser === fallback.user) {
+    return {
+      mode: "sudo-user-bus",
+      user: fallback.user,
+      uid: fallback.uid,
+    };
+  }
+
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    return {
+      mode: "service-user",
+      user: serviceUser,
+    };
+  }
+
+  return null;
+};
 
 const delay = async (ms: number): Promise<void> =>
   new Promise((resolveTimeout) => {
@@ -314,11 +469,13 @@ const parseCronListJson = (value: string): CronListJob[] | null => {
       if (typeof job.id !== "string" || job.id.length === 0) {
         return [];
       }
-      return [{
-        id: job.id,
-        ...(typeof job.name === "string" ? { name: job.name } : {}),
-        ...(typeof job.agentId === "string" ? { agentId: job.agentId } : {}),
-      }];
+      return [
+        {
+          id: job.id,
+          ...(typeof job.name === "string" ? { name: job.name } : {}),
+          ...(typeof job.agentId === "string" ? { agentId: job.agentId } : {}),
+        },
+      ];
     });
   } catch {
     return null;
@@ -331,9 +488,7 @@ const parseCronListTable = (value: string): CronListJob[] =>
     .map((line) => line.trim())
     .filter((line) => /^[0-9a-f]{8}-[0-9a-f-]{27}\s+/i.test(line))
     .map((line) => {
-      const match = line.match(
-        /^([0-9a-f-]{36})\s+(\S+)(?:\s+.+?\s+(?:isolated|main)\s+(\S+))?$/i,
-      );
+      const match = line.match(/^([0-9a-f-]{36})\s+(\S+)(?:\s+.+?\s+(?:isolated|main)\s+(\S+))?$/i);
       if (match === null) {
         const id = line.split(/\s+/, 1)[0];
         if (id === undefined || id.length === 0) {

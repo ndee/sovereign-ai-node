@@ -4,14 +4,17 @@ import type { Command } from "commander";
 
 import type { AppContainer } from "../../app/create-app.js";
 import { DEFAULT_BOT_REPO_URL } from "../../bots/catalog.js";
-import { applyBotCatalogSourceOptions, type BotCatalogSourceOptions } from "../bot-catalog-source.js";
 import {
+  type InstallRequest,
   installRequestSchema,
   startInstallResultSchema,
-  type InstallRequest,
 } from "../../contracts/index.js";
 import { DEFAULT_INSTALL_REQUEST_FILE } from "../../installer/real-service-shared.js";
 import { SOVEREIGN_PINNED_OPENCLAW_VERSION } from "../../openclaw/bootstrap.js";
+import {
+  applyBotCatalogSourceOptions,
+  type BotCatalogSourceOptions,
+} from "../bot-catalog-source.js";
 import { writeCliError, writeCliSuccess } from "../output.js";
 
 type InstallOptions = {
@@ -25,6 +28,7 @@ type InstallOptions = {
   relayControlUrl?: string;
   relayEnrollmentToken?: string;
   matrixTlsMode?: "auto" | "internal" | "manual" | "local-dev";
+  federation?: boolean;
   requestFile?: string;
 } & BotCatalogSourceOptions;
 
@@ -32,9 +36,7 @@ const DEFAULT_MANAGED_RELAY_CONTROL_URL = "https://relay.sovereign-ai-node.com";
 
 const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => {
   const connectivityMode = opts.connectivityMode ?? "relay";
-  const selectedBots = opts.bot
-    ?.map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0);
+  const selectedBots = opts.bot?.map((entry) => entry.trim()).filter((entry) => entry.length > 0);
   return {
     mode: "bundled_matrix",
     connectivity: {
@@ -59,15 +61,17 @@ const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => {
       runOnboard: false,
     },
     openrouter: {
-      model: "openai/gpt-5-nano",
+      model: "qwen/qwen3.5-9b",
       secretRef: "env:OPENROUTER_API_KEY",
     },
     matrix: {
       homeserverDomain:
         connectivityMode === "relay" ? "relay-pending.invalid" : "matrix.example.org",
       publicBaseUrl:
-        connectivityMode === "relay" ? "https://relay-pending.invalid" : "https://matrix.example.org",
-      federationEnabled: false,
+        connectivityMode === "relay"
+          ? "https://relay-pending.invalid"
+          : "https://matrix.example.org",
+      federationEnabled: opts.federation ?? false,
       tlsMode: connectivityMode === "relay" ? "auto" : (opts.matrixTlsMode ?? "auto"),
       alertRoomName: "Sovereign Alerts",
     },
@@ -104,10 +108,7 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
       "Bot package id to install (repeatable; omit to use repo defaults)",
       (value: string, prev: string[] = []) => [...prev, value],
     )
-    .option(
-      "--connectivity-mode <mode>",
-      "Connection mode (direct|relay) (scaffold/dev)",
-    )
+    .option("--connectivity-mode <mode>", "Connection mode (direct|relay) (scaffold/dev)")
     .option(
       "--relay-control-url <url>",
       "Relay control plane URL (default: https://relay.sovereign-ai-node.com)",
@@ -120,6 +121,7 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
       "--matrix-tls-mode <mode>",
       "Matrix TLS mode (auto|internal|manual|local-dev) (scaffold/dev)",
     )
+    .option("--federation", "Enable Matrix federation (allows users from other homeservers)")
     .option(
       "--request-file <path>",
       "Path to an InstallRequest JSON file (overrides scaffold defaults)",
@@ -133,10 +135,16 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
     .action(async (opts: InstallOptions) => {
       const command = "install";
       try {
-        applyBotCatalogSourceOptions(opts);
-        const req = await resolveInstallRequest(opts);
-        const result = await app.installerService.startInstall(req);
-        writeCliSuccess(command, result, startInstallResultSchema, Boolean(opts.json));
+        if (process.env.SOVEREIGN_INTERNAL_INSTALL === "1") {
+          applyBotCatalogSourceOptions(opts);
+          const req = await resolveInstallRequest(opts);
+          const result = await app.installerService.startInstall(req);
+          writeCliSuccess(command, result, startInstallResultSchema, Boolean(opts.json));
+          return;
+        }
+        throw new Error(
+          "Use scripts/install.sh or the curl installer for Sovereign Node v2 installs.",
+        );
       } catch (error) {
         writeCliError(command, error, Boolean(opts.json));
         process.exitCode = 1;

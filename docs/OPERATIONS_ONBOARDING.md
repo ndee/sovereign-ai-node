@@ -97,6 +97,7 @@ Relevant operator commands:
 
 - `sovereign-node templates list --json`
 - `sovereign-node templates install <id>@<version> --json`
+- `sovereign-node migrate --status --json`
 - `sovereign-node tools list --json`
 - `sovereign-node tools create ... --json`
 - `sovereign-node tools update ... --json`
@@ -104,6 +105,11 @@ Relevant operator commands:
 - `sovereign-node agents create ... --json`
 - `sovereign-node agents update ... --json`
 - `sovereign-node agents delete <id> --json`
+- `sovereign-node mail-sentinels list --json`
+- `sovereign-node mail-sentinels show <id> --json`
+- `sovereign-node mail-sentinels create <id> ... --json`
+- `sovereign-node mail-sentinels update <id> ... --json`
+- `sovereign-node mail-sentinels delete <id> --json`
 
 Contract note:
 
@@ -144,7 +150,8 @@ curl -fsSL <sovereign-node-installer-url> | sudo bash
 Notes:
 
 - the installer script now starts with an explicit `Install / Update / Exit` action menu in interactive mode
-- `Update` reuses existing settings and request file
+- `Update` reuses existing settings and request file, fetches the selected installer ref/URL before rerunning in update mode, and the CLI entrypoint must run as root (`sudo sovereign-node update`) while still requiring `sovereign-node migrate` first when pending migrations exist
+- for legacy single-instance Mail Sentinel installs, `sovereign-node migrate` now carries the active top-level IMAP settings and IMAP secret ref into the installer-managed `mail-sentinel` instance so update can continue without re-entering mailbox credentials
 - `Install` on an existing system behaves as reconfigure with prefilled defaults
 - `sovereign-node install` owns OpenClaw installation in the default path.
 - Operators should not run `openclaw onboard` in the default Sovereign flow.
@@ -165,7 +172,7 @@ In the default bundled mode, the installer should perform these steps in order:
 10. Install/repair the OpenClaw gateway service and start it.
 11. Install/configure required OpenClaw plugins.
 12. Install/pin core templates and instantiate core agent/tool runtime entries.
-13. Register `mail-sentinel` cron polling job.
+13. Register `mail-sentinel` polling resources.
 14. Run health checks and synthetic hello alerts from core agents.
 15. Print Element connection details and next steps.
 
@@ -176,7 +183,7 @@ Current default core instantiation:
   - `node-operator`
 - Tool instances:
   - `node-operator-cli` (always)
-  - `mail-sentinel-imap` (only when IMAP is configured)
+  - `mail-sentinel-core` (when Mail Sentinel is installed)
 
 ### OpenClaw Bootstrap in the Default Sovereign Flow
 
@@ -185,7 +192,7 @@ Sovereign installs OpenClaw on the machine as part of `sovereign-node install`.
 Default bootstrap behavior:
 
 - use the official OpenClaw installer script (`install.sh`)
-- install the current Sovereign-pinned OpenClaw version `2026.3.1` (not floating `latest`)
+- install the current Sovereign-pinned OpenClaw version `2026.3.13` (not floating `latest`)
 - skip OpenClaw onboarding (`--no-onboard`)
 - run non-interactively in the installer backend
 
@@ -193,7 +200,7 @@ The default internal command pattern is:
 
 ```bash
 curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install.sh | \
-  bash -s -- --version 2026.3.1 --no-onboard --no-prompt
+  bash -s -- --version 2026.3.13 --no-onboard --no-prompt
 ```
 
 Sovereign then installs the gateway service after writing Sovereign-managed config:
@@ -212,9 +219,21 @@ Recommended operator command set:
 - `sovereign-node doctor`
 - `sovereign-node logs`
 - `sovereign-node test-alert`
+- `sudo sovereign-node update`
+- `sovereign-node migrate`
+- `sovereign-node mail-sentinels list`
+- `sovereign-node mail-sentinels show <id>`
+- `sovereign-node mail-sentinels create <id> ...`
+- `sovereign-node mail-sentinels update <id> ...`
+- `sovereign-node mail-sentinels delete <id>`
 - `sovereign-node reconfigure imap`
 - `sovereign-node reconfigure matrix`
 - `sovereign-node reconfigure openrouter`
+
+Operational note for legacy/default Mail Sentinel installs:
+
+- the top-level `imap` section remains the source of truth for the default `mail-sentinel` instance created from older single-instance installs
+- if an older migration left the default `mail-sentinel` with stale IMAP values, running `sovereign-node migrate`, `sovereign-node update`, or `sovereign-node reconfigure imap` now repairs that instance from the top-level IMAP config
 
 `openclaw` remains fully supported for runtime-native operations:
 
@@ -267,7 +286,7 @@ sudo sovereign-node onboarding issue
 Security note:
 
 - the operator password is no longer embedded in `/onboard`
-- bootstrap codes are single-use and expire after 10 minutes by default
+- bootstrap codes are single-use and expire after 21 minutes by default
 
 ## Wait for Mail Alerts (Operator Step 4)
 
@@ -276,7 +295,7 @@ Before the operator “just waits,” the system must prove the path works.
 Required post-install verification:
 
 - Run a synthetic test alert to the Matrix room
-- Confirm the `mail-sentinel` cron job exists and is enabled
+- Confirm the `mail-sentinel` polling timer/service exists and is enabled
 - Confirm OpenClaw health is green
 - Confirm last IMAP credential test succeeded
 
@@ -318,6 +337,7 @@ If the simple flow fails, the operator should check these first:
 - OpenClaw CLI/version install sanity (bootstrap script reachability, version pin match)
 - Matrix service health and reverse proxy status
 - IMAP connectivity test and credential validity
+- when Proton Bridge is used in maintained validation flows, use the fresh-VM runbook from `sovereign-ai-node-pro/docs/PROTON_BRIDGE_VALIDATION.md`
 - alert room target and bot membership
 
 ## Related Docs
@@ -326,3 +346,4 @@ If the simple flow fails, the operator should check these first:
 - `docs/MAIL_SENTINEL_DESIGN.md`
 - `docs/MATRIX_BUNDLED_SETUP.md`
 - `docs/INSTALLER_CONTRACTS.md`
+- `sovereign-ai-node-pro/docs/PROTON_BRIDGE_VALIDATION.md`

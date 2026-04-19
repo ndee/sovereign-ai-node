@@ -14,13 +14,14 @@ This document covers:
 
 ## Summary
 
-`Mail Sentinel` is a Sovereign agent template (`mail-sentinel@1.0.0`) instantiated as a managed OpenClaw agent that:
+`Mail Sentinel` is a Sovereign agent template (`mail-sentinel@2.0.0`) instantiated as a managed OpenClaw agent that:
 
 - polls mail on a schedule
 - reads mail via a strictly read-only IMAP tool surface
 - classifies high-signal messages
 - posts alerts/summaries
 - learns from user feedback over time without requiring mailbox write access
+- can be installed as multiple managed instances, each with its own IMAP binding, Matrix identity, alert room, and polling schedule
 
 The resulting Sovereign agent is designed to be:
 
@@ -28,12 +29,13 @@ The resulting Sovereign agent is designed to be:
 - minimally privileged
 - configurable with standard OpenClaw primitives (agent workspace, skills, plugins, cron, tool policy)
 
-Template/runtime binding in this model:
+Template/runtime binding in the current bundled install path:
 
-- agent template: `mail-sentinel@1.0.0`
-- tool template: `imap-readonly@1.0.0`
-- default tool instance id (when IMAP is configured): `mail-sentinel-imap`
-- default runtime agent id: `mail-sentinel`
+- agent template: `mail-sentinel@2.0.0`
+- tool templates: `mail-sentinel-tool@1.0.0` and `imap-readonly@1.0.0`
+- default tool instance IDs remain `mail-sentinel-core` and `mail-sentinel-imap`
+- the default single managed agent ID remains `mail-sentinel`
+- current installer-managed deployments may create multiple Mail Sentinel instances instead of a single fixed runtime binding
 
 ## Product and Packaging Decisions
 
@@ -74,12 +76,12 @@ Implementation guidance:
 
 Operators should use the OpenClaw CLI directly for runtime operations.
 
-If a `sovereign-node` CLI is added, it should complement OpenClaw rather than hide it.
+`sovereign-node` is now part of the current operator surface and should complement OpenClaw rather than hide it.
 
 Recommended split:
 
 - `openclaw`: runtime-native operations (agents, plugins, channels, cron, health, security audit)
-- `sovereign-node` (optional): profile application, bot pack install/sync, opinionated checks, backups/runbooks
+- `sovereign-node`: install/update/migration flow, bundled diagnostics, and installer-managed Mail Sentinel instance lifecycle
 
 This preserves transparency and reduces wrapper drift while still allowing a simpler operator experience for common tasks.
 
@@ -105,7 +107,7 @@ The intended operator experience is intentionally simple:
 This is the correct product-level UX target, but several setup steps must be automated behind it for reliability:
 
 - IMAP validation, secret storage, and read-only plugin configuration
-- OpenClaw install/profile application, plugin enablement, and agent/cron registration
+- OpenClaw install/profile application, plugin enablement, and managed agent/timer registration
 - bundled Matrix provisioning (Synapse, database, reverse proxy/TLS)
 - Matrix account bootstrap (operator + managed agent identities), private room creation, and room targeting
 - post-install health checks and a test alert

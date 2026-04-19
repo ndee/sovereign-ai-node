@@ -43,6 +43,118 @@ export type RelayRuntimeConfig = {
   };
 };
 
+export type CompiledHostResourceCheck =
+  | {
+      kind: "field-threshold";
+      id: string;
+      field: string;
+      warnGte?: number;
+      failGte?: number;
+    }
+  | {
+      kind: "resource-state";
+      id: string;
+      property: "present" | "enabled" | "active" | "absent";
+      equals: boolean | string;
+      severity: "warn" | "fail";
+    };
+
+export type CompiledHostResource =
+  | {
+      id: string;
+      botId: string;
+      agentId: string;
+      kind: "directory";
+      path: string;
+      mode?: string;
+      owner?: string;
+      group?: string;
+      checks: CompiledHostResourceCheck[];
+    }
+  | {
+      id: string;
+      botId: string;
+      agentId: string;
+      kind: "managedFile" | "stateFile";
+      path: string;
+      content: string;
+      mode?: string;
+      owner?: string;
+      group?: string;
+      writePolicy: "always" | "ifMissing";
+      statusFields?: Record<
+        string,
+        {
+          path: string;
+          type: "string" | "int" | "boolean" | "timestamp" | "object";
+          default?: string | number | boolean | undefined;
+        }
+      >;
+      checks: CompiledHostResourceCheck[];
+    }
+  | {
+      id: string;
+      botId: string;
+      agentId: string;
+      kind: "systemdService";
+      name: string;
+      content: string;
+      desiredState: {
+        enabled: boolean;
+        active: boolean;
+      };
+      checks: CompiledHostResourceCheck[];
+    }
+  | {
+      id: string;
+      botId: string;
+      agentId: string;
+      kind: "systemdTimer";
+      name: string;
+      content: string;
+      desiredState: {
+        enabled: boolean;
+        active: boolean;
+      };
+      checks: CompiledHostResourceCheck[];
+    }
+  | {
+      id: string;
+      botId: string;
+      agentId: string;
+      kind: "openclawCron";
+      desiredState: "present" | "absent";
+      match: {
+        id?: string;
+        name?: string;
+        agentId?: string;
+      };
+      spec?: {
+        id: string;
+        agentId: string;
+        every: string;
+        session: "isolated";
+        message: string;
+        announceRoomId?: string;
+      };
+      checks: CompiledHostResourceCheck[];
+    };
+
+export type CompiledBotStatus = {
+  botId: string;
+  agentId: string;
+  resourceId: string;
+  path: string;
+  fields: Record<
+    string,
+    {
+      path: string;
+      type: "string" | "int" | "boolean" | "timestamp" | "object";
+      default?: string | number | boolean | undefined;
+    }
+  >;
+};
+
 export type RuntimeConfig = {
   openrouter: {
     model: string;
@@ -63,12 +175,18 @@ export type RuntimeConfig = {
     plugins: {
       allow: string[];
     };
+    session?: {
+      dmScope: "main" | "per-peer" | "per-channel-peer" | "per-account-channel-peer";
+    };
     agents: Array<{
       id: string;
       workspace: string;
+      default?: boolean;
+      model?: string;
       templateRef?: string;
       toolInstanceIds?: string[];
       botId?: string;
+      botInstanceId?: string;
       matrix?: {
         localpart: string;
         userId: string;
@@ -98,11 +216,7 @@ export type RuntimeConfig = {
   };
   bots: {
     config: Record<string, Record<string, BotConfigValue>>;
-  };
-  mailSentinel?: {
-    pollInterval: string;
-    lookbackWindow: string;
-    e2eeAlertRoom: boolean;
+    instances: RuntimeBotInstance[];
   };
   matrix: {
     accessMode: "direct" | "relay";
@@ -154,28 +268,122 @@ export type RuntimeConfig = {
       updatedAt: string;
     }>;
   };
+  hostResources?: {
+    planPath: string;
+    resources: CompiledHostResource[];
+    botStatus: CompiledBotStatus[];
+  };
   relay?: RelayRuntimeConfig;
 };
 
 export type RuntimeAgentEntry = RuntimeConfig["openclawProfile"]["agents"][number];
+
+export type RuntimeBotInstance = {
+  id: string;
+  packageId: string;
+  workspace: string;
+  config: Record<string, BotConfigValue>;
+  secretRefs: Record<string, string>;
+  matrix?: {
+    localpart?: string;
+    alertRoom?: {
+      roomId: string;
+      roomName: string;
+    };
+    allowedUsers?: string[];
+  };
+};
+
+export type InstallProvenance = {
+  nodeRepoUrl: string;
+  nodeRef: string;
+  nodeVersion?: string;
+  nodeCommitSha: string;
+  botsRepoUrl: string;
+  botsRef: string;
+  botsVersion?: string;
+  botsCommitSha: string;
+  installedAt: string;
+  installSource: "curl-installer" | "local-copy" | "git-clone";
+};
+
+const INSTALL_SOURCE_VALUES = new Set(["curl-installer", "local-copy", "git-clone"]);
+
+export const parseInstallProvenance = (raw: string): InstallProvenance | null => {
+  if (raw.trim().length === 0) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  const record = parsed as Record<string, unknown>;
+  const fields = [
+    "nodeRepoUrl",
+    "nodeRef",
+    "nodeCommitSha",
+    "botsRepoUrl",
+    "botsRef",
+    "botsCommitSha",
+    "installedAt",
+    "installSource",
+  ] as const;
+  for (const field of fields) {
+    if (typeof record[field] !== "string" || (record[field] as string).length === 0) {
+      return null;
+    }
+  }
+  if (!INSTALL_SOURCE_VALUES.has(record.installSource as string)) {
+    return null;
+  }
+  const nodeVersion =
+    typeof record.nodeVersion === "string" && record.nodeVersion.length > 0
+      ? record.nodeVersion
+      : undefined;
+  const botsVersion =
+    typeof record.botsVersion === "string" && record.botsVersion.length > 0
+      ? record.botsVersion
+      : undefined;
+  return {
+    nodeRepoUrl: record.nodeRepoUrl as string,
+    nodeRef: record.nodeRef as string,
+    ...(nodeVersion !== undefined ? { nodeVersion } : {}),
+    nodeCommitSha: record.nodeCommitSha as string,
+    botsRepoUrl: record.botsRepoUrl as string,
+    botsRef: record.botsRef as string,
+    ...(botsVersion !== undefined ? { botsVersion } : {}),
+    botsCommitSha: record.botsCommitSha as string,
+    installedAt: record.installedAt as string,
+    installSource: record.installSource as InstallProvenance["installSource"],
+  };
+};
 
 export type GatewayState = "running" | "stopped" | "failed" | "unknown";
 
 export const MAIL_SENTINEL_AGENT_ID = "mail-sentinel";
 export const MAIL_SENTINEL_CRON_ID = "mail-sentinel-poll";
 export const NODE_OPERATOR_AGENT_ID = "node-operator";
-export const MAIL_SENTINEL_HELLO_MESSAGE = "Hello from Mail Sentinel. I can summarize your latest 3 inbox mails.";
-export const NODE_OPERATOR_HELLO_MESSAGE = "Hello from Node Operator. Ask me for Sovereign Node and system status.";
+export const MAIL_SENTINEL_HELLO_MESSAGE =
+  "Hello from Mail Sentinel. I watch incoming mail, alert only on important signals, and learn from your feedback.";
+export const NODE_OPERATOR_HELLO_MESSAGE =
+  "Hello from Node Operator. DM me for Sovereign Node status, install health, and system checks.";
 export const NODE_CLI_OPS_TEMPLATE_REF = "node-cli-ops@1.0.0";
 export const IMAP_READONLY_TEMPLATE_REF = "imap-readonly@1.0.0";
-export const MAIL_SENTINEL_TEMPLATE_REF = "mail-sentinel@1.0.0";
-export const NODE_OPERATOR_TEMPLATE_REF = "node-operator@1.0.0";
+export const MAIL_SENTINEL_TEMPLATE_REF = "mail-sentinel@2.0.0";
+export const NODE_OPERATOR_TEMPLATE_REF = "node-operator@2.0.0";
 export const NODE_OPERATOR_TOOL_INSTANCE_ID = "node-operator-cli";
-export const MAIL_SENTINEL_TOOL_INSTANCE_ID = "mail-sentinel-imap";
+export const MAIL_SENTINEL_TOOL_INSTANCE_ID = "mail-sentinel-core";
 export const INSTALLER_EXEC_TIMEOUT_MS = 60_000;
 export const SOVEREIGN_GATEWAY_SYSTEMD_UNIT = "sovereign-openclaw-gateway.service";
-export const DEFAULT_OPENROUTER_MODEL = "openai/gpt-5-nano";
+export const DEFAULT_OPENROUTER_MODEL = "qwen/qwen3.5-9b";
+export const MANAGED_OPENCLAW_DM_SCOPE = "per-channel-peer";
 export const DEFAULT_INSTALL_REQUEST_FILE = "/etc/sovereign-node/install-request.json";
+export const DEFAULT_HOST_RESOURCES_PLAN_FILE = "/etc/sovereign-node/host-resources.json";
 export const DEFAULT_SERVICE_USER = "root";
 export const DEFAULT_SERVICE_GROUP = "root";
 export const RELAY_TUNNEL_SYSTEMD_UNIT = "sovereign-matrix-relay-tunnel.service";
@@ -186,8 +394,7 @@ const now = () => new Date().toISOString();
 
 const defaultFetch: FetchLike = (input, init) => globalThis.fetch(input, init);
 
-const ensureTrailingSlash = (value: string): string =>
-  value.endsWith("/") ? value : `${value}/`;
+const ensureTrailingSlash = (value: string): string => (value.endsWith("/") ? value : `${value}/`);
 
 const parseJsonSafely = (raw: string): unknown => {
   if (raw.trim().length === 0) {
@@ -233,16 +440,16 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
       ? matrix.adminBaseUrl
       : matrix.publicBaseUrl;
   if (
-    typeof matrix.publicBaseUrl !== "string"
-    || matrix.publicBaseUrl.length === 0
-    || typeof adminBaseUrl !== "string"
-    || adminBaseUrl.length === 0
-    || !isRecord(bot)
-    || typeof bot.accessTokenSecretRef !== "string"
-    || bot.accessTokenSecretRef.length === 0
-    || !isRecord(alertRoom)
-    || typeof alertRoom.roomId !== "string"
-    || alertRoom.roomId.length === 0
+    typeof matrix.publicBaseUrl !== "string" ||
+    matrix.publicBaseUrl.length === 0 ||
+    typeof adminBaseUrl !== "string" ||
+    adminBaseUrl.length === 0 ||
+    !isRecord(bot) ||
+    typeof bot.accessTokenSecretRef !== "string" ||
+    bot.accessTokenSecretRef.length === 0 ||
+    !isRecord(alertRoom) ||
+    typeof alertRoom.roomId !== "string" ||
+    alertRoom.roomId.length === 0
   ) {
     return null;
   }
@@ -278,73 +485,89 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
       : undefined;
   const openclawProfile = isRecord(parsed.openclawProfile) ? parsed.openclawProfile : {};
   const openclawPlugins = isRecord(openclawProfile.plugins) ? openclawProfile.plugins : {};
+  const openclawSession = isRecord(openclawProfile.session) ? openclawProfile.session : {};
+  const openclawDmScope =
+    openclawSession.dmScope === "main" ||
+    openclawSession.dmScope === "per-peer" ||
+    openclawSession.dmScope === "per-channel-peer" ||
+    openclawSession.dmScope === "per-account-channel-peer"
+      ? openclawSession.dmScope
+      : MANAGED_OPENCLAW_DM_SCOPE;
   const openclawAgents = Array.isArray(openclawProfile.agents)
-    ? openclawProfile.agents
-        .flatMap((agent): RuntimeAgentEntry[] => {
-          if (
-            !isRecord(agent)
-            || typeof agent.id !== "string"
-            || agent.id.length === 0
-            || typeof agent.workspace !== "string"
-            || agent.workspace.length === 0
-          ) {
-            return [];
-          }
-          const matrixIdentity = isRecord(agent.matrix)
-            && typeof agent.matrix.localpart === "string"
-            && agent.matrix.localpart.length > 0
-            && typeof agent.matrix.userId === "string"
-            && agent.matrix.userId.length > 0
-              ? {
-                  localpart: agent.matrix.localpart,
-                  userId: agent.matrix.userId,
-                  ...(typeof agent.matrix.passwordSecretRef === "string"
-                    && agent.matrix.passwordSecretRef.length > 0
-                    ? { passwordSecretRef: agent.matrix.passwordSecretRef }
-                    : {}),
-                  ...(typeof agent.matrix.accessTokenSecretRef === "string"
-                    && agent.matrix.accessTokenSecretRef.length > 0
-                    ? { accessTokenSecretRef: agent.matrix.accessTokenSecretRef }
-                    : {}),
-                }
-              : undefined;
-          const templateRef =
-            typeof agent.templateRef === "string" && agent.templateRef.length > 0
-              ? agent.templateRef
-              : undefined;
-          const toolInstanceIds = Array.isArray(agent.toolInstanceIds)
-            ? agent.toolInstanceIds.filter(
-                (entry): entry is string => typeof entry === "string" && entry.length > 0,
-              )
+    ? openclawProfile.agents.flatMap((agent): RuntimeAgentEntry[] => {
+        if (
+          !isRecord(agent) ||
+          typeof agent.id !== "string" ||
+          agent.id.length === 0 ||
+          typeof agent.workspace !== "string" ||
+          agent.workspace.length === 0
+        ) {
+          return [];
+        }
+        const matrixIdentity =
+          isRecord(agent.matrix) &&
+          typeof agent.matrix.localpart === "string" &&
+          agent.matrix.localpart.length > 0 &&
+          typeof agent.matrix.userId === "string" &&
+          agent.matrix.userId.length > 0
+            ? {
+                localpart: agent.matrix.localpart,
+                userId: agent.matrix.userId,
+                ...(typeof agent.matrix.passwordSecretRef === "string" &&
+                agent.matrix.passwordSecretRef.length > 0
+                  ? { passwordSecretRef: agent.matrix.passwordSecretRef }
+                  : {}),
+                ...(typeof agent.matrix.accessTokenSecretRef === "string" &&
+                agent.matrix.accessTokenSecretRef.length > 0
+                  ? { accessTokenSecretRef: agent.matrix.accessTokenSecretRef }
+                  : {}),
+              }
             : undefined;
-          const botId =
-            typeof agent.botId === "string" && agent.botId.length > 0
-              ? agent.botId
-              : undefined;
-          return [
-            {
-              id: agent.id,
-              workspace: agent.workspace,
-              ...(templateRef === undefined ? {} : { templateRef }),
-              ...(botId === undefined ? {} : { botId }),
-              ...(toolInstanceIds === undefined || toolInstanceIds.length === 0
-                ? {}
-                : { toolInstanceIds }),
-              ...(matrixIdentity === undefined ? {} : { matrix: matrixIdentity }),
-            },
-          ];
-        })
+        const templateRef =
+          typeof agent.templateRef === "string" && agent.templateRef.length > 0
+            ? agent.templateRef
+            : undefined;
+        const toolInstanceIds = Array.isArray(agent.toolInstanceIds)
+          ? agent.toolInstanceIds.filter(
+              (entry): entry is string => typeof entry === "string" && entry.length > 0,
+            )
+          : undefined;
+        const isDefault = agent.default === true;
+        const model =
+          typeof agent.model === "string" && agent.model.length > 0 ? agent.model : undefined;
+        const botId =
+          typeof agent.botId === "string" && agent.botId.length > 0 ? agent.botId : undefined;
+        const botInstanceId =
+          typeof agent.botInstanceId === "string" && agent.botInstanceId.length > 0
+            ? agent.botInstanceId
+            : undefined;
+        return [
+          {
+            id: agent.id,
+            workspace: agent.workspace,
+            ...(isDefault ? { default: true } : {}),
+            ...(model === undefined ? {} : { model }),
+            ...(templateRef === undefined ? {} : { templateRef }),
+            ...(botId === undefined ? {} : { botId }),
+            ...(botInstanceId === undefined ? {} : { botInstanceId }),
+            ...(toolInstanceIds === undefined || toolInstanceIds.length === 0
+              ? {}
+              : { toolInstanceIds }),
+            ...(matrixIdentity === undefined ? {} : { matrix: matrixIdentity }),
+          },
+        ];
+      })
     : [];
   const openclawCrons = Array.isArray(openclawProfile.crons)
     ? openclawProfile.crons.flatMap((entry) => {
         if (
-          !isRecord(entry)
-          || typeof entry.id !== "string"
-          || entry.id.length === 0
-          || typeof entry.every !== "string"
-          || entry.every.length === 0
-          || typeof entry.agentId !== "string"
-          || entry.agentId.length === 0
+          !isRecord(entry) ||
+          typeof entry.id !== "string" ||
+          entry.id.length === 0 ||
+          typeof entry.every !== "string" ||
+          entry.every.length === 0 ||
+          typeof entry.agentId !== "string" ||
+          entry.agentId.length === 0
         ) {
           return [];
         }
@@ -359,23 +582,9 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
           },
         ];
       })
-    : isRecord(openclawProfile.cron)
-      && typeof openclawProfile.cron.id === "string"
-      && openclawProfile.cron.id.length > 0
-      && typeof openclawProfile.cron.every === "string"
-      && openclawProfile.cron.every.length > 0
-        ? [
-            {
-              id: openclawProfile.cron.id,
-              every: openclawProfile.cron.every,
-              agentId: MAIL_SENTINEL_AGENT_ID,
-              botId: MAIL_SENTINEL_AGENT_ID,
-            },
-          ]
-        : [];
+    : [];
   const openrouter = isRecord(parsed.openrouter) ? parsed.openrouter : {};
   const imap = isRecord(parsed.imap) ? parsed.imap : {};
-  const legacyMailSentinel = isRecord(parsed.mailSentinel) ? parsed.mailSentinel : {};
   const bots = isRecord(parsed.bots) ? parsed.bots : {};
   const botConfig = isRecord(bots.config)
     ? Object.fromEntries(
@@ -386,33 +595,110 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
           }
           const configEntries = Object.entries(value).filter(
             (entry): entry is [string, BotConfigValue] =>
-              typeof entry[0] === "string"
-              && entry[0].length > 0
-              && (
-                typeof entry[1] === "string"
-                || typeof entry[1] === "number"
-                || typeof entry[1] === "boolean"
-              ),
+              typeof entry[0] === "string" &&
+              entry[0].length > 0 &&
+              (typeof entry[1] === "string" ||
+                typeof entry[1] === "number" ||
+                typeof entry[1] === "boolean"),
           );
           return [[botId, Object.fromEntries(configEntries)]];
         }),
       )
     : {};
+  const botInstances = Array.isArray(bots.instances)
+    ? bots.instances.flatMap((entry): RuntimeBotInstance[] => {
+        if (
+          !isRecord(entry) ||
+          typeof entry.id !== "string" ||
+          entry.id.length === 0 ||
+          typeof entry.packageId !== "string" ||
+          entry.packageId.length === 0
+        ) {
+          return [];
+        }
+        const config = isRecord(entry.config)
+          ? Object.fromEntries(
+              Object.entries(entry.config).filter(
+                (pair): pair is [string, BotConfigValue] =>
+                  typeof pair[0] === "string" &&
+                  pair[0].length > 0 &&
+                  (typeof pair[1] === "string" ||
+                    typeof pair[1] === "number" ||
+                    typeof pair[1] === "boolean"),
+              ),
+            )
+          : {};
+        const secretRefs = isRecord(entry.secretRefs)
+          ? Object.fromEntries(
+              Object.entries(entry.secretRefs).filter(
+                (pair): pair is [string, string] =>
+                  typeof pair[0] === "string" &&
+                  pair[0].length > 0 &&
+                  typeof pair[1] === "string" &&
+                  pair[1].length > 0,
+              ),
+            )
+          : {};
+        const matrixEntry = isRecord(entry.matrix) ? entry.matrix : {};
+        const alertRoomEntry = isRecord(matrixEntry.alertRoom) ? matrixEntry.alertRoom : {};
+        const allowedUsers = Array.isArray(matrixEntry.allowedUsers)
+          ? matrixEntry.allowedUsers.filter(
+              (item): item is string => typeof item === "string" && item.length > 0,
+            )
+          : [];
+        return [
+          {
+            id: entry.id,
+            packageId: entry.packageId,
+            workspace:
+              typeof entry.workspace === "string" && entry.workspace.length > 0
+                ? entry.workspace
+                : join("/var/lib/sovereign-node", entry.id, "workspace"),
+            config,
+            secretRefs,
+            ...(!isRecord(entry.matrix) && allowedUsers.length === 0
+              ? {}
+              : {
+                  matrix: {
+                    ...(typeof matrixEntry.localpart === "string" &&
+                    matrixEntry.localpart.length > 0
+                      ? { localpart: matrixEntry.localpart }
+                      : {}),
+                    ...(typeof alertRoomEntry.roomId === "string" &&
+                    alertRoomEntry.roomId.length > 0
+                      ? {
+                          alertRoom: {
+                            roomId: alertRoomEntry.roomId,
+                            roomName:
+                              typeof alertRoomEntry.roomName === "string" &&
+                              alertRoomEntry.roomName.length > 0
+                                ? alertRoomEntry.roomName
+                                : "Sovereign Alerts",
+                          },
+                        }
+                      : {}),
+                    ...(allowedUsers.length === 0 ? {} : { allowedUsers }),
+                  },
+                }),
+          },
+        ];
+      })
+    : [];
   const templates = isRecord(parsed.templates) ? parsed.templates : {};
   const templateInstalledEntries = Array.isArray(templates.installed)
     ? templates.installed.flatMap((entry) => {
         if (
-          !isRecord(entry)
-          || (entry.kind !== "agent" && entry.kind !== "tool")
-          || typeof entry.id !== "string"
-          || entry.id.length === 0
-          || typeof entry.version !== "string"
-          || entry.version.length === 0
-          || typeof entry.description !== "string"
-          || typeof entry.keyId !== "string"
-          || entry.keyId.length === 0
-          || typeof entry.manifestSha256 !== "string"
-          || entry.manifestSha256.length === 0
+          !isRecord(entry) ||
+          (entry.kind !== "agent" && entry.kind !== "tool") ||
+          typeof entry.id !== "string" ||
+          entry.id.length === 0 ||
+          typeof entry.version !== "string" ||
+          entry.version.length === 0 ||
+          typeof entry.description !== "string" ||
+          typeof entry.keyId !== "string" ||
+          entry.keyId.length === 0 ||
+          typeof entry.manifestSha256 !== "string" ||
+          entry.manifestSha256.length === 0
         ) {
           return [];
         }
@@ -431,7 +717,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
               typeof entry.installedAt === "string" && entry.installedAt.length > 0
                 ? entry.installedAt
                 : now(),
-            source: entry.source === "bot-repo" ? "bot-repo" as const : "core" as const,
+            source: entry.source === "bot-repo" ? ("bot-repo" as const) : ("core" as const),
           },
         ];
       })
@@ -440,11 +726,11 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
   const sovereignToolInstances = Array.isArray(sovereignTools.instances)
     ? sovereignTools.instances.flatMap((entry) => {
         if (
-          !isRecord(entry)
-          || typeof entry.id !== "string"
-          || entry.id.length === 0
-          || typeof entry.templateRef !== "string"
-          || entry.templateRef.length === 0
+          !isRecord(entry) ||
+          typeof entry.id !== "string" ||
+          entry.id.length === 0 ||
+          typeof entry.templateRef !== "string" ||
+          entry.templateRef.length === 0
         ) {
           return [];
         }
@@ -457,10 +743,10 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
           ? Object.fromEntries(
               Object.entries(entry.config).filter(
                 (pair): pair is [string, string] =>
-                  typeof pair[0] === "string"
-                  && pair[0].length > 0
-                  && typeof pair[1] === "string"
-                  && pair[1].length > 0,
+                  typeof pair[0] === "string" &&
+                  pair[0].length > 0 &&
+                  typeof pair[1] === "string" &&
+                  pair[1].length > 0,
               ),
             )
           : {};
@@ -468,10 +754,10 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
           ? Object.fromEntries(
               Object.entries(entry.secretRefs).filter(
                 (pair): pair is [string, string] =>
-                  typeof pair[0] === "string"
-                  && pair[0].length > 0
-                  && typeof pair[1] === "string"
-                  && pair[1].length > 0,
+                  typeof pair[0] === "string" &&
+                  pair[0].length > 0 &&
+                  typeof pair[1] === "string" &&
+                  pair[1].length > 0,
               ),
             )
           : {};
@@ -494,6 +780,229 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
         ];
       })
     : [];
+  const hostResources = isRecord(parsed.hostResources) ? parsed.hostResources : {};
+  const compiledHostResources: CompiledHostResource[] = [];
+  const parseHostChecks = (value: unknown): CompiledHostResourceCheck[] => {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    const parsedChecks: CompiledHostResourceCheck[] = [];
+    for (const check of value) {
+      if (!isRecord(check) || typeof check.kind !== "string" || typeof check.id !== "string") {
+        continue;
+      }
+      if (check.kind === "field-threshold" && typeof check.field === "string") {
+        const parsedCheck: CompiledHostResourceCheck = {
+          kind: "field-threshold",
+          id: check.id,
+          field: check.field,
+          ...(typeof check.warnGte === "number" ? { warnGte: check.warnGte } : {}),
+          ...(typeof check.failGte === "number" ? { failGte: check.failGte } : {}),
+        };
+        parsedChecks.push(parsedCheck);
+        continue;
+      }
+      if (
+        check.kind === "resource-state" &&
+        (check.property === "present" ||
+          check.property === "enabled" ||
+          check.property === "active" ||
+          check.property === "absent") &&
+        (typeof check.equals === "boolean" || typeof check.equals === "string") &&
+        (check.severity === "warn" || check.severity === "fail")
+      ) {
+        parsedChecks.push({
+          kind: "resource-state",
+          id: check.id,
+          property: check.property,
+          equals: check.equals,
+          severity: check.severity,
+        });
+      }
+    }
+    return parsedChecks;
+  };
+  const parseStatusFields = (
+    value: unknown,
+  ): Record<
+    string,
+    {
+      path: string;
+      type: "string" | "int" | "boolean" | "timestamp" | "object";
+      default?: string | number | boolean | undefined;
+    }
+  > | null => {
+    if (!isRecord(value)) {
+      return null;
+    }
+    const parsedFields: Record<
+      string,
+      {
+        path: string;
+        type: "string" | "int" | "boolean" | "timestamp" | "object";
+        default?: string | number | boolean | undefined;
+      }
+    > = {};
+    for (const [fieldName, fieldValue] of Object.entries(value)) {
+      if (
+        !isRecord(fieldValue) ||
+        typeof fieldValue.path !== "string" ||
+        (fieldValue.type !== "string" &&
+          fieldValue.type !== "int" &&
+          fieldValue.type !== "boolean" &&
+          fieldValue.type !== "timestamp" &&
+          fieldValue.type !== "object")
+      ) {
+        continue;
+      }
+      parsedFields[fieldName] = {
+        path: fieldValue.path,
+        type: fieldValue.type,
+        ...(typeof fieldValue.default === "string" ||
+        typeof fieldValue.default === "number" ||
+        typeof fieldValue.default === "boolean"
+          ? { default: fieldValue.default }
+          : {}),
+      };
+    }
+    return parsedFields;
+  };
+  if (Array.isArray(hostResources.resources)) {
+    for (const entry of hostResources.resources) {
+      if (!isRecord(entry) || typeof entry.id !== "string" || typeof entry.botId !== "string") {
+        continue;
+      }
+      const agentId =
+        typeof entry.agentId === "string" && entry.agentId.length > 0 ? entry.agentId : entry.botId;
+      const checks = parseHostChecks(entry.checks);
+      if (entry.kind === "directory" && typeof entry.path === "string") {
+        compiledHostResources.push({
+          id: entry.id,
+          botId: entry.botId,
+          agentId,
+          kind: "directory",
+          path: entry.path,
+          ...(typeof entry.mode === "string" ? { mode: entry.mode } : {}),
+          ...(typeof entry.owner === "string" ? { owner: entry.owner } : {}),
+          ...(typeof entry.group === "string" ? { group: entry.group } : {}),
+          checks,
+        });
+        continue;
+      }
+      if (
+        (entry.kind === "managedFile" || entry.kind === "stateFile") &&
+        typeof entry.path === "string" &&
+        typeof entry.content === "string" &&
+        (entry.writePolicy === "always" || entry.writePolicy === "ifMissing")
+      ) {
+        const statusFields = parseStatusFields(entry.statusFields);
+        compiledHostResources.push({
+          id: entry.id,
+          botId: entry.botId,
+          agentId,
+          kind: entry.kind,
+          path: entry.path,
+          content: entry.content,
+          ...(typeof entry.mode === "string" ? { mode: entry.mode } : {}),
+          ...(typeof entry.owner === "string" ? { owner: entry.owner } : {}),
+          ...(typeof entry.group === "string" ? { group: entry.group } : {}),
+          writePolicy: entry.writePolicy,
+          ...(statusFields === null || Object.keys(statusFields).length === 0
+            ? {}
+            : { statusFields }),
+          checks,
+        });
+        continue;
+      }
+      if (
+        (entry.kind === "systemdService" || entry.kind === "systemdTimer") &&
+        typeof entry.name === "string" &&
+        typeof entry.content === "string" &&
+        isRecord(entry.desiredState) &&
+        typeof entry.desiredState.enabled === "boolean" &&
+        typeof entry.desiredState.active === "boolean"
+      ) {
+        compiledHostResources.push({
+          id: entry.id,
+          botId: entry.botId,
+          agentId,
+          kind: entry.kind,
+          name: entry.name,
+          content: entry.content,
+          desiredState: {
+            enabled: entry.desiredState.enabled,
+            active: entry.desiredState.active,
+          },
+          checks,
+        });
+        continue;
+      }
+      if (
+        entry.kind === "openclawCron" &&
+        (entry.desiredState === "present" || entry.desiredState === "absent") &&
+        isRecord(entry.match)
+      ) {
+        compiledHostResources.push({
+          id: entry.id,
+          botId: entry.botId,
+          agentId,
+          kind: "openclawCron",
+          desiredState: entry.desiredState,
+          match: {
+            ...(typeof entry.match.id === "string" ? { id: entry.match.id } : {}),
+            ...(typeof entry.match.name === "string" ? { name: entry.match.name } : {}),
+            ...(typeof entry.match.agentId === "string" ? { agentId: entry.match.agentId } : {}),
+          },
+          ...(entry.desiredState === "present" &&
+          isRecord(entry.spec) &&
+          typeof entry.spec.id === "string" &&
+          typeof entry.spec.agentId === "string" &&
+          typeof entry.spec.every === "string" &&
+          typeof entry.spec.message === "string"
+            ? {
+                spec: {
+                  id: entry.spec.id,
+                  agentId: entry.spec.agentId,
+                  every: entry.spec.every,
+                  session: entry.spec.session === "isolated" ? "isolated" : "isolated",
+                  message: entry.spec.message,
+                  ...(typeof entry.spec.announceRoomId === "string"
+                    ? { announceRoomId: entry.spec.announceRoomId }
+                    : {}),
+                },
+              }
+            : {}),
+          checks,
+        });
+      }
+    }
+  }
+  const compiledBotStatus: CompiledBotStatus[] = [];
+  if (Array.isArray(hostResources.botStatus)) {
+    for (const entry of hostResources.botStatus) {
+      if (
+        !isRecord(entry) ||
+        typeof entry.botId !== "string" ||
+        typeof entry.resourceId !== "string" ||
+        typeof entry.path !== "string"
+      ) {
+        continue;
+      }
+      const agentId =
+        typeof entry.agentId === "string" && entry.agentId.length > 0 ? entry.agentId : entry.botId;
+      const fields = parseStatusFields(entry.fields);
+      if (fields === null) {
+        continue;
+      }
+      compiledBotStatus.push({
+        botId: entry.botId,
+        agentId,
+        resourceId: entry.resourceId,
+        path: entry.path,
+        fields,
+      });
+    }
+  }
   const relay = isRecord(parsed.relay) ? parsed.relay : {};
   const operator = isRecord(matrix.operator) ? matrix.operator : {};
   const homeserverDomain =
@@ -509,34 +1018,33 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
       ? matrix.onboardingStatePath
       : undefined;
   const inferredImapConfigured =
-    typeof imap.host === "string"
-    && imap.host.length > 0
-    && imap.host !== "pending"
-    && typeof imap.secretRef === "string"
-    && imap.secretRef.length > 0;
+    typeof imap.host === "string" &&
+    imap.host.length > 0 &&
+    imap.host !== "pending" &&
+    typeof imap.secretRef === "string" &&
+    imap.secretRef.length > 0;
   const relayTunnel = isRecord(relay.tunnel) ? relay.tunnel : {};
-  const accessMode =
-    matrix.accessMode === "relay" || relay.enabled === true ? "relay" : "direct";
+  const accessMode = matrix.accessMode === "relay" || relay.enabled === true ? "relay" : "direct";
   const relayConfig =
-    relay.enabled === true
-    && typeof relay.controlUrl === "string"
-    && relay.controlUrl.length > 0
-    && typeof relay.hostname === "string"
-    && relay.hostname.length > 0
-    && typeof relay.publicBaseUrl === "string"
-    && relay.publicBaseUrl.length > 0
-    && typeof relay.serviceName === "string"
-    && relay.serviceName.length > 0
-    && typeof relay.configPath === "string"
-    && relay.configPath.length > 0
-    && typeof relayTunnel.serverAddr === "string"
-    && relayTunnel.serverAddr.length > 0
-    && typeof relayTunnel.serverPort === "number"
-    && Number.isFinite(relayTunnel.serverPort)
-    && typeof relayTunnel.tokenSecretRef === "string"
-    && relayTunnel.tokenSecretRef.length > 0
-    && typeof relayTunnel.proxyName === "string"
-    && relayTunnel.proxyName.length > 0
+    relay.enabled === true &&
+    typeof relay.controlUrl === "string" &&
+    relay.controlUrl.length > 0 &&
+    typeof relay.hostname === "string" &&
+    relay.hostname.length > 0 &&
+    typeof relay.publicBaseUrl === "string" &&
+    relay.publicBaseUrl.length > 0 &&
+    typeof relay.serviceName === "string" &&
+    relay.serviceName.length > 0 &&
+    typeof relay.configPath === "string" &&
+    relay.configPath.length > 0 &&
+    typeof relayTunnel.serverAddr === "string" &&
+    relayTunnel.serverAddr.length > 0 &&
+    typeof relayTunnel.serverPort === "number" &&
+    Number.isFinite(relayTunnel.serverPort) &&
+    typeof relayTunnel.tokenSecretRef === "string" &&
+    relayTunnel.tokenSecretRef.length > 0 &&
+    typeof relayTunnel.proxyName === "string" &&
+    relayTunnel.proxyName.length > 0
       ? {
           enabled: true,
           controlUrl: relay.controlUrl,
@@ -572,10 +1080,9 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
         typeof openclaw.managedInstallation === "boolean" ? openclaw.managedInstallation : true,
       installMethod:
         openclaw.installMethod === "install_sh" ? openclaw.installMethod : "install_sh",
-      requestedVersion:
-        resolveRequestedOpenClawVersion(
-          typeof openclaw.requestedVersion === "string" ? openclaw.requestedVersion : undefined,
-        ),
+      requestedVersion: resolveRequestedOpenClawVersion(
+        typeof openclaw.requestedVersion === "string" ? openclaw.requestedVersion : undefined,
+      ),
       openclawHome,
       runtimeConfigPath,
       runtimeProfilePath,
@@ -601,6 +1108,9 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
             )
           : ["matrix"],
       },
+      session: {
+        dmScope: openclawDmScope,
+      },
       agents: openclawAgents,
       crons: openclawCrons,
       ...(openclawCrons[0] === undefined
@@ -621,16 +1131,11 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
             : "pending",
       host: typeof imap.host === "string" && imap.host.length > 0 ? imap.host : "unknown",
       port:
-        typeof imap.port === "number" && Number.isFinite(imap.port)
-          ? Math.trunc(imap.port)
-          : 993,
+        typeof imap.port === "number" && Number.isFinite(imap.port) ? Math.trunc(imap.port) : 993,
       tls: typeof imap.tls === "boolean" ? imap.tls : true,
       username:
-        typeof imap.username === "string" && imap.username.length > 0
-          ? imap.username
-          : "pending",
-      mailbox:
-        typeof imap.mailbox === "string" && imap.mailbox.length > 0 ? imap.mailbox : "INBOX",
+        typeof imap.username === "string" && imap.username.length > 0 ? imap.username : "pending",
+      mailbox: typeof imap.mailbox === "string" && imap.mailbox.length > 0 ? imap.mailbox : "INBOX",
       secretRef:
         typeof imap.secretRef === "string" && imap.secretRef.length > 0
           ? imap.secretRef
@@ -653,12 +1158,11 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
         ...(typeof operator.localpart === "string" && operator.localpart.length > 0
           ? { localpart: operator.localpart }
           : {}),
-        ...(typeof operator.passwordSecretRef === "string"
-          && operator.passwordSecretRef.length > 0
+        ...(typeof operator.passwordSecretRef === "string" && operator.passwordSecretRef.length > 0
           ? { passwordSecretRef: operator.passwordSecretRef }
           : {}),
-        ...(typeof operator.accessTokenSecretRef === "string"
-          && operator.accessTokenSecretRef.length > 0
+        ...(typeof operator.accessTokenSecretRef === "string" &&
+        operator.accessTokenSecretRef.length > 0
           ? { accessTokenSecretRef: operator.accessTokenSecretRef }
           : {}),
       },
@@ -685,38 +1189,22 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
     },
     ...(relayConfig === undefined ? {} : { relay: relayConfig }),
     bots: {
-      config: Object.keys(botConfig).length > 0
-        ? botConfig
-        : (
-            legacyMailSentinel.pollInterval !== undefined
-            || legacyMailSentinel.lookbackWindow !== undefined
-            || legacyMailSentinel.e2eeAlertRoom !== undefined
-          )
-          ? {
-              [MAIL_SENTINEL_AGENT_ID]: {
-                pollInterval:
-                  typeof legacyMailSentinel.pollInterval === "string"
-                  && legacyMailSentinel.pollInterval.length > 0
-                    ? legacyMailSentinel.pollInterval
-                    : "5m",
-                lookbackWindow:
-                  typeof legacyMailSentinel.lookbackWindow === "string"
-                  && legacyMailSentinel.lookbackWindow.length > 0
-                    ? legacyMailSentinel.lookbackWindow
-                    : "15m",
-                e2eeAlertRoom:
-                  typeof legacyMailSentinel.e2eeAlertRoom === "boolean"
-                    ? legacyMailSentinel.e2eeAlertRoom
-                    : false,
-              },
-            }
-          : {},
+      config: botConfig,
+      instances: botInstances,
     },
     templates: {
       installed: templateInstalledEntries,
     },
     sovereignTools: {
       instances: sovereignToolInstances,
+    },
+    hostResources: {
+      planPath:
+        typeof hostResources.planPath === "string" && hostResources.planPath.length > 0
+          ? hostResources.planPath
+          : DEFAULT_HOST_RESOURCES_PLAN_FILE,
+      resources: compiledHostResources,
+      botStatus: compiledBotStatus,
     },
   };
 };
@@ -832,40 +1320,37 @@ const sanitizeManagedWorkspace = (value: string | undefined, fallback: string): 
 
 const sanitizeManagedAgentLocalpart = (value: string | undefined, fallback: string): string => {
   const candidate = value?.trim().toLowerCase() ?? fallback;
-  const normalized = candidate
-    .replace(/[^a-z0-9._=+\-/]/g, "_")
-    .replace(/^_+|_+$/g, "");
+  const normalized = candidate.replace(/[^a-z0-9._=+\-/]/g, "_").replace(/^_+|_+$/g, "");
   return normalized.length > 0 ? normalized : fallback;
 };
 
 const sanitizeMatrixLocalpartFromAgentId = (agentId: string): string =>
   sanitizeManagedAgentLocalpart(agentId, "agent-bot");
 
-const generateAgentPassword = (): string =>
-  randomBytes(24).toString("base64url");
+const generateAgentPassword = (): string => randomBytes(24).toString("base64url");
 
 const areMatrixIdentitiesEqual = (
   left:
     | {
-      localpart: string;
-      userId: string;
-      passwordSecretRef?: string;
-      accessTokenSecretRef?: string;
-    }
+        localpart: string;
+        userId: string;
+        passwordSecretRef?: string;
+        accessTokenSecretRef?: string;
+      }
     | undefined,
   right:
     | {
-      localpart: string;
-      userId: string;
-      passwordSecretRef?: string;
-      accessTokenSecretRef?: string;
-    }
+        localpart: string;
+        userId: string;
+        passwordSecretRef?: string;
+        accessTokenSecretRef?: string;
+      }
     | undefined,
 ): boolean =>
-  left?.localpart === right?.localpart
-  && left?.userId === right?.userId
-  && left?.passwordSecretRef === right?.passwordSecretRef
-  && left?.accessTokenSecretRef === right?.accessTokenSecretRef;
+  left?.localpart === right?.localpart &&
+  left?.userId === right?.userId &&
+  left?.passwordSecretRef === right?.passwordSecretRef &&
+  left?.accessTokenSecretRef === right?.accessTokenSecretRef;
 
 const isAlreadyJoinedOrInvitedRoomError = (status: number, body: unknown): boolean => {
   if (status !== 400 && status !== 403 && status !== 409) {
@@ -875,9 +1360,7 @@ const isAlreadyJoinedOrInvitedRoomError = (status: number, body: unknown): boole
   return /already in the room|is already in the room|already joined|already invited/.test(text);
 };
 
-const ensureCoreManagedAgents = (
-  agents: RuntimeAgentEntry[],
-): RuntimeAgentEntry[] => {
+const ensureCoreManagedAgents = (agents: RuntimeAgentEntry[]): RuntimeAgentEntry[] => {
   const byId = new Map<string, RuntimeAgentEntry>();
   for (const entry of agents) {
     if (entry.id.trim().length === 0 || entry.workspace.trim().length === 0) {
@@ -886,29 +1369,49 @@ const ensureCoreManagedAgents = (
     byId.set(entry.id, {
       id: entry.id,
       workspace: entry.workspace,
+      ...(entry.default === true ? { default: true } : {}),
+      ...(entry.model === undefined ? {} : { model: entry.model }),
       ...(entry.templateRef === undefined ? {} : { templateRef: entry.templateRef }),
       ...(entry.botId === undefined ? {} : { botId: entry.botId }),
+      ...(entry.botInstanceId === undefined ? {} : { botInstanceId: entry.botInstanceId }),
       ...(entry.toolInstanceIds === undefined || entry.toolInstanceIds.length === 0
         ? {}
         : { toolInstanceIds: entry.toolInstanceIds }),
       ...(entry.matrix === undefined ? {} : { matrix: entry.matrix }),
     });
   }
-  return Array.from(byId.keys()).sort((left, right) => left.localeCompare(right))
-    .map((id) => byId.get(id))
+  const orderedIds = Array.from(byId.keys()).sort((left, right) => left.localeCompare(right));
+  const resolvedDefaultAgentId =
+    Array.from(byId.values()).find((entry) => entry.default === true)?.id ??
+    (byId.has(NODE_OPERATOR_AGENT_ID) ? NODE_OPERATOR_AGENT_ID : orderedIds[0]);
+  return orderedIds
+    .map((id) => {
+      const entry = byId.get(id);
+      if (entry === undefined) {
+        return undefined;
+      }
+      return {
+        ...entry,
+        ...(id === resolvedDefaultAgentId ? { default: true } : {}),
+      };
+    })
     .filter((entry): entry is RuntimeAgentEntry => entry !== undefined);
 };
 
 const isRateLimitedMatrixLoginFailure = (error: unknown): boolean => {
-  if (!isStructuredError(error) || error.code !== "MATRIX_LOGIN_FAILED" || !isRecord(error.details)) {
+  if (
+    !isStructuredError(error) ||
+    error.code !== "MATRIX_LOGIN_FAILED" ||
+    !isRecord(error.details)
+  ) {
     return false;
   }
   if (error.details.status === 429) {
     return true;
   }
   return (
-    typeof error.details.body === "string"
-    && /m_limit_exceeded|too many requests/i.test(error.details.body)
+    typeof error.details.body === "string" &&
+    /m_limit_exceeded|too many requests/i.test(error.details.body)
   );
 };
 
@@ -969,14 +1472,14 @@ const deriveOpenClawHealth = (input: {
 
 const parseGatewayState = (value: string): GatewayState => {
   const normalized = value.toLowerCase();
-  if (/running|active/.test(normalized)) {
-    return "running";
-  }
-  if (/inactive|stopped|dead/.test(normalized)) {
-    return "stopped";
-  }
   if (/failed|error/.test(normalized)) {
     return "failed";
+  }
+  if (/\binactive\b|\bstopped\b|\bdead\b/.test(normalized)) {
+    return "stopped";
+  }
+  if (/\brunning\b|\bactive\b/.test(normalized)) {
+    return "running";
   }
   return "unknown";
 };
@@ -993,8 +1496,7 @@ const textContainsId = (value: string, id: string): boolean => {
   return regex.test(value);
 };
 
-const escapeRegExp = (value: string): string =>
-  value.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const escapeRegExp = (value: string): string => value.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const parseEnvFile = (raw: string): Record<string, string> => {
   const out: Record<string, string> = {};
@@ -1033,9 +1535,9 @@ const isGatewayUserSystemdUnavailableError = (error: unknown): boolean => {
   if (isRecord(error)) {
     if (typeof error.code === "string") {
       gatewayCommandFailure =
-        error.code === "OPENCLAW_GATEWAY_INSTALL_FAILED"
-        || error.code === "OPENCLAW_GATEWAY_START_FAILED"
-        || error.code === "OPENCLAW_GATEWAY_RESTART_FAILED";
+        error.code === "OPENCLAW_GATEWAY_INSTALL_FAILED" ||
+        error.code === "OPENCLAW_GATEWAY_START_FAILED" ||
+        error.code === "OPENCLAW_GATEWAY_RESTART_FAILED";
     }
 
     if (typeof error.message === "string") {
@@ -1057,9 +1559,7 @@ const isGatewayUserSystemdUnavailableError = (error: unknown): boolean => {
     return false;
   }
 
-  return /systemctl --user unavailable|failed to connect to bus|no medium found/i.test(
-    combined,
-  );
+  return /systemctl --user unavailable|failed to connect to bus|no medium found/i.test(combined);
 };
 
 const isMailSentinelGatewayUnavailableError = (error: unknown): boolean => {
@@ -1099,9 +1599,9 @@ const isAlreadyExistsOutput = (value: string): boolean =>
 
 const isCoreAgentBindingBestEffortSkippable = (error: unknown): boolean => {
   if (
-    !isRecord(error)
-    || (error.code !== "MAIL_SENTINEL_REGISTER_FAILED"
-      && error.code !== "MANAGED_AGENT_REGISTER_FAILED")
+    !isRecord(error) ||
+    (error.code !== "MAIL_SENTINEL_REGISTER_FAILED" &&
+      error.code !== "MANAGED_AGENT_REGISTER_FAILED")
   ) {
     return false;
   }
@@ -1215,8 +1715,8 @@ const buildSuggestedCommands = (input: {
   }
   if (input.wiringCheck.status !== "pass") {
     const runtimeConfigPath =
-      input.runtimeConfig?.openclaw.runtimeConfigPath
-      ?? "/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5";
+      input.runtimeConfig?.openclaw.runtimeConfigPath ??
+      "/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5";
     commands.push(`ls -l ${runtimeConfigPath}`);
   }
   if (!input.agentPresent || !input.cronPresent) {
@@ -1262,13 +1762,11 @@ const describeError = (error: unknown): string => {
 };
 
 const stripSingleTrailingNewline = (value: string): string =>
-  value.endsWith("\r\n")
-    ? value.slice(0, -2)
-    : value.endsWith("\n")
-      ? value.slice(0, -1)
-      : value;
+  value.endsWith("\r\n") ? value.slice(0, -2) : value.endsWith("\n") ? value.slice(0, -1) : value;
 
-const normalizeTestAlertError = (error: unknown): {
+const normalizeTestAlertError = (
+  error: unknown,
+): {
   code: string;
   message: string;
   retryable: boolean;
@@ -1309,9 +1807,9 @@ const isStructuredError = (
   }
 
   return (
-    typeof value.code === "string"
-    && typeof value.message === "string"
-    && typeof value.retryable === "boolean"
+    typeof value.code === "string" &&
+    typeof value.message === "string" &&
+    typeof value.retryable === "boolean"
   );
 };
 

@@ -4,8 +4,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { RuntimeConfig } from "../installer/real-service-shared.js";
 import type { ImapClientLike } from "../system/imap-client.js";
 import {
-  ImapReadonlyToolService,
   buildImapSearchQuery,
+  ImapReadonlyToolService,
   normalizeImapSearchQuery,
 } from "./imap-readonly.js";
 
@@ -13,7 +13,7 @@ const TEST_SECRET_ENV = "SOVEREIGN_TEST_IMAP_PASSWORD";
 
 const buildRuntimeConfig = (secretRef: string): RuntimeConfig => ({
   openrouter: {
-    model: "openai/gpt-5-nano",
+    model: "qwen/qwen3.5-9b",
     apiKeySecretRef: "env:OPENROUTER_API_KEY",
   },
   openclaw: {
@@ -45,19 +45,15 @@ const buildRuntimeConfig = (secretRef: string): RuntimeConfig => ({
     mailbox: "INBOX",
     secretRef,
   },
-  mailSentinel: {
-    pollInterval: "5m",
-    lookbackWindow: "15m",
-    e2eeAlertRoom: false,
-  },
   bots: {
     config: {
       "mail-sentinel": {
-        pollInterval: "5m",
-        lookbackWindow: "15m",
+        pollInterval: "30m",
+        lookbackWindow: "1h",
         e2eeAlertRoom: false,
       },
     },
+    instances: [],
   },
   matrix: {
     accessMode: "relay",
@@ -132,12 +128,13 @@ afterEach(() => {
 
 describe("imap-readonly tool service", () => {
   it("builds field-aware IMAP search queries", () => {
-    expect(buildImapSearchQuery("from:alerts@example.org subject:\"Quarterly Report\" is:unseen"))
-      .toEqual({
-        from: "alerts@example.org",
-        subject: "Quarterly Report",
-        seen: false,
-      });
+    expect(
+      buildImapSearchQuery('from:alerts@example.org subject:"Quarterly Report" is:unseen'),
+    ).toEqual({
+      from: "alerts@example.org",
+      subject: "Quarterly Report",
+      seen: false,
+    });
   });
 
   it("normalizes a redundant mailbox prefix in IMAP search queries", () => {
@@ -212,7 +209,7 @@ describe("imap-readonly tool service", () => {
 
     const result = await service.searchMail({
       instanceId: "mail-sentinel-imap",
-      query: "subject:\"Quarterly Report\" is:unseen",
+      query: 'subject:"Quarterly Report" is:unseen',
       limit: 5,
     });
 
@@ -290,7 +287,7 @@ describe("imap-readonly tool service", () => {
         "Message-ID: <bridge-test@example.org>",
         "Date: Fri, 06 Mar 2026 10:00:00 +0000",
         "MIME-Version: 1.0",
-        "Content-Type: multipart/mixed; boundary=\"boundary42\"",
+        'Content-Type: multipart/mixed; boundary="boundary42"',
         "",
         "--boundary42",
         "Content-Type: text/plain; charset=utf-8",
@@ -299,7 +296,7 @@ describe("imap-readonly tool service", () => {
         "",
         "--boundary42",
         "Content-Type: application/pdf",
-        "Content-Disposition: attachment; filename=\"report.pdf\"",
+        'Content-Disposition: attachment; filename="report.pdf"',
         "Content-Transfer-Encoding: base64",
         "",
         "SGVsbG8=",

@@ -44,4 +44,3 @@ export const registerLogsCommand = (program: Command): void => {
       }
     });
 };
-

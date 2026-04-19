@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag is on main
+        run: |
+          if ! git merge-base --is-ancestor "${{ github.sha }}" origin/main; then
+            echo "::error::Tag ${{ github.ref_name }} points to a commit not on main."
+            echo "Tags must be created from commits already merged to main (which have passed PR CI)."
+            exit 1
+          fi
+          echo "Tag ${{ github.ref_name }} (${{ github.sha }}) is reachable from main."
+
+      - name: Verify package.json version matches tag
+        run: |
+          TAG="${{ github.ref_name }}"
+          TAG_VERSION="${TAG#v}"
+          PKG_VERSION="$(jq -r .version package.json)"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match package.json version ($PKG_VERSION)."
+            exit 1
+          fi
+          echo "Tag version matches package.json: $PKG_VERSION"
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          PREV_TAG="$(git describe --tags --abbrev=0 --match='v[0-9]*.[0-9]*.[0-9]*' "${TAG}^" 2>/dev/null || true)"
+          if [ -z "$PREV_TAG" ]; then
+            RANGE="HEAD"
+            echo "No previous v-tag; including full history."
+          else
+            RANGE="${PREV_TAG}..HEAD"
+            echo "Including commits in ${PREV_TAG}..HEAD"
+          fi
+
+          # Collect commits grouped by Conventional Commits type.
+          awk_script='
+            BEGIN {
+              n_break=0; n_added=0; n_fixed=0; n_changed=0; n_docs=0; n_chore=0; n_other=0;
+            }
+            {
+              hash=$1
+              rest=$0; sub(/^[^ ]+ /,"",rest)
+              # Match Conventional Commits header: "type", "type(scope)", "type!", "type(scope)!".
+              if (match(rest, /^[a-zA-Z]+(\([^)]+\))?!?:/)) {
+                header=substr(rest,1,RLENGTH)
+                msg=substr(rest,RLENGTH+1); sub(/^ +/,"",msg)
+                is_breaking = (index(header,"!")>0) ? 1 : 0
+                type=header; sub(/[(!:].*/,"",type)
+                entry="- " msg " (" hash ")"
+                if (is_breaking==1) { breaks[n_break++]=entry }
+                if (type=="feat")      { added[n_added++]=entry }
+                else if (type=="fix")  { fixed[n_fixed++]=entry }
+                else if (type=="refactor" || type=="perf") { changed[n_changed++]=entry }
+                else if (type=="docs") { docs[n_docs++]=entry }
+                else if (type=="chore" || type=="ci" || type=="build" || type=="test" || type=="style") { chore[n_chore++]=entry }
+                else { other[n_other++]=entry }
+              } else {
+                other[n_other++]="- " rest " (" hash ")"
+              }
+            }
+            END {
+              if (n_break>0)   { print "### Breaking Changes"; for (i=0;i<n_break;i++)   print breaks[i];  print "" }
+              if (n_added>0)   { print "### Added";            for (i=0;i<n_added;i++)   print added[i];   print "" }
+              if (n_fixed>0)   { print "### Fixed";            for (i=0;i<n_fixed;i++)   print fixed[i];   print "" }
+              if (n_changed>0) { print "### Changed";          for (i=0;i<n_changed;i++) print changed[i]; print "" }
+              if (n_docs>0)    { print "### Docs";             for (i=0;i<n_docs;i++)    print docs[i];    print "" }
+              if (n_chore>0)   { print "### Internal";         for (i=0;i<n_chore;i++)   print chore[i];   print "" }
+              if (n_other>0)   { print "### Other";            for (i=0;i<n_other;i++)   print other[i];   print "" }
+            }
+          '
+          BODY="$(git log --no-merges --pretty='%h %s' $RANGE | awk "$awk_script")"
+          if [ -z "$BODY" ]; then
+            BODY="_No notable changes._"
+          fi
+
+          if [ -n "$PREV_TAG" ]; then
+            BODY="$(printf '%s\n\n**Full changelog:** https://github.com/%s/compare/%s...%s' \
+              "$BODY" "${{ github.repository }}" "$PREV_TAG" "$TAG")"
+          fi
+
+          {
+            echo "body<<CHANGELOG_EOF"
+            echo "$BODY"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body: ${{ steps.changelog.outputs.body }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: scripts/install.sh

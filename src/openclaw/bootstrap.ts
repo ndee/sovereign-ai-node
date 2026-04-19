@@ -1,5 +1,5 @@
-import { access, readFile } from "node:fs/promises";
-import { constants as fsConstants } from "node:fs";
+import { type Dirent, constants as fsConstants } from "node:fs";
+import { access, chmod, readdir, readFile, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 
@@ -16,9 +16,10 @@ const BUNDLED_OPENCLAW_EXTENSION_REPAIR_TARGETS = [
   },
 ] as const;
 
-// OpenClaw 2026.3.2 regressed Matrix plugin loading, so Sovereign stays on the
-// prior known-good release until the upstream fix is adopted.
-export const SOVEREIGN_PINNED_OPENCLAW_VERSION = "2026.3.1";
+// Sovereign pins a specific OpenClaw release to ensure stability.
+// 2026.3.13 includes health-monitor fixes for long-polling channels (Matrix),
+// cron isolated-session deadlock prevention, and numerous security patches.
+export const SOVEREIGN_PINNED_OPENCLAW_VERSION = "2026.3.13";
 export const SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS = "pinned-by-sovereign";
 
 export type OpenClawInstallOptions = {
@@ -37,7 +38,7 @@ export type DetectedOpenClaw = {
 export type OpenClawInstallInfo = {
   binaryPath: string;
   version: string;
-  installMethod: "install_sh";
+  installMethod: "install_sh" | "npm_fallback";
 };
 
 export interface OpenClawBootstrapper {
@@ -52,7 +53,7 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
   ) {}
 
   async detectInstalled(): Promise<DetectedOpenClaw | null> {
-    let result;
+    let result: Awaited<ReturnType<ExecRunner["run"]>>;
     try {
       result = await this.execRunner.run({
         command: "openclaw",
@@ -86,10 +87,10 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
     const installVersion = resolveInstallVersion(desiredVersion);
     const detected = await this.detectInstalled();
     if (
-      detected !== null
-      && !Boolean(opts.forceReinstall)
-      && (opts.skipIfCompatibleInstalled ?? true)
-      && versionsMatch(detected.version, desiredVersion)
+      detected !== null &&
+      !opts.forceReinstall &&
+      (opts.skipIfCompatibleInstalled ?? true) &&
+      versionsMatch(detected.version, desiredVersion)
     ) {
       await this.repairBundledExtensionRuntimeDependencies();
       this.logger.info(
@@ -133,16 +134,29 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
       },
     });
     if (installResult.exitCode !== 0) {
-      throw {
-        code: "OPENCLAW_INSTALL_FAILED",
-        message: "OpenClaw install.sh exited with a non-zero status",
-        retryable: true,
-        details: {
+      this.logger.warn(
+        {
           command: installResult.command,
           exitCode: installResult.exitCode,
           stderr: truncateText(installResult.stderr, 4000),
           stdout: truncateText(installResult.stdout, 2000),
         },
+        "OpenClaw install.sh failed; attempting direct npm fallback install",
+      );
+      await this.installViaDirectNpmFallback(desiredVersion);
+      const installed = await this.detectInstalled();
+      if (installed === null) {
+        throw {
+          code: "OPENCLAW_INSTALL_FAILED",
+          message: "OpenClaw install fallback completed but the openclaw CLI was not detected",
+          retryable: true,
+        };
+      }
+      await this.repairBundledExtensionRuntimeDependencies();
+      return {
+        binaryPath: installed.binaryPath,
+        version: installed.version,
+        installMethod: "npm_fallback",
       };
     }
 
@@ -183,6 +197,8 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
       return;
     }
 
+    await hardenBundledExtensionDirectories(packageRoot);
+
     for (const target of BUNDLED_OPENCLAW_EXTENSION_REPAIR_TARGETS) {
       const extensionDir = join(packageRoot, target.relativeDir);
       const repairPlan = await planBundledExtensionDependencyRepair(extensionDir);
@@ -194,9 +210,7 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
         {
           extension: repairPlan.packageName,
           extensionDir,
-          missingDependencies: repairPlan.missingDependencies.map(
-            (dependency) => dependency.name,
-          ),
+          missingDependencies: repairPlan.missingDependencies.map((dependency) => dependency.name),
         },
         "Repairing missing bundled OpenClaw extension runtime dependencies",
       );
@@ -256,12 +270,43 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
         {
           extension: repairPlan.packageName,
           extensionDir,
-          repairedDependencies: repairPlan.missingDependencies.map(
-            (dependency) => dependency.name,
-          ),
+          repairedDependencies: repairPlan.missingDependencies.map((dependency) => dependency.name),
         },
         "Bundled OpenClaw extension runtime dependencies repaired successfully",
       );
+    }
+  }
+
+  private async installViaDirectNpmFallback(desiredVersion: string): Promise<void> {
+    const installTarget =
+      desiredVersion === SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS
+        ? SOVEREIGN_PINNED_OPENCLAW_VERSION
+        : desiredVersion;
+    const cacheDir = process.env.NPM_CONFIG_CACHE ?? join(process.env.HOME ?? "/root", ".npm");
+    const installResult = await this.execRunner.run({
+      command: "npm",
+      args: ["install", "-g", `openclaw@${installTarget}`],
+      options: {
+        timeout: OPENCLAW_INSTALL_TIMEOUT_MS,
+        env: {
+          CI: "1",
+          HOME: process.env.HOME ?? "/root",
+          NPM_CONFIG_CACHE: cacheDir,
+        },
+      },
+    });
+    if (installResult.exitCode !== 0) {
+      throw {
+        code: "OPENCLAW_INSTALL_FAILED",
+        message: "OpenClaw direct npm fallback install exited with a non-zero status",
+        retryable: true,
+        details: {
+          command: installResult.command,
+          exitCode: installResult.exitCode,
+          stderr: truncateText(installResult.stderr, 4000),
+          stdout: truncateText(installResult.stdout, 2000),
+        },
+      };
     }
   }
 }
@@ -298,15 +343,19 @@ const buildInstallShellScript = (args: InstallShellArgs): string => {
   if (args.noPrompt) {
     installArgs.push("--no-prompt");
   }
+  const dollar = "$";
 
   return [
     "set -euo pipefail",
+    `if [ "$(id -u)" = "0" ] && [ -z "${dollar}{HOME:-}" ]; then export HOME=/root; fi`,
+    `export NPM_CONFIG_CACHE="${dollar}{NPM_CONFIG_CACHE:-${dollar}{HOME:-/root}/.npm}"`,
+    'mkdir -p "$NPM_CONFIG_CACHE"',
     "curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install.sh \\",
     `  | bash ${installArgs.map(shellQuote).join(" ")}`,
   ].join("\n");
 };
 
-const shellQuote = (value: string): string => `'${value.replaceAll("'", `'\"'\"'`)}'`;
+const shellQuote = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
 
 const parseVersionToken = (value: string): string | null => {
   const trimmed = value.trim();
@@ -346,12 +395,53 @@ const resolveInstalledOpenClawPackageRoot = async (
     try {
       await access(join(candidate, "package.json"), fsConstants.R_OK);
       return candidate;
-    } catch {
-      continue;
-    }
+    } catch {}
   }
 
   return null;
+};
+
+const hardenBundledExtensionDirectories = async (packageRoot: string): Promise<void> => {
+  const extensionsRoot = join(packageRoot, "extensions");
+  const queue = [extensionsRoot];
+
+  while (queue.length > 0) {
+    const currentPath = queue.shift();
+    if (currentPath === undefined) {
+      continue;
+    }
+
+    let info: Awaited<ReturnType<typeof stat>>;
+    try {
+      info = await stat(currentPath);
+    } catch {
+      continue;
+    }
+
+    const currentMode = info.mode & 0o777;
+    const hardenedMode = currentMode & ~0o022;
+    if (hardenedMode !== currentMode) {
+      await chmod(currentPath, hardenedMode);
+    }
+
+    if (!info.isDirectory()) {
+      continue;
+    }
+
+    let entries: Dirent[];
+    try {
+      entries = await readdir(currentPath, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) {
+        continue;
+      }
+      queue.push(join(currentPath, entry.name));
+    }
+  }
 };
 
 const planBundledExtensionDependencyRepair = async (
@@ -406,7 +496,11 @@ const findMissingExtensionDependencies = async (
 
 const isInstallableDependencySpec = (spec: string): boolean => {
   const trimmed = spec.trim();
-  return !trimmed.startsWith("file:") && !trimmed.startsWith("link:") && !trimmed.startsWith("workspace:");
+  return (
+    !trimmed.startsWith("file:") &&
+    !trimmed.startsWith("link:") &&
+    !trimmed.startsWith("workspace:")
+  );
 };
 
 const versionsMatch = (detectedVersion: string, requestedVersion: string): boolean => {

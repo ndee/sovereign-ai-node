@@ -61,4 +61,3 @@ export const registerTemplatesCommand = (program: Command, app: AppContainer): v
       }
     });
 };
-

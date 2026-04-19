@@ -5,6 +5,7 @@ import { createLogger } from "../logging/logger.js";
 import { ShellOpenClawBootstrapper } from "../openclaw/bootstrap.js";
 import { ShellOpenClawGatewayServiceManager } from "../openclaw/gateway-service.js";
 import { ShellOpenClawManagedAgentRegistrar } from "../openclaw/managed-agent.js";
+import { RealBackupService } from "../system/backup.js";
 import { ExecaExecRunner } from "../system/exec.js";
 import { SocketImapTester } from "../system/imap.js";
 import { DockerComposeBundledMatrixProvisioner } from "../system/matrix.js";
@@ -22,14 +23,8 @@ export const createApp = () => {
     DEFAULT_PATHS,
   );
   const preflightChecker = new ShellHostPreflightChecker(execRunner, logger);
-  const openclawGatewayServiceManager = new ShellOpenClawGatewayServiceManager(
-    execRunner,
-    logger,
-  );
-  const managedAgentRegistrar = new ShellOpenClawManagedAgentRegistrar(
-    execRunner,
-    logger,
-  );
+  const openclawGatewayServiceManager = new ShellOpenClawGatewayServiceManager(execRunner, logger);
+  const managedAgentRegistrar = new ShellOpenClawManagedAgentRegistrar(execRunner, logger);
   const botCatalog = new FilesystemBotCatalog();
 
   return {
@@ -45,6 +40,7 @@ export const createApp = () => {
       matrixProvisioner,
       execRunner,
     }),
+    backupService: new RealBackupService(execRunner, logger, DEFAULT_PATHS),
   };
 };
 
