@@ -107,6 +107,11 @@ import {
   type JobRunnerSnapshot,
 } from "./job-runner.js";
 import {
+  renderGuardedJsonStateWorkspacePluginConfig as renderGuardedJsonStateWorkspacePluginConfigFile,
+  renderGuardedJsonStateWorkspacePluginManifest as renderGuardedJsonStateWorkspacePluginManifestFile,
+} from "./real-service-guarded-json-state-plugin.js";
+import { ensureLobsterCliInstalled } from "./real-service-lobster.js";
+import {
   areMatrixIdentitiesEqual,
   areStringListsEqual,
   areStringRecordsEqual,
@@ -4194,162 +4199,32 @@ export class RealInstallerService implements InstallerService {
     );
   }
 
-  private async detectInstalledLobsterCli(): Promise<{
-    binaryPath: string;
-    version: string | null;
-    commands: string[];
-  } | null> {
-    if (this.execRunner === null) {
-      return null;
-    }
-    const probe = await this.execRunner.run({
-      command: "lobster",
-      args: ["commands.list | json"],
-      options: {
-        timeout: LOBSTER_CLI_PROBE_TIMEOUT_MS,
-        env: {
-          CI: "1",
-        },
-      },
-    });
-    if (probe.exitCode !== 0) {
-      return null;
-    }
-    const parsed = parseJsonSafely(probe.stdout);
-    const commands = Array.isArray(parsed)
-      ? parsed.filter((entry): entry is string => typeof entry === "string")
-      : [];
-    const versionResult = await this.execRunner.run({
-      command: "npm",
-      args: ["list", "-g", SOVEREIGN_PINNED_LOBSTER_PACKAGE_NAME, "--json", "--depth=0"],
-      options: {
-        timeout: LOBSTER_CLI_PROBE_TIMEOUT_MS,
-        env: {
-          CI: "1",
-        },
-      },
-    });
-    const versionPayload = parseJsonSafely(versionResult.stdout);
-    const dependencyRecord =
-      isRecord(versionPayload) && isRecord(versionPayload.dependencies)
-        ? versionPayload.dependencies[SOVEREIGN_PINNED_LOBSTER_PACKAGE_NAME]
-        : undefined;
-    const version =
-      isRecord(dependencyRecord) && typeof dependencyRecord.version === "string"
-        ? dependencyRecord.version
-        : null;
-    return {
-      binaryPath: "lobster",
-      version,
-      commands,
-    };
-  }
-
   private async ensureLobsterCliInstalled(): Promise<void> {
-    if (this.execRunner === null) {
-      throw {
-        code: "LOBSTER_INSTALL_FAILED",
-        message: "Exec runner unavailable; cannot install or probe Lobster CLI",
-        retryable: false,
-      };
-    }
-    const requiredCommands = ["clawd.invoke"];
-    const detected = await this.detectInstalledLobsterCli();
-    if (detected !== null) {
-      const versionVerified = detected.version === SOVEREIGN_PINNED_LOBSTER_VERSION;
-      const commandsVerified =
-        detected.commands.length > 0 &&
-        requiredCommands.every((commandName) => detected.commands.includes(commandName));
-      if (versionVerified || commandsVerified) {
-        return;
-      }
-      this.logger.info(
-        "Lobster CLI binary found but could not verify version or required commands; reinstalling",
-      );
-    }
-
-    const installResult = await this.execRunner.run({
-      command: "npm",
-      args: [
-        "install",
-        "-g",
-        `${SOVEREIGN_PINNED_LOBSTER_PACKAGE_NAME}@${SOVEREIGN_PINNED_LOBSTER_VERSION}`,
-      ],
-      options: {
-        timeout: LOBSTER_CLI_INSTALL_TIMEOUT_MS,
-        env: {
-          CI: "1",
-        },
-      },
+    await ensureLobsterCliInstalled({
+      execRunner: this.execRunner,
+      logger: this.logger,
+      packageName: SOVEREIGN_PINNED_LOBSTER_PACKAGE_NAME,
+      version: SOVEREIGN_PINNED_LOBSTER_VERSION,
+      installTimeoutMs: LOBSTER_CLI_INSTALL_TIMEOUT_MS,
+      probeTimeoutMs: LOBSTER_CLI_PROBE_TIMEOUT_MS,
+      requiredCommands: ["clawd.invoke"],
     });
-    if (installResult.exitCode !== 0) {
-      throw {
-        code: "LOBSTER_INSTALL_FAILED",
-        message: "npm install for Lobster CLI exited with non-zero status",
-        retryable: true,
-        details: {
-          command: installResult.command,
-          exitCode: installResult.exitCode,
-          stdout: truncateText(installResult.stdout, 2000),
-          stderr: truncateText(installResult.stderr, 4000),
-        },
-      };
-    }
-
-    const verified = await this.detectInstalledLobsterCli();
-    const verifiedByVersion = verified?.version === SOVEREIGN_PINNED_LOBSTER_VERSION;
-    const verifiedByCommands =
-      verified !== null &&
-      requiredCommands.every((commandName) => verified.commands.includes(commandName));
-    if (!verifiedByVersion && !verifiedByCommands) {
-      throw {
-        code: "LOBSTER_INSTALL_FAILED",
-        message: "Lobster CLI installed but required workflow commands are unavailable",
-        retryable: true,
-        details: {
-          requiredCommands,
-          detectedCommands: verified?.commands ?? [],
-          version: verified?.version ?? null,
-        },
-      };
-    }
   }
 
   private renderGuardedJsonStateWorkspacePluginManifest(): string {
-    return JSON.stringify(
-      {
-        id: GUARDED_JSON_STATE_OPENCLAW_PLUGIN_ID,
-        configSchema: {
-          type: "object",
-          additionalProperties: false,
-          properties: {},
-        },
-      },
-      null,
-      2,
-    );
+    return renderGuardedJsonStateWorkspacePluginManifestFile();
   }
 
   private renderGuardedJsonStateWorkspacePluginConfig(input: {
     workspaceBindings: Record<string, string[]>;
     runtimeConfigPath: string;
   }): string {
-    return JSON.stringify(
-      {
-        executablePath: SOVEREIGN_EXECUTABLE_PATHS["sovereign-tool"],
-        runtimeConfigPath: input.runtimeConfigPath,
-        workspaceBindings: Object.fromEntries(
-          Object.entries(input.workspaceBindings)
-            .map(
-              ([workspace, toolInstanceIds]) =>
-                [workspace, dedupeStrings(toolInstanceIds)] as const,
-            )
-            .sort(([left], [right]) => left.localeCompare(right)),
-        ),
-      },
-      null,
-      2,
-    );
+    return renderGuardedJsonStateWorkspacePluginConfigFile({
+      executablePath:
+        SOVEREIGN_EXECUTABLE_PATHS["sovereign-tool"] ?? "/usr/local/bin/sovereign-tool",
+      runtimeConfigPath: input.runtimeConfigPath,
+      workspaceBindings: input.workspaceBindings,
+    });
   }
 
   private renderGuardedJsonStateWorkspacePluginRuntime(): string {
