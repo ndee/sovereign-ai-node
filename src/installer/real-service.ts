@@ -508,15 +508,33 @@ export class RealInstallerService implements InstallerService {
       typeof matrixEntry.localpart === "string" && matrixEntry.localpart.trim().length > 0
         ? sanitizeManagedAgentLocalpart(matrixEntry.localpart, id)
         : previous?.matrix?.localpart;
+    // Prefer the caller-provided roomId when explicitly set. Otherwise use
+    // the current install's room (input.matrixRoom) instead of the previous
+    // runtime config: when the alert room is recreated (because the
+    // previous room became unreachable, or because the homeserver itself
+    // was reprovisioned), the top-level matrix.alertRoom.roomId gets
+    // refreshed but bot-instance roomIds silently stay pointed at the old
+    // dead room. Tool bindings that resolve `instance.matrix.alertRoom.roomId`
+    // then post alerts into the void. Only fall back to `previous` when the
+    // current install didn't provide a room (shouldn't happen in practice
+    // but preserves the defensive shape).
+    const previousRoomId = previous?.matrix?.alertRoom?.roomId;
+    const previousRoomName = previous?.matrix?.alertRoom?.roomName;
+    const currentRoomId = input.matrixRoom.roomId;
+    const previousMatchesCurrent =
+      typeof previousRoomId === "string" && previousRoomId === currentRoomId;
     const roomId =
       typeof alertRoomEntry.roomId === "string" && alertRoomEntry.roomId.trim().length > 0
         ? alertRoomEntry.roomId.trim()
-        : previous?.matrix?.alertRoom?.roomId;
+        : previousMatchesCurrent
+          ? previousRoomId
+          : (currentRoomId ?? previousRoomId);
     const roomName =
       typeof alertRoomEntry.roomName === "string" && alertRoomEntry.roomName.trim().length > 0
         ? alertRoomEntry.roomName.trim()
-        : (previous?.matrix?.alertRoom?.roomName ??
-          (roomId === undefined ? undefined : input.matrixRoom.roomName));
+        : previousMatchesCurrent
+          ? (previousRoomName ?? input.matrixRoom.roomName)
+          : (input.matrixRoom.roomName ?? (roomId === undefined ? undefined : previousRoomName));
     return {
       id,
       packageId,
@@ -681,8 +699,19 @@ export class RealInstallerService implements InstallerService {
       }),
       matrix: {
         ...(input.entry.matrix ?? {}),
+        // Same staleness guard as normalizeRequestedBotInstance: when the
+        // previous runtime's alertRoom points at a room that's no longer
+        // the current one (e.g. homeserver re-provisioned, postgres wiped,
+        // relay slug rotated), use the current install's matrixRoom so the
+        // `instance.matrix.alertRoom.roomId` binding resolves to a room
+        // that actually exists on the fresh Synapse instance.
         ...(input.entry.matrix?.alertRoom === undefined
-          ? { alertRoom: previous?.matrix?.alertRoom ?? input.matrixRoom }
+          ? {
+              alertRoom:
+                previous?.matrix?.alertRoom?.roomId === input.matrixRoom.roomId
+                  ? previous.matrix.alertRoom
+                  : input.matrixRoom,
+            }
           : {}),
         ...(input.entry.matrix?.allowedUsers === undefined &&
         previous?.matrix?.allowedUsers !== undefined
