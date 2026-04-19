@@ -6732,6 +6732,76 @@ describe("RealInstallerService", () => {
       });
       expect(preserved.matrix?.alertRoom?.roomId).toBe(currentRoom.roomId);
       expect(preserved.matrix?.alertRoom?.roomName).toBe("Custom operator-picked name");
+
+      // Regression for the explicit-roomId branch. The saved install
+      // request file (populated by migrateLegacyMailSentinel) persists
+      // bots.instances[].matrix.alertRoom.roomId and replays it across
+      // updates. When that saved roomId predates a room rotation, it
+      // disagrees with the freshly-bootstrapped matrixRoom. The earlier
+      // normalization trusted the explicit value unconditionally,
+      // short-circuiting the staleness check. Rotate in this case too.
+      const explicitlyStaleResult = internals.normalizeRequestedBotInstance({
+        entry: {
+          id: "mail-sentinel",
+          packageId: "mail-sentinel",
+          matrix: {
+            alertRoom: staleRoom,
+          },
+        },
+        configById: {},
+        matrixRoom: currentRoom,
+        previousRuntimeConfig,
+      });
+      expect(explicitlyStaleResult.matrix?.alertRoom?.roomId).toBe(currentRoom.roomId);
+      expect(explicitlyStaleResult.matrix?.alertRoom?.roomName).toBe(currentRoom.roomName);
+
+      // Operator-picked roomName preserved when explicit roomId matches
+      // current install.
+      const explicitlyMatchingResult = internals.normalizeRequestedBotInstance({
+        entry: {
+          id: "mail-sentinel",
+          packageId: "mail-sentinel",
+          matrix: {
+            alertRoom: {
+              roomId: currentRoom.roomId,
+              roomName: "Custom operator-picked name",
+            },
+          },
+        },
+        configById: {},
+        matrixRoom: currentRoom,
+        previousRuntimeConfig: null,
+      });
+      expect(explicitlyMatchingResult.matrix?.alertRoom?.roomId).toBe(currentRoom.roomId);
+      expect(explicitlyMatchingResult.matrix?.alertRoom?.roomName).toBe(
+        "Custom operator-picked name",
+      );
+
+      // Same explicit-roomId rotation in
+      // applyLegacyMailSentinelRequestedInstanceDefaults. The earlier
+      // check only fired when entry.matrix.alertRoom was undefined; when
+      // the entry carried a stale alertRoom (from a replayed install
+      // request), the alertRoom was spread straight through.
+      const legacyExplicitlyStaleResult =
+        internals.applyLegacyMailSentinelRequestedInstanceDefaults({
+          entry: {
+            id: "mail-sentinel",
+            packageId: "mail-sentinel",
+            workspace: "/var/lib/sovereign-node/mail-sentinel/workspace",
+            config: {},
+            secretRefs: {},
+            matrix: {
+              alertRoom: staleRoom,
+            },
+          },
+          imap: {
+            status: "pending",
+          } as RuntimeConfig["imap"],
+          matrixRoom: currentRoom,
+          previousRuntimeConfig,
+        });
+      expect(legacyExplicitlyStaleResult.matrix?.alertRoom?.roomId).toBe(currentRoom.roomId);
+      expect(legacyExplicitlyStaleResult.matrix?.alertRoom?.roomName).toBe(currentRoom.roomName);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
