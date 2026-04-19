@@ -5303,6 +5303,27 @@ export default function (api) {
     );
     const alertRoom = this.resolveManagedAgentAlertRoom(runtimeConfig, entry);
 
+    // Persist the agent identity BEFORE attempting room-membership calls.
+    // If the invite/join steps below fail transiently (e.g. the bot + agent
+    // share a localpart so Synapse returns a 403 "already in the room" that
+    // isAlreadyJoinedOrInvitedRoomError fails to tolerate, or an
+    // eventual-consistency blip during a fresh Matrix provision), we still
+    // want entry.matrix populated. Without this, the mail-sentinel CLI and
+    // downstream managed-agent tooling all choke on a missing secretRef
+    // and the only recovery is hand-editing the runtime config on the VPS.
+    const nextIdentity = {
+      localpart,
+      userId: loginSession.userId,
+      passwordSecretRef,
+      accessTokenSecretRef,
+    };
+    const changed = !areMatrixIdentitiesEqual(entry.matrix, nextIdentity);
+    entry.matrix = nextIdentity;
+    const primaryBotChanged = this.syncPrimaryDedicatedMatrixBotIdentity(
+      runtimeConfig,
+      nextIdentity,
+    );
+
     await this.ensureMatrixUserInAlertRoom({
       adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
       roomId: alertRoom.roomId,
@@ -5317,18 +5338,6 @@ export default function (api) {
       inviterAccessToken: operatorAccessToken,
     });
 
-    const nextIdentity = {
-      localpart,
-      userId: loginSession.userId,
-      passwordSecretRef,
-      accessTokenSecretRef,
-    };
-    const changed = !areMatrixIdentitiesEqual(entry.matrix, nextIdentity);
-    entry.matrix = nextIdentity;
-    const primaryBotChanged = this.syncPrimaryDedicatedMatrixBotIdentity(
-      runtimeConfig,
-      nextIdentity,
-    );
     return {
       runtimeConfig,
       changed: changed || primaryBotChanged,

@@ -4881,6 +4881,254 @@ describe("RealInstallerService", () => {
     ).toBe(false);
   });
 
+  it("persists agent.matrix before attempting room-membership calls so a failed invite still yields usable config", async () => {
+    // Regression: the mail-sentinel live e2e bricked after a Matrix wipe
+    // because ensureManagedAgentMatrixIdentity persisted agent.matrix only
+    // AFTER calling ensureMatrixUserInAlertRoom. When that invite failed
+    // (Synapse 403 "already in the room" for a fresh agent-equals-bot case
+    // that the tolerance regex occasionally missed during eventual-consistency
+    // gaps), the whole call threw and agent.matrix stayed null. The
+    // mail-sentinel CLI then failed every subsequent `policy list --json`
+    // with "Missing secret reference" and the test harness couldn't boot.
+    //
+    // The fix reorders the writes: agent.matrix is populated from the just-
+    // minted login session BEFORE the invite/join calls. A failed invite
+    // now still propagates the error upward (and the install step warn-wraps
+    // it), but subsequent runs find agent.matrix populated and proceed.
+    const botPackage = buildTestLoadedBotPackage({
+      id: "solo-agent",
+      displayName: "Solo Agent",
+      description: "Dedicated-account agent with no localpart collision.",
+      matrixMode: "dedicated-account",
+    });
+    const paths: SovereignPaths = {
+      configPath: "/tmp/sovereign-node.json5",
+      secretsDir: "/tmp/sovereign-secrets",
+      stateDir: "/tmp/sovereign-state",
+      logsDir: "/tmp/sovereign-logs",
+      installJobsDir: "/tmp/sovereign-install-jobs",
+      openclawServiceHome: "/tmp/sovereign-openclaw-home",
+      provenancePath: "/tmp/sovereign-install-provenance.json",
+      backupsDir: "/tmp/sovereign-backups",
+    };
+    const fetchCalls: string[] = [];
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => {
+          throw new Error("not used");
+        },
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {
+          throw new Error("not used");
+        },
+        start: async () => {
+          throw new Error("not used");
+        },
+        restart: async () => {
+          throw new Error("not used");
+        },
+      },
+      botCatalog: {
+        listPackages: async () => [botPackage],
+        getPackage: async () => botPackage,
+        getDefaultSelectedIds: async () => [],
+        findPackageByTemplateRef: async (ref) =>
+          ref === botPackage.templateRef ? botPackage : null,
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async () => {
+          throw new Error("not used");
+        },
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.e2e.sovereign.local",
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async ({ command, args }) => ({
+          command: [command, ...(args ?? [])].join(" "),
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        }),
+      },
+      fetchImpl: async (url: string) => {
+        fetchCalls.push(url);
+        // Admin user upsert (PUT /_synapse/admin/v2/users/...): ok
+        if (url.includes("/_synapse/admin/v2/users/")) {
+          return new Response(JSON.stringify({ name: "@solo-agent:e2e.sovereign.local" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        // Login: succeed with a fresh token
+        if (url.includes("/_matrix/client/v3/login")) {
+          return new Response(
+            JSON.stringify({
+              user_id: "@solo-agent:e2e.sovereign.local",
+              access_token: "solo-agent-fresh-token",
+              device_id: "DEV",
+            }),
+            {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            },
+          );
+        }
+        // Invite: simulate a transient 403 that the tolerance regex doesn't
+        // match (e.g. "You are not in the room") to force the post-fix path
+        // through its error propagation.
+        if (url.includes("/invite")) {
+          return new Response(
+            JSON.stringify({
+              errcode: "M_FORBIDDEN",
+              error: "Some other forbidden reason without the magic phrase",
+            }),
+            {
+              status: 403,
+              headers: { "Content-Type": "application/json" },
+            },
+          );
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    const runtimeConfig: RuntimeConfig = {
+      openrouter: {
+        model: "qwen/qwen3.5-9b",
+        apiKeySecretRef: "env:OPENROUTER_API_KEY",
+      },
+      openclaw: {
+        managedInstallation: true,
+        installMethod: "install_sh",
+        requestedVersion: "0.2.0",
+        openclawHome: "/tmp/sovereign-openclaw-home/.openclaw",
+        runtimeConfigPath: "/tmp/sovereign-openclaw-home/.openclaw/openclaw.json5",
+        runtimeProfilePath: "/tmp/sovereign-openclaw-home/profiles/runtime.json5",
+        gatewayEnvPath: "/tmp/sovereign-openclaw-home/gateway.env",
+      },
+      openclawProfile: {
+        plugins: { allow: ["matrix"] },
+        agents: [
+          {
+            id: "solo-agent",
+            templateRef: botPackage.templateRef,
+            workspace: "/tmp/solo-agent",
+          },
+        ],
+        crons: [],
+      },
+      imap: {
+        status: "configured",
+        host: "imap.example.org",
+        port: 993,
+        tls: true,
+        username: "operator@example.org",
+        mailbox: "INBOX",
+        secretRef: "file:/tmp/imap-secret",
+      },
+      bots: { config: {}, instances: [] },
+      matrix: {
+        accessMode: "direct",
+        homeserverDomain: "e2e.sovereign.local",
+        federationEnabled: false,
+        publicBaseUrl: "https://matrix.e2e.sovereign.local",
+        adminBaseUrl: "http://127.0.0.1:8008",
+        operator: {
+          userId: "@operator:e2e.sovereign.local",
+          accessTokenSecretRef: "file:/tmp/operator.token",
+        },
+        bot: {
+          localpart: "primary-bot",
+          userId: "@primary-bot:e2e.sovereign.local",
+          accessTokenSecretRef: "file:/tmp/bot.token",
+        },
+        alertRoom: {
+          roomId: "!alerts:e2e.sovereign.local",
+          roomName: "Sovereign Alerts",
+        },
+      },
+      templates: { installed: [] },
+      sovereignTools: { instances: [] },
+    };
+
+    // Pre-stub secret resolution/writing so we don't touch disk.
+    const secretOverrides = new Map<string, string>([
+      ["file:/tmp/operator.token", "operator-token"],
+      ["file:/tmp/sovereign-secrets/matrix-agent-solo-agent-password", "solo-agent-password"],
+    ]);
+    (
+      service as unknown as {
+        resolveSecretRef(ref: string): Promise<string>;
+      }
+    ).resolveSecretRef = async (ref: string) => {
+      const value = secretOverrides.get(ref);
+      if (value === undefined) throw new Error(`Unexpected secret ref: ${ref}`);
+      return value;
+    };
+    (
+      service as unknown as {
+        writeManagedSecretFile(name: string, contents: string): Promise<string>;
+      }
+    ).writeManagedSecretFile = async (name) => `file:/tmp/sovereign-secrets/${name}`;
+    (
+      service as unknown as {
+        writeManagedAgentAccessTokenFile(
+          config: RuntimeConfig,
+          name: string,
+          token: string,
+        ): Promise<string>;
+      }
+    ).writeManagedAgentAccessTokenFile = async (_config, name) =>
+      `file:/tmp/sovereign-secrets/matrix-agent-access-tokens/${name}`;
+
+    const invoker = service as unknown as {
+      ensureManagedAgentMatrixIdentity(
+        config: RuntimeConfig,
+        agentId: string,
+      ): Promise<{ runtimeConfig: RuntimeConfig; changed: boolean }>;
+    };
+    await expect(
+      invoker.ensureManagedAgentMatrixIdentity(runtimeConfig, "solo-agent"),
+    ).rejects.toThrow(/Failed to invite @solo-agent/);
+    // The critical assertion: even though the invite failed and the call
+    // threw, entry.matrix is now populated so the mail-sentinel CLI and
+    // downstream tooling can still resolve secretRefs.
+    expect(runtimeConfig.openclawProfile.agents[0]?.matrix).toEqual({
+      localpart: "solo-agent",
+      userId: "@solo-agent:e2e.sovereign.local",
+      passwordSecretRef: "file:/tmp/sovereign-secrets/matrix-agent-solo-agent-password",
+      accessTokenSecretRef:
+        "file:/tmp/sovereign-secrets/matrix-agent-access-tokens/matrix-agent-solo-agent-access-token",
+    });
+    // Sanity: the admin/login/invite calls all fired.
+    expect(fetchCalls.some((u) => u.includes("/_synapse/admin/v2/users/"))).toBe(true);
+    expect(fetchCalls.some((u) => u.includes("/login"))).toBe(true);
+    expect(fetchCalls.some((u) => u.includes("/invite"))).toBe(true);
+  });
+
   it("resolves configured runtime ownership from the service identity when running as root", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-ownership-test-"));
     const getuidMock =
