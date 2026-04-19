@@ -448,8 +448,23 @@ ensure_runtime_directories() {
 
   chown -R "${SERVICE_USER}:${SERVICE_GROUP}" \
     /etc/sovereign-node \
-    /var/lib/sovereign-node \
     /var/log/sovereign-node
+
+  # /var/lib/sovereign-node is chowned with exclusions. Container-managed
+  # subtrees (bundled Matrix Postgres data, Synapse data files) are owned
+  # by UIDs from inside the containers (postgres=70, synapse=991). A blind
+  # recursive chown to SERVICE_USER locks those containers out of their
+  # own files — Postgres then fails with "could not open file ... Permission
+  # denied" on every subsequent Matrix login, surfacing as HTTP 500
+  # "Problem storing device." Any path under bundled-matrix/*/postgres-data
+  # or */synapse stays untouched so the compose stack keeps working across
+  # re-runs of `sovereign-node update`.
+  find /var/lib/sovereign-node \
+    -mindepth 1 \
+    \( -path '*/bundled-matrix/*/postgres-data' -o -path '*/bundled-matrix/*/synapse' \) -prune \
+    -o -print0 \
+    | xargs -0 --no-run-if-empty chown "${SERVICE_USER}:${SERVICE_GROUP}"
+  chown "${SERVICE_USER}:${SERVICE_GROUP}" /var/lib/sovereign-node
 }
 
 resolve_source_mode() {
