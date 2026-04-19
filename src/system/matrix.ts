@@ -1903,7 +1903,6 @@ const renderCaddyfile = (siteHostname: string, tlsMode: BundledMatrixOnboardingM
     "}",
   ].join("\n");
 
-
 const renderWellKnownFiles = (input: {
   accessMode: BundledMatrixAccessMode;
   homeserverDomain: string;
@@ -2084,7 +2083,6 @@ const truncateText = (value: string, maxChars: number): string => {
   }
   return `${value.slice(0, maxChars)}...(truncated)`;
 };
-
 
 function resolveDurationFromEnv(name: string, fallbackMs: number): number {
   const raw = process.env[name];
