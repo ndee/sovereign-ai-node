@@ -593,7 +593,15 @@ export class RealInstallerService implements InstallerService {
               ? {}
               : { localpart: previousAgent.matrix.localpart }
             : { localpart: previous.matrix.localpart }),
-          alertRoom: previous?.matrix?.alertRoom ?? input.matrixRoom,
+          // Same staleness guard as normalizeRequestedBotInstance +
+          // applyLegacyMailSentinelRequestedInstanceDefaults: when the
+          // previous runtime's roomId doesn't match the current install's
+          // authoritative matrixRoom, use matrixRoom so the subsequent
+          // tool bindings resolve to a room that actually exists.
+          alertRoom:
+            previous?.matrix?.alertRoom?.roomId === input.matrixRoom.roomId
+              ? previous.matrix.alertRoom
+              : input.matrixRoom,
           ...(previous?.matrix?.allowedUsers === undefined
             ? {}
             : { allowedUsers: previous.matrix.allowedUsers }),

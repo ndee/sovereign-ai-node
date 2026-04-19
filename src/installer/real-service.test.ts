@@ -6737,6 +6737,162 @@ describe("RealInstallerService", () => {
     }
   });
 
+  it("rotates a stale alertRoom through buildLegacyMailSentinelRequestedInstance when no explicit bot instance is in the request", async () => {
+    // Follow-up to #120. The install request path where no explicit
+    // bots.instances[] is provided (the common case — install.sh only
+    // sets bots.selected) routes through
+    // buildLegacyMailSentinelRequestedInstance, which was still reading
+    // `previous?.matrix?.alertRoom ?? input.matrixRoom` without the
+    // staleness check. That left instance.matrix.alertRoom pinned to the
+    // old dead room across installer runs.
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => {
+          throw new Error("not used");
+        },
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => {
+          throw new Error("not used");
+        },
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async () => ({
+          ok: true,
+          host: "127.0.0.1",
+          port: 1143,
+          tls: true,
+          auth: "ok",
+          mailbox: "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+    });
+
+    try {
+      const internals = service as unknown as {
+        buildLegacyMailSentinelRequestedInstance(input: {
+          configById: Record<string, Record<string, unknown>>;
+          imap: RuntimeConfig["imap"];
+          matrixRoom: { roomId: string; roomName: string };
+          previousRuntimeConfig: RuntimeConfig | null;
+        }): {
+          id: string;
+          matrix?: { alertRoom?: { roomId: string; roomName: string } };
+        };
+      };
+
+      const currentRoom = {
+        roomId: "!fresh:matrix.example.org",
+        roomName: "Sovereign Alerts",
+      };
+      const staleRoom = {
+        roomId: "!stale:old.homeserver.example",
+        roomName: "Sovereign Alerts (old)",
+      };
+
+      const previousRuntimeConfig = {
+        bots: {
+          instances: [
+            {
+              id: "mail-sentinel",
+              packageId: "mail-sentinel",
+              workspace: "/var/lib/sovereign-node/mail-sentinel/workspace",
+              config: {},
+              secretRefs: {},
+              matrix: { alertRoom: staleRoom },
+            },
+          ],
+        },
+        openclawProfile: { agents: [] },
+      } as unknown as RuntimeConfig;
+
+      // Stale previous → rotate to current.
+      const rotated = internals.buildLegacyMailSentinelRequestedInstance({
+        configById: {},
+        imap: { status: "pending" } as RuntimeConfig["imap"],
+        matrixRoom: currentRoom,
+        previousRuntimeConfig,
+      });
+      expect(rotated.matrix?.alertRoom?.roomId).toBe(currentRoom.roomId);
+      expect(rotated.matrix?.alertRoom?.roomName).toBe(currentRoom.roomName);
+
+      // Matching previous → preserve operator-picked metadata.
+      const matchingPreviousRuntimeConfig = {
+        bots: {
+          instances: [
+            {
+              id: "mail-sentinel",
+              packageId: "mail-sentinel",
+              workspace: "/var/lib/sovereign-node/mail-sentinel/workspace",
+              config: {},
+              secretRefs: {},
+              matrix: {
+                alertRoom: {
+                  roomId: currentRoom.roomId,
+                  roomName: "Custom operator-picked name",
+                },
+              },
+            },
+          ],
+        },
+        openclawProfile: { agents: [] },
+      } as unknown as RuntimeConfig;
+
+      const preserved = internals.buildLegacyMailSentinelRequestedInstance({
+        configById: {},
+        imap: { status: "pending" } as RuntimeConfig["imap"],
+        matrixRoom: currentRoom,
+        previousRuntimeConfig: matchingPreviousRuntimeConfig,
+      });
+      expect(preserved.matrix?.alertRoom?.roomId).toBe(currentRoom.roomId);
+      expect(preserved.matrix?.alertRoom?.roomName).toBe("Custom operator-picked name");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("treats disabled systemd host resources as healthy when they match desired state", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {
