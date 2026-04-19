@@ -1004,7 +1004,7 @@ const buildManagedAgentMatrixProvisionResponse = (
 };
 
 describe("RealInstallerService", () => {
-  it("generates an immutable relay slug during enrollment instead of honoring caller-provided slugs", async () => {
+  it("honors the caller-provided relay slug when enrolling with an enrollment token", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {
       configPath: join(tempRoot, "etc", "sovereign-node.json5"),
@@ -1147,10 +1147,166 @@ describe("RealInstallerService", () => {
         }
       ).resolveRelayEnrollment(req, "inst_test_custom_relay");
 
-      expect(capturedRequestedSlug).toMatch(/^[a-z0-9-]{1,63}$/);
-      expect(capturedRequestedSlug).not.toBe("user-picked-name");
+      // Authenticated enrollment sends the caller's slug unchanged so
+      // operators running their own relay (or re-enrolling with a known
+      // token) can pick a stable, human-readable hostname.
+      expect(capturedRequestedSlug).toBe("user-picked-name");
       expect(enrollment.hostname).toBe("pilot-node.relay.sovereign-ai-node.com");
       expect(enrollment.publicBaseUrl).toBe("https://pilot-node.relay.sovereign-ai-node.com");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to a generated relay slug when the caller-provided slug is already taken", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+
+    const capturedSlugs: string[] = [];
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "pinned-by-sovereign",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: "/tmp/ws",
+          agentCommand: "openclaw agents add mail-sentinel",
+          cronCommand: "openclaw cron add --name mail-sentinel-poll",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async (req) => ({
+          projectDir: "/tmp/fake-matrix",
+          composeFilePath: "/tmp/fake-matrix/compose.yaml",
+          accessMode: "relay",
+          homeserverDomain: req.matrix.homeserverDomain,
+          publicBaseUrl: req.matrix.publicBaseUrl,
+          adminBaseUrl: "http://127.0.0.1:8008",
+          federationEnabled: false,
+          tlsMode: "auto",
+        }),
+        bootstrapAccounts: async () => ({
+          operator: {
+            localpart: "operator",
+            userId: "@operator:pilot-node.relay.sovereign-ai-node.com",
+            passwordSecretRef: "file:/tmp/operator.password",
+            accessToken: "operator-token",
+          },
+          bot: {
+            localpart: "mail-sentinel",
+            userId: "@mail-sentinel:pilot-node.relay.sovereign-ai-node.com",
+            passwordSecretRef: "file:/tmp/mail-sentinel.password",
+            accessToken: "bot-token",
+          },
+        }),
+        bootstrapRoom: async () => ({
+          roomId: "!alerts:pilot-node.relay.sovereign-ai-node.com",
+          roomName: "Sovereign Alerts",
+        }),
+        test: async (req) => ({
+          ok: true,
+          homeserverUrl: req.publicBaseUrl,
+          checks: [],
+        }),
+      },
+      fetchImpl: async (_input, init) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { requestedSlug?: unknown };
+        const slug = typeof body.requestedSlug === "string" ? body.requestedSlug : "";
+        capturedSlugs.push(slug);
+        // First attempt (caller's "taken-name") — 409 conflict.
+        if (capturedSlugs.length === 1) {
+          return new Response(JSON.stringify({ error: "slug taken" }), {
+            status: 409,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        // Second attempt (generated) — accept.
+        return new Response(
+          JSON.stringify({
+            result: {
+              assignedHostname: "pilot-node.relay.sovereign-ai-node.com",
+              publicBaseUrl: "https://pilot-node.relay.sovereign-ai-node.com",
+              tunnel: {
+                serverAddr: "relay.sovereign-ai-node.com",
+                serverPort: 7000,
+                token: "relay-token",
+                proxyName: "relay-pilot-node",
+              },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+
+    try {
+      const req = buildInstallRequest() as InstallRequest & {
+        relay: { controlUrl: string; enrollmentToken: string; requestedSlug: string };
+      };
+      req.connectivity = { mode: "relay" };
+      req.relay = {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+        enrollmentToken: "relay-enrollment-token",
+        requestedSlug: "taken-name",
+      };
+      req.imap = undefined;
+      req.matrix.homeserverDomain = "relay-pending.invalid";
+      req.matrix.publicBaseUrl = "https://relay-pending.invalid";
+      req.matrix.federationEnabled = false;
+      req.matrix.tlsMode = "auto";
+
+      const enrollment = await (
+        service as unknown as {
+          resolveRelayEnrollment: (
+            value: InstallRequest,
+            installationId: string,
+          ) => Promise<{ hostname: string; publicBaseUrl: string }>;
+        }
+      ).resolveRelayEnrollment(req, "inst_test_collision");
+
+      expect(capturedSlugs).toHaveLength(2);
+      expect(capturedSlugs[0]).toBe("taken-name");
+      expect(capturedSlugs[1]).not.toBe("taken-name");
+      expect(capturedSlugs[1]).toMatch(/^[a-z0-9-]{1,63}$/);
+      expect(enrollment.hostname).toBe("pilot-node.relay.sovereign-ai-node.com");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -1443,6 +1599,396 @@ describe("RealInstallerService", () => {
         "https://pilot-node.relay.sovereign-ai-node.com",
       );
       expect(effectiveReq.matrix.federationEnabled).toBe(true);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves the existing bundled homeserver when switching a direct install to relay", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "pinned-by-sovereign",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          workspaceDir: "/tmp/ws",
+          agentCommand: "openclaw agents add mail-sentinel",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+    });
+
+    try {
+      const req = buildInstallRequest();
+      req.connectivity = { mode: "relay" };
+      req.relay = {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      };
+
+      const previousRuntimeConfig: RuntimeConfig = {
+        openrouter: {
+          model: "qwen/qwen3.5-9b",
+          apiKeySecretRef: "env:OPENROUTER_API_KEY",
+        },
+        openclaw: {
+          managedInstallation: true,
+          installMethod: "install_sh",
+          requestedVersion: "0.2.0",
+          openclawHome: "/tmp/openclaw-home",
+          runtimeConfigPath: "/tmp/openclaw.json5",
+          runtimeProfilePath: "/tmp/runtime.json5",
+          gatewayEnvPath: "/tmp/gateway.env",
+        },
+        openclawProfile: {
+          plugins: { allow: ["matrix"] },
+          agents: [],
+          crons: [],
+        },
+        imap: {
+          status: "configured",
+          host: "imap.example.org",
+          port: 993,
+          tls: true,
+          username: "operator@example.org",
+          mailbox: "INBOX",
+          secretRef: "file:/tmp/imap-secret",
+        },
+        bots: {
+          config: {},
+          instances: [],
+        },
+        matrix: {
+          accessMode: "direct",
+          homeserverDomain: "e2e.sovereign.local",
+          federationEnabled: false,
+          publicBaseUrl: "http://127.0.0.1:8008",
+          adminBaseUrl: "http://127.0.0.1:8008",
+          operator: {
+            userId: "@operator:e2e.sovereign.local",
+          },
+          bot: {
+            localpart: "mail-sentinel",
+            userId: "@mail-sentinel:e2e.sovereign.local",
+            accessTokenSecretRef: "file:/tmp/mail-sentinel.token",
+          },
+          alertRoom: {
+            roomId: "!alerts:e2e.sovereign.local",
+            roomName: "Sovereign Alerts",
+          },
+        },
+        templates: {
+          installed: [],
+        },
+        sovereignTools: {
+          instances: [],
+        },
+      };
+
+      const effectiveReq = await (
+        service as unknown as {
+          buildRelayProvisionRequest: (
+            value: InstallRequest,
+            enrollment: {
+              controlUrl: string;
+              hostname: string;
+              publicBaseUrl: string;
+              tunnel: {
+                serverAddr: string;
+                serverPort: number;
+                token: string;
+                proxyName: string;
+                type: "http";
+                localIp: string;
+                localPort: number;
+              };
+            },
+            previousRuntimeConfig?: RuntimeConfig | null,
+          ) => InstallRequest;
+        }
+      ).buildRelayProvisionRequest(
+        req,
+        {
+          controlUrl: "https://relay.sovereign-ai-node.com",
+          hostname: "wild-liberty-yak-82f6.sovereign-ai-node.com",
+          publicBaseUrl: "https://wild-liberty-yak-82f6.sovereign-ai-node.com",
+          tunnel: {
+            serverAddr: "relay.sovereign-ai-node.com",
+            serverPort: 7000,
+            token: "relay-token",
+            proxyName: "relay-wild-liberty-yak-82f6",
+            type: "http",
+            localIp: "127.0.0.1",
+            localPort: 18080,
+          },
+        },
+        previousRuntimeConfig,
+      );
+
+      expect(effectiveReq.connectivity?.mode).toBe("relay");
+      expect(effectiveReq.matrix.homeserverDomain).toBe("e2e.sovereign.local");
+      expect(effectiveReq.matrix.publicBaseUrl).toBe(
+        "https://wild-liberty-yak-82f6.sovereign-ai-node.com",
+      );
+      expect(effectiveReq.matrix.federationEnabled).toBe(false);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("passes superseded OpenClaw cron matches to managed agent registration", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+
+    let capturedInput:
+      | {
+          agentId: string;
+          workspaceDir: string;
+          removeCronMatchers?: Array<{ id?: string; name?: string; agentId?: string }>;
+        }
+      | undefined;
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "pinned-by-sovereign",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async (input) => {
+          capturedInput = input;
+          return {
+            agentId: input.agentId,
+            workspaceDir: input.workspaceDir,
+            agentCommand: `openclaw agents upsert --id ${input.agentId}`,
+          };
+        },
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+    });
+
+    const botPackage = buildTestLoadedBotPackage({
+      id: "mail-sentinel",
+      displayName: "Mail Sentinel",
+      description: "Test bot",
+      matrixMode: "dedicated-account",
+    });
+    const runtimeConfig = {
+      openrouter: {
+        model: "qwen/qwen3.5-9b",
+        apiKeySecretRef: "env:OPENROUTER_API_KEY",
+      },
+      openclaw: {
+        managedInstallation: true,
+        installMethod: "install_sh",
+        requestedVersion: "0.2.0",
+        openclawHome: "/tmp/openclaw-home",
+        runtimeConfigPath: "/tmp/openclaw.json5",
+        runtimeProfilePath: "/tmp/runtime.json5",
+        gatewayEnvPath: "/tmp/gateway.env",
+        serviceUser: "sovereign-node",
+        serviceGroup: "sovereign-node",
+      },
+      openclawProfile: {
+        plugins: { allow: ["matrix"] },
+        session: { dmScope: "per-channel-peer" },
+        agents: [
+          {
+            id: "mail-sentinel",
+            botId: "mail-sentinel",
+            workspace: "/tmp/mail-sentinel",
+            matrix: {
+              localpart: "mail-sentinel",
+              userId: "@mail-sentinel:e2e.sovereign.local",
+              accessTokenSecretRef: "file:/tmp/mail-sentinel.token",
+            },
+          },
+        ],
+        crons: [],
+      },
+      imap: {
+        status: "configured",
+        host: "imap.example.org",
+        port: 993,
+        tls: true,
+        username: "operator@example.org",
+        mailbox: "INBOX",
+        secretRef: "file:/tmp/imap-secret",
+      },
+      bots: {
+        config: {},
+        instances: [],
+      },
+      matrix: {
+        accessMode: "direct",
+        homeserverDomain: "e2e.sovereign.local",
+        federationEnabled: false,
+        publicBaseUrl: "http://127.0.0.1:8008",
+        adminBaseUrl: "http://127.0.0.1:8008",
+        operator: {
+          userId: "@operator:e2e.sovereign.local",
+        },
+        bot: {
+          localpart: "mail-sentinel",
+          userId: "@mail-sentinel:e2e.sovereign.local",
+          accessTokenSecretRef: "file:/tmp/mail-sentinel.token",
+        },
+        alertRoom: {
+          roomId: "!alerts:e2e.sovereign.local",
+          roomName: "Sovereign Alerts",
+        },
+      },
+      hostResources: {
+        planPath: "/tmp/host-resources.json",
+        resources: [
+          {
+            id: "scan-timer::supersede::0",
+            botId: "mail-sentinel",
+            agentId: "mail-sentinel",
+            kind: "openclawCron",
+            desiredState: "absent",
+            match: {
+              name: "mail-sentinel-poll",
+              agentId: "mail-sentinel",
+            },
+            checks: [],
+          },
+        ],
+        botStatus: [],
+      },
+      templates: {
+        installed: [],
+      },
+      sovereignTools: {
+        instances: [],
+      },
+    } as RuntimeConfig;
+
+    try {
+      (
+        service as unknown as { persistManagedBotRegistrationRecords: () => Promise<void> }
+      ).persistManagedBotRegistrationRecords = async () => {};
+      (
+        service as unknown as { ensureManagedAgentOpenClawBindings: () => Promise<void> }
+      ).ensureManagedAgentOpenClawBindings = async () => {};
+
+      await (
+        service as unknown as {
+          registerManagedBots: (
+            config: RuntimeConfig,
+            botPackages: LoadedBotPackage[],
+          ) => Promise<unknown>;
+        }
+      ).registerManagedBots(runtimeConfig, [botPackage]);
+
+      expect(capturedInput?.removeCronMatchers).toEqual([
+        {
+          name: "mail-sentinel-poll",
+          agentId: "mail-sentinel",
+        },
+      ]);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -4491,6 +5037,254 @@ describe("RealInstallerService", () => {
     ).toBe(false);
   });
 
+  it("persists agent.matrix before attempting room-membership calls so a failed invite still yields usable config", async () => {
+    // Regression: the mail-sentinel live e2e bricked after a Matrix wipe
+    // because ensureManagedAgentMatrixIdentity persisted agent.matrix only
+    // AFTER calling ensureMatrixUserInAlertRoom. When that invite failed
+    // (Synapse 403 "already in the room" for a fresh agent-equals-bot case
+    // that the tolerance regex occasionally missed during eventual-consistency
+    // gaps), the whole call threw and agent.matrix stayed null. The
+    // mail-sentinel CLI then failed every subsequent `policy list --json`
+    // with "Missing secret reference" and the test harness couldn't boot.
+    //
+    // The fix reorders the writes: agent.matrix is populated from the just-
+    // minted login session BEFORE the invite/join calls. A failed invite
+    // now still propagates the error upward (and the install step warn-wraps
+    // it), but subsequent runs find agent.matrix populated and proceed.
+    const botPackage = buildTestLoadedBotPackage({
+      id: "solo-agent",
+      displayName: "Solo Agent",
+      description: "Dedicated-account agent with no localpart collision.",
+      matrixMode: "dedicated-account",
+    });
+    const paths: SovereignPaths = {
+      configPath: "/tmp/sovereign-node.json5",
+      secretsDir: "/tmp/sovereign-secrets",
+      stateDir: "/tmp/sovereign-state",
+      logsDir: "/tmp/sovereign-logs",
+      installJobsDir: "/tmp/sovereign-install-jobs",
+      openclawServiceHome: "/tmp/sovereign-openclaw-home",
+      provenancePath: "/tmp/sovereign-install-provenance.json",
+      backupsDir: "/tmp/sovereign-backups",
+    };
+    const fetchCalls: string[] = [];
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => {
+          throw new Error("not used");
+        },
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {
+          throw new Error("not used");
+        },
+        start: async () => {
+          throw new Error("not used");
+        },
+        restart: async () => {
+          throw new Error("not used");
+        },
+      },
+      botCatalog: {
+        listPackages: async () => [botPackage],
+        getPackage: async () => botPackage,
+        getDefaultSelectedIds: async () => [],
+        findPackageByTemplateRef: async (ref) =>
+          ref === botPackage.templateRef ? botPackage : null,
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async () => {
+          throw new Error("not used");
+        },
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.e2e.sovereign.local",
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async ({ command, args }) => ({
+          command: [command, ...(args ?? [])].join(" "),
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        }),
+      },
+      fetchImpl: async (url: string) => {
+        fetchCalls.push(url);
+        // Admin user upsert (PUT /_synapse/admin/v2/users/...): ok
+        if (url.includes("/_synapse/admin/v2/users/")) {
+          return new Response(JSON.stringify({ name: "@solo-agent:e2e.sovereign.local" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        // Login: succeed with a fresh token
+        if (url.includes("/_matrix/client/v3/login")) {
+          return new Response(
+            JSON.stringify({
+              user_id: "@solo-agent:e2e.sovereign.local",
+              access_token: "solo-agent-fresh-token",
+              device_id: "DEV",
+            }),
+            {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            },
+          );
+        }
+        // Invite: simulate a transient 403 that the tolerance regex doesn't
+        // match (e.g. "You are not in the room") to force the post-fix path
+        // through its error propagation.
+        if (url.includes("/invite")) {
+          return new Response(
+            JSON.stringify({
+              errcode: "M_FORBIDDEN",
+              error: "Some other forbidden reason without the magic phrase",
+            }),
+            {
+              status: 403,
+              headers: { "Content-Type": "application/json" },
+            },
+          );
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    const runtimeConfig: RuntimeConfig = {
+      openrouter: {
+        model: "qwen/qwen3.5-9b",
+        apiKeySecretRef: "env:OPENROUTER_API_KEY",
+      },
+      openclaw: {
+        managedInstallation: true,
+        installMethod: "install_sh",
+        requestedVersion: "0.2.0",
+        openclawHome: "/tmp/sovereign-openclaw-home/.openclaw",
+        runtimeConfigPath: "/tmp/sovereign-openclaw-home/.openclaw/openclaw.json5",
+        runtimeProfilePath: "/tmp/sovereign-openclaw-home/profiles/runtime.json5",
+        gatewayEnvPath: "/tmp/sovereign-openclaw-home/gateway.env",
+      },
+      openclawProfile: {
+        plugins: { allow: ["matrix"] },
+        agents: [
+          {
+            id: "solo-agent",
+            templateRef: botPackage.templateRef,
+            workspace: "/tmp/solo-agent",
+          },
+        ],
+        crons: [],
+      },
+      imap: {
+        status: "configured",
+        host: "imap.example.org",
+        port: 993,
+        tls: true,
+        username: "operator@example.org",
+        mailbox: "INBOX",
+        secretRef: "file:/tmp/imap-secret",
+      },
+      bots: { config: {}, instances: [] },
+      matrix: {
+        accessMode: "direct",
+        homeserverDomain: "e2e.sovereign.local",
+        federationEnabled: false,
+        publicBaseUrl: "https://matrix.e2e.sovereign.local",
+        adminBaseUrl: "http://127.0.0.1:8008",
+        operator: {
+          userId: "@operator:e2e.sovereign.local",
+          accessTokenSecretRef: "file:/tmp/operator.token",
+        },
+        bot: {
+          localpart: "primary-bot",
+          userId: "@primary-bot:e2e.sovereign.local",
+          accessTokenSecretRef: "file:/tmp/bot.token",
+        },
+        alertRoom: {
+          roomId: "!alerts:e2e.sovereign.local",
+          roomName: "Sovereign Alerts",
+        },
+      },
+      templates: { installed: [] },
+      sovereignTools: { instances: [] },
+    };
+
+    // Pre-stub secret resolution/writing so we don't touch disk.
+    const secretOverrides = new Map<string, string>([
+      ["file:/tmp/operator.token", "operator-token"],
+      ["file:/tmp/sovereign-secrets/matrix-agent-solo-agent-password", "solo-agent-password"],
+    ]);
+    (
+      service as unknown as {
+        resolveSecretRef(ref: string): Promise<string>;
+      }
+    ).resolveSecretRef = async (ref: string) => {
+      const value = secretOverrides.get(ref);
+      if (value === undefined) throw new Error(`Unexpected secret ref: ${ref}`);
+      return value;
+    };
+    (
+      service as unknown as {
+        writeManagedSecretFile(name: string, contents: string): Promise<string>;
+      }
+    ).writeManagedSecretFile = async (name) => `file:/tmp/sovereign-secrets/${name}`;
+    (
+      service as unknown as {
+        writeManagedAgentAccessTokenFile(
+          config: RuntimeConfig,
+          name: string,
+          token: string,
+        ): Promise<string>;
+      }
+    ).writeManagedAgentAccessTokenFile = async (_config, name) =>
+      `file:/tmp/sovereign-secrets/matrix-agent-access-tokens/${name}`;
+
+    const invoker = service as unknown as {
+      ensureManagedAgentMatrixIdentity(
+        config: RuntimeConfig,
+        agentId: string,
+      ): Promise<{ runtimeConfig: RuntimeConfig; changed: boolean }>;
+    };
+    await expect(
+      invoker.ensureManagedAgentMatrixIdentity(runtimeConfig, "solo-agent"),
+    ).rejects.toThrow(/Failed to invite @solo-agent/);
+    // The critical assertion: even though the invite failed and the call
+    // threw, entry.matrix is now populated so the mail-sentinel CLI and
+    // downstream tooling can still resolve secretRefs.
+    expect(runtimeConfig.openclawProfile.agents[0]?.matrix).toEqual({
+      localpart: "solo-agent",
+      userId: "@solo-agent:e2e.sovereign.local",
+      passwordSecretRef: "file:/tmp/sovereign-secrets/matrix-agent-solo-agent-password",
+      accessTokenSecretRef:
+        "file:/tmp/sovereign-secrets/matrix-agent-access-tokens/matrix-agent-solo-agent-access-token",
+    });
+    // Sanity: the admin/login/invite calls all fired.
+    expect(fetchCalls.some((u) => u.includes("/_synapse/admin/v2/users/"))).toBe(true);
+    expect(fetchCalls.some((u) => u.includes("/login"))).toBe(true);
+    expect(fetchCalls.some((u) => u.includes("/invite"))).toBe(true);
+  });
+
   it("resolves configured runtime ownership from the service identity when running as root", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-ownership-test-"));
     const getuidMock =
@@ -5739,6 +6533,431 @@ describe("RealInstallerService", () => {
       expect(result.config.imapConfigured).toBe(true);
       // Non-IMAP keys in the entry must be preserved.
       expect(result.config.pollInterval).toBe("30m");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rotates a stale bot-instance alertRoom to the freshly-bootstrapped room", async () => {
+    // Regression: when the homeserver is reprovisioned (fresh Matrix
+    // provision, postgres wipe, relay slug rotation, etc.) the top-level
+    // matrix.alertRoom.roomId gets refreshed but bot-instance
+    // matrix.alertRoom.roomId was silently preserved from the previous
+    // runtime config. Tool bindings (`instance.matrix.alertRoom.roomId`)
+    // then posted alerts into a non-existent room. The e2e manifested as
+    // "N recorded alerts, 0 Matrix alerts" forever. The fix rotates the
+    // bot-instance roomId to the current install's matrixRoom whenever
+    // the previous roomId doesn't match.
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => {
+          throw new Error("not used");
+        },
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => {
+          throw new Error("not used");
+        },
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async () => ({
+          ok: true,
+          host: "127.0.0.1",
+          port: 1143,
+          tls: true,
+          auth: "ok",
+          mailbox: "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+    });
+
+    type BotInstanceShape = {
+      id: string;
+      packageId: string;
+      workspace?: string;
+      config?: Record<string, unknown>;
+      secretRefs?: Record<string, unknown>;
+      matrix?: {
+        alertRoom?: { roomId: string; roomName: string };
+        [key: string]: unknown;
+      };
+    };
+    try {
+      const internals = service as unknown as {
+        normalizeRequestedBotInstance(input: {
+          entry: BotInstanceShape;
+          configById: Record<string, Record<string, unknown>>;
+          matrixRoom: { roomId: string; roomName: string };
+          previousRuntimeConfig: RuntimeConfig | null;
+        }): BotInstanceShape;
+        applyLegacyMailSentinelRequestedInstanceDefaults(input: {
+          entry: BotInstanceShape;
+          imap: RuntimeConfig["imap"];
+          matrixRoom: { roomId: string; roomName: string };
+          previousRuntimeConfig: RuntimeConfig | null;
+        }): BotInstanceShape;
+      };
+
+      const currentRoom = {
+        roomId: "!fresh:matrix.example.org",
+        roomName: "Sovereign Alerts",
+      };
+      const staleRoom = {
+        roomId: "!stale:old.homeserver.example",
+        roomName: "Sovereign Alerts (old)",
+      };
+
+      const previousRuntimeConfig = {
+        bots: {
+          instances: [
+            {
+              id: "mail-sentinel",
+              packageId: "mail-sentinel",
+              workspace: "/var/lib/sovereign-node/mail-sentinel/workspace",
+              config: {},
+              secretRefs: {},
+              matrix: { alertRoom: staleRoom },
+            },
+          ],
+        },
+      } as unknown as RuntimeConfig;
+
+      // Path 1: normalizeRequestedBotInstance — the caller doesn't pass a
+      // matrix.alertRoom, and the previous runtime has a stale one. The
+      // normalized result must use the current install's room.
+      const normalized = internals.normalizeRequestedBotInstance({
+        entry: {
+          id: "mail-sentinel",
+          packageId: "mail-sentinel",
+        },
+        configById: {},
+        matrixRoom: currentRoom,
+        previousRuntimeConfig,
+      });
+      expect(normalized.matrix?.alertRoom?.roomId).toBe(currentRoom.roomId);
+      expect(normalized.matrix?.alertRoom?.roomName).toBe(currentRoom.roomName);
+
+      // Path 2: applyLegacyMailSentinelRequestedInstanceDefaults — the
+      // legacy mail-sentinel synthesis path also has to rotate. Start
+      // from an entry without matrix.alertRoom so the branch fires.
+      const legacyResult = internals.applyLegacyMailSentinelRequestedInstanceDefaults({
+        entry: {
+          id: "mail-sentinel",
+          packageId: "mail-sentinel",
+          workspace: "/var/lib/sovereign-node/mail-sentinel/workspace",
+          config: {},
+          secretRefs: {},
+        },
+        imap: {
+          status: "pending",
+        } as RuntimeConfig["imap"],
+        matrixRoom: currentRoom,
+        previousRuntimeConfig,
+      });
+      expect(legacyResult.matrix?.alertRoom?.roomId).toBe(currentRoom.roomId);
+      expect(legacyResult.matrix?.alertRoom?.roomName).toBe(currentRoom.roomName);
+
+      // Sanity: when the previous roomId DOES match the current one, the
+      // fix must not discard the previous entry's metadata (e.g. a custom
+      // roomName the operator set explicitly).
+      const matchingPreviousRuntimeConfig = {
+        bots: {
+          instances: [
+            {
+              id: "mail-sentinel",
+              packageId: "mail-sentinel",
+              workspace: "/var/lib/sovereign-node/mail-sentinel/workspace",
+              config: {},
+              secretRefs: {},
+              matrix: {
+                alertRoom: {
+                  roomId: currentRoom.roomId,
+                  roomName: "Custom operator-picked name",
+                },
+              },
+            },
+          ],
+        },
+      } as unknown as RuntimeConfig;
+      const preserved = internals.normalizeRequestedBotInstance({
+        entry: {
+          id: "mail-sentinel",
+          packageId: "mail-sentinel",
+        },
+        configById: {},
+        matrixRoom: currentRoom,
+        previousRuntimeConfig: matchingPreviousRuntimeConfig,
+      });
+      expect(preserved.matrix?.alertRoom?.roomId).toBe(currentRoom.roomId);
+      expect(preserved.matrix?.alertRoom?.roomName).toBe("Custom operator-picked name");
+
+      // Regression for the explicit-roomId branch. The saved install
+      // request file (populated by migrateLegacyMailSentinel) persists
+      // bots.instances[].matrix.alertRoom.roomId and replays it across
+      // updates. When that saved roomId predates a room rotation, it
+      // disagrees with the freshly-bootstrapped matrixRoom. The earlier
+      // normalization trusted the explicit value unconditionally,
+      // short-circuiting the staleness check. Rotate in this case too.
+      const explicitlyStaleResult = internals.normalizeRequestedBotInstance({
+        entry: {
+          id: "mail-sentinel",
+          packageId: "mail-sentinel",
+          matrix: {
+            alertRoom: staleRoom,
+          },
+        },
+        configById: {},
+        matrixRoom: currentRoom,
+        previousRuntimeConfig,
+      });
+      expect(explicitlyStaleResult.matrix?.alertRoom?.roomId).toBe(currentRoom.roomId);
+      expect(explicitlyStaleResult.matrix?.alertRoom?.roomName).toBe(currentRoom.roomName);
+
+      // Operator-picked roomName preserved when explicit roomId matches
+      // current install.
+      const explicitlyMatchingResult = internals.normalizeRequestedBotInstance({
+        entry: {
+          id: "mail-sentinel",
+          packageId: "mail-sentinel",
+          matrix: {
+            alertRoom: {
+              roomId: currentRoom.roomId,
+              roomName: "Custom operator-picked name",
+            },
+          },
+        },
+        configById: {},
+        matrixRoom: currentRoom,
+        previousRuntimeConfig: null,
+      });
+      expect(explicitlyMatchingResult.matrix?.alertRoom?.roomId).toBe(currentRoom.roomId);
+      expect(explicitlyMatchingResult.matrix?.alertRoom?.roomName).toBe(
+        "Custom operator-picked name",
+      );
+
+      // Same explicit-roomId rotation in
+      // applyLegacyMailSentinelRequestedInstanceDefaults. The earlier
+      // check only fired when entry.matrix.alertRoom was undefined; when
+      // the entry carried a stale alertRoom (from a replayed install
+      // request), the alertRoom was spread straight through.
+      const legacyExplicitlyStaleResult =
+        internals.applyLegacyMailSentinelRequestedInstanceDefaults({
+          entry: {
+            id: "mail-sentinel",
+            packageId: "mail-sentinel",
+            workspace: "/var/lib/sovereign-node/mail-sentinel/workspace",
+            config: {},
+            secretRefs: {},
+            matrix: {
+              alertRoom: staleRoom,
+            },
+          },
+          imap: {
+            status: "pending",
+          } as RuntimeConfig["imap"],
+          matrixRoom: currentRoom,
+          previousRuntimeConfig,
+        });
+      expect(legacyExplicitlyStaleResult.matrix?.alertRoom?.roomId).toBe(currentRoom.roomId);
+      expect(legacyExplicitlyStaleResult.matrix?.alertRoom?.roomName).toBe(currentRoom.roomName);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rotates a stale alertRoom through buildLegacyMailSentinelRequestedInstance when no explicit bot instance is in the request", async () => {
+    // Follow-up to #120. The install request path where no explicit
+    // bots.instances[] is provided (the common case — install.sh only
+    // sets bots.selected) routes through
+    // buildLegacyMailSentinelRequestedInstance, which was still reading
+    // `previous?.matrix?.alertRoom ?? input.matrixRoom` without the
+    // staleness check. That left instance.matrix.alertRoom pinned to the
+    // old dead room across installer runs.
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => {
+          throw new Error("not used");
+        },
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => {
+          throw new Error("not used");
+        },
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async () => ({
+          ok: true,
+          host: "127.0.0.1",
+          port: 1143,
+          tls: true,
+          auth: "ok",
+          mailbox: "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+    });
+
+    try {
+      const internals = service as unknown as {
+        buildLegacyMailSentinelRequestedInstance(input: {
+          configById: Record<string, Record<string, unknown>>;
+          imap: RuntimeConfig["imap"];
+          matrixRoom: { roomId: string; roomName: string };
+          previousRuntimeConfig: RuntimeConfig | null;
+        }): {
+          id: string;
+          matrix?: { alertRoom?: { roomId: string; roomName: string } };
+        };
+      };
+
+      const currentRoom = {
+        roomId: "!fresh:matrix.example.org",
+        roomName: "Sovereign Alerts",
+      };
+      const staleRoom = {
+        roomId: "!stale:old.homeserver.example",
+        roomName: "Sovereign Alerts (old)",
+      };
+
+      const previousRuntimeConfig = {
+        bots: {
+          instances: [
+            {
+              id: "mail-sentinel",
+              packageId: "mail-sentinel",
+              workspace: "/var/lib/sovereign-node/mail-sentinel/workspace",
+              config: {},
+              secretRefs: {},
+              matrix: { alertRoom: staleRoom },
+            },
+          ],
+        },
+        openclawProfile: { agents: [] },
+      } as unknown as RuntimeConfig;
+
+      // Stale previous → rotate to current.
+      const rotated = internals.buildLegacyMailSentinelRequestedInstance({
+        configById: {},
+        imap: { status: "pending" } as RuntimeConfig["imap"],
+        matrixRoom: currentRoom,
+        previousRuntimeConfig,
+      });
+      expect(rotated.matrix?.alertRoom?.roomId).toBe(currentRoom.roomId);
+      expect(rotated.matrix?.alertRoom?.roomName).toBe(currentRoom.roomName);
+
+      // Matching previous → preserve operator-picked metadata.
+      const matchingPreviousRuntimeConfig = {
+        bots: {
+          instances: [
+            {
+              id: "mail-sentinel",
+              packageId: "mail-sentinel",
+              workspace: "/var/lib/sovereign-node/mail-sentinel/workspace",
+              config: {},
+              secretRefs: {},
+              matrix: {
+                alertRoom: {
+                  roomId: currentRoom.roomId,
+                  roomName: "Custom operator-picked name",
+                },
+              },
+            },
+          ],
+        },
+        openclawProfile: { agents: [] },
+      } as unknown as RuntimeConfig;
+
+      const preserved = internals.buildLegacyMailSentinelRequestedInstance({
+        configById: {},
+        imap: { status: "pending" } as RuntimeConfig["imap"],
+        matrixRoom: currentRoom,
+        previousRuntimeConfig: matchingPreviousRuntimeConfig,
+      });
+      expect(preserved.matrix?.alertRoom?.roomId).toBe(currentRoom.roomId);
+      expect(preserved.matrix?.alertRoom?.roomName).toBe("Custom operator-picked name");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }

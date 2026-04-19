@@ -508,15 +508,42 @@ export class RealInstallerService implements InstallerService {
       typeof matrixEntry.localpart === "string" && matrixEntry.localpart.trim().length > 0
         ? sanitizeManagedAgentLocalpart(matrixEntry.localpart, id)
         : previous?.matrix?.localpart;
-    const roomId =
+    // Rotate the alertRoom to the current install's room whenever the
+    // caller's or previous runtime's value disagrees with it. The saved
+    // install-request persists `bots.instances[].matrix.alertRoom.roomId`
+    // across updates (see migrateLegacyMailSentinel), so a stale roomId
+    // from before a homeserver/room rotation survives forever otherwise —
+    // #120 only rotated when alertRoomEntry.roomId was empty, leaving the
+    // explicit-roomId branch to keep pinning bots to a dead room. Any
+    // caller-provided roomId that doesn't match the freshly-bootstrapped
+    // matrixRoom is ipso facto stale: operator-chosen rooms flow through
+    // matrixRoom, so a legitimate custom value would equal currentRoomId.
+    const previousRoomId = previous?.matrix?.alertRoom?.roomId;
+    const previousRoomName = previous?.matrix?.alertRoom?.roomName;
+    const currentRoomId = input.matrixRoom.roomId;
+    const explicitRoomId =
       typeof alertRoomEntry.roomId === "string" && alertRoomEntry.roomId.trim().length > 0
         ? alertRoomEntry.roomId.trim()
-        : previous?.matrix?.alertRoom?.roomId;
-    const roomName =
+        : undefined;
+    const explicitRoomName =
       typeof alertRoomEntry.roomName === "string" && alertRoomEntry.roomName.trim().length > 0
         ? alertRoomEntry.roomName.trim()
-        : (previous?.matrix?.alertRoom?.roomName ??
-          (roomId === undefined ? undefined : input.matrixRoom.roomName));
+        : undefined;
+    const explicitMatchesCurrent = explicitRoomId === currentRoomId;
+    const previousMatchesCurrent =
+      typeof previousRoomId === "string" && previousRoomId === currentRoomId;
+    const roomId = explicitMatchesCurrent
+      ? explicitRoomId
+      : previousMatchesCurrent
+        ? previousRoomId
+        : (currentRoomId ?? explicitRoomId ?? previousRoomId);
+    const roomName = explicitMatchesCurrent
+      ? (explicitRoomName ?? input.matrixRoom.roomName)
+      : previousMatchesCurrent
+        ? (previousRoomName ?? input.matrixRoom.roomName)
+        : (input.matrixRoom.roomName ??
+          explicitRoomName ??
+          (roomId === undefined ? undefined : previousRoomName));
     return {
       id,
       packageId,
@@ -575,7 +602,15 @@ export class RealInstallerService implements InstallerService {
               ? {}
               : { localpart: previousAgent.matrix.localpart }
             : { localpart: previous.matrix.localpart }),
-          alertRoom: previous?.matrix?.alertRoom ?? input.matrixRoom,
+          // Same staleness guard as normalizeRequestedBotInstance +
+          // applyLegacyMailSentinelRequestedInstanceDefaults: when the
+          // previous runtime's roomId doesn't match the current install's
+          // authoritative matrixRoom, use matrixRoom so the subsequent
+          // tool bindings resolve to a room that actually exists.
+          alertRoom:
+            previous?.matrix?.alertRoom?.roomId === input.matrixRoom.roomId
+              ? previous.matrix.alertRoom
+              : input.matrixRoom,
           ...(previous?.matrix?.allowedUsers === undefined
             ? {}
             : { allowedUsers: previous.matrix.allowedUsers }),
@@ -681,9 +716,19 @@ export class RealInstallerService implements InstallerService {
       }),
       matrix: {
         ...(input.entry.matrix ?? {}),
-        ...(input.entry.matrix?.alertRoom === undefined
-          ? { alertRoom: previous?.matrix?.alertRoom ?? input.matrixRoom }
-          : {}),
+        // Rotate the bot-instance alertRoom to the current install's
+        // matrixRoom unless the entry/previous roomId already matches it.
+        // Saved install-requests persist a stale roomId from the legacy
+        // migration across updates; callers with a legit custom roomId
+        // flow it through matrixRoom so any mismatch here is ipso facto
+        // stale. Preserving the entry/previous alertRoom block when it
+        // matches keeps operator-picked roomName intact.
+        alertRoom:
+          input.entry.matrix?.alertRoom?.roomId === input.matrixRoom.roomId
+            ? input.entry.matrix.alertRoom
+            : previous?.matrix?.alertRoom?.roomId === input.matrixRoom.roomId
+              ? previous.matrix.alertRoom
+              : input.matrixRoom,
         ...(input.entry.matrix?.allowedUsers === undefined &&
         previous?.matrix?.allowedUsers !== undefined
           ? { allowedUsers: previous.matrix.allowedUsers }
@@ -2702,6 +2747,46 @@ export class RealInstallerService implements InstallerService {
     },
   ): unknown {
     const botInstance = context?.botInstance;
+    const botPackage = context?.botPackage;
+    // When the binding resolver runs without a concrete botInstance (e.g.
+    // inside the `instances.length === 0` branch of the managed-tool
+    // construction, reached for any bot selected by the installer that has
+    // no pre-existing bot instance from a prior runtime config), we still
+    // want `instance.config.*` paths to resolve. Fall back to the bot
+    // package's configDefaults so manifests that rely purely on defaults
+    // (no user overrides) still build their tool bindings. Historically
+    // this only surfaced when a selected bot lacked an `enabledWhen` gate
+    // on every tool instance — mail-sentinel's imap tool is gated, so the
+    // no-instance branch skipped it and never exercised this path.
+    const syntheticInstance =
+      botInstance === undefined && botPackage !== undefined
+        ? {
+            id: botPackage.manifest.id,
+            packageId: botPackage.manifest.id,
+            workspace: "",
+            config: { ...botPackage.manifest.configDefaults },
+            secretRefs: {} as Record<string, string>,
+            // Bot tool bindings commonly reference
+            // `instance.matrix.alertRoom.roomId` to pin alerts at the node's
+            // single alert room. Mirror the runtime config's alert room
+            // into the synthetic instance.matrix so those bindings resolve
+            // without requiring a pre-existing bot instance.
+            matrix: {
+              alertRoom: {
+                roomId: runtimeConfig.matrix?.alertRoom?.roomId ?? "",
+                roomName: runtimeConfig.matrix?.alertRoom?.roomName ?? "",
+              },
+            },
+            toolInstanceIds: context?.toolInstanceIdMap ?? {},
+          }
+        : undefined;
+    const syntheticAgent =
+      botInstance === undefined && botPackage !== undefined
+        ? {
+            id: botPackage.manifest.id,
+            workspace: "",
+          }
+        : undefined;
     return path.split(".").reduce<unknown>(
       (current, segment) => {
         if (!isRecord(current) || !(segment in current)) {
@@ -2712,7 +2797,12 @@ export class RealInstallerService implements InstallerService {
       {
         ...runtimeConfig,
         ...(botInstance === undefined
-          ? {}
+          ? syntheticInstance === undefined
+            ? {}
+            : {
+                instance: syntheticInstance,
+                agent: syntheticAgent,
+              }
           : {
               instance: {
                 id: botInstance.id,
@@ -5303,6 +5393,27 @@ export default function (api) {
     );
     const alertRoom = this.resolveManagedAgentAlertRoom(runtimeConfig, entry);
 
+    // Persist the agent identity BEFORE attempting room-membership calls.
+    // If the invite/join steps below fail transiently (e.g. the bot + agent
+    // share a localpart so Synapse returns a 403 "already in the room" that
+    // isAlreadyJoinedOrInvitedRoomError fails to tolerate, or an
+    // eventual-consistency blip during a fresh Matrix provision), we still
+    // want entry.matrix populated. Without this, the mail-sentinel CLI and
+    // downstream managed-agent tooling all choke on a missing secretRef
+    // and the only recovery is hand-editing the runtime config on the VPS.
+    const nextIdentity = {
+      localpart,
+      userId: loginSession.userId,
+      passwordSecretRef,
+      accessTokenSecretRef,
+    };
+    const changed = !areMatrixIdentitiesEqual(entry.matrix, nextIdentity);
+    entry.matrix = nextIdentity;
+    const primaryBotChanged = this.syncPrimaryDedicatedMatrixBotIdentity(
+      runtimeConfig,
+      nextIdentity,
+    );
+
     await this.ensureMatrixUserInAlertRoom({
       adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
       roomId: alertRoom.roomId,
@@ -5317,18 +5428,6 @@ export default function (api) {
       inviterAccessToken: operatorAccessToken,
     });
 
-    const nextIdentity = {
-      localpart,
-      userId: loginSession.userId,
-      passwordSecretRef,
-      accessTokenSecretRef,
-    };
-    const changed = !areMatrixIdentitiesEqual(entry.matrix, nextIdentity);
-    entry.matrix = nextIdentity;
-    const primaryBotChanged = this.syncPrimaryDedicatedMatrixBotIdentity(
-      runtimeConfig,
-      nextIdentity,
-    );
     return {
       runtimeConfig,
       changed: changed || primaryBotChanged,
@@ -6828,9 +6927,11 @@ export default function (api) {
             return;
           }
           stepState.relayEnrollment = await this.resolveRelayEnrollment(req, ctx.installationId);
+          const previousRuntimeConfig = await this.tryReadRuntimeConfig();
           stepState.effectiveRequest = this.buildRelayProvisionRequest(
             req,
             stepState.relayEnrollment,
+            previousRuntimeConfig,
           );
         },
       },
@@ -7037,6 +7138,7 @@ export default function (api) {
           }
           let topologyChanged = false;
           for (const agent of runtimeConfig.openclawProfile.agents) {
+            const priorMatrixIdentity = agent.matrix;
             try {
               const ensuredAgent = await this.ensureManagedAgentMatrixIdentity(
                 runtimeConfig,
@@ -7052,6 +7154,20 @@ export default function (api) {
                 },
                 "Managed bot Matrix identity provisioning failed during install; continuing with degraded bot setup",
               );
+              // ensureManagedAgentMatrixIdentity persists entry.matrix in
+              // memory BEFORE the room-membership calls that can throw
+              // (invite/join). When it does throw partway through, the
+              // in-memory mutation survives but we still need to flag
+              // topologyChanged so persistManagedAgentTopologyDocument
+              // flushes the new agent identity to disk. Without this,
+              // the next install would still see entry.matrix == null and
+              // repeat the failure loop.
+              const currentMatrixIdentity = runtimeConfig.openclawProfile.agents.find(
+                (candidate) => candidate.id === agent.id,
+              )?.matrix;
+              if (!areMatrixIdentitiesEqual(priorMatrixIdentity, currentMatrixIdentity)) {
+                topologyChanged = true;
+              }
             }
           }
           if (topologyChanged) {
@@ -7295,9 +7411,22 @@ export default function (api) {
       usesManagedPublicEnroll ? "/api/v1/enroll-public" : "/api/v1/enroll",
       ensureTrailingSlash(relay.controlUrl),
     ).toString();
+    // On authenticated enrollment (caller presents an enrollmentToken) we
+    // honour relay.requestedSlug when supplied, so operators running their
+    // own relay or re-enrolling with a known token can pick a stable,
+    // human-readable hostname. On public enrollment (no token, shared
+    // control plane) we always generate to prevent slug squatting. If the
+    // caller's slug is already taken we fall back to generated names on
+    // subsequent attempts.
+    const callerSlug = relay.requestedSlug?.trim();
+    const callerSlugEligible =
+      !usesManagedPublicEnroll && typeof callerSlug === "string" && callerSlug.length > 0;
     let lastFailure: { status?: number; responseText?: string; error?: unknown } | null = null;
     for (let attempt = 1; attempt <= 6; attempt += 1) {
-      const requestedSlug = this.generateManagedRelayRequestedSlug();
+      const requestedSlug =
+        attempt === 1 && callerSlugEligible
+          ? (callerSlug as string)
+          : this.generateManagedRelayRequestedSlug();
       let response: Response;
       try {
         response = await this.fetchImpl(endpoint, {
@@ -7491,7 +7620,12 @@ export default function (api) {
   private buildRelayProvisionRequest(
     req: InstallRequest,
     enrollment: RelayEnrollmentResult,
+    previousRuntimeConfig?: RuntimeConfig | null,
   ): InstallRequest {
+    const homeserverDomain =
+      previousRuntimeConfig?.matrix.accessMode === "direct"
+        ? previousRuntimeConfig.matrix.homeserverDomain
+        : enrollment.hostname;
     return {
       ...req,
       connectivity: {
@@ -7500,7 +7634,7 @@ export default function (api) {
       },
       matrix: {
         ...req.matrix,
-        homeserverDomain: enrollment.hostname,
+        homeserverDomain,
         publicBaseUrl: enrollment.publicBaseUrl,
         federationEnabled: req.matrix.federationEnabled ?? false,
       },
@@ -7760,6 +7894,14 @@ export default function (api) {
           entry.botId === botPackage.manifest.id &&
           entry.spec?.agentId === agent.id,
       );
+      const staleCronMatchers = (runtimeConfig.hostResources?.resources ?? []).flatMap((entry) =>
+        entry.kind === "openclawCron" &&
+        entry.desiredState === "absent" &&
+        entry.botId === botPackage.manifest.id &&
+        entry.agentId === agent.id
+          ? [entry.match]
+          : [],
+      );
       try {
         const registration = await this.withManagedOpenClawServiceIdentityEnv(
           runtimeConfig,
@@ -7767,6 +7909,7 @@ export default function (api) {
             await this.managedAgentRegistrar.register({
               agentId: agent.id,
               workspaceDir: agent.workspace,
+              ...(staleCronMatchers.length === 0 ? {} : { removeCronMatchers: staleCronMatchers }),
               ...(cronEntry === undefined ||
               compiledCron?.kind !== "openclawCron" ||
               compiledCron.spec === undefined
