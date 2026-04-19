@@ -7048,6 +7048,7 @@ export default function (api) {
           }
           let topologyChanged = false;
           for (const agent of runtimeConfig.openclawProfile.agents) {
+            const priorMatrixIdentity = agent.matrix;
             try {
               const ensuredAgent = await this.ensureManagedAgentMatrixIdentity(
                 runtimeConfig,
@@ -7063,6 +7064,20 @@ export default function (api) {
                 },
                 "Managed bot Matrix identity provisioning failed during install; continuing with degraded bot setup",
               );
+              // ensureManagedAgentMatrixIdentity persists entry.matrix in
+              // memory BEFORE the room-membership calls that can throw
+              // (invite/join). When it does throw partway through, the
+              // in-memory mutation survives but we still need to flag
+              // topologyChanged so persistManagedAgentTopologyDocument
+              // flushes the new agent identity to disk. Without this,
+              // the next install would still see entry.matrix == null and
+              // repeat the failure loop.
+              const currentMatrixIdentity = runtimeConfig.openclawProfile.agents.find(
+                (candidate) => candidate.id === agent.id,
+              )?.matrix;
+              if (!areMatrixIdentitiesEqual(priorMatrixIdentity, currentMatrixIdentity)) {
+                topologyChanged = true;
+              }
             }
           }
           if (topologyChanged) {
