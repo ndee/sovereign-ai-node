@@ -2702,6 +2702,46 @@ export class RealInstallerService implements InstallerService {
     },
   ): unknown {
     const botInstance = context?.botInstance;
+    const botPackage = context?.botPackage;
+    // When the binding resolver runs without a concrete botInstance (e.g.
+    // inside the `instances.length === 0` branch of the managed-tool
+    // construction, reached for any bot selected by the installer that has
+    // no pre-existing bot instance from a prior runtime config), we still
+    // want `instance.config.*` paths to resolve. Fall back to the bot
+    // package's configDefaults so manifests that rely purely on defaults
+    // (no user overrides) still build their tool bindings. Historically
+    // this only surfaced when a selected bot lacked an `enabledWhen` gate
+    // on every tool instance — mail-sentinel's imap tool is gated, so the
+    // no-instance branch skipped it and never exercised this path.
+    const syntheticInstance =
+      botInstance === undefined && botPackage !== undefined
+        ? {
+            id: botPackage.manifest.id,
+            packageId: botPackage.manifest.id,
+            workspace: "",
+            config: { ...botPackage.manifest.configDefaults },
+            secretRefs: {} as Record<string, string>,
+            // Bot tool bindings commonly reference
+            // `instance.matrix.alertRoom.roomId` to pin alerts at the node's
+            // single alert room. Mirror the runtime config's alert room
+            // into the synthetic instance.matrix so those bindings resolve
+            // without requiring a pre-existing bot instance.
+            matrix: {
+              alertRoom: {
+                roomId: runtimeConfig.matrix?.alertRoom?.roomId ?? "",
+                roomName: runtimeConfig.matrix?.alertRoom?.roomName ?? "",
+              },
+            },
+            toolInstanceIds: context?.toolInstanceIdMap ?? {},
+          }
+        : undefined;
+    const syntheticAgent =
+      botInstance === undefined && botPackage !== undefined
+        ? {
+            id: botPackage.manifest.id,
+            workspace: "",
+          }
+        : undefined;
     return path.split(".").reduce<unknown>(
       (current, segment) => {
         if (!isRecord(current) || !(segment in current)) {
@@ -2712,7 +2752,12 @@ export class RealInstallerService implements InstallerService {
       {
         ...runtimeConfig,
         ...(botInstance === undefined
-          ? {}
+          ? syntheticInstance === undefined
+            ? {}
+            : {
+                instance: syntheticInstance,
+                agent: syntheticAgent,
+              }
           : {
               instance: {
                 id: botInstance.id,
