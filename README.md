@@ -8,7 +8,7 @@ Sovereign AI Node is a self-hosted platform for running specialized bots on your
 
 The current documented path requires:
 
-* a dedicated Ubuntu host — VM, bare metal, or VPS (22.04+ recommended)
+* a dedicated Ubuntu or Debian host — VM, bare metal, or VPS (Ubuntu 22.04+ recommended)
 * an [OpenRouter](https://openrouter.ai/) API key for the provider-backed bot runtime path
 * an Element or other Matrix client for operator interaction
 
@@ -16,7 +16,7 @@ The installer provisions the Matrix stack (Synapse) and bot runtime (OpenClaw) a
 
 ## Install
 
-Run the guided installer on a fresh Ubuntu host (VM, bare metal, or VPS):
+Run the guided installer on a fresh Ubuntu or Debian host (VM, bare metal, or VPS):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ndee/sovereign-ai-node/main/scripts/install.sh | sudo bash
