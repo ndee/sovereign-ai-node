@@ -1004,7 +1004,7 @@ const buildManagedAgentMatrixProvisionResponse = (
 };
 
 describe("RealInstallerService", () => {
-  it("generates an immutable relay slug during enrollment instead of honoring caller-provided slugs", async () => {
+  it("honors the caller-provided relay slug when enrolling with an enrollment token", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {
       configPath: join(tempRoot, "etc", "sovereign-node.json5"),
@@ -1147,10 +1147,166 @@ describe("RealInstallerService", () => {
         }
       ).resolveRelayEnrollment(req, "inst_test_custom_relay");
 
-      expect(capturedRequestedSlug).toMatch(/^[a-z0-9-]{1,63}$/);
-      expect(capturedRequestedSlug).not.toBe("user-picked-name");
+      // Authenticated enrollment sends the caller's slug unchanged so
+      // operators running their own relay (or re-enrolling with a known
+      // token) can pick a stable, human-readable hostname.
+      expect(capturedRequestedSlug).toBe("user-picked-name");
       expect(enrollment.hostname).toBe("pilot-node.relay.sovereign-ai-node.com");
       expect(enrollment.publicBaseUrl).toBe("https://pilot-node.relay.sovereign-ai-node.com");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to a generated relay slug when the caller-provided slug is already taken", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+
+    const capturedSlugs: string[] = [];
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "pinned-by-sovereign",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: "/tmp/ws",
+          agentCommand: "openclaw agents add mail-sentinel",
+          cronCommand: "openclaw cron add --name mail-sentinel-poll",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async (req) => ({
+          projectDir: "/tmp/fake-matrix",
+          composeFilePath: "/tmp/fake-matrix/compose.yaml",
+          accessMode: "relay",
+          homeserverDomain: req.matrix.homeserverDomain,
+          publicBaseUrl: req.matrix.publicBaseUrl,
+          adminBaseUrl: "http://127.0.0.1:8008",
+          federationEnabled: false,
+          tlsMode: "auto",
+        }),
+        bootstrapAccounts: async () => ({
+          operator: {
+            localpart: "operator",
+            userId: "@operator:pilot-node.relay.sovereign-ai-node.com",
+            passwordSecretRef: "file:/tmp/operator.password",
+            accessToken: "operator-token",
+          },
+          bot: {
+            localpart: "mail-sentinel",
+            userId: "@mail-sentinel:pilot-node.relay.sovereign-ai-node.com",
+            passwordSecretRef: "file:/tmp/mail-sentinel.password",
+            accessToken: "bot-token",
+          },
+        }),
+        bootstrapRoom: async () => ({
+          roomId: "!alerts:pilot-node.relay.sovereign-ai-node.com",
+          roomName: "Sovereign Alerts",
+        }),
+        test: async (req) => ({
+          ok: true,
+          homeserverUrl: req.publicBaseUrl,
+          checks: [],
+        }),
+      },
+      fetchImpl: async (_input, init) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { requestedSlug?: unknown };
+        const slug = typeof body.requestedSlug === "string" ? body.requestedSlug : "";
+        capturedSlugs.push(slug);
+        // First attempt (caller's "taken-name") — 409 conflict.
+        if (capturedSlugs.length === 1) {
+          return new Response(JSON.stringify({ error: "slug taken" }), {
+            status: 409,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        // Second attempt (generated) — accept.
+        return new Response(
+          JSON.stringify({
+            result: {
+              assignedHostname: "pilot-node.relay.sovereign-ai-node.com",
+              publicBaseUrl: "https://pilot-node.relay.sovereign-ai-node.com",
+              tunnel: {
+                serverAddr: "relay.sovereign-ai-node.com",
+                serverPort: 7000,
+                token: "relay-token",
+                proxyName: "relay-pilot-node",
+              },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    });
+
+    try {
+      const req = buildInstallRequest() as InstallRequest & {
+        relay: { controlUrl: string; enrollmentToken: string; requestedSlug: string };
+      };
+      req.connectivity = { mode: "relay" };
+      req.relay = {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+        enrollmentToken: "relay-enrollment-token",
+        requestedSlug: "taken-name",
+      };
+      req.imap = undefined;
+      req.matrix.homeserverDomain = "relay-pending.invalid";
+      req.matrix.publicBaseUrl = "https://relay-pending.invalid";
+      req.matrix.federationEnabled = false;
+      req.matrix.tlsMode = "auto";
+
+      const enrollment = await (
+        service as unknown as {
+          resolveRelayEnrollment: (
+            value: InstallRequest,
+            installationId: string,
+          ) => Promise<{ hostname: string; publicBaseUrl: string }>;
+        }
+      ).resolveRelayEnrollment(req, "inst_test_collision");
+
+      expect(capturedSlugs).toHaveLength(2);
+      expect(capturedSlugs[0]).toBe("taken-name");
+      expect(capturedSlugs[1]).not.toBe("taken-name");
+      expect(capturedSlugs[1]).toMatch(/^[a-z0-9-]{1,63}$/);
+      expect(enrollment.hostname).toBe("pilot-node.relay.sovereign-ai-node.com");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }

@@ -7321,9 +7321,22 @@ export default function (api) {
       usesManagedPublicEnroll ? "/api/v1/enroll-public" : "/api/v1/enroll",
       ensureTrailingSlash(relay.controlUrl),
     ).toString();
+    // On authenticated enrollment (caller presents an enrollmentToken) we
+    // honour relay.requestedSlug when supplied, so operators running their
+    // own relay or re-enrolling with a known token can pick a stable,
+    // human-readable hostname. On public enrollment (no token, shared
+    // control plane) we always generate to prevent slug squatting. If the
+    // caller's slug is already taken we fall back to generated names on
+    // subsequent attempts.
+    const callerSlug = relay.requestedSlug?.trim();
+    const callerSlugEligible =
+      !usesManagedPublicEnroll && typeof callerSlug === "string" && callerSlug.length > 0;
     let lastFailure: { status?: number; responseText?: string; error?: unknown } | null = null;
     for (let attempt = 1; attempt <= 6; attempt += 1) {
-      const requestedSlug = this.generateManagedRelayRequestedSlug();
+      const requestedSlug =
+        attempt === 1 && callerSlugEligible
+          ? (callerSlug as string)
+          : this.generateManagedRelayRequestedSlug();
       let response: Response;
       try {
         response = await this.fetchImpl(endpoint, {
