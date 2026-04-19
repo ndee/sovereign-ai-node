@@ -428,6 +428,7 @@ export class RealInstallerService implements InstallerService {
     configById: Record<string, BotConfigRecord>;
     imap: RuntimeConfig["imap"];
     matrixRoom: { roomId: string; roomName: string };
+    homeserverDomain: string;
     previousRuntimeConfig: RuntimeConfig | null;
   }): RequestedBotInstance[] {
     const explicitInstances = Array.isArray(input.req.bots?.instances)
@@ -436,6 +437,7 @@ export class RealInstallerService implements InstallerService {
             entry,
             configById: input.configById,
             matrixRoom: input.matrixRoom,
+            homeserverDomain: input.homeserverDomain,
             previousRuntimeConfig: input.previousRuntimeConfig,
           }),
         )
@@ -445,6 +447,7 @@ export class RealInstallerService implements InstallerService {
         entry,
         imap: input.imap,
         matrixRoom: input.matrixRoom,
+        homeserverDomain: input.homeserverDomain,
         previousRuntimeConfig: input.previousRuntimeConfig,
       }),
     );
@@ -460,6 +463,7 @@ export class RealInstallerService implements InstallerService {
           configById: input.configById,
           imap: input.imap,
           matrixRoom: input.matrixRoom,
+          homeserverDomain: input.homeserverDomain,
           previousRuntimeConfig: input.previousRuntimeConfig,
         }),
       );
@@ -471,6 +475,7 @@ export class RealInstallerService implements InstallerService {
     entry: NonNullable<NonNullable<InstallRequest["bots"]>["instances"]>[number];
     configById: Record<string, BotConfigRecord>;
     matrixRoom: { roomId: string; roomName: string };
+    homeserverDomain: string;
     previousRuntimeConfig: RuntimeConfig | null;
   }): RequestedBotInstance {
     const id = sanitizeManagedAgentId(input.entry.id);
@@ -478,10 +483,17 @@ export class RealInstallerService implements InstallerService {
     const previous = input.previousRuntimeConfig?.bots.instances.find((entry) => entry.id === id);
     const matrixEntry = isRecord(input.entry.matrix) ? input.entry.matrix : {};
     const alertRoomEntry = isRecord(matrixEntry.alertRoom) ? matrixEntry.alertRoom : {};
-    const allowedUsers = normalizeMatrixUserList(
+    // Rotate persisted allowedUsers to the current Synapse homeserver domain.
+    // Same staleness problem as alertRoom: the saved install-request and
+    // previous runtime both carry MXIDs that disagree with the live Synapse
+    // after a homeserver rotation, and the entries are copied verbatim
+    // without normalization (rewriteAllowedUsersToHomeserverDomain docstring
+    // has the full explanation).
+    const allowedUsers = rewriteAllowedUsersToHomeserverDomain(
       Array.isArray(matrixEntry.allowedUsers)
         ? matrixEntry.allowedUsers
         : (previous?.matrix?.allowedUsers ?? []),
+      input.homeserverDomain,
     );
     const config = {
       ...(input.configById[packageId] ?? {}),
@@ -576,6 +588,7 @@ export class RealInstallerService implements InstallerService {
     configById: Record<string, BotConfigRecord>;
     imap: RuntimeConfig["imap"];
     matrixRoom: { roomId: string; roomName: string };
+    homeserverDomain: string;
     previousRuntimeConfig: RuntimeConfig | null;
   }): RequestedBotInstance {
     const previous =
@@ -585,6 +598,13 @@ export class RealInstallerService implements InstallerService {
     const previousAgent = input.previousRuntimeConfig?.openclawProfile.agents.find(
       (entry) => entry.id === MAIL_SENTINEL_AGENT_ID,
     );
+    const rotatedAllowedUsers =
+      previous?.matrix?.allowedUsers === undefined
+        ? undefined
+        : rewriteAllowedUsersToHomeserverDomain(
+            previous.matrix.allowedUsers,
+            input.homeserverDomain,
+          );
     return this.applyLegacyMailSentinelRequestedInstanceDefaults({
       entry: {
         id: MAIL_SENTINEL_AGENT_ID,
@@ -611,13 +631,19 @@ export class RealInstallerService implements InstallerService {
             previous?.matrix?.alertRoom?.roomId === input.matrixRoom.roomId
               ? previous.matrix.alertRoom
               : input.matrixRoom,
-          ...(previous?.matrix?.allowedUsers === undefined
+          // Rotate MXIDs to the current homeserver so post-rotation
+          // operator accounts land in the allowlist instead of the dead
+          // pre-rotation domain. Drop the field entirely when the rewrite
+          // yields nothing (mirrors the previous "copy only when present"
+          // shape so callers still see undefined for empty lists).
+          ...(rotatedAllowedUsers === undefined || rotatedAllowedUsers.length === 0
             ? {}
-            : { allowedUsers: previous.matrix.allowedUsers }),
+            : { allowedUsers: rotatedAllowedUsers }),
         },
       },
       imap: input.imap,
       matrixRoom: input.matrixRoom,
+      homeserverDomain: input.homeserverDomain,
       previousRuntimeConfig: input.previousRuntimeConfig,
     });
   }
@@ -626,6 +652,7 @@ export class RealInstallerService implements InstallerService {
     entry: RequestedBotInstance;
     imap: RuntimeConfig["imap"];
     matrixRoom: { roomId: string; roomName: string };
+    homeserverDomain: string;
     previousRuntimeConfig: RuntimeConfig | null;
   }): RequestedBotInstance {
     if (input.entry.packageId !== MAIL_SENTINEL_AGENT_ID) {
@@ -729,10 +756,29 @@ export class RealInstallerService implements InstallerService {
             : previous?.matrix?.alertRoom?.roomId === input.matrixRoom.roomId
               ? previous.matrix.alertRoom
               : input.matrixRoom,
-        ...(input.entry.matrix?.allowedUsers === undefined &&
-        previous?.matrix?.allowedUsers !== undefined
-          ? { allowedUsers: previous.matrix.allowedUsers }
-          : {}),
+        // Rotate allowedUsers to the current homeserver in both branches:
+        // when the entry already carries a list (replayed install request),
+        // and when we fall back to the previous runtime's list. Either one
+        // can have survived a homeserver rotation untouched — the E2E VPS
+        // reproduction had `@operator:e2e.sovereign.local` leaking through
+        // on every `sovereign-node update` because
+        // normalizeRequestedBotInstance ran ahead of this function and the
+        // rotation was only applied there.
+        ...(input.entry.matrix?.allowedUsers !== undefined
+          ? {
+              allowedUsers: rewriteAllowedUsersToHomeserverDomain(
+                input.entry.matrix.allowedUsers,
+                input.homeserverDomain,
+              ),
+            }
+          : previous?.matrix?.allowedUsers !== undefined
+            ? {
+                allowedUsers: rewriteAllowedUsersToHomeserverDomain(
+                  previous.matrix.allowedUsers,
+                  input.homeserverDomain,
+                ),
+              }
+            : {}),
       },
     };
     return next;
@@ -1996,6 +2042,14 @@ export class RealInstallerService implements InstallerService {
     }
 
     const request = await this.tryReadSavedInstallRequest();
+    // Prefer the runtime config's homeserverDomain when it exists so the
+    // summary reflects the live Synapse; fall back to the saved install
+    // request, then to an empty string when we have neither (the install
+    // hasn't bootstrapped Matrix yet — in that case allowedUsers entries
+    // without an explicit domain will be rewritten to `@localpart:` which
+    // the summary layer tolerates).
+    const summaryHomeserverDomain =
+      runtimeConfig?.matrix.homeserverDomain ?? request?.request.matrix.homeserverDomain ?? "";
     return {
       instances: (request?.request.bots?.instances ?? [])
         .filter((entry) => entry.packageId === MAIL_SENTINEL_AGENT_ID)
@@ -2010,6 +2064,7 @@ export class RealInstallerService implements InstallerService {
                 roomId: "",
                 roomName: request?.request.matrix.alertRoomName ?? "Sovereign Alerts",
               },
+              homeserverDomain: summaryHomeserverDomain,
               previousRuntimeConfig: runtimeConfig,
             }),
             runtimeConfig,
@@ -8897,6 +8952,7 @@ export default function (api) {
             },
             imap: runtimeConfig.imap,
             matrixRoom: runtimeConfig.matrix.alertRoom,
+            homeserverDomain: runtimeConfig.matrix.homeserverDomain,
             previousRuntimeConfig: runtimeConfig,
           })
         : this.normalizeRequestedBotInstance({
@@ -8905,6 +8961,7 @@ export default function (api) {
               ? (request.bots?.config ?? {})
               : {},
             matrixRoom: runtimeConfig.matrix.alertRoom,
+            homeserverDomain: runtimeConfig.matrix.homeserverDomain,
             previousRuntimeConfig: runtimeConfig,
           });
     const imapSecretRef =
@@ -9549,6 +9606,7 @@ export default function (api) {
       configById: selectedBotConfig,
       imap: imapConfig,
       matrixRoom: input.matrixRoom,
+      homeserverDomain: provisionalRuntimeConfig.matrix.homeserverDomain,
       previousRuntimeConfig,
     });
     provisionalRuntimeConfig.bots.instances = requestedBotInstances;
@@ -10867,6 +10925,38 @@ const normalizeMatrixUserList = (values: string[]): string[] =>
       .filter((entry) => entry.length > 0)
       .sort((left, right) => left.localeCompare(right)),
   );
+
+// Rotate persisted MXIDs to the current Synapse homeserver domain. The saved
+// install-request and previous runtime config both persist
+// `bots.instances[].matrix.allowedUsers` verbatim. When Synapse is
+// reprovisioned (bundled-matrix mode rotates the homeserver hostname; the
+// relay can also hand back a fresh slug/domain), the localparts are recreated
+// on the new homeserver but the stored MXIDs still carry the dead domain. If
+// those stale entries flow into OpenClaw's matrix allowlist the operator is
+// silently excluded from the bot's alert room, so chat replies never fire —
+// the localparts just never match. Rewriting to the current homeserver
+// mirrors what normalizeMatrixUserIdentifier does for interactive
+// invite/remove flows (real-service.ts:normalizeMatrixUserIdentifier), and
+// drops entries that can't be parsed.
+const rewriteAllowedUsersToHomeserverDomain = (
+  values: readonly string[],
+  homeserverDomain: string,
+): string[] => {
+  const rewritten = values
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .map((entry) => {
+      const withoutAt = entry.startsWith("@") ? entry.slice(1) : entry;
+      const separatorIndex = withoutAt.indexOf(":");
+      const localpart = separatorIndex >= 0 ? withoutAt.slice(0, separatorIndex) : withoutAt;
+      if (localpart.length === 0) {
+        return "";
+      }
+      return `@${localpart}:${homeserverDomain}`;
+    })
+    .filter((entry) => entry.length > 0);
+  return normalizeMatrixUserList(rewritten);
+};
 
 const sortBotInstances = (entries: RequestedBotInstance[]): RequestedBotInstance[] =>
   [...entries].sort((left, right) => left.id.localeCompare(right.id));
