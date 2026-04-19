@@ -2721,7 +2721,17 @@ export class RealInstallerService implements InstallerService {
             workspace: "",
             config: { ...botPackage.manifest.configDefaults },
             secretRefs: {} as Record<string, string>,
-            matrix: {},
+            // Bot tool bindings commonly reference
+            // `instance.matrix.alertRoom.roomId` to pin alerts at the node's
+            // single alert room. Mirror the runtime config's alert room
+            // into the synthetic instance.matrix so those bindings resolve
+            // without requiring a pre-existing bot instance.
+            matrix: {
+              alertRoom: {
+                roomId: runtimeConfig.matrix?.alertRoom?.roomId ?? "",
+                roomName: runtimeConfig.matrix?.alertRoom?.roomName ?? "",
+              },
+            },
             toolInstanceIds: context?.toolInstanceIdMap ?? {},
           }
         : undefined;
