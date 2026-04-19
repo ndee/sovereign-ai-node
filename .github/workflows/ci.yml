@@ -238,12 +238,19 @@ jobs:
             --idle-timeout-seconds 180 \
             --overall-timeout-seconds 1800
 
+          # The interactive driver now accepts the default bot selection
+          # rather than sending "a" (select all). Assert mail-sentinel is
+          # present (the only defaultInstall: true bot in sovereign-ai-bots
+          # today) instead of pinning the exact list — new default bots
+          # should land without workflow churn, and the explicit "all"
+          # coverage lives in a follow-up job once non-default bots support
+          # clean interactive-install paths.
           sudo jq -e '
             .connectivity.mode == "direct"
             and .matrix.publicBaseUrl == "http://127.0.0.1:8008"
             and .matrix.alertRoomName == "Alerts"
             and .operator.username == "admin"
-            and ((.bots.selected | sort) == ["bitcoin-skill-match", "mail-sentinel", "node-operator"])
+            and (.bots.selected | index("mail-sentinel"))
           ' /etc/sovereign-node/install-request.json > /dev/null
         timeout-minutes: 30
 
