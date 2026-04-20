@@ -87,6 +87,7 @@ import type {
   BundledMatrixProvisionResult,
   BundledMatrixRoomBootstrapResult,
 } from "../system/matrix.js";
+import { FilesystemMatrixAvatarResolver } from "../system/matrix-avatars.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
 import { formatGiB, parseDfAvailableBytes } from "../system/preflight.js";
 import {
@@ -6945,19 +6946,28 @@ export default function (api) {
             };
           }
           const previousRuntimeConfig = await this.tryReadRuntimeConfig();
-          const previousAlertRoom =
+          const sameHomeserver =
             previousRuntimeConfig !== null &&
             previousRuntimeConfig.matrix.homeserverDomain ===
-              stepState.matrixProvision.homeserverDomain &&
-            previousRuntimeConfig.matrix.alertRoom.roomId.length > 0
+              stepState.matrixProvision.homeserverDomain;
+          const previousAlertRoom =
+            sameHomeserver && previousRuntimeConfig.matrix.alertRoom.roomId.length > 0
               ? previousRuntimeConfig.matrix.alertRoom
               : undefined;
+          const previousAvatarSha256 = sameHomeserver
+            ? previousRuntimeConfig.matrix.alertRoom.avatarSha256
+            : undefined;
+          const avatarResolver = new FilesystemMatrixAvatarResolver(this.botCatalog);
 
           stepState.matrixRoom = await this.matrixProvisioner.bootstrapRoom(
             stepState.effectiveRequest ?? req,
             stepState.matrixProvision,
             stepState.matrixAccounts,
-            previousAlertRoom !== undefined ? { previousAlertRoom } : undefined,
+            {
+              ...(previousAlertRoom === undefined ? {} : { previousAlertRoom }),
+              avatarResolver,
+              ...(previousAvatarSha256 === undefined ? {} : { previousAvatarSha256 }),
+            },
           );
         },
       },
@@ -9346,6 +9356,9 @@ export default function (api) {
       alertRoom: {
         roomId: input.matrixRoom.roomId,
         roomName: input.matrixRoom.roomName,
+        ...(input.matrixRoom.avatarSha256 === undefined
+          ? {}
+          : { avatarSha256: input.matrixRoom.avatarSha256 }),
       },
     };
     const provisionalRuntimeConfig: RuntimeConfig = {
@@ -9734,6 +9747,9 @@ export default function (api) {
         alertRoom: {
           roomId: runtimeConfig.matrix.alertRoom.roomId,
           roomName: runtimeConfig.matrix.alertRoom.roomName,
+          ...(runtimeConfig.matrix.alertRoom.avatarSha256 === undefined
+            ? {}
+            : { avatarSha256: runtimeConfig.matrix.alertRoom.avatarSha256 }),
         },
       },
       ...(runtimeConfig.relay === undefined
