@@ -12,7 +12,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { basename, delimiter, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type {
   BotCatalog,
   BotConfigRecord,
@@ -107,6 +107,11 @@ import {
   type JobRunnerSnapshot,
 } from "./job-runner.js";
 import {
+  renderGuardedJsonStateWorkspacePluginConfig as renderGuardedJsonStateWorkspacePluginConfigFile,
+  renderGuardedJsonStateWorkspacePluginManifest as renderGuardedJsonStateWorkspacePluginManifestFile,
+} from "./real-service-guarded-json-state-plugin.js";
+import { ensureLobsterCliInstalled } from "./real-service-lobster.js";
+import {
   areMatrixIdentitiesEqual,
   areStringListsEqual,
   areStringRecordsEqual,
@@ -180,6 +185,22 @@ import {
   textContainsId,
   truncateText,
 } from "./real-service-shared.js";
+import {
+  dedupeStrings,
+  isBotConfigRecordMap,
+  isManagedAgentMatrixAccessTokenFileName,
+  normalizeBotConfigRecord,
+  normalizeMatrixUserList,
+  renderSystemGatewayMatrixWaitCommand,
+  resolveExecutablePath,
+  resolveExpectedBundledBotLocalpart,
+  rewriteAllowedUsersToHomeserverDomain,
+  shouldGateSystemGatewayOnLocalMatrix,
+  sortBotInstances,
+  sortInstalledTemplates,
+  sortToolInstances,
+  toSystemdDuration,
+} from "./real-service-utils.js";
 import type {
   InstallerService,
   MailSentinelApplyResult,
@@ -4194,162 +4215,32 @@ export class RealInstallerService implements InstallerService {
     );
   }
 
-  private async detectInstalledLobsterCli(): Promise<{
-    binaryPath: string;
-    version: string | null;
-    commands: string[];
-  } | null> {
-    if (this.execRunner === null) {
-      return null;
-    }
-    const probe = await this.execRunner.run({
-      command: "lobster",
-      args: ["commands.list | json"],
-      options: {
-        timeout: LOBSTER_CLI_PROBE_TIMEOUT_MS,
-        env: {
-          CI: "1",
-        },
-      },
-    });
-    if (probe.exitCode !== 0) {
-      return null;
-    }
-    const parsed = parseJsonSafely(probe.stdout);
-    const commands = Array.isArray(parsed)
-      ? parsed.filter((entry): entry is string => typeof entry === "string")
-      : [];
-    const versionResult = await this.execRunner.run({
-      command: "npm",
-      args: ["list", "-g", SOVEREIGN_PINNED_LOBSTER_PACKAGE_NAME, "--json", "--depth=0"],
-      options: {
-        timeout: LOBSTER_CLI_PROBE_TIMEOUT_MS,
-        env: {
-          CI: "1",
-        },
-      },
-    });
-    const versionPayload = parseJsonSafely(versionResult.stdout);
-    const dependencyRecord =
-      isRecord(versionPayload) && isRecord(versionPayload.dependencies)
-        ? versionPayload.dependencies[SOVEREIGN_PINNED_LOBSTER_PACKAGE_NAME]
-        : undefined;
-    const version =
-      isRecord(dependencyRecord) && typeof dependencyRecord.version === "string"
-        ? dependencyRecord.version
-        : null;
-    return {
-      binaryPath: "lobster",
-      version,
-      commands,
-    };
-  }
-
   private async ensureLobsterCliInstalled(): Promise<void> {
-    if (this.execRunner === null) {
-      throw {
-        code: "LOBSTER_INSTALL_FAILED",
-        message: "Exec runner unavailable; cannot install or probe Lobster CLI",
-        retryable: false,
-      };
-    }
-    const requiredCommands = ["clawd.invoke"];
-    const detected = await this.detectInstalledLobsterCli();
-    if (detected !== null) {
-      const versionVerified = detected.version === SOVEREIGN_PINNED_LOBSTER_VERSION;
-      const commandsVerified =
-        detected.commands.length > 0 &&
-        requiredCommands.every((commandName) => detected.commands.includes(commandName));
-      if (versionVerified || commandsVerified) {
-        return;
-      }
-      this.logger.info(
-        "Lobster CLI binary found but could not verify version or required commands; reinstalling",
-      );
-    }
-
-    const installResult = await this.execRunner.run({
-      command: "npm",
-      args: [
-        "install",
-        "-g",
-        `${SOVEREIGN_PINNED_LOBSTER_PACKAGE_NAME}@${SOVEREIGN_PINNED_LOBSTER_VERSION}`,
-      ],
-      options: {
-        timeout: LOBSTER_CLI_INSTALL_TIMEOUT_MS,
-        env: {
-          CI: "1",
-        },
-      },
+    await ensureLobsterCliInstalled({
+      execRunner: this.execRunner,
+      logger: this.logger,
+      packageName: SOVEREIGN_PINNED_LOBSTER_PACKAGE_NAME,
+      version: SOVEREIGN_PINNED_LOBSTER_VERSION,
+      installTimeoutMs: LOBSTER_CLI_INSTALL_TIMEOUT_MS,
+      probeTimeoutMs: LOBSTER_CLI_PROBE_TIMEOUT_MS,
+      requiredCommands: ["clawd.invoke"],
     });
-    if (installResult.exitCode !== 0) {
-      throw {
-        code: "LOBSTER_INSTALL_FAILED",
-        message: "npm install for Lobster CLI exited with non-zero status",
-        retryable: true,
-        details: {
-          command: installResult.command,
-          exitCode: installResult.exitCode,
-          stdout: truncateText(installResult.stdout, 2000),
-          stderr: truncateText(installResult.stderr, 4000),
-        },
-      };
-    }
-
-    const verified = await this.detectInstalledLobsterCli();
-    const verifiedByVersion = verified?.version === SOVEREIGN_PINNED_LOBSTER_VERSION;
-    const verifiedByCommands =
-      verified !== null &&
-      requiredCommands.every((commandName) => verified.commands.includes(commandName));
-    if (!verifiedByVersion && !verifiedByCommands) {
-      throw {
-        code: "LOBSTER_INSTALL_FAILED",
-        message: "Lobster CLI installed but required workflow commands are unavailable",
-        retryable: true,
-        details: {
-          requiredCommands,
-          detectedCommands: verified?.commands ?? [],
-          version: verified?.version ?? null,
-        },
-      };
-    }
   }
 
   private renderGuardedJsonStateWorkspacePluginManifest(): string {
-    return JSON.stringify(
-      {
-        id: GUARDED_JSON_STATE_OPENCLAW_PLUGIN_ID,
-        configSchema: {
-          type: "object",
-          additionalProperties: false,
-          properties: {},
-        },
-      },
-      null,
-      2,
-    );
+    return renderGuardedJsonStateWorkspacePluginManifestFile();
   }
 
   private renderGuardedJsonStateWorkspacePluginConfig(input: {
     workspaceBindings: Record<string, string[]>;
     runtimeConfigPath: string;
   }): string {
-    return JSON.stringify(
-      {
-        executablePath: SOVEREIGN_EXECUTABLE_PATHS["sovereign-tool"],
-        runtimeConfigPath: input.runtimeConfigPath,
-        workspaceBindings: Object.fromEntries(
-          Object.entries(input.workspaceBindings)
-            .map(
-              ([workspace, toolInstanceIds]) =>
-                [workspace, dedupeStrings(toolInstanceIds)] as const,
-            )
-            .sort(([left], [right]) => left.localeCompare(right)),
-        ),
-      },
-      null,
-      2,
-    );
+    return renderGuardedJsonStateWorkspacePluginConfigFile({
+      executablePath:
+        SOVEREIGN_EXECUTABLE_PATHS["sovereign-tool"] ?? "/usr/local/bin/sovereign-tool",
+      runtimeConfigPath: input.runtimeConfigPath,
+      workspaceBindings: input.workspaceBindings,
+    });
   }
 
   private renderGuardedJsonStateWorkspacePluginRuntime(): string {
@@ -8301,7 +8192,12 @@ export default function (api) {
       `EnvironmentFile=-${runtimeConfig.openclaw.gatewayEnvPath}`,
       ...(waitsForLocalMatrix
         ? [
-            `ExecStartPre=${renderSystemGatewayMatrixWaitCommand(runtimeConfig.matrix.adminBaseUrl)}`,
+            `ExecStartPre=${renderSystemGatewayMatrixWaitCommand({
+              adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
+              attempts: SYSTEM_GATEWAY_MATRIX_WAIT_ATTEMPTS,
+              delaySeconds: SYSTEM_GATEWAY_MATRIX_WAIT_DELAY_SECONDS,
+              timeoutSeconds: SYSTEM_GATEWAY_MATRIX_WAIT_TIMEOUT_SECONDS,
+            })}`,
           ]
         : []),
       `ExecStart=${openclawCommand} gateway run --allow-unconfigured --bind loopback`,
@@ -10836,161 +10732,3 @@ export default function (api) {
     }
   }
 }
-
-const dedupeStrings = (values: string[]): string[] =>
-  Array.from(new Set(values)).sort((left, right) => left.localeCompare(right));
-
-const resolveExpectedBundledBotLocalpart = (
-  operatorLocalpart: string,
-  preferredLocalpart?: string,
-): string => {
-  const desiredLocalpart = sanitizeExpectedMatrixLocalpart(
-    preferredLocalpart ?? "service-bot",
-    "service-bot",
-  );
-  return operatorLocalpart === desiredLocalpart ? `${desiredLocalpart}-bot` : desiredLocalpart;
-};
-
-const toSystemdDuration = (value: string): string => {
-  const match = value.match(/^(\d+)\s*(m|h|d|s)/i);
-  if (match === null || match[1] === undefined || match[2] === undefined) {
-    return "30min";
-  }
-  const systemdUnit = match[2].toLowerCase() === "m" ? "min" : match[2].toLowerCase();
-  return `${match[1]}${systemdUnit}`;
-};
-
-const isManagedAgentMatrixAccessTokenFileName = (fileName: string): boolean =>
-  /^matrix-agent-.+-access-token$/.test(fileName);
-
-const shouldGateSystemGatewayOnLocalMatrix = (adminBaseUrl: string): boolean => {
-  try {
-    const parsed = new URL(adminBaseUrl);
-    const hostname = parsed.hostname.replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
-    return (
-      parsed.protocol === "http:" &&
-      (hostname === "127.0.0.1" || hostname === "::1" || hostname === "localhost")
-    );
-  } catch {
-    return false;
-  }
-};
-
-const renderSystemGatewayMatrixWaitCommand = (adminBaseUrl: string): string => {
-  const versionsUrl = new URL(
-    "/_matrix/client/versions",
-    ensureTrailingSlash(adminBaseUrl),
-  ).toString();
-  return [
-    "/usr/bin/env",
-    "sh",
-    "-lc",
-    `'attempt=0; while [ "$attempt" -lt ${SYSTEM_GATEWAY_MATRIX_WAIT_ATTEMPTS} ]; do curl -fsS --max-time ${SYSTEM_GATEWAY_MATRIX_WAIT_TIMEOUT_SECONDS} "${versionsUrl}" >/dev/null 2>&1 && exit 0; attempt=$((attempt + 1)); sleep ${SYSTEM_GATEWAY_MATRIX_WAIT_DELAY_SECONDS}; done; exit 1'`,
-  ].join(" ");
-};
-
-const isBotConfigRecordMap = (value: unknown): value is Record<string, BotConfigRecord> => {
-  if (!isRecord(value)) {
-    return false;
-  }
-  return Object.values(value).every(
-    (entry) =>
-      isRecord(entry) &&
-      Object.values(entry).every(
-        (item) => typeof item === "string" || typeof item === "number" || typeof item === "boolean",
-      ),
-  );
-};
-
-const normalizeBotConfigRecord = (value: unknown): BotConfigRecord =>
-  !isRecord(value)
-    ? {}
-    : Object.fromEntries(
-        Object.entries(value)
-          .filter(
-            (entry): entry is [string, BotConfigValue] =>
-              typeof entry[0] === "string" &&
-              entry[0].length > 0 &&
-              (typeof entry[1] === "string" ||
-                typeof entry[1] === "number" ||
-                typeof entry[1] === "boolean"),
-          )
-          .sort(([left], [right]) => left.localeCompare(right)),
-      );
-
-const normalizeMatrixUserList = (values: string[]): string[] =>
-  dedupeStrings(
-    values
-      .map((entry) => entry.trim())
-      .filter((entry) => entry.length > 0)
-      .sort((left, right) => left.localeCompare(right)),
-  );
-
-// Rotate persisted MXIDs to the current Synapse homeserver domain. The saved
-// install-request and previous runtime config both persist
-// `bots.instances[].matrix.allowedUsers` verbatim. When Synapse is
-// reprovisioned (bundled-matrix mode rotates the homeserver hostname; the
-// relay can also hand back a fresh slug/domain), the localparts are recreated
-// on the new homeserver but the stored MXIDs still carry the dead domain. If
-// those stale entries flow into OpenClaw's matrix allowlist the operator is
-// silently excluded from the bot's alert room, so chat replies never fire —
-// the localparts just never match. Rewriting to the current homeserver
-// mirrors what normalizeMatrixUserIdentifier does for interactive
-// invite/remove flows (real-service.ts:normalizeMatrixUserIdentifier), and
-// drops entries that can't be parsed.
-const rewriteAllowedUsersToHomeserverDomain = (
-  values: readonly string[],
-  homeserverDomain: string,
-): string[] => {
-  const rewritten = values
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0)
-    .map((entry) => {
-      const withoutAt = entry.startsWith("@") ? entry.slice(1) : entry;
-      const separatorIndex = withoutAt.indexOf(":");
-      const localpart = separatorIndex >= 0 ? withoutAt.slice(0, separatorIndex) : withoutAt;
-      if (localpart.length === 0) {
-        return "";
-      }
-      return `@${localpart}:${homeserverDomain}`;
-    })
-    .filter((entry) => entry.length > 0);
-  return normalizeMatrixUserList(rewritten);
-};
-
-const sortBotInstances = (entries: RequestedBotInstance[]): RequestedBotInstance[] =>
-  [...entries].sort((left, right) => left.id.localeCompare(right.id));
-
-const sortInstalledTemplates = (
-  entries: RuntimeConfig["templates"]["installed"],
-): RuntimeConfig["templates"]["installed"] =>
-  [...entries].sort((left, right) =>
-    `${left.kind}:${left.id}:${left.version}`.localeCompare(
-      `${right.kind}:${right.id}:${right.version}`,
-    ),
-  );
-
-const sortToolInstances = (
-  entries: RuntimeConfig["sovereignTools"]["instances"],
-): RuntimeConfig["sovereignTools"]["instances"] =>
-  [...entries].sort((left, right) => left.id.localeCompare(right.id));
-
-const resolveExecutablePath = async (command: string): Promise<string | null> => {
-  if (command.includes("/")) {
-    return command;
-  }
-
-  const pathValue = process.env.PATH ?? "";
-  for (const entry of pathValue.split(delimiter)) {
-    if (entry.length === 0) {
-      continue;
-    }
-    const candidate = join(entry, command);
-    try {
-      await access(candidate, fsConstants.X_OK);
-      return candidate;
-    } catch {}
-  }
-
-  return null;
-};
