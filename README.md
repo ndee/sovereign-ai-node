@@ -8,7 +8,7 @@ Sovereign AI Node is a self-hosted platform for running specialized bots on your
 
 The current documented path requires:
 
-* a dedicated Ubuntu host — VM, bare metal, or VPS (22.04+ recommended)
+* a dedicated Ubuntu or Debian host — VM, bare metal, or VPS (Ubuntu 22.04+ recommended)
 * an [OpenRouter](https://openrouter.ai/) API key for the provider-backed bot runtime path
 * an Element or other Matrix client for operator interaction
 
@@ -16,7 +16,7 @@ The installer provisions the Matrix stack (Synapse) and bot runtime (OpenClaw) a
 
 ## Install
 
-Run the guided installer on a fresh Ubuntu host (VM, bare metal, or VPS):
+Run the guided installer on a fresh Ubuntu or Debian host (VM, bare metal, or VPS):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ndee/sovereign-ai-node/main/scripts/install.sh | sudo bash
@@ -38,6 +38,21 @@ Sovereign AI Node is the runtime and control plane layer. Bot packages are defin
 | **Bots** | `sovereign-ai-bots` | Installable bot packages, workspace files, manifests |
 
 Matrix is the primary control plane. Bots register as Matrix users, operate inside rooms, and receive operator interaction through standard Matrix clients.
+
+## Optional bot packages
+
+Additional installable bot packages live in the companion [`sovereign-ai-bots`](https://github.com/ndee/sovereign-ai-bots) repository without changing the runtime code in this repo.
+
+Example optional package:
+
+* `bali-compass@1.0.0` — practical guidance for travel, relocation, life, business, and Bitcoin in Bali and wider Indonesia
+
+Useful commands:
+
+* `sovereign-node bots list --json`
+* `sovereign-node bots instantiate bali-compass --json`
+
+For a non-interactive install request that also selects the Bali bot, see `deploy/install-request.bali-compass.example.json`.
 
 ## Control plane
 
@@ -72,7 +87,6 @@ The broader multi-bot system is the platform direction. Mail Sentinel is the fir
 ## Why Matrix
 
 Matrix is the control plane because it gives the system:
-
 * rooms as natural operator surfaces
 * bot-native interaction
 * local or self-hosted deployment options
