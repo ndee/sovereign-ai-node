@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -5285,6 +5286,421 @@ describe("RealInstallerService", () => {
     expect(fetchCalls.some((u) => u.includes("/_synapse/admin/v2/users/"))).toBe(true);
     expect(fetchCalls.some((u) => u.includes("/login"))).toBe(true);
     expect(fetchCalls.some((u) => u.includes("/invite"))).toBe(true);
+  });
+
+  describe("ensureManagedAgentMatrixIdentity avatar provisioning", () => {
+    type UploadMediaInput = {
+      baseUrl: string;
+      accessToken: string;
+      fileName: string;
+      contentType: string;
+      data: Uint8Array;
+    };
+    type SetUserAvatarInput = {
+      baseUrl: string;
+      userId: string;
+      accessToken: string;
+      contentUri: string;
+    };
+
+    const buildAvatarHarness = async (options: {
+      botAvatarBytes?: Buffer;
+      serviceBotAvatarBytes?: Buffer;
+      previousAvatarSha256?: string;
+      uploadMediaImpl?: (input: UploadMediaInput) => Promise<{ contentUri: string }>;
+      setUserAvatarImpl?: (input: SetUserAvatarInput) => Promise<void>;
+    }): Promise<{
+      service: RealInstallerService;
+      runtimeConfig: RuntimeConfig;
+      botPackage: LoadedBotPackage;
+      uploadCalls: UploadMediaInput[];
+      setUserAvatarCalls: SetUserAvatarInput[];
+      cleanup: () => Promise<void>;
+    }> => {
+      const uploadMediaImpl = options.uploadMediaImpl;
+      const setUserAvatarImpl = options.setUserAvatarImpl;
+      const repoDir = await mkdtemp(join(tmpdir(), "sovereign-agent-avatar-"));
+      const botPackage = buildTestLoadedBotPackage({
+        id: "solo-agent",
+        displayName: "Solo Agent",
+        description: "Dedicated-account agent.",
+        matrixMode: "dedicated-account",
+      });
+      const botPackageDir = join(repoDir, "bots", botPackage.manifest.id);
+      await mkdir(botPackageDir, { recursive: true });
+      if (options.botAvatarBytes !== undefined) {
+        await writeFile(join(botPackageDir, "avatar.png"), options.botAvatarBytes);
+      }
+      if (options.serviceBotAvatarBytes !== undefined) {
+        await writeFile(join(repoDir, "service-bot.png"), options.serviceBotAvatarBytes);
+      }
+
+      const patchedBotPackage: LoadedBotPackage = { ...botPackage, rootDir: botPackageDir };
+
+      const paths: SovereignPaths = {
+        configPath: "/tmp/sovereign-node.json5",
+        secretsDir: "/tmp/sovereign-secrets",
+        stateDir: "/tmp/sovereign-state",
+        logsDir: "/tmp/sovereign-logs",
+        installJobsDir: "/tmp/sovereign-install-jobs",
+        openclawServiceHome: "/tmp/sovereign-openclaw-home",
+        provenancePath: "/tmp/sovereign-install-provenance.json",
+        backupsDir: "/tmp/sovereign-backups",
+      };
+      const uploadCalls: UploadMediaInput[] = [];
+      const setUserAvatarCalls: SetUserAvatarInput[] = [];
+      const service = new RealInstallerService(createLogger(), paths, {
+        openclawBootstrapper: {
+          detectInstalled: async () => null,
+          ensureInstalled: async () => {
+            throw new Error("not used");
+          },
+        },
+        openclawGatewayServiceManager: {
+          install: async () => {
+            throw new Error("not used");
+          },
+          start: async () => {
+            throw new Error("not used");
+          },
+          restart: async () => {
+            throw new Error("not used");
+          },
+        },
+        botCatalog: {
+          listPackages: async () => [patchedBotPackage],
+          getPackage: async (id) => {
+            if (id !== patchedBotPackage.manifest.id) {
+              throw { code: "BOT_PACKAGE_NOT_FOUND", message: "x", retryable: false };
+            }
+            return patchedBotPackage;
+          },
+          getDefaultSelectedIds: async () => [],
+          findPackageByTemplateRef: async (ref) =>
+            ref === patchedBotPackage.templateRef ? patchedBotPackage : null,
+          getRepoDir: async () => repoDir,
+        },
+        preflightChecker: {
+          run: async () => ({
+            mode: "bundled_matrix",
+            overall: "pass",
+            checks: [],
+            recommendedActions: [],
+          }),
+        },
+        imapTester: {
+          test: async () => {
+            throw new Error("not used");
+          },
+        },
+        matrixProvisioner: {
+          provision: async () => {
+            throw new Error("not used");
+          },
+          bootstrapAccounts: async () => {
+            throw new Error("not used");
+          },
+          bootstrapRoom: async () => {
+            throw new Error("not used");
+          },
+          test: async () => ({
+            ok: true,
+            homeserverUrl: "https://matrix.e2e.sovereign.local",
+            checks: [],
+          }),
+          ...(uploadMediaImpl === undefined
+            ? {}
+            : {
+                uploadMedia: async (input: UploadMediaInput) => {
+                  uploadCalls.push(input);
+                  return await uploadMediaImpl(input);
+                },
+              }),
+          ...(setUserAvatarImpl === undefined
+            ? {}
+            : {
+                setUserAvatar: async (input: SetUserAvatarInput) => {
+                  setUserAvatarCalls.push(input);
+                  return await setUserAvatarImpl(input);
+                },
+              }),
+        },
+        execRunner: {
+          run: async ({ command, args }) => ({
+            command: [command, ...(args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          }),
+        },
+        fetchImpl: async (url: string) => {
+          if (url.includes("/_synapse/admin/v2/users/")) {
+            return new Response(JSON.stringify({ name: "@solo-agent:e2e.sovereign.local" }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          if (url.includes("/_matrix/client/v3/login")) {
+            return new Response(
+              JSON.stringify({
+                user_id: "@solo-agent:e2e.sovereign.local",
+                access_token: "solo-agent-fresh-token",
+                device_id: "DEV",
+              }),
+              {
+                status: 200,
+                headers: { "Content-Type": "application/json" },
+              },
+            );
+          }
+          // Tolerate invite/join success + allowedUsers no-op.
+          return new Response(JSON.stringify({}), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        },
+      });
+
+      const secretOverrides = new Map<string, string>([
+        ["file:/tmp/operator.token", "operator-token"],
+        ["file:/tmp/sovereign-secrets/matrix-agent-solo-agent-password", "solo-agent-password"],
+      ]);
+      (service as unknown as { resolveSecretRef(ref: string): Promise<string> }).resolveSecretRef =
+        async (ref: string) => {
+          const value = secretOverrides.get(ref);
+          if (value === undefined) throw new Error(`Unexpected secret ref: ${ref}`);
+          return value;
+        };
+      (
+        service as unknown as {
+          writeManagedSecretFile(name: string, contents: string): Promise<string>;
+        }
+      ).writeManagedSecretFile = async (name) => `file:/tmp/sovereign-secrets/${name}`;
+      (
+        service as unknown as {
+          writeManagedAgentAccessTokenFile(
+            config: RuntimeConfig,
+            name: string,
+            token: string,
+          ): Promise<string>;
+        }
+      ).writeManagedAgentAccessTokenFile = async (_config, name) =>
+        `file:/tmp/sovereign-secrets/matrix-agent-access-tokens/${name}`;
+
+      const runtimeConfig: RuntimeConfig = {
+        openrouter: {
+          model: "qwen/qwen3.5-9b",
+          apiKeySecretRef: "env:OPENROUTER_API_KEY",
+        },
+        openclaw: {
+          managedInstallation: true,
+          installMethod: "install_sh",
+          requestedVersion: "0.2.0",
+          openclawHome: "/tmp/sovereign-openclaw-home/.openclaw",
+          runtimeConfigPath: "/tmp/sovereign-openclaw-home/.openclaw/openclaw.json5",
+          runtimeProfilePath: "/tmp/sovereign-openclaw-home/profiles/runtime.json5",
+          gatewayEnvPath: "/tmp/sovereign-openclaw-home/gateway.env",
+        },
+        openclawProfile: {
+          plugins: { allow: ["matrix"] },
+          agents: [
+            {
+              id: "solo-agent",
+              templateRef: patchedBotPackage.templateRef,
+              workspace: "/tmp/solo-agent",
+              ...(options.previousAvatarSha256 === undefined
+                ? {}
+                : {
+                    matrix: {
+                      localpart: "solo-agent",
+                      userId: "@solo-agent:e2e.sovereign.local",
+                      passwordSecretRef:
+                        "file:/tmp/sovereign-secrets/matrix-agent-solo-agent-password",
+                      accessTokenSecretRef:
+                        "file:/tmp/sovereign-secrets/matrix-agent-access-tokens/matrix-agent-solo-agent-access-token",
+                      avatarSha256: options.previousAvatarSha256,
+                    },
+                  }),
+            },
+          ],
+          crons: [],
+        },
+        imap: {
+          status: "configured",
+          host: "imap.example.org",
+          port: 993,
+          tls: true,
+          username: "operator@example.org",
+          mailbox: "INBOX",
+          secretRef: "file:/tmp/imap-secret",
+        },
+        bots: { config: {}, instances: [] },
+        matrix: {
+          accessMode: "direct",
+          homeserverDomain: "e2e.sovereign.local",
+          federationEnabled: false,
+          publicBaseUrl: "https://matrix.e2e.sovereign.local",
+          adminBaseUrl: "http://127.0.0.1:8008",
+          operator: {
+            userId: "@operator:e2e.sovereign.local",
+            accessTokenSecretRef: "file:/tmp/operator.token",
+          },
+          bot: {
+            localpart: "primary-bot",
+            userId: "@primary-bot:e2e.sovereign.local",
+            accessTokenSecretRef: "file:/tmp/bot.token",
+          },
+          alertRoom: {
+            roomId: "!alerts:e2e.sovereign.local",
+            roomName: "Sovereign Alerts",
+          },
+        },
+        templates: { installed: [] },
+        sovereignTools: { instances: [] },
+      };
+
+      return {
+        service,
+        runtimeConfig,
+        botPackage: patchedBotPackage,
+        uploadCalls,
+        setUserAvatarCalls,
+        cleanup: async () => await rm(repoDir, { recursive: true, force: true }),
+      };
+    };
+
+    const invokeEnsure = (
+      service: RealInstallerService,
+    ): ((
+      config: RuntimeConfig,
+      agentId: string,
+    ) => Promise<{ runtimeConfig: RuntimeConfig; changed: boolean }>) => {
+      return (
+        service as unknown as {
+          ensureManagedAgentMatrixIdentity(
+            config: RuntimeConfig,
+            agentId: string,
+          ): Promise<{ runtimeConfig: RuntimeConfig; changed: boolean }>;
+        }
+      ).ensureManagedAgentMatrixIdentity.bind(service);
+    };
+
+    it("uploads the bot package avatar and persists its sha on first run", async () => {
+      const botBytes = Buffer.from("bot-avatar-bytes");
+      const { service, runtimeConfig, uploadCalls, setUserAvatarCalls, cleanup } =
+        await buildAvatarHarness({
+          botAvatarBytes: botBytes,
+          uploadMediaImpl: async () => ({ contentUri: "mxc://example/bot" }),
+          setUserAvatarImpl: async () => undefined,
+        });
+      try {
+        await invokeEnsure(service)(runtimeConfig, "solo-agent");
+        expect(uploadCalls).toHaveLength(1);
+        expect(uploadCalls[0]?.fileName).toBe("avatar.png");
+        expect(Buffer.from(uploadCalls[0]?.data ?? new Uint8Array()).equals(botBytes)).toBe(true);
+        expect(uploadCalls[0]?.accessToken).toBe("solo-agent-fresh-token");
+        expect(setUserAvatarCalls).toHaveLength(1);
+        expect(setUserAvatarCalls[0]?.userId).toBe("@solo-agent:e2e.sovereign.local");
+        expect(setUserAvatarCalls[0]?.contentUri).toBe("mxc://example/bot");
+        const sha = createHash("sha256").update(botBytes).digest("hex");
+        expect(runtimeConfig.openclawProfile.agents[0]?.matrix?.avatarSha256).toBe(sha);
+      } finally {
+        await cleanup();
+      }
+    });
+
+    it("falls back to service-bot.png when the bot package has no avatar", async () => {
+      const serviceBytes = Buffer.from("service-bot-bytes");
+      const { service, runtimeConfig, uploadCalls, cleanup } = await buildAvatarHarness({
+        serviceBotAvatarBytes: serviceBytes,
+        uploadMediaImpl: async () => ({ contentUri: "mxc://example/service" }),
+        setUserAvatarImpl: async () => undefined,
+      });
+      try {
+        await invokeEnsure(service)(runtimeConfig, "solo-agent");
+        expect(uploadCalls).toHaveLength(1);
+        expect(uploadCalls[0]?.fileName).toBe("service-bot.png");
+        expect(Buffer.from(uploadCalls[0]?.data ?? new Uint8Array()).equals(serviceBytes)).toBe(
+          true,
+        );
+        const sha = createHash("sha256").update(serviceBytes).digest("hex");
+        expect(runtimeConfig.openclawProfile.agents[0]?.matrix?.avatarSha256).toBe(sha);
+      } finally {
+        await cleanup();
+      }
+    });
+
+    it("skips upload when the persisted sha matches the bot avatar", async () => {
+      const botBytes = Buffer.from("bot-avatar-bytes");
+      const sha = createHash("sha256").update(botBytes).digest("hex");
+      const { service, runtimeConfig, uploadCalls, setUserAvatarCalls, cleanup } =
+        await buildAvatarHarness({
+          botAvatarBytes: botBytes,
+          previousAvatarSha256: sha,
+          uploadMediaImpl: async () => ({ contentUri: "mxc://should/not/be/called" }),
+          setUserAvatarImpl: async () => undefined,
+        });
+      try {
+        await invokeEnsure(service)(runtimeConfig, "solo-agent");
+        expect(uploadCalls).toHaveLength(0);
+        expect(setUserAvatarCalls).toHaveLength(0);
+        expect(runtimeConfig.openclawProfile.agents[0]?.matrix?.avatarSha256).toBe(sha);
+      } finally {
+        await cleanup();
+      }
+    });
+
+    it("clears the avatarSha256 when no avatar is available anywhere", async () => {
+      const { service, runtimeConfig, uploadCalls, setUserAvatarCalls, cleanup } =
+        await buildAvatarHarness({
+          uploadMediaImpl: async () => ({ contentUri: "mxc://should/not/be/called" }),
+          setUserAvatarImpl: async () => undefined,
+        });
+      try {
+        await invokeEnsure(service)(runtimeConfig, "solo-agent");
+        expect(uploadCalls).toHaveLength(0);
+        expect(setUserAvatarCalls).toHaveLength(0);
+        expect(runtimeConfig.openclawProfile.agents[0]?.matrix?.avatarSha256).toBeUndefined();
+      } finally {
+        await cleanup();
+      }
+    });
+
+    it("keeps the previous sha and does not fail the identity step when uploadMedia throws", async () => {
+      const botBytes = Buffer.from("bot-avatar-bytes");
+      const { service, runtimeConfig, cleanup } = await buildAvatarHarness({
+        botAvatarBytes: botBytes,
+        previousAvatarSha256: "previous-sha",
+        uploadMediaImpl: async () => {
+          throw new Error("rate limited");
+        },
+        setUserAvatarImpl: async () => undefined,
+      });
+      try {
+        const result = await invokeEnsure(service)(runtimeConfig, "solo-agent");
+        expect(result.runtimeConfig.openclawProfile.agents[0]?.matrix?.avatarSha256).toBe(
+          "previous-sha",
+        );
+      } finally {
+        await cleanup();
+      }
+    });
+
+    it("skips avatar provisioning entirely when the provisioner exposes no uploadMedia", async () => {
+      const botBytes = Buffer.from("bot-avatar-bytes");
+      const { service, runtimeConfig, uploadCalls, setUserAvatarCalls, cleanup } =
+        await buildAvatarHarness({
+          botAvatarBytes: botBytes,
+        });
+      try {
+        await invokeEnsure(service)(runtimeConfig, "solo-agent");
+        expect(uploadCalls).toHaveLength(0);
+        expect(setUserAvatarCalls).toHaveLength(0);
+        expect(runtimeConfig.openclawProfile.agents[0]?.matrix?.avatarSha256).toBeUndefined();
+      } finally {
+        await cleanup();
+      }
+    });
   });
 
   it("resolves configured runtime ownership from the service identity when running as root", async () => {
