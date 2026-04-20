@@ -234,6 +234,7 @@ Operational note for legacy/default Mail Sentinel installs:
 
 - the top-level `imap` section remains the source of truth for the default `mail-sentinel` instance created from older single-instance installs
 - if an older migration left the default `mail-sentinel` with stale IMAP values, running `sovereign-node migrate`, `sovereign-node update`, or `sovereign-node reconfigure imap` now repairs that instance from the top-level IMAP config
+- if an older migration left the default `mail-sentinel` pinned to a stale Matrix alert room or stale `allowedUsers` MXIDs, running `sovereign-node migrate`, `sovereign-node update`, or `sovereign-node reconfigure matrix` now rotates that instance back to the current bundled Matrix room and homeserver domain
 
 `openclaw` remains fully supported for runtime-native operations:
 
