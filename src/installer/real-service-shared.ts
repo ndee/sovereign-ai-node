@@ -192,6 +192,7 @@ export type RuntimeConfig = {
         userId: string;
         passwordSecretRef?: string;
         accessTokenSecretRef?: string;
+        avatarSha256?: string;
       };
     }>;
     crons: Array<{
@@ -237,10 +238,12 @@ export type RuntimeConfig = {
       userId: string;
       passwordSecretRef?: string;
       accessTokenSecretRef: string;
+      avatarSha256?: string;
     };
     alertRoom: {
       roomId: string;
       roomName: string;
+      avatarSha256?: string;
     };
   };
   templates: {
@@ -520,6 +523,10 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
                 ...(typeof agent.matrix.accessTokenSecretRef === "string" &&
                 agent.matrix.accessTokenSecretRef.length > 0
                   ? { accessTokenSecretRef: agent.matrix.accessTokenSecretRef }
+                  : {}),
+                ...(typeof agent.matrix.avatarSha256 === "string" &&
+                agent.matrix.avatarSha256.length > 0
+                  ? { avatarSha256: agent.matrix.avatarSha256 }
                   : {}),
               }
             : undefined;
@@ -1178,6 +1185,9 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
           ? { passwordSecretRef: bot.passwordSecretRef }
           : {}),
         accessTokenSecretRef: bot.accessTokenSecretRef,
+        ...(typeof bot.avatarSha256 === "string" && bot.avatarSha256.length > 0
+          ? { avatarSha256: bot.avatarSha256 }
+          : {}),
       },
       alertRoom: {
         roomId: alertRoom.roomId,
@@ -1185,6 +1195,9 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
           typeof alertRoom.roomName === "string" && alertRoom.roomName.length > 0
             ? alertRoom.roomName
             : "Sovereign Alerts",
+        ...(typeof alertRoom.avatarSha256 === "string" && alertRoom.avatarSha256.length > 0
+          ? { avatarSha256: alertRoom.avatarSha256 }
+          : {}),
       },
     },
     ...(relayConfig === undefined ? {} : { relay: relayConfig }),
