@@ -1185,3 +1185,311 @@ const readLoginPassword = (payload: Record<string, unknown>): string | null => {
   const password = payload.password;
   return typeof password === "string" && password.trim().length > 0 ? password : null;
 };
+
+type FetchCall = { url: string; init: RequestInit | undefined };
+
+const createAvatarProvisioner = async (
+  responder: (call: FetchCall) => Response | Promise<Response>,
+): Promise<{
+  provisioner: DockerComposeBundledMatrixProvisioner;
+  calls: FetchCall[];
+  cleanup: () => Promise<void>;
+}> => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-avatar-test-"));
+  const paths: SovereignPaths = {
+    configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+    secretsDir: join(tempRoot, "etc", "secrets"),
+    stateDir: join(tempRoot, "state"),
+    logsDir: join(tempRoot, "logs"),
+    installJobsDir: join(tempRoot, "install-jobs"),
+    openclawServiceHome: join(tempRoot, "openclaw-home"),
+    provenancePath: join(tempRoot, "install-provenance.json"),
+    backupsDir: join(tempRoot, "backups"),
+  };
+  const execRunner: ExecRunner = {
+    run: async (input): Promise<ExecResult> => ({
+      command: [input.command, ...(input.args ?? [])].join(" "),
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    }),
+  };
+  const calls: FetchCall[] = [];
+  const fetchImpl = async (url: string, init?: RequestInit): Promise<Response> => {
+    calls.push({ url, init });
+    return await Promise.resolve(responder({ url, init }));
+  };
+  const provisioner = new DockerComposeBundledMatrixProvisioner(
+    execRunner,
+    createLogger(),
+    paths,
+    fetchImpl,
+  );
+  return {
+    provisioner,
+    calls,
+    cleanup: async () => await rm(tempRoot, { recursive: true, force: true }),
+  };
+};
+
+describe("DockerComposeBundledMatrixProvisioner.uploadMedia", () => {
+  it("uploads the payload and returns the mxc content uri", async () => {
+    const { provisioner, calls, cleanup } = await createAvatarProvisioner(() => {
+      return new Response(JSON.stringify({ content_uri: "mxc://example/abc" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    try {
+      const data = new Uint8Array([1, 2, 3, 4]);
+      const result = await provisioner.uploadMedia({
+        baseUrl: "http://matrix.local.test:8008",
+        accessToken: "token-123",
+        fileName: "avatar.png",
+        contentType: "image/png",
+        data,
+      });
+      expect(result.contentUri).toBe("mxc://example/abc");
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.url).toBe(
+        "http://matrix.local.test:8008/_matrix/media/v3/upload?filename=avatar.png",
+      );
+      const init = calls[0]?.init;
+      expect(init?.method).toBe("POST");
+      const headers = init?.headers as Record<string, string>;
+      expect(headers.Authorization).toBe("Bearer token-123");
+      expect(headers["Content-Type"]).toBe("image/png");
+      expect(init?.body).toBe(data);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("throws MATRIX_MEDIA_UPLOAD_FAILED on a non-2xx response", async () => {
+    const { provisioner, cleanup } = await createAvatarProvisioner(() => {
+      return new Response(JSON.stringify({ errcode: "M_LIMIT_EXCEEDED" }), {
+        status: 429,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    try {
+      await expect(
+        provisioner.uploadMedia({
+          baseUrl: "http://matrix.local.test:8008",
+          accessToken: "token",
+          fileName: "a.png",
+          contentType: "image/png",
+          data: new Uint8Array([0]),
+        }),
+      ).rejects.toMatchObject({
+        code: "MATRIX_MEDIA_UPLOAD_FAILED",
+        retryable: true,
+        details: expect.objectContaining({ status: 429 }),
+      });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("throws MATRIX_MEDIA_UPLOAD_FAILED when the server returns no content_uri", async () => {
+    const { provisioner, cleanup } = await createAvatarProvisioner(() => {
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    try {
+      await expect(
+        provisioner.uploadMedia({
+          baseUrl: "http://matrix.local.test:8008",
+          accessToken: "token",
+          fileName: "a.png",
+          contentType: "image/png",
+          data: new Uint8Array([0]),
+        }),
+      ).rejects.toMatchObject({ code: "MATRIX_MEDIA_UPLOAD_FAILED" });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("throws MATRIX_MEDIA_UPLOAD_FAILED when content_uri is not an mxc uri", async () => {
+    const { provisioner, cleanup } = await createAvatarProvisioner(() => {
+      return new Response(JSON.stringify({ content_uri: "https://example/x" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    try {
+      await expect(
+        provisioner.uploadMedia({
+          baseUrl: "http://matrix.local.test:8008",
+          accessToken: "token",
+          fileName: "a.png",
+          contentType: "image/png",
+          data: new Uint8Array([0]),
+        }),
+      ).rejects.toMatchObject({ code: "MATRIX_MEDIA_UPLOAD_FAILED" });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("throws MATRIX_MEDIA_UPLOAD_FAILED when fetch rejects", async () => {
+    const { provisioner, cleanup } = await createAvatarProvisioner(() => {
+      throw new Error("network down");
+    });
+    try {
+      await expect(
+        provisioner.uploadMedia({
+          baseUrl: "http://matrix.local.test:8008",
+          accessToken: "token",
+          fileName: "a.png",
+          contentType: "image/png",
+          data: new Uint8Array([0]),
+        }),
+      ).rejects.toMatchObject({ code: "MATRIX_MEDIA_UPLOAD_FAILED" });
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+describe("DockerComposeBundledMatrixProvisioner.setUserAvatar", () => {
+  it("PUTs the avatar_url to the profile endpoint", async () => {
+    const { provisioner, calls, cleanup } = await createAvatarProvisioner(() => {
+      return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+    try {
+      await provisioner.setUserAvatar({
+        baseUrl: "http://matrix.local.test:8008",
+        userId: "@bot:matrix.local.test",
+        accessToken: "bot-token",
+        contentUri: "mxc://example/bot",
+      });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.url).toBe(
+        "http://matrix.local.test:8008/_matrix/client/v3/profile/%40bot%3Amatrix.local.test/avatar_url",
+      );
+      expect(calls[0]?.init?.method).toBe("PUT");
+      expect(JSON.parse(calls[0]?.init?.body as string)).toEqual({
+        avatar_url: "mxc://example/bot",
+      });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("throws MATRIX_USER_AVATAR_FAILED on a non-2xx response", async () => {
+    const { provisioner, cleanup } = await createAvatarProvisioner(() => {
+      return new Response(JSON.stringify({ errcode: "M_FORBIDDEN" }), {
+        status: 403,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    try {
+      await expect(
+        provisioner.setUserAvatar({
+          baseUrl: "http://matrix.local.test:8008",
+          userId: "@bot:matrix.local.test",
+          accessToken: "t",
+          contentUri: "mxc://e/b",
+        }),
+      ).rejects.toMatchObject({
+        code: "MATRIX_USER_AVATAR_FAILED",
+        details: expect.objectContaining({ status: 403 }),
+      });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("throws MATRIX_USER_AVATAR_FAILED when fetch rejects", async () => {
+    const { provisioner, cleanup } = await createAvatarProvisioner(() => {
+      throw new Error("boom");
+    });
+    try {
+      await expect(
+        provisioner.setUserAvatar({
+          baseUrl: "http://matrix.local.test:8008",
+          userId: "@bot:matrix.local.test",
+          accessToken: "t",
+          contentUri: "mxc://e/b",
+        }),
+      ).rejects.toMatchObject({ code: "MATRIX_USER_AVATAR_FAILED" });
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+describe("DockerComposeBundledMatrixProvisioner.setRoomAvatar", () => {
+  it("PUTs the state event for m.room.avatar", async () => {
+    const { provisioner, calls, cleanup } = await createAvatarProvisioner(() => {
+      return new Response(JSON.stringify({ event_id: "$1" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    try {
+      await provisioner.setRoomAvatar({
+        baseUrl: "http://matrix.local.test:8008",
+        roomId: "!abc:matrix.local.test",
+        accessToken: "op-token",
+        contentUri: "mxc://example/room",
+      });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.url).toBe(
+        "http://matrix.local.test:8008/_matrix/client/v3/rooms/!abc%3Amatrix.local.test/state/m.room.avatar/",
+      );
+      expect(calls[0]?.init?.method).toBe("PUT");
+      expect(JSON.parse(calls[0]?.init?.body as string)).toEqual({
+        url: "mxc://example/room",
+      });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("throws MATRIX_ROOM_AVATAR_FAILED on a non-2xx response", async () => {
+    const { provisioner, cleanup } = await createAvatarProvisioner(() => {
+      return new Response(JSON.stringify({ errcode: "M_FORBIDDEN" }), {
+        status: 403,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    try {
+      await expect(
+        provisioner.setRoomAvatar({
+          baseUrl: "http://matrix.local.test:8008",
+          roomId: "!abc:matrix.local.test",
+          accessToken: "op",
+          contentUri: "mxc://e/r",
+        }),
+      ).rejects.toMatchObject({
+        code: "MATRIX_ROOM_AVATAR_FAILED",
+        details: expect.objectContaining({ status: 403 }),
+      });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("throws MATRIX_ROOM_AVATAR_FAILED when fetch rejects", async () => {
+    const { provisioner, cleanup } = await createAvatarProvisioner(() => {
+      throw new Error("net");
+    });
+    try {
+      await expect(
+        provisioner.setRoomAvatar({
+          baseUrl: "http://matrix.local.test:8008",
+          roomId: "!abc:matrix.local.test",
+          accessToken: "op",
+          contentUri: "mxc://e/r",
+        }),
+      ).rejects.toMatchObject({ code: "MATRIX_ROOM_AVATAR_FAILED" });
+    } finally {
+      await cleanup();
+    }
+  });
+});
