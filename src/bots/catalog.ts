@@ -136,6 +136,7 @@ export interface BotCatalog {
   getPackage(id: string): Promise<LoadedBotPackage>;
   getDefaultSelectedIds(): Promise<string[]>;
   findPackageByTemplateRef(ref: string): Promise<LoadedBotPackage | null>;
+  getRepoDir(): Promise<string>;
 }
 
 export type FilesystemBotCatalogOptions = {
@@ -191,6 +192,10 @@ export class FilesystemBotCatalog implements BotCatalog {
     const normalized = ref.trim();
     const found = (await this.listPackages()).find((entry) => entry.templateRef === normalized);
     return found ?? null;
+  }
+
+  async getRepoDir(): Promise<string> {
+    return await this.resolveRepoDir();
   }
 
   private async loadPackages(): Promise<LoadedBotPackage[]> {

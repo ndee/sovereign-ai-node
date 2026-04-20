@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   isCoreAgentBindingBestEffortSkippable,
   parseInstallProvenance,
+  parseRuntimeConfigDocument,
 } from "./real-service-shared.js";
 
 describe("isCoreAgentBindingBestEffortSkippable", () => {
@@ -141,5 +142,62 @@ describe("parseInstallProvenance", () => {
     expect(parseInstallProvenance(JSON.stringify("string"))).toBeNull();
     expect(parseInstallProvenance(JSON.stringify(42))).toBeNull();
     expect(parseInstallProvenance(JSON.stringify(null))).toBeNull();
+  });
+});
+
+describe("parseRuntimeConfigDocument avatarSha256 round-trip", () => {
+  const baseDocument = {
+    matrix: {
+      accessMode: "direct",
+      homeserverDomain: "matrix.example.org",
+      federationEnabled: false,
+      publicBaseUrl: "https://matrix.example.org",
+      adminBaseUrl: "https://matrix.example.org",
+      operator: { userId: "@op:matrix.example.org" },
+      bot: {
+        userId: "@bot:matrix.example.org",
+        accessTokenSecretRef: "file:/etc/sovereign-node/secrets/bot-token",
+      },
+      alertRoom: { roomId: "!abc:matrix.example.org", roomName: "Sovereign Alerts" },
+    },
+    openclawProfile: {
+      agents: [
+        {
+          id: "mail-sentinel",
+          workspace: "/var/lib/sovereign-node/mail-sentinel/workspace",
+          matrix: {
+            localpart: "mail-sentinel",
+            userId: "@mail-sentinel:matrix.example.org",
+            accessTokenSecretRef: "file:/etc/sovereign-node/secrets/agent-token",
+          },
+        },
+      ],
+    },
+  };
+
+  it("preserves avatarSha256 on matrix.bot, matrix.alertRoom, and each agent", () => {
+    const document = JSON.parse(JSON.stringify(baseDocument));
+    document.matrix.bot.avatarSha256 = "a".repeat(64);
+    document.matrix.alertRoom.avatarSha256 = "b".repeat(64);
+    document.openclawProfile.agents[0].matrix.avatarSha256 = "c".repeat(64);
+    const result = parseRuntimeConfigDocument(JSON.stringify(document));
+    expect(result).not.toBeNull();
+    if (result === null) throw new Error("unexpected null");
+    expect(result.matrix.bot.avatarSha256).toBe("a".repeat(64));
+    expect(result.matrix.alertRoom.avatarSha256).toBe("b".repeat(64));
+    expect(result.openclawProfile.agents[0]?.matrix?.avatarSha256).toBe("c".repeat(64));
+  });
+
+  it("omits avatarSha256 when absent, empty, or the wrong type", () => {
+    const document = JSON.parse(JSON.stringify(baseDocument));
+    document.matrix.bot.avatarSha256 = "";
+    document.matrix.alertRoom.avatarSha256 = 42;
+    document.openclawProfile.agents[0].matrix.avatarSha256 = null;
+    const result = parseRuntimeConfigDocument(JSON.stringify(document));
+    expect(result).not.toBeNull();
+    if (result === null) throw new Error("unexpected null");
+    expect(result.matrix.bot.avatarSha256).toBeUndefined();
+    expect(result.matrix.alertRoom.avatarSha256).toBeUndefined();
+    expect(result.openclawProfile.agents[0]?.matrix?.avatarSha256).toBeUndefined();
   });
 });

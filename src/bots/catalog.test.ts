@@ -237,4 +237,16 @@ describe("FilesystemBotCatalog", () => {
       repoUrl: DEFAULT_BOT_REPO_URL,
     });
   });
+
+  it("exposes the resolved repo dir via getRepoDir", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-bots-repo-"));
+    tempRoots.push(tempRoot);
+    await writeBotPackage(tempRoot, {
+      id: "mail-sentinel",
+      displayName: "Mail Sentinel",
+      defaultInstall: true,
+    });
+    const catalog = new FilesystemBotCatalog(tempRoot);
+    await expect(catalog.getRepoDir()).resolves.toBe(tempRoot);
+  });
 });
