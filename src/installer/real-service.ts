@@ -87,7 +87,10 @@ import type {
   BundledMatrixProvisionResult,
   BundledMatrixRoomBootstrapResult,
 } from "../system/matrix.js";
-import { FilesystemMatrixAvatarResolver } from "../system/matrix-avatars.js";
+import {
+  FilesystemMatrixAvatarResolver,
+  type MatrixAvatarResolver,
+} from "../system/matrix-avatars.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
 import { formatGiB, parseDfAvailableBytes } from "../system/preflight.js";
 import {
@@ -5254,6 +5257,9 @@ export default function (api) {
           ? {}
           : { passwordSecretRef: runtimeConfig.matrix.bot.passwordSecretRef }),
         accessTokenSecretRef: runtimeConfig.matrix.bot.accessTokenSecretRef,
+        ...(runtimeConfig.matrix.bot.avatarSha256 === undefined
+          ? {}
+          : { avatarSha256: runtimeConfig.matrix.bot.avatarSha256 }),
       };
       const changed = !areMatrixIdentitiesEqual(entry.matrix, mappedIdentity);
       if (changed) {
@@ -5320,18 +5326,24 @@ export default function (api) {
     // want entry.matrix populated. Without this, the mail-sentinel CLI and
     // downstream managed-agent tooling all choke on a missing secretRef
     // and the only recovery is hand-editing the runtime config on the VPS.
-    const nextIdentity = {
+    const previousAvatarSha256 = entry.matrix?.avatarSha256;
+    const nextIdentity: NonNullable<RuntimeAgentEntry["matrix"]> = {
       localpart,
       userId: loginSession.userId,
       passwordSecretRef,
       accessTokenSecretRef,
+      ...(previousAvatarSha256 === undefined ? {} : { avatarSha256: previousAvatarSha256 }),
     };
-    const changed = !areMatrixIdentitiesEqual(entry.matrix, nextIdentity);
+    const previousIdentitySnapshot = entry.matrix;
     entry.matrix = nextIdentity;
-    const primaryBotChanged = this.syncPrimaryDedicatedMatrixBotIdentity(
-      runtimeConfig,
-      nextIdentity,
-    );
+    const primaryBotChanged = this.syncPrimaryDedicatedMatrixBotIdentity(runtimeConfig, {
+      localpart: nextIdentity.localpart,
+      userId: nextIdentity.userId,
+      ...(nextIdentity.passwordSecretRef === undefined
+        ? {}
+        : { passwordSecretRef: nextIdentity.passwordSecretRef }),
+      accessTokenSecretRef,
+    });
 
     await this.ensureMatrixUserInAlertRoom({
       adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
@@ -5347,10 +5359,92 @@ export default function (api) {
       inviterAccessToken: operatorAccessToken,
     });
 
+    const appliedAvatarSha256 = await this.tryApplyManagedAgentAvatar({
+      runtimeConfig,
+      agentId,
+      botPackage,
+      userId: loginSession.userId,
+      accessToken: loginSession.accessToken,
+      previousAvatarSha256,
+    });
+    if (appliedAvatarSha256 === undefined) {
+      if ("avatarSha256" in nextIdentity) {
+        delete nextIdentity.avatarSha256;
+      }
+    } else {
+      nextIdentity.avatarSha256 = appliedAvatarSha256;
+    }
+
+    const changed = !areMatrixIdentitiesEqual(previousIdentitySnapshot, nextIdentity);
+
     return {
       runtimeConfig,
       changed: changed || primaryBotChanged,
     };
+  }
+
+  private async tryApplyManagedAgentAvatar(input: {
+    runtimeConfig: RuntimeConfig;
+    agentId: string;
+    botPackage: LoadedBotPackage | null;
+    userId: string;
+    accessToken: string;
+    previousAvatarSha256: string | undefined;
+  }): Promise<string | undefined> {
+    const uploadMedia = this.matrixProvisioner.uploadMedia?.bind(this.matrixProvisioner);
+    const setUserAvatar = this.matrixProvisioner.setUserAvatar?.bind(this.matrixProvisioner);
+    if (uploadMedia === undefined || setUserAvatar === undefined) {
+      return input.previousAvatarSha256;
+    }
+    try {
+      const resolver = new FilesystemMatrixAvatarResolver(this.botCatalog);
+      let asset: Awaited<ReturnType<MatrixAvatarResolver["resolveBotAvatar"]>> = null;
+      if (input.botPackage !== null) {
+        asset = await resolver.resolveBotAvatar(input.botPackage.manifest.id);
+      }
+      if (asset === null) {
+        asset = await resolver.resolveServiceBotAvatar();
+      }
+      if (asset === null) {
+        return input.previousAvatarSha256;
+      }
+      if (input.previousAvatarSha256 === asset.sha256) {
+        return asset.sha256;
+      }
+      const uploaded = await uploadMedia({
+        baseUrl: input.runtimeConfig.matrix.adminBaseUrl,
+        accessToken: input.accessToken,
+        fileName: asset.fileName,
+        contentType: asset.contentType,
+        data: asset.data,
+      });
+      await setUserAvatar({
+        baseUrl: input.runtimeConfig.matrix.adminBaseUrl,
+        userId: input.userId,
+        accessToken: input.accessToken,
+        contentUri: uploaded.contentUri,
+      });
+      this.logger.info(
+        {
+          agentId: input.agentId,
+          userId: input.userId,
+          avatarSha256: asset.sha256,
+          source: input.botPackage !== null && asset.fileName === "avatar.png" ? "bot" : "service",
+        },
+        "Applied Matrix managed agent avatar",
+      );
+      return asset.sha256;
+    } catch (error) {
+      this.logger.warn(
+        {
+          agentId: input.agentId,
+          userId: input.userId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Failed to apply Matrix managed agent avatar; leaving user avatar unchanged",
+      );
+      return input.previousAvatarSha256;
+    }
   }
 
   private async ensureSynapseUserViaAdminApi(input: {
