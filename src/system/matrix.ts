@@ -63,6 +63,7 @@ type MatrixBootstrapAccount = {
   userId: string;
   passwordSecretRef: string;
   accessToken: string;
+  avatarSha256?: string;
 };
 
 export type BundledMatrixAccountsResult = {
@@ -84,6 +85,8 @@ export interface BundledMatrixProvisioner {
     provision: BundledMatrixProvisionResult,
     options?: {
       botLocalpart?: string;
+      avatarResolver?: MatrixAvatarResolver;
+      previousBotAvatarSha256?: string;
     },
   ): Promise<BundledMatrixAccountsResult>;
   bootstrapRoom(
@@ -328,6 +331,8 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     provision: BundledMatrixProvisionResult,
     options?: {
       botLocalpart?: string;
+      avatarResolver?: MatrixAvatarResolver;
+      previousBotAvatarSha256?: string;
     },
   ): Promise<BundledMatrixAccountsResult> {
     await this.ensureStackRunning(provision);
@@ -350,15 +355,53 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     );
     const botPasswordSecretRef = await this.writeSecretFile(secretsDir, botSecretName, botPassword);
 
+    const accounts = await this.bootstrapAccountsWithRecovery({
+      provision,
+      operatorLocalpart,
+      operatorPassword,
+      operatorPasswordSecretRef,
+      botLocalpart,
+      botPassword,
+      botPasswordSecretRef,
+      secretsDir,
+      operatorSecretName,
+      botSecretName,
+    });
+
+    const appliedBotSha = await this.tryApplyServiceBotAvatar({
+      provision,
+      botUserId: accounts.bot.userId,
+      botAccessToken: accounts.bot.accessToken,
+      avatarResolver: options?.avatarResolver,
+      previousAvatarSha256: options?.previousBotAvatarSha256,
+    });
+    if (appliedBotSha !== undefined) {
+      accounts.bot.avatarSha256 = appliedBotSha;
+    }
+    return accounts;
+  }
+
+  private async bootstrapAccountsWithRecovery(input: {
+    provision: BundledMatrixProvisionResult;
+    operatorLocalpart: string;
+    operatorPassword: string;
+    operatorPasswordSecretRef: string;
+    botLocalpart: string;
+    botPassword: string;
+    botPasswordSecretRef: string;
+    secretsDir: string;
+    operatorSecretName: string;
+    botSecretName: string;
+  }): Promise<BundledMatrixAccountsResult> {
     try {
       return await this.bootstrapAccountsWithKnownPasswords({
-        provision,
-        operatorLocalpart,
-        operatorPassword,
-        operatorPasswordSecretRef,
-        botLocalpart,
-        botPassword,
-        botPasswordSecretRef,
+        provision: input.provision,
+        operatorLocalpart: input.operatorLocalpart,
+        operatorPassword: input.operatorPassword,
+        operatorPasswordSecretRef: input.operatorPasswordSecretRef,
+        botLocalpart: input.botLocalpart,
+        botPassword: input.botPassword,
+        botPasswordSecretRef: input.botPasswordSecretRef,
       });
     } catch (error) {
       if (!isRecoverableAccountCredentialFailure(error)) {
@@ -367,40 +410,94 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
 
       this.logger.warn(
         {
-          projectDir: provision.projectDir,
-          homeserverDomain: provision.homeserverDomain,
-          operatorLocalpart,
-          botLocalpart,
+          projectDir: input.provision.projectDir,
+          homeserverDomain: input.provision.homeserverDomain,
+          operatorLocalpart: input.operatorLocalpart,
+          botLocalpart: input.botLocalpart,
         },
         "Detected stale Matrix bootstrap credentials; resetting bundled Matrix Postgres state and retrying account bootstrap",
       );
 
-      await this.resetBundledPostgresState(provision);
-      await this.ensureStackRunning(provision);
-      await this.waitForSynapseReadyWithRecovery(provision);
+      await this.resetBundledPostgresState(input.provision);
+      await this.ensureStackRunning(input.provision);
+      await this.waitForSynapseReadyWithRecovery(input.provision);
 
       const recoveredOperatorPassword = generatePassword();
       const recoveredBotPassword = generatePassword();
       const recoveredOperatorPasswordSecretRef = await this.writeSecretFile(
-        secretsDir,
-        operatorSecretName,
+        input.secretsDir,
+        input.operatorSecretName,
         recoveredOperatorPassword,
       );
       const recoveredBotPasswordSecretRef = await this.writeSecretFile(
-        secretsDir,
-        botSecretName,
+        input.secretsDir,
+        input.botSecretName,
         recoveredBotPassword,
       );
 
-      return this.bootstrapAccountsWithKnownPasswords({
-        provision,
-        operatorLocalpart,
+      return await this.bootstrapAccountsWithKnownPasswords({
+        provision: input.provision,
+        operatorLocalpart: input.operatorLocalpart,
         operatorPassword: recoveredOperatorPassword,
         operatorPasswordSecretRef: recoveredOperatorPasswordSecretRef,
-        botLocalpart,
+        botLocalpart: input.botLocalpart,
         botPassword: recoveredBotPassword,
         botPasswordSecretRef: recoveredBotPasswordSecretRef,
       });
+    }
+  }
+
+  private async tryApplyServiceBotAvatar(input: {
+    provision: BundledMatrixProvisionResult;
+    botUserId: string;
+    botAccessToken: string;
+    avatarResolver: MatrixAvatarResolver | undefined;
+    previousAvatarSha256: string | undefined;
+  }): Promise<string | undefined> {
+    const resolver = input.avatarResolver;
+    if (resolver === undefined) {
+      return input.previousAvatarSha256;
+    }
+    try {
+      const asset = await resolver.resolveServiceBotAvatar();
+      if (asset === null) {
+        return input.previousAvatarSha256;
+      }
+      if (input.previousAvatarSha256 === asset.sha256) {
+        return asset.sha256;
+      }
+      const uploaded = await this.uploadMedia({
+        baseUrl: input.provision.adminBaseUrl,
+        accessToken: input.botAccessToken,
+        fileName: asset.fileName,
+        contentType: asset.contentType,
+        data: asset.data,
+      });
+      await this.setUserAvatar({
+        baseUrl: input.provision.adminBaseUrl,
+        userId: input.botUserId,
+        accessToken: input.botAccessToken,
+        contentUri: uploaded.contentUri,
+      });
+      this.logger.info(
+        {
+          projectDir: input.provision.projectDir,
+          botUserId: input.botUserId,
+          avatarSha256: asset.sha256,
+        },
+        "Applied Matrix service bot avatar",
+      );
+      return asset.sha256;
+    } catch (error) {
+      this.logger.warn(
+        {
+          projectDir: input.provision.projectDir,
+          botUserId: input.botUserId,
+          error: describeError(error),
+        },
+        "Failed to apply Matrix service bot avatar; leaving user avatar unchanged",
+      );
+      return input.previousAvatarSha256;
     }
   }
 
