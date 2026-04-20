@@ -116,6 +116,18 @@ import {
 } from "./real-service-guarded-json-state-plugin.js";
 import { ensureLobsterCliInstalled } from "./real-service-lobster.js";
 import {
+  buildRelayProvisionRequest as buildRelayProvisionRequestFile,
+  generateManagedRelayRequestedSlug as generateManagedRelayRequestedSlugFile,
+  getRelayRequest as getRelayRequestFile,
+  isDefaultManagedRelayControlUrl as isDefaultManagedRelayControlUrlFile,
+  isRelayModeRequest as isRelayModeRequestFile,
+} from "./real-service-relay.js";
+import {
+  parseManagedRelayEnrollmentResponse,
+  type RelayEnrollmentData,
+  tryUsePreEnrolledRelay as tryUsePreEnrolledRelayFile,
+} from "./real-service-relay-enrollment.js";
+import {
   areMatrixIdentitiesEqual,
   areStringListsEqual,
   areStringRecordsEqual,
@@ -168,7 +180,6 @@ import {
   RELAY_TUNNEL_SYSTEMD_UNIT,
   RESERVED_AGENT_IDS,
   type RelayRuntimeConfig,
-  type RelayTunnelConfig,
   type RuntimeAgentEntry,
   type RuntimeBotInstance,
   type RuntimeConfig,
@@ -238,12 +249,7 @@ type PersistedInstallJobRecord = {
   updatedAt: string;
 };
 
-type RelayEnrollmentResult = {
-  controlUrl: string;
-  hostname: string;
-  publicBaseUrl: string;
-  tunnel: RelayTunnelConfig;
-};
+type RelayEnrollmentResult = RelayEnrollmentData;
 
 type CompiledHostPlan = {
   resources: CompiledHostResource[];
@@ -298,44 +304,7 @@ const SOVEREIGN_EXECUTABLE_PATHS: Record<string, string> = {
   "sovereign-tool": "/usr/local/bin/sovereign-tool",
 };
 
-const DEFAULT_MANAGED_RELAY_CONTROL_URL = "https://relay.sovereign-ai-node.com";
 const DEFAULT_MATRIX_USER_INVITE_TTL_MINUTES = 1_440;
-
-const RELAY_NAME_THEMES = [
-  "satoshi",
-  "freedom",
-  "privacy",
-  "liberty",
-  "cipher",
-  "anon",
-  "hodl",
-  "sovereign",
-  "bitcoin",
-];
-
-const RELAY_NAME_MOODS = [
-  "stealthy",
-  "mighty",
-  "brave",
-  "silent",
-  "wild",
-  "sunny",
-  "cosmic",
-  "fuzzy",
-  "nimble",
-];
-
-const RELAY_NAME_MASCOTS = [
-  "badger",
-  "fox",
-  "otter",
-  "owl",
-  "falcon",
-  "lynx",
-  "yak",
-  "raven",
-  "wolf",
-];
 
 type RealInstallerServiceDeps = {
   openclawBootstrapper: OpenClawBootstrapper;
@@ -7334,28 +7303,15 @@ export default function (api) {
   }
 
   private isRelayModeRequest(req: InstallRequest): boolean {
-    if (req.connectivity?.mode === "relay") {
-      return true;
-    }
-    if (req.connectivity?.mode === "direct") {
-      return false;
-    }
-    return req.relay !== undefined;
+    return isRelayModeRequestFile(req);
   }
 
   private getRelayRequest(req: InstallRequest): NonNullable<InstallRequest["relay"]> {
-    if (req.relay !== undefined) {
-      return req.relay;
-    }
-    throw {
-      code: "RELAY_CONFIG_MISSING",
-      message: "Relay mode requires relay.controlUrl",
-      retryable: false,
-    };
+    return getRelayRequestFile(req);
   }
 
   private isDefaultManagedRelayControlUrl(controlUrl: string): boolean {
-    return controlUrl.trim().replace(/\/+$/, "") === DEFAULT_MANAGED_RELAY_CONTROL_URL;
+    return isDefaultManagedRelayControlUrlFile(controlUrl);
   }
 
   private async tryReuseExistingRelayEnrollment(
@@ -7402,28 +7358,7 @@ export default function (api) {
   private tryUsePreEnrolledRelay(
     relay: NonNullable<InstallRequest["relay"]>,
   ): RelayEnrollmentResult | null {
-    if (!relay.hostname || !relay.publicBaseUrl || !relay.tunnel) {
-      return null;
-    }
-    const t = relay.tunnel;
-    if (!t.serverAddr || !t.token || !t.proxyName) {
-      return null;
-    }
-    return {
-      controlUrl: relay.controlUrl,
-      hostname: relay.hostname,
-      publicBaseUrl: relay.publicBaseUrl,
-      tunnel: {
-        serverAddr: t.serverAddr,
-        serverPort: t.serverPort ?? 7000,
-        token: t.token,
-        proxyName: t.proxyName,
-        ...(t.subdomain === undefined ? {} : { subdomain: t.subdomain }),
-        type: "http",
-        localIp: "127.0.0.1",
-        localPort: RELAY_LOCAL_EDGE_PORT,
-      },
-    };
+    return tryUsePreEnrolledRelayFile({ relay, localEdgePort: RELAY_LOCAL_EDGE_PORT });
   }
 
   private async resolveRelayEnrollment(
@@ -7550,99 +7485,24 @@ export default function (api) {
         };
       }
 
-      const parsed = parseJsonDocument(responseText);
-      const payload =
-        isRecord(parsed) && isRecord(parsed.result)
-          ? parsed.result
-          : isRecord(parsed)
-            ? parsed
-            : null;
-      const tunnel = payload !== null && isRecord(payload.tunnel) ? payload.tunnel : null;
-      const hostname =
-        payload !== null && typeof payload.assignedHostname === "string"
-          ? payload.assignedHostname.trim()
-          : payload !== null && typeof payload.hostname === "string"
-            ? payload.hostname.trim()
-            : "";
-      const publicBaseUrl =
-        payload !== null && typeof payload.publicBaseUrl === "string"
-          ? payload.publicBaseUrl.trim()
-          : "";
-      const serverAddr =
-        tunnel !== null && typeof tunnel.serverAddr === "string"
-          ? tunnel.serverAddr.trim()
-          : tunnel !== null && typeof tunnel.serverHost === "string"
-            ? tunnel.serverHost.trim()
-            : "";
-      const serverPort =
-        tunnel !== null &&
-        typeof tunnel.serverPort === "number" &&
-        Number.isFinite(tunnel.serverPort)
-          ? Math.trunc(tunnel.serverPort)
-          : 7000;
-      const token =
-        tunnel !== null && typeof tunnel.token === "string"
-          ? tunnel.token.trim()
-          : tunnel !== null && typeof tunnel.authToken === "string"
-            ? tunnel.authToken.trim()
-            : "";
-      const proxyName =
-        tunnel !== null && typeof tunnel.proxyName === "string"
-          ? tunnel.proxyName.trim()
-          : hostname.length > 0
-            ? `relay-${hostname.replace(/[^a-zA-Z0-9-]/g, "-")}`
-            : "";
-      const subdomain =
-        tunnel !== null &&
-        typeof tunnel.subdomain === "string" &&
-        tunnel.subdomain.trim().length > 0
-          ? tunnel.subdomain.trim()
-          : undefined;
-
-      if (
-        hostname.length === 0 ||
-        publicBaseUrl.length === 0 ||
-        serverAddr.length === 0 ||
-        token.length === 0 ||
-        proxyName.length === 0
-      ) {
-        throw {
-          code: "RELAY_ENROLL_INVALID",
-          message: "Managed relay enrollment returned an incomplete response",
-          retryable: false,
-          details: {
-            controlUrl: relay.controlUrl,
-            requestedSlug,
-            response: summarizeText(responseText, 1200),
-          },
-        };
-      }
+      const enrollment = parseManagedRelayEnrollmentResponse({
+        responseText,
+        controlUrl: relay.controlUrl,
+        requestedSlug,
+        localEdgePort: RELAY_LOCAL_EDGE_PORT,
+      });
 
       this.logger.info(
         {
-          hostname,
-          publicBaseUrl,
+          hostname: enrollment.hostname,
+          publicBaseUrl: enrollment.publicBaseUrl,
           controlUrl: relay.controlUrl,
           requestedSlug,
         },
         "Managed relay enrollment succeeded",
       );
 
-      return {
-        controlUrl: relay.controlUrl,
-        hostname,
-        publicBaseUrl,
-        tunnel: {
-          serverAddr,
-          serverPort,
-          token,
-          proxyName,
-          ...(subdomain === undefined ? {} : { subdomain }),
-          type: "http",
-          localIp: "127.0.0.1",
-          localPort: RELAY_LOCAL_EDGE_PORT,
-        },
-      };
+      return enrollment;
     }
 
     throw {
@@ -7661,24 +7521,7 @@ export default function (api) {
   }
 
   private generateManagedRelayRequestedSlug(): string {
-    const entropy = randomUUID().replace(/-/g, "");
-    const pick = (values: readonly string[], offset: number): string => {
-      const nibble = entropy.slice(offset, offset + 2);
-      const value = Number.parseInt(nibble, 16);
-      const index = Number.isFinite(value) ? value % values.length : 0;
-      return values[index] ?? values[0] ?? "node";
-    };
-    const suffix = entropy.slice(0, 4);
-    const raw =
-      `${pick(RELAY_NAME_MOODS, 0)}-${pick(RELAY_NAME_THEMES, 2)}-${pick(RELAY_NAME_MASCOTS, 4)}-${suffix}`.toLowerCase();
-    const normalized = raw
-      .replace(/[^a-z0-9-]/g, "-")
-      .replace(/-{2,}/g, "-")
-      .replace(/^-+/, "")
-      .replace(/-+$/, "");
-    return normalized.length === 0
-      ? `sovereign-node-${suffix}`
-      : normalized.slice(0, 63).replace(/-+$/, "");
+    return generateManagedRelayRequestedSlugFile();
   }
 
   private buildRelayProvisionRequest(
@@ -7686,23 +7529,12 @@ export default function (api) {
     enrollment: RelayEnrollmentResult,
     previousRuntimeConfig?: RuntimeConfig | null,
   ): InstallRequest {
-    const homeserverDomain =
-      previousRuntimeConfig?.matrix.accessMode === "direct"
-        ? previousRuntimeConfig.matrix.homeserverDomain
-        : enrollment.hostname;
-    return {
-      ...req,
-      connectivity: {
-        ...(req.connectivity ?? {}),
-        mode: "relay",
-      },
-      matrix: {
-        ...req.matrix,
-        homeserverDomain,
-        publicBaseUrl: enrollment.publicBaseUrl,
-        federationEnabled: req.matrix.federationEnabled ?? false,
-      },
-    };
+    return buildRelayProvisionRequestFile({
+      req,
+      hostname: enrollment.hostname,
+      publicBaseUrl: enrollment.publicBaseUrl,
+      previousRuntimeConfig,
+    });
   }
 
   private getRelayTunnelConfigPath(): string {
