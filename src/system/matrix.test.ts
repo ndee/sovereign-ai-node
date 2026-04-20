@@ -1423,6 +1423,222 @@ describe("DockerComposeBundledMatrixProvisioner.setUserAvatar", () => {
   });
 });
 
+describe("DockerComposeBundledMatrixProvisioner.tryApplyAlertRoomAvatar", () => {
+  type AvatarAsset = {
+    path: string;
+    data: Uint8Array;
+    sha256: string;
+    contentType: string;
+    fileName: string;
+  };
+  type TryApplyInput = {
+    provision: { adminBaseUrl: string; projectDir: string };
+    roomId: string;
+    operatorAccessToken: string;
+    avatarResolver: { resolveAlertRoomAvatar: () => Promise<AvatarAsset | null> } | undefined;
+    previousAvatarSha256: string | undefined;
+  };
+  type WithPrivate = {
+    tryApplyAlertRoomAvatar: (input: TryApplyInput) => Promise<string | undefined>;
+  };
+
+  const callPrivate = (
+    provisioner: DockerComposeBundledMatrixProvisioner,
+    input: TryApplyInput,
+  ): Promise<string | undefined> => {
+    return (provisioner as unknown as WithPrivate).tryApplyAlertRoomAvatar(input);
+  };
+
+  const provision = {
+    adminBaseUrl: "http://matrix.local.test:8008",
+    projectDir: "/tmp/proj",
+  };
+
+  it("returns the previous sha when no resolver is provided", async () => {
+    const { provisioner, calls, cleanup } = await createAvatarProvisioner(
+      () => new Response("{}", { status: 200 }),
+    );
+    try {
+      const result = await callPrivate(provisioner, {
+        provision,
+        roomId: "!abc:matrix.local.test",
+        operatorAccessToken: "op",
+        avatarResolver: undefined,
+        previousAvatarSha256: "cafe".repeat(16),
+      });
+      expect(result).toBe("cafe".repeat(16));
+      expect(calls).toHaveLength(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("returns the previous sha when no avatar file exists on disk", async () => {
+    const { provisioner, calls, cleanup } = await createAvatarProvisioner(
+      () => new Response("{}", { status: 200 }),
+    );
+    try {
+      const result = await callPrivate(provisioner, {
+        provision,
+        roomId: "!abc:matrix.local.test",
+        operatorAccessToken: "op",
+        avatarResolver: { resolveAlertRoomAvatar: async () => null },
+        previousAvatarSha256: "dead".repeat(16),
+      });
+      expect(result).toBe("dead".repeat(16));
+      expect(calls).toHaveLength(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("short-circuits when the avatar sha matches the persisted sha", async () => {
+    const { provisioner, calls, cleanup } = await createAvatarProvisioner(
+      () => new Response("{}", { status: 200 }),
+    );
+    try {
+      const asset: AvatarAsset = {
+        path: "/repo/alert-room.png",
+        data: new Uint8Array([1]),
+        sha256: "beef".repeat(16),
+        contentType: "image/png",
+        fileName: "alert-room.png",
+      };
+      const result = await callPrivate(provisioner, {
+        provision,
+        roomId: "!abc:matrix.local.test",
+        operatorAccessToken: "op",
+        avatarResolver: { resolveAlertRoomAvatar: async () => asset },
+        previousAvatarSha256: "beef".repeat(16),
+      });
+      expect(result).toBe("beef".repeat(16));
+      expect(calls).toHaveLength(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("uploads the avatar and sets it on the room when the sha differs", async () => {
+    const { provisioner, calls, cleanup } = await createAvatarProvisioner((call) => {
+      if (call.url.includes("/_matrix/media/v3/upload")) {
+        return new Response(JSON.stringify({ content_uri: "mxc://example/room-avatar" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (call.url.includes("/state/m.room.avatar")) {
+        return new Response(JSON.stringify({ event_id: "$1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("{}", { status: 404 });
+    });
+    try {
+      const asset: AvatarAsset = {
+        path: "/repo/alert-room.png",
+        data: new Uint8Array([1, 2, 3]),
+        sha256: "cafebabe".repeat(8),
+        contentType: "image/png",
+        fileName: "alert-room.png",
+      };
+      const result = await callPrivate(provisioner, {
+        provision,
+        roomId: "!abc:matrix.local.test",
+        operatorAccessToken: "op",
+        avatarResolver: { resolveAlertRoomAvatar: async () => asset },
+        previousAvatarSha256: "feedface".repeat(8),
+      });
+      expect(result).toBe("cafebabe".repeat(8));
+      expect(calls).toHaveLength(2);
+      expect(calls[0]?.url).toContain("/_matrix/media/v3/upload");
+      expect(calls[1]?.url).toContain("/state/m.room.avatar");
+      expect(JSON.parse(calls[1]?.init?.body as string)).toEqual({
+        url: "mxc://example/room-avatar",
+      });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("uploads the avatar when no previous sha is persisted", async () => {
+    const { provisioner, calls, cleanup } = await createAvatarProvisioner((call) => {
+      if (call.url.includes("/_matrix/media/v3/upload")) {
+        return new Response(JSON.stringify({ content_uri: "mxc://example/x" }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    });
+    try {
+      const asset: AvatarAsset = {
+        path: "/repo/alert-room.png",
+        data: new Uint8Array([9]),
+        sha256: "0".repeat(64),
+        contentType: "image/png",
+        fileName: "alert-room.png",
+      };
+      const result = await callPrivate(provisioner, {
+        provision,
+        roomId: "!abc:matrix.local.test",
+        operatorAccessToken: "op",
+        avatarResolver: { resolveAlertRoomAvatar: async () => asset },
+        previousAvatarSha256: undefined,
+      });
+      expect(result).toBe("0".repeat(64));
+      expect(calls).toHaveLength(2);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("falls back to the previous sha when the resolver throws", async () => {
+    const { provisioner, calls, cleanup } = await createAvatarProvisioner(
+      () => new Response("{}", { status: 200 }),
+    );
+    try {
+      const result = await callPrivate(provisioner, {
+        provision,
+        roomId: "!abc:matrix.local.test",
+        operatorAccessToken: "op",
+        avatarResolver: {
+          resolveAlertRoomAvatar: async () => {
+            throw new Error("filesystem offline");
+          },
+        },
+        previousAvatarSha256: "previous-sha",
+      });
+      expect(result).toBe("previous-sha");
+      expect(calls).toHaveLength(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("falls back to the previous sha when the upload fails", async () => {
+    const { provisioner, cleanup } = await createAvatarProvisioner(() => {
+      return new Response(JSON.stringify({ errcode: "M_LIMIT_EXCEEDED" }), { status: 429 });
+    });
+    try {
+      const asset: AvatarAsset = {
+        path: "/repo/alert-room.png",
+        data: new Uint8Array([5]),
+        sha256: "new-sha".padEnd(64, "x"),
+        contentType: "image/png",
+        fileName: "alert-room.png",
+      };
+      const result = await callPrivate(provisioner, {
+        provision,
+        roomId: "!abc:matrix.local.test",
+        operatorAccessToken: "op",
+        avatarResolver: { resolveAlertRoomAvatar: async () => asset },
+        previousAvatarSha256: "old-sha",
+      });
+      expect(result).toBe("old-sha");
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
 describe("DockerComposeBundledMatrixProvisioner.setRoomAvatar", () => {
   it("PUTs the state event for m.room.avatar", async () => {
     const { provisioner, calls, cleanup } = await createAvatarProvisioner(() => {
