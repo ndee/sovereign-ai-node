@@ -8,6 +8,7 @@ import type { CheckResult } from "../contracts/common.js";
 import type { InstallRequest, TestMatrixResult } from "../contracts/index.js";
 import type { Logger } from "../logging/logger.js";
 import type { ExecResult, ExecRunner } from "./exec.js";
+import type { MatrixAvatarResolver } from "./matrix-avatars.js";
 import {
   buildOnboardingPageUrl,
   normalizeEmbeddedSvg,
@@ -72,6 +73,7 @@ export type BundledMatrixAccountsResult = {
 export type BundledMatrixRoomBootstrapResult = {
   roomId: string;
   roomName: string;
+  avatarSha256?: string;
 };
 
 export interface BundledMatrixProvisioner {
@@ -90,6 +92,8 @@ export interface BundledMatrixProvisioner {
     accounts: BundledMatrixAccountsResult,
     options?: {
       previousAlertRoom?: { roomId: string; roomName: string };
+      avatarResolver?: MatrixAvatarResolver;
+      previousAvatarSha256?: string;
     },
   ): Promise<BundledMatrixRoomBootstrapResult>;
   test(req: TestMatrixRequest): Promise<TestMatrixResult>;
@@ -465,6 +469,8 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     accounts: BundledMatrixAccountsResult,
     options?: {
       previousAlertRoom?: { roomId: string; roomName: string };
+      avatarResolver?: MatrixAvatarResolver;
+      previousAvatarSha256?: string;
     },
   ): Promise<BundledMatrixRoomBootstrapResult> {
     await this.waitForSynapseReady(provision.adminBaseUrl);
@@ -492,9 +498,17 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
           accounts.bot.userId,
           accounts.bot.accessToken,
         );
+        const appliedSha = await this.tryApplyAlertRoomAvatar({
+          provision,
+          roomId: previousRoom.roomId,
+          operatorAccessToken: accounts.operator.accessToken,
+          avatarResolver: options?.avatarResolver,
+          previousAvatarSha256: options?.previousAvatarSha256,
+        });
         const result: BundledMatrixRoomBootstrapResult = {
           roomId: previousRoom.roomId,
           roomName: previousRoom.roomName,
+          ...(appliedSha === undefined ? {} : { avatarSha256: appliedSha }),
         };
         if (shouldUseReverseProxy(provision.accessMode, provision.tlsMode)) {
           await this.writeOnboardingPage({
@@ -563,9 +577,17 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       retryable: true,
     });
 
+    const appliedSha = await this.tryApplyAlertRoomAvatar({
+      provision,
+      roomId,
+      operatorAccessToken: accounts.operator.accessToken,
+      avatarResolver: options?.avatarResolver,
+      previousAvatarSha256: options?.previousAvatarSha256,
+    });
     const result: BundledMatrixRoomBootstrapResult = {
       roomId,
       roomName,
+      ...(appliedSha === undefined ? {} : { avatarSha256: appliedSha }),
     };
     if (shouldUseReverseProxy(provision.accessMode, provision.tlsMode)) {
       await this.writeOnboardingPage({
@@ -586,6 +608,60 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       "Bundled Matrix alert room bootstrapped",
     );
     return result;
+  }
+
+  private async tryApplyAlertRoomAvatar(input: {
+    provision: BundledMatrixProvisionResult;
+    roomId: string;
+    operatorAccessToken: string;
+    avatarResolver: MatrixAvatarResolver | undefined;
+    previousAvatarSha256: string | undefined;
+  }): Promise<string | undefined> {
+    const resolver = input.avatarResolver;
+    if (resolver === undefined) {
+      return input.previousAvatarSha256;
+    }
+    try {
+      const asset = await resolver.resolveAlertRoomAvatar();
+      if (asset === null) {
+        return input.previousAvatarSha256;
+      }
+      if (input.previousAvatarSha256 === asset.sha256) {
+        return asset.sha256;
+      }
+      const uploaded = await this.uploadMedia({
+        baseUrl: input.provision.adminBaseUrl,
+        accessToken: input.operatorAccessToken,
+        fileName: asset.fileName,
+        contentType: asset.contentType,
+        data: asset.data,
+      });
+      await this.setRoomAvatar({
+        baseUrl: input.provision.adminBaseUrl,
+        roomId: input.roomId,
+        accessToken: input.operatorAccessToken,
+        contentUri: uploaded.contentUri,
+      });
+      this.logger.info(
+        {
+          projectDir: input.provision.projectDir,
+          roomId: input.roomId,
+          avatarSha256: asset.sha256,
+        },
+        "Applied Matrix alert room avatar",
+      );
+      return asset.sha256;
+    } catch (error) {
+      this.logger.warn(
+        {
+          projectDir: input.provision.projectDir,
+          roomId: input.roomId,
+          error: describeError(error),
+        },
+        "Failed to apply Matrix alert room avatar; leaving room avatar unchanged",
+      );
+      return input.previousAvatarSha256;
+    }
   }
 
   private async isRoomReachable(
