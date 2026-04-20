@@ -4876,6 +4876,7 @@ describe("RealInstallerService", () => {
         getDefaultSelectedIds: async () => [],
         findPackageByTemplateRef: async (ref) =>
           ref === botPackage.templateRef ? botPackage : null,
+        getRepoDir: async () => "/tmp/sovereign-ai-bots-mock",
       },
       preflightChecker: {
         run: async () => ({
@@ -5092,6 +5093,7 @@ describe("RealInstallerService", () => {
         getDefaultSelectedIds: async () => [],
         findPackageByTemplateRef: async (ref) =>
           ref === botPackage.templateRef ? botPackage : null,
+        getRepoDir: async () => "/tmp/sovereign-ai-bots-mock",
       },
       preflightChecker: {
         run: async () => ({
@@ -9374,6 +9376,7 @@ describe("RealInstallerService", () => {
         getDefaultSelectedIds: async () => [],
         findPackageByTemplateRef: async (ref) =>
           ref === botPackage.templateRef ? botPackage : null,
+        getRepoDir: async () => "/tmp/sovereign-ai-bots-mock",
       },
       preflightChecker: {
         run: async () => ({

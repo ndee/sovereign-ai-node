@@ -1234,6 +1234,174 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     }
   }
 
+  async uploadMedia(input: {
+    baseUrl: string;
+    accessToken: string;
+    fileName: string;
+    contentType: string;
+    data: Uint8Array;
+  }): Promise<{ contentUri: string }> {
+    const url = new URL(
+      `/_matrix/media/v3/upload?filename=${encodeURIComponent(input.fileName)}`,
+      ensureTrailingSlash(input.baseUrl),
+    ).toString();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), MATRIX_HTTP_TIMEOUT_MS);
+    try {
+      const response = await this.fetchImpl(url, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": input.contentType,
+          Authorization: `Bearer ${input.accessToken}`,
+        },
+        body: input.data,
+        signal: controller.signal,
+      });
+      const rawBody = await response.text();
+      const parsedBody = parseJsonSafely(rawBody);
+      if (!response.ok) {
+        throw {
+          code: "MATRIX_MEDIA_UPLOAD_FAILED",
+          message: "Failed to upload media to the Matrix homeserver",
+          retryable: true,
+          details: {
+            url,
+            status: response.status,
+            body: summarizeUnknown(parsedBody),
+          },
+        };
+      }
+      const contentUri =
+        isRecord(parsedBody) && typeof parsedBody.content_uri === "string"
+          ? parsedBody.content_uri.trim()
+          : "";
+      if (contentUri.length === 0 || !contentUri.startsWith("mxc://")) {
+        throw {
+          code: "MATRIX_MEDIA_UPLOAD_FAILED",
+          message: "Matrix media upload returned an invalid content_uri",
+          retryable: true,
+          details: { url, body: summarizeUnknown(parsedBody) },
+        };
+      }
+      return { contentUri };
+    } catch (error) {
+      if (isStructuredError(error)) {
+        throw error;
+      }
+      throw {
+        code: "MATRIX_MEDIA_UPLOAD_FAILED",
+        message: "Failed to upload media to the Matrix homeserver",
+        retryable: true,
+        details: { url, error: describeError(error) },
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async setUserAvatar(input: {
+    baseUrl: string;
+    userId: string;
+    accessToken: string;
+    contentUri: string;
+  }): Promise<void> {
+    const url = new URL(
+      `/_matrix/client/v3/profile/${encodeURIComponent(input.userId)}/avatar_url`,
+      ensureTrailingSlash(input.baseUrl),
+    ).toString();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), MATRIX_HTTP_TIMEOUT_MS);
+    try {
+      const response = await this.fetchImpl(url, {
+        method: "PUT",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${input.accessToken}`,
+        },
+        body: JSON.stringify({ avatar_url: input.contentUri }),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const rawBody = await response.text();
+        throw {
+          code: "MATRIX_USER_AVATAR_FAILED",
+          message: "Failed to set the Matrix user avatar",
+          retryable: true,
+          details: {
+            url,
+            status: response.status,
+            body: summarizeUnknown(parseJsonSafely(rawBody)),
+          },
+        };
+      }
+    } catch (error) {
+      if (isStructuredError(error)) {
+        throw error;
+      }
+      throw {
+        code: "MATRIX_USER_AVATAR_FAILED",
+        message: "Failed to set the Matrix user avatar",
+        retryable: true,
+        details: { url, error: describeError(error) },
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async setRoomAvatar(input: {
+    baseUrl: string;
+    roomId: string;
+    accessToken: string;
+    contentUri: string;
+  }): Promise<void> {
+    const url = new URL(
+      `/_matrix/client/v3/rooms/${encodeURIComponent(input.roomId)}/state/m.room.avatar/`,
+      ensureTrailingSlash(input.baseUrl),
+    ).toString();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), MATRIX_HTTP_TIMEOUT_MS);
+    try {
+      const response = await this.fetchImpl(url, {
+        method: "PUT",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${input.accessToken}`,
+        },
+        body: JSON.stringify({ url: input.contentUri }),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const rawBody = await response.text();
+        throw {
+          code: "MATRIX_ROOM_AVATAR_FAILED",
+          message: "Failed to set the Matrix room avatar",
+          retryable: true,
+          details: {
+            url,
+            status: response.status,
+            body: summarizeUnknown(parseJsonSafely(rawBody)),
+          },
+        };
+      }
+    } catch (error) {
+      if (isStructuredError(error)) {
+        throw error;
+      }
+      throw {
+        code: "MATRIX_ROOM_AVATAR_FAILED",
+        message: "Failed to set the Matrix room avatar",
+        retryable: true,
+        details: { url, error: describeError(error) },
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   private async ensureManagedSecretsDir(): Promise<string> {
     const dir = this.paths.secretsDir;
     await mkdir(dir, { recursive: true });
