@@ -127,6 +127,7 @@ import {
   type RelayEnrollmentData,
   tryUsePreEnrolledRelay as tryUsePreEnrolledRelayFile,
 } from "./real-service-relay-enrollment.js";
+import { renderRelayTunnelConfig, renderRelayTunnelUnit } from "./real-service-relay-tunnel.js";
 import {
   areMatrixIdentitiesEqual,
   areStringListsEqual,
@@ -7556,24 +7557,7 @@ export default function (api) {
       token = await this.resolveSecretRef(relay.tunnel.tokenSecretRef);
       await mkdir(dirname(configPath), { recursive: true });
       await this.applyRuntimeOwnership(dirname(configPath));
-      const configText = [
-        `serverAddr = "${relay.tunnel.serverAddr}"`,
-        `serverPort = ${relay.tunnel.serverPort}`,
-        "",
-        "[auth]",
-        'method = "token"',
-        `token = "${token}"`,
-        "",
-        "[[proxies]]",
-        `name = "${relay.tunnel.proxyName}"`,
-        `type = "${relay.tunnel.type}"`,
-        `localIP = "${relay.tunnel.localIp}"`,
-        `localPort = ${relay.tunnel.localPort}`,
-        `customDomains = ["${relay.hostname}"]`,
-        ...(relay.tunnel.subdomain === undefined
-          ? []
-          : [`subdomain = "${relay.tunnel.subdomain}"`]),
-      ].join("\n");
+      const configText = renderRelayTunnelConfig({ relay, token });
       await writeFile(configPath, `${configText}\n`, "utf8");
       await chmod(configPath, 0o600);
       await this.applyRuntimeOwnership(configPath);
@@ -7588,25 +7572,11 @@ export default function (api) {
       return false;
     }
 
-    const unitContents = [
-      "[Unit]",
-      "Description=Sovereign Matrix Relay Tunnel",
-      "After=network-online.target docker.service",
-      "Wants=network-online.target",
-      "Requires=docker.service",
-      "",
-      "[Service]",
-      "Type=simple",
-      `ExecStartPre=-/usr/bin/docker rm -f ${containerName}`,
-      `ExecStart=/usr/bin/docker run --rm --name ${containerName} --network host -v ${configPath}:/etc/frp/frpc.toml:ro ${RELAY_TUNNEL_DEFAULT_IMAGE} -c /etc/frp/frpc.toml`,
-      `ExecStop=/usr/bin/docker stop ${containerName}`,
-      "Restart=always",
-      "RestartSec=3",
-      "",
-      "[Install]",
-      "WantedBy=multi-user.target",
-      "",
-    ].join("\n");
+    const unitContents = renderRelayTunnelUnit({
+      configPath,
+      containerName,
+      image: RELAY_TUNNEL_DEFAULT_IMAGE,
+    });
 
     try {
       await mkdir(dirname(unitPath), { recursive: true });
