@@ -5033,6 +5033,9 @@ export default function (api) {
           ? {}
           : { passwordSecretRef: runtimeConfig.matrix.bot.passwordSecretRef }),
         accessTokenSecretRef: runtimeConfig.matrix.bot.accessTokenSecretRef,
+        ...(runtimeConfig.matrix.bot.avatarSha256 === undefined
+          ? {}
+          : { avatarSha256: runtimeConfig.matrix.bot.avatarSha256 }),
       },
       alertRoom: runtimeConfig.matrix.alertRoom,
     };
@@ -5905,6 +5908,7 @@ export default function (api) {
     await this.matrixProvisioner.resetState(input.provision);
     return this.matrixProvisioner.bootstrapAccounts(input.req, input.provision, {
       ...(input.botLocalpart === undefined ? {} : { botLocalpart: input.botLocalpart }),
+      avatarResolver: new FilesystemMatrixAvatarResolver(this.botCatalog),
     });
   }
 
@@ -6916,6 +6920,14 @@ export default function (api) {
               bootstrapBotLocalpart,
             );
           }
+          const previousAccountsRuntimeConfig = await this.tryReadRuntimeConfig();
+          const previousBotAvatarSha256 =
+            previousAccountsRuntimeConfig !== null &&
+            previousAccountsRuntimeConfig.matrix.homeserverDomain ===
+              stepState.matrixProvision.homeserverDomain
+              ? previousAccountsRuntimeConfig.matrix.bot.avatarSha256
+              : undefined;
+          const accountsAvatarResolver = new FilesystemMatrixAvatarResolver(this.botCatalog);
           try {
             stepState.matrixAccounts = await this.matrixProvisioner.bootstrapAccounts(
               stepState.effectiveRequest ?? req,
@@ -6924,6 +6936,8 @@ export default function (api) {
                 ...(bootstrapBotLocalpart === undefined
                   ? {}
                   : { botLocalpart: bootstrapBotLocalpart }),
+                avatarResolver: accountsAvatarResolver,
+                ...(previousBotAvatarSha256 === undefined ? {} : { previousBotAvatarSha256 }),
               },
             );
           } catch (error) {
@@ -9423,6 +9437,9 @@ export default function (api) {
         userId: input.matrixAccounts.bot.userId,
         passwordSecretRef: input.matrixAccounts.bot.passwordSecretRef,
         accessTokenSecretRef: botTokenSecretRef,
+        ...(input.matrixAccounts.bot.avatarSha256 === undefined
+          ? {}
+          : { avatarSha256: input.matrixAccounts.bot.avatarSha256 }),
       },
       alertRoom: {
         roomId: input.matrixRoom.roomId,
@@ -9814,6 +9831,9 @@ export default function (api) {
           userId: runtimeConfig.matrix.bot.userId,
           passwordSecretRef: input.matrixAccounts.bot.passwordSecretRef,
           accessTokenSecretRef: runtimeConfig.matrix.bot.accessTokenSecretRef,
+          ...(runtimeConfig.matrix.bot.avatarSha256 === undefined
+            ? {}
+            : { avatarSha256: runtimeConfig.matrix.bot.avatarSha256 }),
         },
         alertRoom: {
           roomId: runtimeConfig.matrix.alertRoom.roomId,
