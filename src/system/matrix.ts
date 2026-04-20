@@ -99,6 +99,25 @@ export interface BundledMatrixProvisioner {
       previousAvatarSha256?: string;
     },
   ): Promise<BundledMatrixRoomBootstrapResult>;
+  uploadMedia?(input: {
+    baseUrl: string;
+    accessToken: string;
+    fileName: string;
+    contentType: string;
+    data: Uint8Array;
+  }): Promise<{ contentUri: string }>;
+  setUserAvatar?(input: {
+    baseUrl: string;
+    userId: string;
+    accessToken: string;
+    contentUri: string;
+  }): Promise<void>;
+  setRoomAvatar?(input: {
+    baseUrl: string;
+    roomId: string;
+    accessToken: string;
+    contentUri: string;
+  }): Promise<void>;
   test(req: TestMatrixRequest): Promise<TestMatrixResult>;
   updateFederationConfig?(params: {
     federationEnabled: boolean;
