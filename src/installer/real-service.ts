@@ -112,6 +112,13 @@ import {
 } from "./real-service-guarded-json-state-plugin.js";
 import { ensureLobsterCliInstalled } from "./real-service-lobster.js";
 import {
+  buildRelayProvisionRequest as buildRelayProvisionRequestFile,
+  generateManagedRelayRequestedSlug as generateManagedRelayRequestedSlugFile,
+  getRelayRequest as getRelayRequestFile,
+  isDefaultManagedRelayControlUrl as isDefaultManagedRelayControlUrlFile,
+  isRelayModeRequest as isRelayModeRequestFile,
+} from "./real-service-relay.js";
+import {
   areMatrixIdentitiesEqual,
   areStringListsEqual,
   areStringRecordsEqual,
@@ -294,44 +301,7 @@ const SOVEREIGN_EXECUTABLE_PATHS: Record<string, string> = {
   "sovereign-tool": "/usr/local/bin/sovereign-tool",
 };
 
-const DEFAULT_MANAGED_RELAY_CONTROL_URL = "https://relay.sovereign-ai-node.com";
 const DEFAULT_MATRIX_USER_INVITE_TTL_MINUTES = 1_440;
-
-const RELAY_NAME_THEMES = [
-  "satoshi",
-  "freedom",
-  "privacy",
-  "liberty",
-  "cipher",
-  "anon",
-  "hodl",
-  "sovereign",
-  "bitcoin",
-];
-
-const RELAY_NAME_MOODS = [
-  "stealthy",
-  "mighty",
-  "brave",
-  "silent",
-  "wild",
-  "sunny",
-  "cosmic",
-  "fuzzy",
-  "nimble",
-];
-
-const RELAY_NAME_MASCOTS = [
-  "badger",
-  "fox",
-  "otter",
-  "owl",
-  "falcon",
-  "lynx",
-  "yak",
-  "raven",
-  "wolf",
-];
 
 type RealInstallerServiceDeps = {
   openclawBootstrapper: OpenClawBootstrapper;
@@ -7216,28 +7186,15 @@ export default function (api) {
   }
 
   private isRelayModeRequest(req: InstallRequest): boolean {
-    if (req.connectivity?.mode === "relay") {
-      return true;
-    }
-    if (req.connectivity?.mode === "direct") {
-      return false;
-    }
-    return req.relay !== undefined;
+    return isRelayModeRequestFile(req);
   }
 
   private getRelayRequest(req: InstallRequest): NonNullable<InstallRequest["relay"]> {
-    if (req.relay !== undefined) {
-      return req.relay;
-    }
-    throw {
-      code: "RELAY_CONFIG_MISSING",
-      message: "Relay mode requires relay.controlUrl",
-      retryable: false,
-    };
+    return getRelayRequestFile(req);
   }
 
   private isDefaultManagedRelayControlUrl(controlUrl: string): boolean {
-    return controlUrl.trim().replace(/\/+$/, "") === DEFAULT_MANAGED_RELAY_CONTROL_URL;
+    return isDefaultManagedRelayControlUrlFile(controlUrl);
   }
 
   private async tryReuseExistingRelayEnrollment(
@@ -7543,24 +7500,7 @@ export default function (api) {
   }
 
   private generateManagedRelayRequestedSlug(): string {
-    const entropy = randomUUID().replace(/-/g, "");
-    const pick = (values: readonly string[], offset: number): string => {
-      const nibble = entropy.slice(offset, offset + 2);
-      const value = Number.parseInt(nibble, 16);
-      const index = Number.isFinite(value) ? value % values.length : 0;
-      return values[index] ?? values[0] ?? "node";
-    };
-    const suffix = entropy.slice(0, 4);
-    const raw =
-      `${pick(RELAY_NAME_MOODS, 0)}-${pick(RELAY_NAME_THEMES, 2)}-${pick(RELAY_NAME_MASCOTS, 4)}-${suffix}`.toLowerCase();
-    const normalized = raw
-      .replace(/[^a-z0-9-]/g, "-")
-      .replace(/-{2,}/g, "-")
-      .replace(/^-+/, "")
-      .replace(/-+$/, "");
-    return normalized.length === 0
-      ? `sovereign-node-${suffix}`
-      : normalized.slice(0, 63).replace(/-+$/, "");
+    return generateManagedRelayRequestedSlugFile();
   }
 
   private buildRelayProvisionRequest(
@@ -7568,23 +7508,12 @@ export default function (api) {
     enrollment: RelayEnrollmentResult,
     previousRuntimeConfig?: RuntimeConfig | null,
   ): InstallRequest {
-    const homeserverDomain =
-      previousRuntimeConfig?.matrix.accessMode === "direct"
-        ? previousRuntimeConfig.matrix.homeserverDomain
-        : enrollment.hostname;
-    return {
-      ...req,
-      connectivity: {
-        ...(req.connectivity ?? {}),
-        mode: "relay",
-      },
-      matrix: {
-        ...req.matrix,
-        homeserverDomain,
-        publicBaseUrl: enrollment.publicBaseUrl,
-        federationEnabled: req.matrix.federationEnabled ?? false,
-      },
-    };
+    return buildRelayProvisionRequestFile({
+      req,
+      hostname: enrollment.hostname,
+      publicBaseUrl: enrollment.publicBaseUrl,
+      previousRuntimeConfig,
+    });
   }
 
   private getRelayTunnelConfigPath(): string {
