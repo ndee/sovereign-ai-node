@@ -6461,6 +6461,7 @@ describe("RealInstallerService", () => {
           };
           imap: RuntimeConfig["imap"];
           matrixRoom: { roomId: string; roomName: string };
+          homeserverDomain: string;
           previousRuntimeConfig: RuntimeConfig | null;
         }): {
           id: string;
@@ -6507,6 +6508,7 @@ describe("RealInstallerService", () => {
           roomId: "!alerts:matrix.example.org",
           roomName: "Sovereign Alerts",
         },
+        homeserverDomain: "matrix.example.org",
         previousRuntimeConfig: {
           bots: {
             instances: [
@@ -6630,12 +6632,14 @@ describe("RealInstallerService", () => {
           entry: BotInstanceShape;
           configById: Record<string, Record<string, unknown>>;
           matrixRoom: { roomId: string; roomName: string };
+          homeserverDomain: string;
           previousRuntimeConfig: RuntimeConfig | null;
         }): BotInstanceShape;
         applyLegacyMailSentinelRequestedInstanceDefaults(input: {
           entry: BotInstanceShape;
           imap: RuntimeConfig["imap"];
           matrixRoom: { roomId: string; roomName: string };
+          homeserverDomain: string;
           previousRuntimeConfig: RuntimeConfig | null;
         }): BotInstanceShape;
       };
@@ -6674,6 +6678,7 @@ describe("RealInstallerService", () => {
         },
         configById: {},
         matrixRoom: currentRoom,
+        homeserverDomain: "matrix.example.org",
         previousRuntimeConfig,
       });
       expect(normalized.matrix?.alertRoom?.roomId).toBe(currentRoom.roomId);
@@ -6694,6 +6699,7 @@ describe("RealInstallerService", () => {
           status: "pending",
         } as RuntimeConfig["imap"],
         matrixRoom: currentRoom,
+        homeserverDomain: "matrix.example.org",
         previousRuntimeConfig,
       });
       expect(legacyResult.matrix?.alertRoom?.roomId).toBe(currentRoom.roomId);
@@ -6728,6 +6734,7 @@ describe("RealInstallerService", () => {
         },
         configById: {},
         matrixRoom: currentRoom,
+        homeserverDomain: "matrix.example.org",
         previousRuntimeConfig: matchingPreviousRuntimeConfig,
       });
       expect(preserved.matrix?.alertRoom?.roomId).toBe(currentRoom.roomId);
@@ -6750,6 +6757,7 @@ describe("RealInstallerService", () => {
         },
         configById: {},
         matrixRoom: currentRoom,
+        homeserverDomain: "matrix.example.org",
         previousRuntimeConfig,
       });
       expect(explicitlyStaleResult.matrix?.alertRoom?.roomId).toBe(currentRoom.roomId);
@@ -6770,6 +6778,7 @@ describe("RealInstallerService", () => {
         },
         configById: {},
         matrixRoom: currentRoom,
+        homeserverDomain: "matrix.example.org",
         previousRuntimeConfig: null,
       });
       expect(explicitlyMatchingResult.matrix?.alertRoom?.roomId).toBe(currentRoom.roomId);
@@ -6798,6 +6807,7 @@ describe("RealInstallerService", () => {
             status: "pending",
           } as RuntimeConfig["imap"],
           matrixRoom: currentRoom,
+          homeserverDomain: "matrix.example.org",
           previousRuntimeConfig,
         });
       expect(legacyExplicitlyStaleResult.matrix?.alertRoom?.roomId).toBe(currentRoom.roomId);
@@ -6886,10 +6896,14 @@ describe("RealInstallerService", () => {
           configById: Record<string, Record<string, unknown>>;
           imap: RuntimeConfig["imap"];
           matrixRoom: { roomId: string; roomName: string };
+          homeserverDomain: string;
           previousRuntimeConfig: RuntimeConfig | null;
         }): {
           id: string;
-          matrix?: { alertRoom?: { roomId: string; roomName: string } };
+          matrix?: {
+            alertRoom?: { roomId: string; roomName: string };
+            allowedUsers?: string[];
+          };
         };
       };
 
@@ -6923,6 +6937,7 @@ describe("RealInstallerService", () => {
         configById: {},
         imap: { status: "pending" } as RuntimeConfig["imap"],
         matrixRoom: currentRoom,
+        homeserverDomain: "matrix.example.org",
         previousRuntimeConfig,
       });
       expect(rotated.matrix?.alertRoom?.roomId).toBe(currentRoom.roomId);
@@ -6954,10 +6969,269 @@ describe("RealInstallerService", () => {
         configById: {},
         imap: { status: "pending" } as RuntimeConfig["imap"],
         matrixRoom: currentRoom,
+        homeserverDomain: "matrix.example.org",
         previousRuntimeConfig: matchingPreviousRuntimeConfig,
       });
       expect(preserved.matrix?.alertRoom?.roomId).toBe(currentRoom.roomId);
       expect(preserved.matrix?.alertRoom?.roomName).toBe("Custom operator-picked name");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rotates stale bot-instance allowedUsers MXIDs to the current homeserver domain", async () => {
+    // Repro from the Mail Sentinel Live E2E run that hung waiting for a
+    // bot reply: the top-level matrix section had rotated to
+    // `brave-freedom-badger-ad52.sovereign-ai-node.com` (bundled-matrix
+    // recreated the Synapse container with a fresh relay-picked hostname)
+    // but bots.instances[mail-sentinel].matrix.allowedUsers still carried
+    // the pre-rotation `@operator:e2e.sovereign.local`. OpenClaw's group
+    // allowlist therefore excluded the real operator and every chat
+    // message silently became non-reply — scan-driven alerts still fired
+    // because the bot is the sender there, only the reply path compared
+    // against allowedUsers.
+    //
+    // The three rotation sites (normalizeRequestedBotInstance,
+    // buildLegacyMailSentinelRequestedInstance,
+    // applyLegacyMailSentinelRequestedInstanceDefaults) mirror the
+    // alertRoom rotation pattern added in #120-#122.
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => {
+          throw new Error("not used");
+        },
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => {
+          throw new Error("not used");
+        },
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async () => ({
+          ok: true,
+          host: "127.0.0.1",
+          port: 1143,
+          tls: true,
+          auth: "ok",
+          mailbox: "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+    });
+
+    try {
+      type BotInstanceShape = {
+        id: string;
+        packageId: string;
+        workspace?: string;
+        config?: Record<string, unknown>;
+        secretRefs?: Record<string, unknown>;
+        matrix?: {
+          allowedUsers?: string[];
+          alertRoom?: { roomId: string; roomName: string };
+          [key: string]: unknown;
+        };
+      };
+      const internals = service as unknown as {
+        normalizeRequestedBotInstance(input: {
+          entry: BotInstanceShape;
+          configById: Record<string, Record<string, unknown>>;
+          matrixRoom: { roomId: string; roomName: string };
+          homeserverDomain: string;
+          previousRuntimeConfig: RuntimeConfig | null;
+        }): BotInstanceShape;
+        buildLegacyMailSentinelRequestedInstance(input: {
+          configById: Record<string, Record<string, unknown>>;
+          imap: RuntimeConfig["imap"];
+          matrixRoom: { roomId: string; roomName: string };
+          homeserverDomain: string;
+          previousRuntimeConfig: RuntimeConfig | null;
+        }): BotInstanceShape;
+        applyLegacyMailSentinelRequestedInstanceDefaults(input: {
+          entry: BotInstanceShape;
+          imap: RuntimeConfig["imap"];
+          matrixRoom: { roomId: string; roomName: string };
+          homeserverDomain: string;
+          previousRuntimeConfig: RuntimeConfig | null;
+        }): BotInstanceShape;
+      };
+
+      const currentRoom = {
+        roomId: "!fresh:brave-freedom-badger-ad52.sovereign-ai-node.com",
+        roomName: "Sovereign Alerts",
+      };
+      const currentDomain = "brave-freedom-badger-ad52.sovereign-ai-node.com";
+
+      // Previous runtime saved from before the homeserver rotation.
+      const stalePreviousRuntimeConfig = {
+        bots: {
+          instances: [
+            {
+              id: "mail-sentinel",
+              packageId: "mail-sentinel",
+              workspace: "/var/lib/sovereign-node/mail-sentinel/workspace",
+              config: {},
+              secretRefs: {},
+              matrix: {
+                alertRoom: currentRoom,
+                allowedUsers: ["@operator:e2e.sovereign.local"],
+              },
+            },
+          ],
+        },
+        openclawProfile: { agents: [] },
+      } as unknown as RuntimeConfig;
+
+      // Path 1: normalizeRequestedBotInstance falls back to the previous
+      // runtime's allowedUsers when the entry doesn't provide one.
+      const fallback = internals.normalizeRequestedBotInstance({
+        entry: { id: "mail-sentinel", packageId: "mail-sentinel" },
+        configById: {},
+        matrixRoom: currentRoom,
+        homeserverDomain: currentDomain,
+        previousRuntimeConfig: stalePreviousRuntimeConfig,
+      });
+      expect(fallback.matrix?.allowedUsers).toEqual([`@operator:${currentDomain}`]);
+
+      // Path 2: normalizeRequestedBotInstance with an explicit stale list
+      // on the entry (the install-request replay case reproduced on the
+      // E2E VPS).
+      const explicit = internals.normalizeRequestedBotInstance({
+        entry: {
+          id: "mail-sentinel",
+          packageId: "mail-sentinel",
+          matrix: { allowedUsers: ["@operator:e2e.sovereign.local"] },
+        },
+        configById: {},
+        matrixRoom: currentRoom,
+        homeserverDomain: currentDomain,
+        previousRuntimeConfig: null,
+      });
+      expect(explicit.matrix?.allowedUsers).toEqual([`@operator:${currentDomain}`]);
+
+      // Path 3: buildLegacyMailSentinelRequestedInstance — the
+      // no-explicit-bot-instance path inherits the previous runtime's
+      // allowedUsers.
+      const legacyBuild = internals.buildLegacyMailSentinelRequestedInstance({
+        configById: {},
+        imap: { status: "pending" } as RuntimeConfig["imap"],
+        matrixRoom: currentRoom,
+        homeserverDomain: currentDomain,
+        previousRuntimeConfig: stalePreviousRuntimeConfig,
+      });
+      expect(legacyBuild.matrix?.allowedUsers).toEqual([`@operator:${currentDomain}`]);
+
+      // Path 4: applyLegacyMailSentinelRequestedInstanceDefaults with a
+      // stale explicit entry (the replayed install request).
+      const legacyApply = internals.applyLegacyMailSentinelRequestedInstanceDefaults({
+        entry: {
+          id: "mail-sentinel",
+          packageId: "mail-sentinel",
+          workspace: "/var/lib/sovereign-node/mail-sentinel/workspace",
+          config: {},
+          secretRefs: {},
+          matrix: {
+            allowedUsers: ["@operator:e2e.sovereign.local"],
+          },
+        },
+        imap: { status: "pending" } as RuntimeConfig["imap"],
+        matrixRoom: currentRoom,
+        homeserverDomain: currentDomain,
+        previousRuntimeConfig: stalePreviousRuntimeConfig,
+      });
+      expect(legacyApply.matrix?.allowedUsers).toEqual([`@operator:${currentDomain}`]);
+
+      // Path 5: when the previous runtime's allowedUsers already match
+      // the current homeserver, the rewrite must be a no-op so
+      // operator-picked localparts aren't mangled (e.g. mixed-case
+      // preservation would regress if we always re-derived).
+      const freshPreviousRuntimeConfig = {
+        bots: {
+          instances: [
+            {
+              id: "mail-sentinel",
+              packageId: "mail-sentinel",
+              workspace: "/var/lib/sovereign-node/mail-sentinel/workspace",
+              config: {},
+              secretRefs: {},
+              matrix: {
+                alertRoom: currentRoom,
+                allowedUsers: [`@operator:${currentDomain}`, `@second:${currentDomain}`],
+              },
+            },
+          ],
+        },
+        openclawProfile: { agents: [] },
+      } as unknown as RuntimeConfig;
+      const noop = internals.normalizeRequestedBotInstance({
+        entry: { id: "mail-sentinel", packageId: "mail-sentinel" },
+        configById: {},
+        matrixRoom: currentRoom,
+        homeserverDomain: currentDomain,
+        previousRuntimeConfig: freshPreviousRuntimeConfig,
+      });
+      expect(noop.matrix?.allowedUsers).toEqual([
+        `@operator:${currentDomain}`,
+        `@second:${currentDomain}`,
+      ]);
+
+      // Path 6: entries without an explicit `@localpart:domain` shape
+      // (plain localparts from a hand-authored install-request) are
+      // rewritten to the current homeserver, matching what
+      // normalizeMatrixUserIdentifier does for interactive invite flows.
+      const localpartOnly = internals.normalizeRequestedBotInstance({
+        entry: {
+          id: "mail-sentinel",
+          packageId: "mail-sentinel",
+          matrix: { allowedUsers: ["operator"] },
+        },
+        configById: {},
+        matrixRoom: currentRoom,
+        homeserverDomain: currentDomain,
+        previousRuntimeConfig: null,
+      });
+      expect(localpartOnly.matrix?.allowedUsers).toEqual([`@operator:${currentDomain}`]);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
