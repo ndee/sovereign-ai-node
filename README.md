@@ -39,6 +39,21 @@ Sovereign AI Node is the runtime and control plane layer. Bot packages are defin
 
 Matrix is the primary control plane. Bots register as Matrix users, operate inside rooms, and receive operator interaction through standard Matrix clients.
 
+## Optional bot packages
+
+Additional installable bot packages live in the companion [`sovereign-ai-bots`](https://github.com/ndee/sovereign-ai-bots) repository without changing the runtime code in this repo.
+
+Example optional package:
+
+* `bali-compass@1.0.0` — practical guidance for travel, relocation, life, business, and Bitcoin in Bali and wider Indonesia
+
+Useful commands:
+
+* `sovereign-node bots list --json`
+* `sovereign-node bots instantiate bali-compass --json`
+
+For a non-interactive install request that also selects the Bali bot, see `deploy/install-request.bali-compass.example.json`.
+
 ## Control plane
 
 ![Matrix control plane showing multi-bot presence on Sovereign AI Node](docs/img/03-presence.png)
@@ -72,7 +87,6 @@ The broader multi-bot system is the platform direction. Mail Sentinel is the fir
 ## Why Matrix
 
 Matrix is the control plane because it gives the system:
-
 * rooms as natural operator surfaces
 * bot-native interaction
 * local or self-hosted deployment options
