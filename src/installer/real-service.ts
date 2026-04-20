@@ -120,6 +120,11 @@ import {
   isRelayModeRequest as isRelayModeRequestFile,
 } from "./real-service-relay.js";
 import {
+  parseManagedRelayEnrollmentResponse,
+  type RelayEnrollmentData,
+  tryUsePreEnrolledRelay as tryUsePreEnrolledRelayFile,
+} from "./real-service-relay-enrollment.js";
+import {
   areMatrixIdentitiesEqual,
   areStringListsEqual,
   areStringRecordsEqual,
@@ -172,7 +177,6 @@ import {
   RELAY_TUNNEL_SYSTEMD_UNIT,
   RESERVED_AGENT_IDS,
   type RelayRuntimeConfig,
-  type RelayTunnelConfig,
   type RuntimeAgentEntry,
   type RuntimeBotInstance,
   type RuntimeConfig,
@@ -242,12 +246,7 @@ type PersistedInstallJobRecord = {
   updatedAt: string;
 };
 
-type RelayEnrollmentResult = {
-  controlUrl: string;
-  hostname: string;
-  publicBaseUrl: string;
-  tunnel: RelayTunnelConfig;
-};
+type RelayEnrollmentResult = RelayEnrollmentData;
 
 type CompiledHostPlan = {
   resources: CompiledHostResource[];
@@ -7251,28 +7250,7 @@ export default function (api) {
   private tryUsePreEnrolledRelay(
     relay: NonNullable<InstallRequest["relay"]>,
   ): RelayEnrollmentResult | null {
-    if (!relay.hostname || !relay.publicBaseUrl || !relay.tunnel) {
-      return null;
-    }
-    const t = relay.tunnel;
-    if (!t.serverAddr || !t.token || !t.proxyName) {
-      return null;
-    }
-    return {
-      controlUrl: relay.controlUrl,
-      hostname: relay.hostname,
-      publicBaseUrl: relay.publicBaseUrl,
-      tunnel: {
-        serverAddr: t.serverAddr,
-        serverPort: t.serverPort ?? 7000,
-        token: t.token,
-        proxyName: t.proxyName,
-        ...(t.subdomain === undefined ? {} : { subdomain: t.subdomain }),
-        type: "http",
-        localIp: "127.0.0.1",
-        localPort: RELAY_LOCAL_EDGE_PORT,
-      },
-    };
+    return tryUsePreEnrolledRelayFile({ relay, localEdgePort: RELAY_LOCAL_EDGE_PORT });
   }
 
   private async resolveRelayEnrollment(
@@ -7399,99 +7377,24 @@ export default function (api) {
         };
       }
 
-      const parsed = parseJsonDocument(responseText);
-      const payload =
-        isRecord(parsed) && isRecord(parsed.result)
-          ? parsed.result
-          : isRecord(parsed)
-            ? parsed
-            : null;
-      const tunnel = payload !== null && isRecord(payload.tunnel) ? payload.tunnel : null;
-      const hostname =
-        payload !== null && typeof payload.assignedHostname === "string"
-          ? payload.assignedHostname.trim()
-          : payload !== null && typeof payload.hostname === "string"
-            ? payload.hostname.trim()
-            : "";
-      const publicBaseUrl =
-        payload !== null && typeof payload.publicBaseUrl === "string"
-          ? payload.publicBaseUrl.trim()
-          : "";
-      const serverAddr =
-        tunnel !== null && typeof tunnel.serverAddr === "string"
-          ? tunnel.serverAddr.trim()
-          : tunnel !== null && typeof tunnel.serverHost === "string"
-            ? tunnel.serverHost.trim()
-            : "";
-      const serverPort =
-        tunnel !== null &&
-        typeof tunnel.serverPort === "number" &&
-        Number.isFinite(tunnel.serverPort)
-          ? Math.trunc(tunnel.serverPort)
-          : 7000;
-      const token =
-        tunnel !== null && typeof tunnel.token === "string"
-          ? tunnel.token.trim()
-          : tunnel !== null && typeof tunnel.authToken === "string"
-            ? tunnel.authToken.trim()
-            : "";
-      const proxyName =
-        tunnel !== null && typeof tunnel.proxyName === "string"
-          ? tunnel.proxyName.trim()
-          : hostname.length > 0
-            ? `relay-${hostname.replace(/[^a-zA-Z0-9-]/g, "-")}`
-            : "";
-      const subdomain =
-        tunnel !== null &&
-        typeof tunnel.subdomain === "string" &&
-        tunnel.subdomain.trim().length > 0
-          ? tunnel.subdomain.trim()
-          : undefined;
-
-      if (
-        hostname.length === 0 ||
-        publicBaseUrl.length === 0 ||
-        serverAddr.length === 0 ||
-        token.length === 0 ||
-        proxyName.length === 0
-      ) {
-        throw {
-          code: "RELAY_ENROLL_INVALID",
-          message: "Managed relay enrollment returned an incomplete response",
-          retryable: false,
-          details: {
-            controlUrl: relay.controlUrl,
-            requestedSlug,
-            response: summarizeText(responseText, 1200),
-          },
-        };
-      }
+      const enrollment = parseManagedRelayEnrollmentResponse({
+        responseText,
+        controlUrl: relay.controlUrl,
+        requestedSlug,
+        localEdgePort: RELAY_LOCAL_EDGE_PORT,
+      });
 
       this.logger.info(
         {
-          hostname,
-          publicBaseUrl,
+          hostname: enrollment.hostname,
+          publicBaseUrl: enrollment.publicBaseUrl,
           controlUrl: relay.controlUrl,
           requestedSlug,
         },
         "Managed relay enrollment succeeded",
       );
 
-      return {
-        controlUrl: relay.controlUrl,
-        hostname,
-        publicBaseUrl,
-        tunnel: {
-          serverAddr,
-          serverPort,
-          token,
-          proxyName,
-          ...(subdomain === undefined ? {} : { subdomain }),
-          type: "http",
-          localIp: "127.0.0.1",
-          localPort: RELAY_LOCAL_EDGE_PORT,
-        },
-      };
+      return enrollment;
     }
 
     throw {
