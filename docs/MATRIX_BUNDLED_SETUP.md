@@ -24,6 +24,7 @@ The default bundled Matrix profile is:
 - reverse proxy with TLS termination
 - private operator + managed-agent accounts
 - private alert room for managed-agent notifications
+- packaged Matrix avatar assets applied to the service bot, managed bot accounts, and alert room when present in the configured bot catalog
 
 Connectivity can run in one of two access modes:
 
@@ -108,6 +109,7 @@ The installer should generate or provision:
 - required core agent accounts
 - operator/bootstrap credential reveal flow
 - private alert room
+- service-bot and alert-room avatars when the configured bot catalog ships `service-bot.png` or `alert-room.png`
 
 ## Bundled Provisioning Sequence (What the Installer Must Automate)
 
@@ -199,6 +201,7 @@ Required bootstrap actions:
 - create private alert room
 - apply the alert-room avatar when `alert-room.png` exists
 - invite operator and required core agents to the room
+- apply bundled Matrix avatars when available (`service-bot.png`, `alert-room.png`, and per-package `bots/<id>/avatar.png`)
 - persist room ID and mapped agent identities in config for alert delivery
 
 Recommended access defaults:
