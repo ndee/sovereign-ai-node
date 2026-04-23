@@ -309,6 +309,8 @@ Behavior:
 - MUST require root privileges and instruct the operator to re-run with `sudo` when invoked as a non-root user
 - MUST fail clearly when pending migrations exist
 - MUST instruct the operator to run `sovereign-node migrate` first when that happens
+- when no explicit installer ref/URL override is supplied, SHOULD resolve the latest GitHub release tag first and fall back to `main` only when that lookup fails
+- explicit `--ref`, `--installer-url`, `SOVEREIGN_NODE_REF`, and `SOVEREIGN_NODE_INSTALL_SH_URL` inputs override the default latest-release lookup
 
 ## `sovereign-node migrate`
 
@@ -548,7 +550,7 @@ type InstallRequest = {
   relay?: {
     controlUrl: string;
     enrollmentToken?: string;
-    requestedSlug?: string;
+    requestedSlug?: string; // optional preferred relay slug for seeded/automated relay enrollment; installer may fall back to a generated slug if unavailable
     hostname?: string; // when pre-enrolled, installer skips relay enrollment
     publicBaseUrl?: string; // when pre-enrolled, installer skips relay enrollment
     tunnel?: {
@@ -797,6 +799,18 @@ type SovereignStatus = {
     contractVersion: string;
     openclaw?: string;
     plugins?: Record<string, string>;
+    provenance?: {
+      nodeRepoUrl: string;
+      nodeRef: string;
+      nodeVersion?: string;
+      nodeCommitSha: string;
+      botsRepoUrl: string;
+      botsRef: string;
+      botsVersion?: string;
+      botsCommitSha: string;
+      installedAt: string;
+      installSource: "curl-installer" | "local-copy" | "git-clone";
+    };
   };
 };
 ```
