@@ -49,14 +49,12 @@ Additional installable bot packages live in the companion [`sovereign-ai-bots`](
 
 Example optional package:
 
-* `bali-compass@1.0.0` — practical guidance for travel, relocation, life, business, and Bitcoin in Bali and wider Indonesia
+* `project-sentinel@2.0.0` — digest-first project intelligence bot that watches curated upstream and community sources, scores items against project-specific lanes, and routes red alerts or amber digests into Matrix
 
 Useful commands:
 
 * `sovereign-node bots list --json`
-* `sovereign-node bots instantiate bali-compass --json`
-
-For a non-interactive install request that also selects the Bali bot, see `deploy/install-request.bali-compass.example.json`.
+* `sovereign-node bots instantiate project-sentinel --json`
 
 ## Control plane
 
