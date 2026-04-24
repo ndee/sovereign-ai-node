@@ -1,0 +1,52 @@
+{
+  "mode": "bundled_matrix",
+  "connectivity": {
+    "mode": "direct"
+  },
+  "openclaw": {
+    "manageInstallation": true,
+    "installMethod": "install_sh",
+    "version": "2026.3.13",
+    "skipIfCompatibleInstalled": true,
+    "forceReinstall": false,
+    "runOnboard": false
+  },
+  "openrouter": {
+    "model": "qwen/qwen3.5-9b",
+    "secretRef": "file:/etc/sovereign-node/secrets/openrouter-api-key"
+  },
+  "matrix": {
+    "homeserverDomain": "matrix.example.com",
+    "publicBaseUrl": "https://matrix.example.com",
+    "federationEnabled": true,
+    "tlsMode": "auto",
+    "alertRoomName": "Alerts"
+  },
+  "operator": {
+    "username": "admin"
+  },
+  "advanced": {
+    "nonInteractive": true
+  },
+  "bots": {
+    "selected": [
+      "mail-sentinel",
+      "node-operator"
+    ],
+    "config": {
+      "mail-sentinel": {
+        "pollInterval": "15m",
+        "lookbackWindow": "2h",
+        "e2eeAlertRoom": false
+      }
+    }
+  },
+  "imap": {
+    "host": "imap.example.com",
+    "port": 993,
+    "tls": true,
+    "username": "operator@example.com",
+    "secretRef": "file:/etc/sovereign-node/secrets/imap-password",
+    "mailbox": "INBOX"
+  }
+}
