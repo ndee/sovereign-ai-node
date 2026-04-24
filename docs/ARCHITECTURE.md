@@ -214,12 +214,18 @@ OpenClaw CLI remains the primary runtime/operator interface.
 CLI policy:
 
 - `openclaw` handles runtime-native operations (agents, plugins, channels, cron, health, security audit)
-- `sovereign-node` handles install, update, migration, diagnostics, and opinionated helper workflows such as Mail Sentinel instance management
+- `sovereign-node` handles update, migration, diagnostics, template and agent management, and opinionated helper workflows such as Mail Sentinel instance management
 - OpenClaw CLI remains available for debugging, advanced operations, and break-glass use
+
+Current CLI status on `main`:
+
+- The supported install entrypoint is `scripts/install.sh` (or the documented `curl | sudo bash` path), not direct `sovereign-node install`
+- `sovereign-node install` remains scaffold-only unless `SOVEREIGN_INTERNAL_INSTALL=1` is set for internal/dev flows
+- `sovereign-node reconfigure imap`, `sovereign-node logs`, and `sovereign-node test-alert` are scaffold surfaces today and should not be treated as complete operator workflows
 
 Typical lifecycle:
 
-- Default operator path: `sovereign-node install` bootstraps OpenClaw (official `install.sh`, pinned version, `--no-onboard`)
+- Default operator path: `scripts/install.sh` (or the documented `curl` installer) bootstraps OpenClaw through the official `install.sh` flow with `--no-onboard`
 - Check/update saved install state when needed (`sovereign-node update`, `sovereign-node migrate`)
 - Install/repair the OpenClaw gateway service (`openclaw gateway install`) after Sovereign writes the runtime config
 - Install and enable required plugins
@@ -240,7 +246,7 @@ Repo helper scripts may automate repeated CLI sequences, but the runtime remains
 
 Supported surface model:
 
-- `sovereign-node` CLI for opinionated install, reconfigure, status, and diagnostics workflows
+- `sovereign-node` CLI for opinionated update, migration, status, diagnostics, template, agent, and helper workflows
 - Sovereign Wizard UI (web UI) for guided onboarding and day-1 operations
 - `openclaw` CLI for runtime-native inspection, debugging, and break-glass operations
 
