@@ -35,9 +35,9 @@ Sovereign AI Node is the runtime and control plane layer. Bot packages are defin
 | Layer | Repository | Role |
 |---|---|---|
 | **Runtime** | `sovereign-ai-node` | Installer, Matrix stack, agent/tool contracts, policy boundaries |
-| **Bots** | `sovereign-ai-bots` | Installable bot packages, workspace files, manifests |
+| **Bots** | `sovereign-ai-bots` | Installable bot packages, workspace files, Matrix avatar assets, manifests |
 
-Matrix is the primary control plane. Bots register as Matrix users, operate inside rooms, and receive operator interaction through standard Matrix clients.
+Matrix is the primary control plane. Bots register as Matrix users, operate inside rooms, and receive operator interaction through standard Matrix clients. When bundled avatar assets are present in `sovereign-ai-bots`, the installer also applies them to the service bot, managed bot accounts, and the bundled alert room.
 
 ## Optional bot packages
 

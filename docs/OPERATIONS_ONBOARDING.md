@@ -47,6 +47,7 @@ The operator should not need to manually do these steps in the default path, but
 - Provision the bundled Matrix stack (Synapse, Postgres, reverse proxy, TLS)
 - Create Matrix operator and required core-agent accounts
 - Create a private alert room and store the room target
+- Apply bundled Matrix avatars for the service bot, alert room, and any selected bot packages that ship `avatar.png`
 - Run health checks and send a test alert
 
 Details of the bundled Matrix setup are defined in `docs/MATRIX_BUNDLED_SETUP.md`.
