@@ -124,8 +124,8 @@ The default install flow should provision Matrix in this order:
 4. Start/configure reverse proxy with TLS and Matrix endpoint routing.
 5. Verify Synapse health through the public endpoint.
 6. Create operator account and required core agent accounts.
-7. Apply the bundled Matrix avatars that exist on disk for the service bot, alert room, and managed agents.
-8. Create private alert room and invite operator + required core agents.
+7. Apply bundled account avatars when catalog assets are available (`service-bot.png` and per-bot `bots/<id>/avatar.png`).
+8. Create the private alert room, apply `alert-room.png` when present, and invite operator + required core agents.
 9. Persist homeserver URL, mapped Matrix identities/tokens, alert room ID, and applied avatar hashes into Sovereign/OpenClaw config.
 10. Run a Matrix send test before enabling core agent cron/background flows.
 

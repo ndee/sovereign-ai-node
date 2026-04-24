@@ -418,6 +418,12 @@ Current CLI flags:
 - `--federation`
 - `--no-federation`
 
+Behavior:
+
+- for the legacy/default `mail-sentinel` instance, the active bundled Matrix alert room and homeserver domain are authoritative for `matrix.alertRoom` and `matrix.allowedUsers`
+- when a previous migration or saved install request carries a stale legacy/default `mail-sentinel` room ID, room name, or `allowedUsers` MXID domain, update/reconfigure flows MUST rewrite that instance to the current bundled Matrix room and homeserver domain
+- this reconciliation rule applies to the legacy/default `mail-sentinel` instance and MUST NOT rewrite unrelated multi-instance Mail Sentinel entries that intentionally target a different bundled Matrix room
+
 `--json` result schema:
 
 - `result` MUST be a `ReconfigureResult` with `target = "matrix"`
@@ -1018,6 +1024,11 @@ Response:
 Purpose:
 
 - validate and persist updated bundled Matrix settings (for example homeserver URL, room target, federation flag)
+
+Behavior:
+
+- for the legacy/default `mail-sentinel` instance, the active bundled Matrix alert room and homeserver domain are authoritative for `matrix.alertRoom` and `matrix.allowedUsers`
+- when the request is applied after a homeserver or alert-room rotation, the installer MUST rewrite stale legacy/default `mail-sentinel` room IDs, room names, and `allowedUsers` MXIDs to the current bundled Matrix outputs before persisting runtime state
 
 Request body:
 
