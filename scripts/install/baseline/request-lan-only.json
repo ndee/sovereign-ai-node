@@ -1,0 +1,43 @@
+{
+  "mode": "bundled_matrix",
+  "connectivity": {
+    "mode": "direct"
+  },
+  "openclaw": {
+    "manageInstallation": true,
+    "installMethod": "install_sh",
+    "version": "2026.3.13",
+    "skipIfCompatibleInstalled": true,
+    "forceReinstall": false,
+    "runOnboard": false
+  },
+  "openrouter": {
+    "model": "qwen/qwen3.5-9b",
+    "secretRef": "file:/etc/sovereign-node/secrets/openrouter-api-key"
+  },
+  "matrix": {
+    "homeserverDomain": "matrix.local.test",
+    "publicBaseUrl": "http://127.0.0.1:8008",
+    "federationEnabled": false,
+    "tlsMode": "local-dev",
+    "alertRoomName": "Alerts"
+  },
+  "operator": {
+    "username": "admin"
+  },
+  "advanced": {
+    "nonInteractive": true
+  },
+  "bots": {
+    "selected": [
+      "mail-sentinel"
+    ],
+    "config": {
+      "mail-sentinel": {
+        "pollInterval": "30m",
+        "lookbackWindow": "1h",
+        "e2eeAlertRoom": false
+      }
+    }
+  }
+}

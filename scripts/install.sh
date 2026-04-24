@@ -3880,4 +3880,6 @@ EOF
   print_matrix_client_onboarding_guidance
 }
 
-main "$@"
+if ! (return 0 2>/dev/null); then
+  main "$@"
+fi
