@@ -77,39 +77,15 @@ RUNTIME_STATUS_OUTPUT=""
 DOCTOR_REPORT_OUTPUT=""
 declare -a UI_SPINNER_FRAMES=("[    ]" "[=   ]" "[==  ]" "[=== ]" "[ ===]" "[  ==]" "[   =]")
 
-log() {
-  printf '[%s] %s\n' "$SCRIPT_NAME" "$*"
-}
-
-die() {
-  printf '[%s] ERROR: %s\n' "$SCRIPT_NAME" "$*" >&2
+INSTALL_LIB_DIR="${INSTALL_LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/install" 2>/dev/null && pwd)}"
+if [[ -z "${INSTALL_LIB_DIR}" || ! -d "${INSTALL_LIB_DIR}" ]]; then
+  printf '[%s] ERROR: cannot locate install library directory (tried: %s)\n' \
+    "${SCRIPT_NAME}" "${INSTALL_LIB_DIR:-<unset>}" >&2
   exit 1
-}
+fi
 
-usage() {
-  cat <<'EOF'
-Usage: install.sh [options]
-
-Options:
-  --repo-url <url>         Git URL for sovereign-ai-node (default: https://github.com/ndee/sovereign-ai-node)
-  --source-dir <path>      Local source directory (alternative to --repo-url)
-  --ref <ref>              Git ref (default: main)
-  --bots-repo-url <url>    Git URL for sovereign-ai-bots (default: https://github.com/ndee/sovereign-ai-bots)
-  --bots-source-dir <path> Local bot repo source directory (alternative to --bots-repo-url)
-  --bots-ref <ref>         Bot repo Git ref (default: main)
-  --install-root <path>    Install root (default: /opt/sovereign-ai-node)
-  --service-user <user>    systemd service user (default: sovereign-node)
-  --service-group <group>  systemd service group (default: same as service user)
-  --api-host <host>        API bind host (default: 127.0.0.1)
-  --api-port <port>        API bind port (default: 8787)
-  --request-file <path>    Install request output path (default: /etc/sovereign-node/install-request.json)
-  --install                Force Install mode (new install / reconfigure)
-  --update                 Force Update mode (reuse existing request/config)
-  --skip-install-run       Only bootstrap host; do not run sovereign-node install
-  --non-interactive        Do not prompt; use explicit or inferred action
-  -h, --help               Show help
-EOF
-}
+# shellcheck source=install/lib-log.sh
+source "${INSTALL_LIB_DIR}/lib-log.sh"
 
 normalize_service_identity() {
   if [[ -z "$SERVICE_GROUP" ]]; then
