@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/img/branding/03-light-background.png" alt="Sovereign AI Node" width="420">
+</p>
+
 # Sovereign AI Node
 
 Open-core, local-first multi-bot AI runtime with Matrix as the control plane.
