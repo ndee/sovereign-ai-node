@@ -1835,6 +1835,12 @@ export class RealInstallerService implements InstallerService {
     return join(this.paths.stateDir, "setup-ui", "bootstrap-state.json");
   }
 
+  private async ensureSetupUiStateDirOwnership(): Promise<void> {
+    const dir = dirname(this.getSetupUiBootstrapStatePath());
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await this.applyRuntimeOwnership(dir);
+  }
+
   private async readSetupUiBootstrapState(): Promise<SetupUiBootstrapState | null> {
     const path = this.getSetupUiBootstrapStatePath();
     let raw: string;
@@ -1878,6 +1884,7 @@ export class RealInstallerService implements InstallerService {
     const issued = issueSetupUiBootstrapState(
       req?.ttlMinutes === undefined ? undefined : { ttlMinutes: req.ttlMinutes },
     );
+    await this.ensureSetupUiStateDirOwnership();
     await this.writeInstallerJsonFile(this.getSetupUiBootstrapStatePath(), issued.state, 0o600);
     const ttlMinutes = Math.max(
       1,
@@ -1907,6 +1914,7 @@ export class RealInstallerService implements InstallerService {
       return { ok: false, reason: "not-issued" };
     }
     const result = redeemSetupUiBootstrapToken({ state, token });
+    await this.ensureSetupUiStateDirOwnership();
     await this.writeInstallerJsonFile(this.getSetupUiBootstrapStatePath(), result.state, 0o600);
     if (result.ok) {
       return { ok: true };
