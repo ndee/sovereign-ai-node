@@ -1,11 +1,14 @@
 import { h, render } from "./vendor/preact.module.js";
 import htm from "./vendor/htm.module.js";
+import { useCallback, useEffect, useState } from "./vendor/preact-hooks.module.js";
 
+import { apiGet, apiPost, clearAuth, setCsrf } from "./api.js";
 import { useHashRoute } from "./router.js";
 import { Install } from "./screens/install.js";
-import { Status } from "./screens/status.js";
-import { Reconfigure } from "./screens/reconfigure.js";
+import { Login } from "./screens/login.js";
 import { Onboarding } from "./screens/onboarding.js";
+import { Reconfigure } from "./screens/reconfigure.js";
+import { Status } from "./screens/status.js";
 
 const html = htm.bind(h);
 
@@ -28,7 +31,7 @@ const matchRoute = (route) => {
   return { name: "install" };
 };
 
-const Nav = ({ active }) => {
+const Nav = ({ active, onSignOut, signingOut }) => {
   const groups = ["Setup", "Operate", "Reconfigure"];
   return html`
     <nav class="nav">
@@ -51,6 +54,17 @@ const Nav = ({ active }) => {
           )}
         `,
       )}
+      <div style="margin-top: auto; padding-top: 24px;">
+        <button
+          class="btn btn--secondary"
+          type="button"
+          onClick=${onSignOut}
+          disabled=${signingOut}
+          style="width: 100%;"
+        >
+          ${signingOut ? "Signing out…" : "Sign out"}
+        </button>
+      </div>
     </nav>
   `;
 };
@@ -64,12 +78,70 @@ const Screen = ({ route }) => {
   return null;
 };
 
+const Splash = () =>
+  html`<div style="min-height: 100vh; display: flex; align-items: center; justify-content: center;">
+    <p class="muted">Loading…</p>
+  </div>`;
+
 const App = () => {
   const route = useHashRoute();
   const activePath = route === "/" ? "/install" : route;
+  const [authState, setAuthState] = useState(null);
+  const [authLoaded, setAuthLoaded] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+
+  const refreshAuth = useCallback(async () => {
+    try {
+      const result = await apiGet("/api/auth/state");
+      if (result.csrf) setCsrf(result.csrf);
+      setAuthState(result);
+    } catch {
+      setAuthState({ authenticated: false, stage: "needs-bootstrap" });
+    } finally {
+      setAuthLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshAuth();
+    const onUnauth = () => {
+      clearAuth();
+      setAuthState((prev) => (prev ? { ...prev, authenticated: false } : prev));
+      refreshAuth();
+    };
+    window.addEventListener("sov:unauth", onUnauth);
+    return () => window.removeEventListener("sov:unauth", onUnauth);
+  }, [refreshAuth]);
+
+  const onAuthenticated = useCallback(() => {
+    refreshAuth();
+  }, [refreshAuth]);
+
+  const onSignOut = useCallback(async () => {
+    setSigningOut(true);
+    try {
+      await apiPost("/api/auth/logout", {});
+    } catch {
+      // ignore — we'll clear local state anyway
+    } finally {
+      clearAuth();
+      setSigningOut(false);
+      refreshAuth();
+    }
+  }, [refreshAuth]);
+
+  if (!authLoaded) return html`<${Splash} />`;
+  if (!authState?.authenticated) {
+    return html`<${Login}
+      stage=${authState?.stage ?? "needs-bootstrap"}
+      username=${authState?.username}
+      onAuthenticated=${onAuthenticated}
+    />`;
+  }
+
   return html`
     <div class="app-shell">
-      <${Nav} active=${activePath} />
+      <${Nav} active=${activePath} onSignOut=${onSignOut} signingOut=${signingOut} />
       <main class="main">
         <${Screen} route=${route} />
       </main>

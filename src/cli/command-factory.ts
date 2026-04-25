@@ -11,6 +11,7 @@ import { registerMailSentinelsCommand } from "./commands/mail-sentinels.js";
 import { registerMigrateCommand } from "./commands/migrate.js";
 import { registerOnboardingCommand } from "./commands/onboarding.js";
 import { registerReconfigureCommand } from "./commands/reconfigure.js";
+import { registerSetupUiCommand } from "./commands/setup-ui.js";
 import { registerStatusCommand } from "./commands/status.js";
 import { registerTemplatesCommand } from "./commands/templates.js";
 import { registerTestAlertCommand } from "./commands/test-alert.js";
@@ -43,6 +44,7 @@ export const createCliProgram = (app: AppContainer): Command => {
   registerLogsCommand(program);
   registerTestAlertCommand(program, app);
   registerReconfigureCommand(program, app);
+  registerSetupUiCommand(program, app);
   registerUpdateCommand(program, app);
 
   return program;

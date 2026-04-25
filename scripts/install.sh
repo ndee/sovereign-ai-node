@@ -200,6 +200,7 @@ Useful commands:
 - sovereign-node onboarding issue --json
 EOF
   print_matrix_client_onboarding_guidance
+  print_setup_ui_access_guidance
 }
 
 if ! (return 0 2>/dev/null); then
