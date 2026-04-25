@@ -996,41 +996,6 @@ run_install_command() {
   return 0
 }
 
-run_runtime_readiness_step() {
-  local status_output log_path
-
-  if [[ "$RUN_INSTALL" != "1" ]]; then
-    return 0
-  fi
-
-  if ! ui_is_fancy; then
-    if ! status_output="$(wait_for_runtime_ready 20 5)"; then
-      RUNTIME_STATUS_OUTPUT="$status_output"
-      printf '%s\n' "$status_output"
-      die "Runtime did not reach healthy state for Matrix/OpenClaw within timeout"
-    fi
-    RUNTIME_STATUS_OUTPUT="$status_output"
-    printf '%s\n' "$status_output"
-    return 0
-  fi
-
-  ui_begin_step "Wait for runtime health"
-  log_path="$(ui_step_log_path)"
-  : > "$log_path"
-  if status_output="$(wait_for_runtime_ready 20 5 "$log_path")"; then
-    RUNTIME_STATUS_OUTPUT="$status_output"
-    ui_complete_step "Matrix and OpenClaw healthy"
-    return 0
-  fi
-
-  RUNTIME_STATUS_OUTPUT="$status_output"
-  ui_preserve_logs
-  ui_fail_step "runtime probes did not converge"
-  ui_error "Step log: $log_path"
-  ui_show_log_excerpt "$log_path"
-  return 1
-}
-
 run_post_install_diagnostics_step() {
   local doctor_exit_code summary_headline log_path pid frame_index
 

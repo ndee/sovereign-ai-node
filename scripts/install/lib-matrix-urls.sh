@@ -3,8 +3,7 @@
 #
 # Depends on lib-log and (for the guidance printer) the sovereign-node CLI
 # being installed. Reads and mutates RECOMMENDED_MATRIX_DOMAIN,
-# RECOMMENDED_MATRIX_PUBLIC_BASE_URL, DEFAULT_INTERNAL_MATRIX_DOMAIN_SUFFIX,
-# REQUEST_FILE.
+# RECOMMENDED_MATRIX_PUBLIC_BASE_URL, REQUEST_FILE.
 
 refresh_recommended_matrix_defaults() {
   local detected_ip
