@@ -23,14 +23,18 @@ The installer provisions the Matrix stack (Synapse) and bot runtime (OpenClaw) a
 Run the guided installer on a fresh Ubuntu or Debian host (VM, bare metal, or VPS):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ndee/sovereign-ai-node/main/scripts/install.sh | sudo bash
+curl -fsSL https://github.com/ndee/sovereign-ai-node/releases/latest/download/install.sh | sudo bash
 ```
+
+This pulls the bundled installer attached to the most recent tagged release. To pin a specific version, replace `latest` with the tag name (e.g. `v1.2.3`).
 
 If you are working from a local checkout instead:
 
 ```bash
 sudo bash scripts/install.sh --source-dir "$(pwd)"
 ```
+
+The local-checkout flow uses the multi-file installer under `scripts/install/`. The `scripts/install.sh` you see in this repo is the orchestrator; it sources `scripts/install/lib-*.sh` at runtime. The single-file `install.sh` shipped via the release URL is built from the same sources by `scripts/install/build.sh` during the release workflow.
 
 ## Architecture
 
