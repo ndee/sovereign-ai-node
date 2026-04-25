@@ -43,20 +43,13 @@ Each `recoverJsonObject` JS heredoc (currently at lines 3170, 3246, 3348, 3411, 
 
 Top-level global-variable declarations and `DEFAULT_*` constants (lines 1–79 ish) stay in `install.sh` because they are read by multiple libraries; document them in a short comment block.
 
-**Curl-pipe compatibility — release-artefact model.** Today `install.sh` is a committed file served directly from `raw.githubusercontent.com/.../main/scripts/install.sh`. The release workflow (`.github/workflows/release.yml` line 113) already uploads `scripts/install.sh` as a GitHub Release asset on tag push but the README still points at `main`.
+**Curl-pipe — release-artefact model.** The repo holds `scripts/install.sh` (a thin orchestrator) and `scripts/install/lib-*.sh` (the libraries it sources at runtime). For curl-pipe installs, `release.yml` runs `scripts/install/build.sh` on tag push to concatenate the orchestrator + libraries into a self-contained `install.sh` that ships as the GitHub Release asset.
 
-The refactor switches to **release-artefact-as-source-of-truth**:
+- README's curl command points at `https://github.com/ndee/sovereign-ai-node/releases/latest/download/install.sh` (tag-pinned). The previous `raw.githubusercontent.com/.../main/scripts/install.sh` URL is intentionally broken — the orchestrator on `main` cannot run via curl-pipe because the libs aren't reachable that way. Migration is documented in release notes.
+- Local-checkout installs (`sudo bash scripts/install.sh --source-dir "$(pwd)"`) keep working unchanged — the orchestrator finds `scripts/install/lib-*.sh` next to itself.
+- CI (`ci.yml` E2E jobs) runs the orchestrator from a local checkout, exercising the multi-file path. The release workflow validates the bundled output is syntactically valid bash and that the bundled file contains no leftover `source` statements.
 
-- The repo on `main` contains `scripts/install/lib-*.sh` (sources of truth) and `scripts/install/build.sh` (concatenator). It does **not** contain a top-level `scripts/install.sh` at all.
-- `release.yml` runs `scripts/install/build.sh` → produces `install.sh` in the workflow workspace → uploads it as the Release asset (existing `files:` entry becomes the built path).
-- Users install via `curl -fsSL https://github.com/ndee/sovereign-ai-node/releases/latest/download/install.sh | sudo bash` (new URL, pins to the most recent tagged release instead of whatever's on `main` right now).
-- README updated to the new URL.
-- For local-checkout installs (`sudo bash scripts/install.sh --source-dir "$(pwd)"`), `scripts/install.sh` needs to exist. Two options:
-  - Ship a trivial wrapper committed at `scripts/install.sh` that sources the libs directly from `scripts/install/lib-*.sh` when the tree has them. Same file the builder would output minus the concatenation — keeps local-dev flow identical. (**recommended**)
-  - Require local users to run `scripts/install/build.sh` first. More friction, not worth it.
-- CI (`ci.yml` lines 163-167, 232-234) runs `scripts/install.sh` — the wrapper above keeps those steps green without changes.
-
-Benefits: no committed-bundle freshness check (no sync risk), no extra step for installer-touching PRs, release workflow already has tag-pinning, users get a versioned install URL for free. Cost: one public URL change in the README and a coordinated release cut before the first post-refactor announcement.
+Benefits: no committed-bundle freshness check (no sync risk on `main`), release workflow already has tag-pinning, users get a versioned install URL. Cost: any third-party scripts/automation pinned to the old `main`-served URL break; this is documented and accepted.
 
 ### Part B — Split `src/installer/real-service.ts` along its natural boundaries
 

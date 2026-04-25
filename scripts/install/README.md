@@ -1,70 +1,62 @@
-# Installer refactor — working directory
+# Installer
 
-This directory scaffolds the split of `scripts/install.sh` (currently 3,883 lines,
-127 shell functions) into a small orchestrator plus topical libraries. The
-feature work that motivates the split — a zero-input curl installer with
-DM-driven post-install configuration — lands in a follow-up PR.
+The Sovereign Node installer is split into a thin orchestrator (`scripts/install.sh`) and topical libraries under `scripts/install/lib-*.sh` that the orchestrator sources at runtime.
 
-## Scope of this PR
-
-In:
-
-- Baseline snapshot tooling (`baseline-snapshot.sh`, `verify-baseline.sh`) and
-  committed baseline fixtures (`baseline/`) that the follow-up extraction PRs
-  must keep byte-identical.
-- A tiny sourceable guard in `scripts/install.sh` so the baseline tooling can
-  call functions without triggering `main`. Single 3-line change, behaviour
-  identical when invoked normally.
-- This README and the design doc in `DESIGN.md`.
-
-Out (deferred to follow-up PRs):
-
-- Actual extraction of functions into `scripts/install/lib-*.sh`. One library
-  per PR, each verified green by `verify-baseline.sh`.
-- The `real-service.ts` module split (PR-2 in the refactor series).
-- Every behaviour change discussed in the design doc (zero-input install,
-  default-bot flip, OpenRouter key via DM, mail-sentinel chat setup, secret
-  redaction CLI). These land in a feature PR on top of the merged refactor.
-
-## Layout (target state once extractions land)
+## Layout
 
 ```
 scripts/
-├── install.sh                  # thin orchestrator (~250 lines): args, main, source-the-libs
+├── install.sh                  # orchestrator (~210 lines): globals, source-the-libs, main()
 └── install/
     ├── README.md               # this file
-    ├── DESIGN.md               # approved plan (context + design decisions)
+    ├── DESIGN.md               # design rationale for the split
+    ├── build.sh                # concatenate libs → standalone install.sh for release artefact
     ├── baseline-snapshot.sh    # capture behavioural baseline
     ├── verify-baseline.sh      # diff current vs committed baseline
-    ├── baseline/               # committed reference output
-    ├── build.sh                # concatenate libs → install.sh for release artefact (future)
+    ├── baseline/               # committed reference output (--help + request-file fixtures)
     ├── lib-log.sh              # log, die, usage
     ├── lib-args.sh             # parse_args, normalize_service_identity
     ├── lib-os.sh               # OS detection, apt helpers
     ├── lib-runtime-deps.sh     # apt/docker/node bootstrap
-    ├── lib-runtime-paths.sh    # service account, runtime dirs, source sync
-    ├── lib-build.sh            # app build, systemd unit install
+    ├── lib-runtime-paths.sh    # service account, runtime dirs, source sync, provenance
+    ├── lib-build.sh            # app/bot package build, systemd unit, CLI wrappers, hygiene
     ├── lib-ui.sh               # TUI primitives (progress, banner, log capture)
     ├── lib-prompt.sh           # choice menus, confirm, value/secret prompts
-    ├── lib-bot-catalog.sh      # bot selection parsing
-    ├── lib-request-file.sh     # request JSON IO and defaults migration
-    ├── lib-matrix-urls.sh      # onboarding/element URL builders, QR
-    ├── lib-wizard.sh           # interactive install wizard
-    └── lib-runner.sh           # install runner, readiness wait, summarisation
+    ├── lib-bot-catalog.sh      # bot catalog loading and selection prompts
+    ├── lib-matrix-urls.sh      # onboarding/element URL builders, QR, post-install guidance
+    ├── lib-request-file.sh     # request JSON IO, defaults migration, secret writing
+    ├── lib-wizard.sh           # resolve_action, interactive install wizard, prepare_request_file
+    └── lib-runner.sh           # install runner, readiness wait, output summarisation
 ```
 
-## Release-artefact model
+## Install paths
 
-Today `install.sh` is served from `raw.githubusercontent.com/.../main/scripts/install.sh`.
-After the refactor lands, the repo will no longer contain a monolithic
-`scripts/install.sh`; the release workflow will concatenate libraries into an
-`install.sh` artefact attached to the GitHub Release, and the README's curl
-command will change to
-`https://github.com/ndee/sovereign-ai-node/releases/latest/download/install.sh`.
+**Released installer (curl-pipe).** Each tagged release has a `dist/install.sh` asset built from the orchestrator + libraries by `scripts/install/build.sh`. Users install with:
 
-Local-checkout installs (`sudo bash scripts/install.sh --source-dir "$(pwd)"`)
-continue to work because a minimal `scripts/install.sh` wrapper sources the
-libs directly when present in the tree.
+```bash
+curl -fsSL https://github.com/ndee/sovereign-ai-node/releases/latest/download/install.sh | sudo bash
+```
+
+To pin a specific version, replace `latest` with the tag (e.g. `v1.2.3`).
+
+The previous `raw.githubusercontent.com/.../main/scripts/install.sh` URL no longer works because the orchestrator on `main` cannot run via curl-pipe — it sources the lib files at runtime, and the curl pipe only fetches one file. This is documented as a deliberate breaking change in the release notes.
+
+**Local checkout.** Run the orchestrator directly; it finds `scripts/install/lib-*.sh` next to itself:
+
+```bash
+sudo bash scripts/install.sh --source-dir "$(pwd)"
+```
+
+CI exercises this path on every PR (`.github/workflows/ci.yml` E2E install jobs).
+
+**Building the bundle locally.** To verify the release artefact looks right, or to test changes without cutting a release:
+
+```bash
+scripts/install/build.sh /tmp/install.sh
+sudo bash /tmp/install.sh --source-dir "$(pwd)"
+```
+
+`build.sh` validates the bundled output (syntactically valid bash, no leftover `source` statements) before writing.
 
 ## Verifying behaviour preservation
 
@@ -72,15 +64,12 @@ libs directly when present in the tree.
 scripts/install/verify-baseline.sh
 ```
 
-Runs `--help` and a matrix of `write_request_file_from_env` fixtures, diffs
-against the committed baseline. Fails on any drift. Extraction PRs MUST keep
-this green.
+Drives `install.sh --help` and `write_request_file_from_env` against four fixtures (fresh direct, mail-sentinel + IMAP, LAN-only, relay) and diffs against `scripts/install/baseline/`. Fails on any drift. Any PR touching the installer must keep this green.
 
-If a change is intentional (e.g. the feature PR adding zero-input synthesis),
-regenerate the baseline:
+If a change is intentional, regenerate the baseline:
 
 ```
 scripts/install/baseline-snapshot.sh scripts/install/baseline
 ```
 
-and include the baseline diff as part of the PR that changes behaviour.
+and include the baseline diff in the PR.
