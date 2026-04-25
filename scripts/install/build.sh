@@ -38,9 +38,14 @@ JS_DIR="${LIB_DIR}/js"
 # entry under js/bin/ imports `runCli` from a sibling module under js/ and
 # invokes it. We resolve that import statically so the bundled installer can
 # carry the JS body inline without needing INSTALL_LIB_DIR/js/ on disk.
+#
+# argv after the .mjs path (if any) is forwarded verbatim to the inlined
+# `node - …` invocation so the JS body's process.argv lines up with the
+# multi-file dev path.
 inline_mjs() {
   local indent="$1"
   local cli_name="$2"
+  local trailing_argv="$3"
   local cli_path="${JS_DIR}/bin/${cli_name}"
   if [[ ! -f "${cli_path}" ]]; then
     echo "::error::missing JS CLI entry: ${cli_path}" >&2
@@ -58,14 +63,18 @@ inline_mjs() {
     echo "::error::cannot resolve ${lib_relative} from ${cli_path}" >&2
     exit 1
   fi
-  printf '%snode --input-type=module - <<'\''NODE'\''\n' "${indent}"
+  if [[ -n "${trailing_argv}" ]]; then
+    printf '%snode --input-type=module - %s <<'\''NODE'\''\n' "${indent}" "${trailing_argv}"
+  else
+    printf '%snode --input-type=module - <<'\''NODE'\''\n' "${indent}"
+  fi
   cat "${lib_path}"
   printf 'runCli();\n'
   printf 'NODE\n'
 }
 
 # Stream a library file into the bundle, replacing each
-#   node "${INSTALL_LIB_DIR}/js/bin/<name>.mjs"
+#   node "${INSTALL_LIB_DIR}/js/bin/<name>.mjs" [args...]
 # invocation with the inlined module heredoc.
 inline_lib() {
   local lib_path="$1"
@@ -75,8 +84,11 @@ inline_lib() {
       first=0
       [[ "${line}" == "#!"* ]] && continue
     fi
-    if [[ "${line}" =~ ^([[:space:]]*)node[[:space:]]+\"\$\{INSTALL_LIB_DIR\}/js/bin/([a-z0-9-]+\.mjs)\"[[:space:]]*$ ]]; then
-      inline_mjs "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    if [[ "${line}" =~ ^([[:space:]]*)node[[:space:]]+\"\$\{INSTALL_LIB_DIR\}/js/bin/([a-z0-9-]+\.mjs)\"([[:space:]].*)?$ ]]; then
+      local trailing="${BASH_REMATCH[3]:-}"
+      # Strip leading whitespace from trailing argv.
+      trailing="${trailing#"${trailing%%[![:space:]]*}"}"
+      inline_mjs "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${trailing}"
     else
       printf '%s\n' "${line}"
     fi
