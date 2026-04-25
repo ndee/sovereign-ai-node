@@ -43,6 +43,7 @@ import {
   installJobStatusResponseSchema,
   installRequestSchema,
   type MatrixOnboardingIssueResult,
+  type MatrixOnboardingPublicState,
   type PreflightResult,
   type ReconfigureResult,
   type SovereignStatus,
@@ -56,6 +57,7 @@ import {
   buildMatrixOnboardingLink,
   buildMatrixOnboardingUrl,
   issueMatrixOnboardingState,
+  parseMatrixOnboardingState,
 } from "../onboarding/bootstrap-code.js";
 import {
   type OpenClawBootstrapper,
@@ -1774,6 +1776,49 @@ export class RealInstallerService implements InstallerService {
       onboardingUrl,
       onboardingLink: buildMatrixOnboardingLink(onboardingUrl, issued.code),
       username: runtimeConfig.matrix.operator.userId,
+    };
+  }
+
+  async getMatrixOnboardingState(): Promise<MatrixOnboardingPublicState | null> {
+    let runtimeConfig: RuntimeConfig;
+    try {
+      runtimeConfig = await this.readRuntimeConfig();
+    } catch {
+      return null;
+    }
+    let statePath: string;
+    try {
+      statePath = this.getMatrixOnboardingStatePath(runtimeConfig);
+    } catch {
+      return null;
+    }
+    let raw: string;
+    try {
+      raw = await readFile(statePath, "utf8");
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return null;
+      }
+      throw error;
+    }
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+    const state = parseMatrixOnboardingState(parsedJson);
+    if (state === null) {
+      return null;
+    }
+    return {
+      issuedAt: state.issuedAt,
+      expiresAt: state.expiresAt,
+      ...(state.consumedAt !== undefined ? { consumedAt: state.consumedAt } : {}),
+      failedAttempts: state.failedAttempts,
+      maxAttempts: state.maxAttempts,
+      username: state.username,
+      homeserverUrl: state.homeserverUrl,
     };
   }
 

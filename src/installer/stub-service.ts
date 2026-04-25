@@ -14,6 +14,7 @@ import type {
   InstallJobStatusResponse,
   InstallRequest,
   MatrixOnboardingIssueResult,
+  MatrixOnboardingPublicState,
   PreflightResult,
   ReconfigureResult,
   SovereignStatus,
@@ -283,6 +284,17 @@ export class StubInstallerService implements InstallerService {
       onboardingUrl: "https://matrix.example.org/onboard",
       onboardingLink: "https://matrix.example.org/onboard#code=SCFD-0000-0000",
       username: "@operator:matrix.example.org",
+    };
+  }
+
+  async getMatrixOnboardingState(): Promise<MatrixOnboardingPublicState | null> {
+    return {
+      issuedAt: "2025-01-01T00:00:00.000Z",
+      expiresAt: "2025-01-01T00:21:00.000Z",
+      failedAttempts: 0,
+      maxAttempts: 5,
+      username: "@operator:matrix.example.org",
+      homeserverUrl: "https://matrix.example.org",
     };
   }
 

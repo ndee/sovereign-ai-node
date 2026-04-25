@@ -12,6 +12,7 @@ import type {
   InstallJobStatusResponse,
   InstallRequest,
   MatrixOnboardingIssueResult,
+  MatrixOnboardingPublicState,
   PreflightResult,
   ReconfigureResult,
   SovereignStatus,
@@ -181,6 +182,7 @@ export interface InstallerService {
   reconfigureMatrix(req: ReconfigureMatrixRequest): Promise<ReconfigureResult>;
   reconfigureOpenrouter(req: ReconfigureOpenrouterRequest): Promise<ReconfigureResult>;
   issueMatrixOnboardingCode(req?: { ttlMinutes?: number }): Promise<MatrixOnboardingIssueResult>;
+  getMatrixOnboardingState(): Promise<MatrixOnboardingPublicState | null>;
   inviteMatrixUser(req: {
     username: string;
     ttlMinutes?: number;
