@@ -12,6 +12,7 @@ export default defineConfig({
       "src/openclaw/**/*.test.ts",
       "src/system/**/*.test.ts",
       "src/tooling/**/*.test.ts",
+      "scripts/install/js/**/*.test.mjs",
     ],
     coverage: {
       provider: "v8",
@@ -29,8 +30,9 @@ export default defineConfig({
         "src/openclaw/**/*.ts",
         "src/system/**/*.ts",
         "src/tooling/**/*.ts",
+        "scripts/install/js/**/*.mjs",
       ],
-      exclude: ["**/*.test.ts"],
+      exclude: ["**/*.test.ts", "**/*.test.mjs", "scripts/install/js/bin/**"],
       thresholds: {
         statements: 68,
         branches: 66,
