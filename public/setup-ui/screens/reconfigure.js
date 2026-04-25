@@ -1,52 +1,102 @@
-import { h } from "../vendor/preact.module.js";
-import htm from "../vendor/htm.module.js";
-import { useState } from "../vendor/preact-hooks.module.js";
+import { h } from "./vendor/preact.module.js";
+import htm from "./vendor/htm.module.js";
+import { useState } from "./vendor/preact-hooks.module.js";
 
-import { apiPost } from "../api.js";
+import { apiPost } from "./api.js";
+import { CheckList } from "./components/CheckList.js";
 import {
   Checkbox,
   ErrorBanner,
   Field,
   NumberInput,
-  SubmitButton,
   TextInput,
-} from "../forms.js";
+} from "./forms.js";
 
 const html = htm.bind(h);
 
-const Result = ({ result }) => {
+const SERVICE_LABELS = {
+  "openclaw-gateway": "OpenClaw gateway",
+  "sovereign-node": "Sovereign Node API",
+  synapse: "Matrix homeserver",
+  postgres: "Postgres",
+  "reverse-proxy": "Reverse proxy",
+  "relay-tunnel": "Relay tunnel",
+};
+
+const restartLine = (services) => {
+  if (!services || services.length === 0) return null;
+  const friendly = services.map((s) => SERVICE_LABELS[s] ?? s);
+  if (friendly.length === 1) {
+    return `${friendly[0]} will restart to pick up the change. This usually takes a few seconds.`;
+  }
+  const last = friendly.pop();
+  return `${friendly.join(", ")} and ${last} will restart to pick up the change. This usually takes a few seconds.`;
+};
+
+const ApplyResult = ({ result }) => {
   if (!result) return null;
   return html`
-    <div class="card" style="margin-top: 18px;">
-      <h3>Reconfigure result</h3>
-      <p>
-        Target: <code>${result.target}</code>. Changed:
-        <code>${result.changed.length === 0 ? "(nothing)" : result.changed.join(", ")}</code>.
-      </p>
-      ${result.restartRequiredServices.length > 0
-        ? html`
-            <p class="muted">
-              Restart required:
-              <code>${result.restartRequiredServices.join(", ")}</code>
-            </p>
-          `
-        : null}
-      ${result.validation.length > 0
-        ? html`
-            <ul class="steps">
-              ${result.validation.map(
-                (check) => html`
-                  <li>
-                    <span>${check.name}<br /><span class="dim">${check.message ?? ""}</span></span>
-                    <span class=${`badge badge--${check.status}`}>${check.status}</span>
-                  </li>
-                `,
-              )}
-            </ul>
-          `
-        : null}
+    <div class="alert alert--success">
+      Applied. ${restartLine(result.restartRequiredServices) ?? "No service restart needed."}
     </div>
+    ${result.changed && result.changed.length > 0
+      ? html`
+          <p class="muted">
+            Updated:
+            ${result.changed.map(
+              (field, idx) => html`${idx === 0 ? "" : ", "}<code>${field}</code>`,
+            )}
+          </p>
+        `
+      : null}
+    ${result.validation && result.validation.length > 0
+      ? html`<${CheckList} checks=${result.validation} />`
+      : null}
   `;
+};
+
+const useApplyForm = ({ buildPayload, testEndpoint, applyEndpoint, hasTest }) => {
+  const [phase, setPhase] = useState(hasTest ? "editing" : "tested-ok");
+  const [error, setError] = useState(null);
+  const [testResult, setTestResult] = useState(null);
+  const [applyResult, setApplyResult] = useState(null);
+
+  const markDirty = () => {
+    if (hasTest && phase !== "editing") setPhase("editing");
+    setApplyResult(null);
+  };
+
+  const test = async () => {
+    setPhase("testing");
+    setError(null);
+    setTestResult(null);
+    try {
+      const payload = buildPayload();
+      const result = await apiPost(testEndpoint, payload.test);
+      setTestResult(result);
+      setPhase(result.ok ? "tested-ok" : "tested-fail");
+    } catch (err) {
+      setError(err);
+      setPhase("tested-fail");
+    }
+  };
+
+  const apply = async () => {
+    setPhase("applying");
+    setError(null);
+    setApplyResult(null);
+    try {
+      const payload = buildPayload();
+      const result = await apiPost(applyEndpoint, payload.apply);
+      setApplyResult(result);
+      setPhase("applied-ok");
+    } catch (err) {
+      setError(err);
+      setPhase("applied-fail");
+    }
+  };
+
+  return { phase, error, testResult, applyResult, markDirty, test, apply };
 };
 
 const ImapForm = () => {
@@ -55,70 +105,101 @@ const ImapForm = () => {
   const [tls, setTls] = useState(true);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [secretRef, setSecretRef] = useState("");
   const [mailbox, setMailbox] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(null);
-  const [result, setResult] = useState(null);
 
-  const submit = async (event) => {
-    event.preventDefault();
-    setBusy(true);
-    setError(null);
-    setResult(null);
-    try {
-      const imap = {
-        host,
-        port,
-        tls,
-        username,
-        ...(password.length > 0 ? { password } : {}),
-        ...(secretRef.length > 0 ? { secretRef } : {}),
-        ...(mailbox.length > 0 ? { mailbox } : {}),
-      };
-      const response = await apiPost("/api/reconfigure/imap", { imap });
-      setResult(response);
-    } catch (err) {
-      setError(err);
-    } finally {
-      setBusy(false);
-    }
+  const buildPayload = () => {
+    const imap = {
+      host: host.trim(),
+      port,
+      tls,
+      username: username.trim(),
+      password,
+      ...(mailbox.trim().length > 0 ? { mailbox: mailbox.trim() } : {}),
+    };
+    return { test: { imap }, apply: { imap } };
   };
 
+  const form = useApplyForm({
+    buildPayload,
+    testEndpoint: "/api/install/test-imap",
+    applyEndpoint: "/api/reconfigure/imap",
+    hasTest: true,
+  });
+
+  const wrap = (setter) => (value) => {
+    setter(value);
+    form.markDirty();
+  };
+
+  const formValid =
+    host.trim().length > 0 &&
+    username.trim().length > 0 &&
+    password.length > 0 &&
+    Number.isInteger(port) &&
+    port > 0 &&
+    port <= 65535;
+
+  const testing = form.phase === "testing";
+  const applying = form.phase === "applying";
+  const canApply = form.phase === "tested-ok" && formValid && !applying;
+
   return html`
-    <form onSubmit=${submit}>
-      <${ErrorBanner} error=${error} />
+    <form
+      onSubmit=${(event) => {
+        event.preventDefault();
+        if (canApply) form.apply();
+      }}
+    >
+      <${ErrorBanner} error=${form.error} />
       <${Field} label="Host">
-        <${TextInput} value=${host} onInput=${setHost} placeholder="imap.example.com" />
+        <${TextInput} value=${host} onInput=${wrap(setHost)} placeholder="imap.example.com" />
       <//>
-      <${Field} label="Port">
-        <${NumberInput} value=${port} onInput=${(value) => setPort(value ?? 993)} />
-      <//>
-      <${Field} label="TLS">
-        <${Checkbox} checked=${tls} onInput=${setTls} label="Use TLS (IMAPS)" />
-      <//>
+      <div class="row">
+        <${Field} label="Port">
+          <${NumberInput} value=${port} onInput=${(value) => wrap(setPort)(value ?? 993)} />
+        <//>
+        <${Field} label="TLS">
+          <${Checkbox} checked=${tls} onInput=${wrap(setTls)} label="Use TLS (IMAPS)" />
+        <//>
+      </div>
       <${Field} label="Username">
-        <${TextInput} value=${username} onInput=${setUsername} />
+        <${TextInput} value=${username} onInput=${wrap(setUsername)} />
       <//>
       <${Field}
-        label="Password (optional)"
-        hint="Provide one of password or secretRef. The password is written to the managed secret store."
+        label="Password"
+        hint="Re-enter the mailbox password to test and apply. We never echo persisted secrets to the browser."
       >
-        <${TextInput} value=${password} onInput=${setPassword} type="password" />
+        <${TextInput} value=${password} onInput=${wrap(setPassword)} type="password" />
       <//>
-      <${Field}
-        label="Secret ref (optional)"
-        hint="Path-like reference to an existing managed secret, e.g. file:/etc/sovereign-node/secrets/imap-password."
-      >
-        <${TextInput} value=${secretRef} onInput=${setSecretRef} />
-      <//>
-      <${Field} label="Mailbox (optional)">
-        <${TextInput} value=${mailbox} onInput=${setMailbox} placeholder="INBOX" />
+      <${Field} label="Folder (optional)">
+        <${TextInput} value=${mailbox} onInput=${wrap(setMailbox)} placeholder="INBOX" />
       <//>
       <div class="btn-row">
-        <${SubmitButton} busy=${busy}>Apply IMAP changes<//>
+        <button
+          class="btn btn--secondary"
+          type="button"
+          onClick=${form.test}
+          disabled=${!formValid || testing || applying}
+        >
+          ${testing ? "Testing…" : "Test connection"}
+        </button>
+        <button class="btn" type="submit" disabled=${!canApply}>
+          ${applying ? "Applying…" : "Apply"}
+        </button>
       </div>
-      <${Result} result=${result} />
+      ${form.testResult
+        ? html`
+            <div class="alert alert--${form.testResult.ok ? "success" : "error"}">
+              ${form.testResult.ok
+                ? `Connection ok on ${form.testResult.host}:${form.testResult.port}.`
+                : "Connection failed. Apply is disabled until a passing test."}
+            </div>
+            ${!form.testResult.ok && form.testResult.error
+              ? html`<p class="muted">${form.testResult.error.message}</p>`
+              : null}
+          `
+        : null}
+      <${ApplyResult} result=${form.applyResult} />
     </form>
   `;
 };
@@ -128,126 +209,178 @@ const MatrixForm = () => {
   const [publicBaseUrl, setPublicBaseUrl] = useState("");
   const [federationEnabled, setFederationEnabled] = useState(false);
   const [operatorUsername, setOperatorUsername] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(null);
-  const [result, setResult] = useState(null);
 
-  const submit = async (event) => {
-    event.preventDefault();
-    setBusy(true);
-    setError(null);
-    setResult(null);
-    try {
-      const matrix = {
-        ...(homeserverDomain.length > 0 ? { homeserverDomain } : {}),
-        ...(publicBaseUrl.length > 0 ? { publicBaseUrl } : {}),
-        federationEnabled,
-      };
-      const operator = operatorUsername.length > 0 ? { username: operatorUsername } : undefined;
-      const body = {
-        ...(Object.keys(matrix).length > 0 ? { matrix } : {}),
-        ...(operator !== undefined ? { operator } : {}),
-      };
-      const response = await apiPost("/api/reconfigure/matrix", body);
-      setResult(response);
-    } catch (err) {
-      setError(err);
-    } finally {
-      setBusy(false);
-    }
+  const buildPayload = () => {
+    const matrix = {
+      ...(homeserverDomain.trim().length > 0 ? { homeserverDomain: homeserverDomain.trim() } : {}),
+      ...(publicBaseUrl.trim().length > 0 ? { publicBaseUrl: publicBaseUrl.trim() } : {}),
+      federationEnabled,
+    };
+    const operator =
+      operatorUsername.trim().length > 0 ? { username: operatorUsername.trim() } : undefined;
+    const apply = {
+      ...(Object.keys(matrix).length > 0 ? { matrix } : {}),
+      ...(operator !== undefined ? { operator } : {}),
+    };
+    const test = {
+      publicBaseUrl: publicBaseUrl.trim(),
+      federationEnabled,
+    };
+    return { test, apply };
   };
 
+  const form = useApplyForm({
+    buildPayload,
+    testEndpoint: "/api/install/test-matrix",
+    applyEndpoint: "/api/reconfigure/matrix",
+    hasTest: true,
+  });
+
+  const wrap = (setter) => (value) => {
+    setter(value);
+    form.markDirty();
+  };
+
+  const canTest = publicBaseUrl.trim().length > 0;
+  const testing = form.phase === "testing";
+  const applying = form.phase === "applying";
+  const hasAnything =
+    homeserverDomain.trim().length > 0 ||
+    publicBaseUrl.trim().length > 0 ||
+    operatorUsername.trim().length > 0;
+  const canApply = form.phase === "tested-ok" && hasAnything && !applying;
+
   return html`
-    <form onSubmit=${submit}>
-      <${ErrorBanner} error=${error} />
-      <${Field} label="Homeserver domain">
-        <${TextInput}
-          value=${homeserverDomain}
-          onInput=${setHomeserverDomain}
-          placeholder="matrix.example.com"
-        />
-      <//>
+    <form
+      onSubmit=${(event) => {
+        event.preventDefault();
+        if (canApply) form.apply();
+      }}
+    >
+      <${ErrorBanner} error=${form.error} />
       <${Field} label="Public base URL">
         <${TextInput}
           value=${publicBaseUrl}
-          onInput=${setPublicBaseUrl}
+          onInput=${wrap(setPublicBaseUrl)}
           placeholder="https://matrix.example.com"
+        />
+      <//>
+      <${Field} label="Homeserver domain">
+        <${TextInput}
+          value=${homeserverDomain}
+          onInput=${wrap(setHomeserverDomain)}
+          placeholder="matrix.example.com"
         />
       <//>
       <${Field} label="Federation">
         <${Checkbox}
           checked=${federationEnabled}
-          onInput=${setFederationEnabled}
+          onInput=${wrap(setFederationEnabled)}
           label="Enable federation"
         />
       <//>
       <${Field} label="Operator username (optional)">
-        <${TextInput} value=${operatorUsername} onInput=${setOperatorUsername} />
+        <${TextInput} value=${operatorUsername} onInput=${wrap(setOperatorUsername)} />
       <//>
       <div class="btn-row">
-        <${SubmitButton} busy=${busy}>Apply Matrix changes<//>
+        <button
+          class="btn btn--secondary"
+          type="button"
+          onClick=${form.test}
+          disabled=${!canTest || testing || applying}
+        >
+          ${testing ? "Testing…" : "Test connection"}
+        </button>
+        <button class="btn" type="submit" disabled=${!canApply}>
+          ${applying ? "Applying…" : "Apply"}
+        </button>
       </div>
-      <${Result} result=${result} />
+      ${form.testResult
+        ? html`
+            <div class="alert alert--${form.testResult.ok ? "success" : "error"}">
+              ${form.testResult.ok
+                ? `Matrix homeserver reachable at ${form.testResult.homeserverUrl}.`
+                : "Matrix homeserver could not be reached. Apply is disabled until a passing test."}
+            </div>
+            <${CheckList} checks=${form.testResult.checks ?? []} />
+          `
+        : null}
+      <${ApplyResult} result=${form.applyResult} />
     </form>
   `;
 };
 
-const OpenrouterForm = () => {
+const ProviderForm = () => {
   const [model, setModel] = useState("");
   const [apiKey, setApiKey] = useState("");
-  const [secretRef, setSecretRef] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(null);
-  const [result, setResult] = useState(null);
 
-  const submit = async (event) => {
-    event.preventDefault();
-    setBusy(true);
-    setError(null);
-    setResult(null);
-    try {
-      const openrouter = {
-        ...(model.length > 0 ? { model } : {}),
-        ...(apiKey.length > 0 ? { apiKey } : {}),
-        ...(secretRef.length > 0 ? { secretRef } : {}),
-      };
-      const response = await apiPost("/api/reconfigure/openrouter", { openrouter });
-      setResult(response);
-    } catch (err) {
-      setError(err);
-    } finally {
-      setBusy(false);
-    }
+  const buildPayload = () => {
+    const openrouter = {
+      ...(model.trim().length > 0 ? { model: model.trim() } : {}),
+      ...(apiKey.length > 0 ? { apiKey } : {}),
+    };
+    return { test: null, apply: { openrouter } };
   };
 
+  const form = useApplyForm({
+    buildPayload,
+    testEndpoint: null,
+    applyEndpoint: "/api/reconfigure/openrouter",
+    hasTest: false,
+  });
+
+  const wrap = (setter) => (value) => {
+    setter(value);
+    form.markDirty();
+  };
+
+  const applying = form.phase === "applying";
+  const canApply = (model.trim().length > 0 || apiKey.length > 0) && !applying;
+
   return html`
-    <form onSubmit=${submit}>
-      <${ErrorBanner} error=${error} />
-      <p class="muted">Provide at least one of model, apiKey, or secretRef.</p>
+    <form
+      onSubmit=${(event) => {
+        event.preventDefault();
+        if (canApply) form.apply();
+      }}
+    >
+      <${ErrorBanner} error=${form.error} />
+      <p class="muted">
+        OpenRouter has no test endpoint, so the key is validated server-side at apply. Provide at
+        least one of model or API key.
+      </p>
       <${Field} label="Model (optional)">
-        <${TextInput} value=${model} onInput=${setModel} placeholder="qwen/qwen3.5-9b" />
+        <${TextInput} value=${model} onInput=${wrap(setModel)} placeholder="qwen/qwen3.5-9b" />
       <//>
-      <${Field}
-        label="API key (optional)"
-        hint="If provided, written to the managed secret store. Mutually exclusive with secretRef."
-      >
-        <${TextInput} value=${apiKey} onInput=${setApiKey} type="password" />
-      <//>
-      <${Field} label="Secret ref (optional)">
-        <${TextInput} value=${secretRef} onInput=${setSecretRef} />
+      <${Field} label="API key (optional)">
+        <${TextInput} value=${apiKey} onInput=${wrap(setApiKey)} type="password" />
       <//>
       <div class="btn-row">
-        <${SubmitButton} busy=${busy}>Apply OpenRouter changes<//>
+        <button class="btn" type="submit" disabled=${!canApply}>
+          ${applying ? "Applying…" : "Apply"}
+        </button>
       </div>
-      <${Result} result=${result} />
+      <${ApplyResult} result=${form.applyResult} />
     </form>
   `;
 };
 
 const TARGETS = {
-  imap: { title: "Reconfigure IMAP", component: ImapForm },
-  matrix: { title: "Reconfigure Matrix", component: MatrixForm },
-  openrouter: { title: "Reconfigure OpenRouter", component: OpenrouterForm },
+  imap: {
+    title: "Reconfigure mailbox",
+    subtitle: "Update IMAP credentials. We test the new connection before saving.",
+    component: ImapForm,
+  },
+  matrix: {
+    title: "Reconfigure Matrix",
+    subtitle: "Update homeserver settings. We test reachability before saving.",
+    component: MatrixForm,
+  },
+  openrouter: {
+    title: "Reconfigure provider",
+    subtitle: "Update OpenRouter model or API key.",
+    component: ProviderForm,
+  },
 };
 
 export const Reconfigure = ({ target }) => {
@@ -256,7 +389,7 @@ export const Reconfigure = ({ target }) => {
   return html`
     <section class="hero">
       <h1>${entry.title}</h1>
-      <p>Apply changes to the running installation. Validation runs server-side.</p>
+      <p>${entry.subtitle}</p>
     </section>
     <section class="section">
       <div class="card">
