@@ -225,7 +225,7 @@ const OpenrouterForm = () => {
       <${ErrorBanner} error=${error} />
       <p class="muted">Provide at least one of model, apiKey, or secretRef.</p>
       <${Field} label="Model (optional)">
-        <${TextInput} value=${model} onInput=${setModel} placeholder="openai/gpt-4o-mini" />
+        <${TextInput} value=${model} onInput=${setModel} placeholder="qwen/qwen3.5-9b" />
       <//>
       <${Field}
         label="API key (optional)"

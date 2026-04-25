@@ -17,7 +17,7 @@ const DEFAULT_REQUEST = {
     username: "operator",
   },
   openrouter: {
-    model: "openai/gpt-4o-mini",
+    model: "qwen/qwen3.5-9b",
     apiKey: "",
   },
 };
