@@ -32,15 +32,55 @@ mkdir -p "$(dirname "${OUT}")"
 TMP="$(mktemp --tmpdir install-bundle.XXXXXX.sh)"
 trap 'rm -f "${TMP}"' EXIT
 
-# Strip the shebang from a library file when inlining (the bundled installer
-# already has its own shebang at the top).
-strip_shebang() {
-  local file="$1"
-  if [[ "$(head -n 1 "${file}")" == "#!"* ]]; then
-    tail -n +2 "${file}"
-  else
-    cat "${file}"
+JS_DIR="${LIB_DIR}/js"
+
+# Inline a `.mjs` CLI entry as a `node --input-type=module` heredoc. Each CLI
+# entry under js/bin/ imports `runCli` from a sibling module under js/ and
+# invokes it. We resolve that import statically so the bundled installer can
+# carry the JS body inline without needing INSTALL_LIB_DIR/js/ on disk.
+inline_mjs() {
+  local indent="$1"
+  local cli_name="$2"
+  local cli_path="${JS_DIR}/bin/${cli_name}"
+  if [[ ! -f "${cli_path}" ]]; then
+    echo "::error::missing JS CLI entry: ${cli_path}" >&2
+    exit 1
   fi
+  local lib_relative
+  lib_relative="$(awk -F'"' '/^import .* from "/ {print $2; exit}' "${cli_path}")"
+  if [[ -z "${lib_relative}" ]]; then
+    echo "::error::cannot find runCli import in ${cli_path}" >&2
+    exit 1
+  fi
+  local lib_path
+  lib_path="$(cd "$(dirname "${cli_path}")" && cd "$(dirname "${lib_relative}")" && pwd)/$(basename "${lib_relative}")"
+  if [[ ! -f "${lib_path}" ]]; then
+    echo "::error::cannot resolve ${lib_relative} from ${cli_path}" >&2
+    exit 1
+  fi
+  printf '%snode --input-type=module - <<'\''NODE'\''\n' "${indent}"
+  cat "${lib_path}"
+  printf 'runCli();\n'
+  printf 'NODE\n'
+}
+
+# Stream a library file into the bundle, replacing each
+#   node "${INSTALL_LIB_DIR}/js/bin/<name>.mjs"
+# invocation with the inlined module heredoc.
+inline_lib() {
+  local lib_path="$1"
+  local first=1
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    if [[ "${first}" == "1" ]]; then
+      first=0
+      [[ "${line}" == "#!"* ]] && continue
+    fi
+    if [[ "${line}" =~ ^([[:space:]]*)node[[:space:]]+\"\$\{INSTALL_LIB_DIR\}/js/bin/([a-z0-9-]+\.mjs)\"[[:space:]]*$ ]]; then
+      inline_mjs "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    else
+      printf '%s\n' "${line}"
+    fi
+  done < "${lib_path}"
 }
 
 while IFS= read -r line; do
@@ -53,7 +93,7 @@ while IFS= read -r line; do
     fi
     {
       echo "# ===== inlined from ${lib_name} ====="
-      strip_shebang "${lib_path}"
+      inline_lib "${lib_path}"
       echo "# ===== end ${lib_name} ====="
     } >> "${TMP}"
   elif [[ "${line}" =~ ^[[:space:]]*INSTALL_LIB_DIR= ]]; then
@@ -86,6 +126,12 @@ bash -n "${OUT}"
 # Sanity: bundled file must not still contain a `source ... lib-*.sh` line.
 if grep -qE '^source.*lib-[a-z-]+\.sh' "${OUT}"; then
   echo "::error::bundle still contains a source statement; concatenation failed" >&2
+  exit 1
+fi
+
+# Sanity: bundled file must not still reference the on-disk JS modules.
+if grep -qE 'node[[:space:]]+"\$\{INSTALL_LIB_DIR\}/js/' "${OUT}"; then
+  echo "::error::bundle still references INSTALL_LIB_DIR/js; .mjs inlining failed" >&2
   exit 1
 fi
 
