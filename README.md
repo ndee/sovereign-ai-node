@@ -36,6 +36,28 @@ sudo bash scripts/install.sh --source-dir "$(pwd)"
 
 The local-checkout flow uses the multi-file installer under `scripts/install/`. The `scripts/install.sh` you see in this repo is the orchestrator; it sources `scripts/install/lib-*.sh` at runtime. The single-file `install.sh` shipped via the release URL is built from the same sources by `scripts/install/build.sh` during the release workflow.
 
+## Update
+
+Once installed, update to the latest release with:
+
+```bash
+sudo sovereign-node update
+```
+
+This downloads the bundled `install.sh` from the latest release and re-runs it in update mode. Pin a specific version with `--ref vX.Y.Z`.
+
+### Recovery: hosts stuck on v2.0.0
+
+`sovereign-node update` on v2.0.0 fetched the orchestrator script from `raw.githubusercontent.com` and silently exited 1 because the orchestrator requires a sibling `install/` library tree that was never downloaded. v2.1.0+ hosts use the bundled release asset and update normally.
+
+To recover a v2.0.0 host, run the curl installer once manually — this matches what `sudo sovereign-node update` does on a fixed host:
+
+```bash
+curl -fsSL https://github.com/ndee/sovereign-ai-node/releases/latest/download/install.sh | sudo bash -s -- --update --non-interactive
+```
+
+After this completes, future updates can use `sudo sovereign-node update`.
+
 ## Architecture
 
 Sovereign AI Node is the runtime and control plane layer. Bot packages are defined and versioned separately in [`sovereign-ai-bots`](https://github.com/ndee/sovereign-ai-bots).

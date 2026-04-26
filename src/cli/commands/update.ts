@@ -11,10 +11,10 @@ import { writeCliError, writeCliSuccess } from "../output.js";
 
 export const GITHUB_REPO = "ndee/sovereign-ai-node";
 
-export const DEFAULT_INSTALL_SH_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh`;
+export const DEFAULT_INSTALL_SH_URL = `https://github.com/${GITHUB_REPO}/releases/latest/download/install.sh`;
 
 const INSTALL_SH_URL_TEMPLATE = (ref: string): string =>
-  `https://raw.githubusercontent.com/${GITHUB_REPO}/${ref}/scripts/install.sh`;
+  `https://github.com/${GITHUB_REPO}/releases/download/${ref}/install.sh`;
 
 const LATEST_RELEASE_URL = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
 const LATEST_RELEASE_TIMEOUT_MS = 10_000;
@@ -229,7 +229,7 @@ export const registerUpdateCommand = (
     )
     .option("--json", "Emit JSON output")
     .option("--request-file <path>", "Forwarded to install.sh as --request-file <path>")
-    .option("--ref <ref>", "Git ref for install.sh (default: latest release, fallback: main)")
+    .option("--ref <tag>", "Release tag whose bundled install.sh asset to use (default: latest)")
     .option("--installer-url <url>", "Override the install.sh URL (wins over --ref)")
     .action(async (opts: UpdateOptions) => {
       const command = "update";
