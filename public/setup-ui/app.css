@@ -578,6 +578,45 @@ code {
   margin-bottom: 24px;
 }
 
+.mode-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.mode-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 16px 18px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--body-font);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.mode-card:hover {
+  border-color: var(--accent);
+}
+.mode-card--active {
+  border-color: var(--primary);
+  background: rgba(249, 115, 23, 0.06);
+}
+.mode-card__title {
+  font-family: var(--headline-font);
+  font-weight: 600;
+  font-size: 1rem;
+  color: var(--text);
+}
+.mode-card__summary {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
 .module-list {
   list-style: none;
   margin: 0;

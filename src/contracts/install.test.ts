@@ -83,4 +83,37 @@ describe("installRequestSchema", () => {
     expect(parsed.imap?.tls).toBe(true);
     expect(parsed.bots?.selected).toEqual(["mail-sentinel", "node-operator"]);
   });
+
+  it("accepts the wizard's local-dev Matrix preset", () => {
+    // Mirrors the Local dev card in MatrixStep.js. The schema must accept
+    // tlsMode: "local-dev" and a plaintext http://127.0.0.1 base URL so the
+    // smoke-test path through the wizard never fails at request validation.
+    const parsed = installRequestSchema.parse({
+      mode: "bundled_matrix" as const,
+      matrix: {
+        homeserverDomain: "matrix.local.test",
+        publicBaseUrl: "http://127.0.0.1:8008",
+        federationEnabled: false,
+        tlsMode: "local-dev",
+      },
+      operator: { username: "operator", password: "operator-password" },
+      openrouter: { apiKey: "sk-or-test" },
+    });
+    expect(parsed.matrix.tlsMode).toBe("local-dev");
+  });
+
+  it("accepts the wizard's Local LAN Matrix preset", () => {
+    const parsed = installRequestSchema.parse({
+      mode: "bundled_matrix" as const,
+      matrix: {
+        homeserverDomain: "matrix.lan.local",
+        publicBaseUrl: "https://matrix.lan.local",
+        federationEnabled: false,
+        tlsMode: "internal",
+      },
+      operator: { username: "operator", password: "operator-password" },
+      openrouter: { apiKey: "sk-or-test" },
+    });
+    expect(parsed.matrix.tlsMode).toBe("internal");
+  });
 });

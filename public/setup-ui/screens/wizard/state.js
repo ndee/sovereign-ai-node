@@ -5,6 +5,8 @@ const STORAGE_KEY = "sov:setup-ui:wizard:v1";
 const DEFAULT_STATE = {
   v: 1,
   matrix: {
+    deployMode: "public",
+    tlsMode: "auto",
     homeserverDomain: "",
     publicBaseUrl: "",
     federationEnabled: false,
@@ -109,6 +111,11 @@ export const buildInstallRequest = (state, secrets) => {
     publicBaseUrl: state.matrix.publicBaseUrl.trim(),
     federationEnabled: state.matrix.federationEnabled === true,
   };
+  if (state.matrix.tlsMode && state.matrix.tlsMode !== "auto") {
+    matrix.tlsMode = state.matrix.tlsMode;
+  } else if (state.matrix.tlsMode === "auto") {
+    matrix.tlsMode = "auto";
+  }
   const alertRoomName = state.matrix.alertRoomName?.trim();
   if (alertRoomName) matrix.alertRoomName = alertRoomName;
 
@@ -155,7 +162,17 @@ export const buildInstallRequest = (state, secrets) => {
   return request;
 };
 
+const DEPLOY_MODE_LABEL = {
+  public: "Public site (TLS via bundled reverse proxy)",
+  lan: "Local LAN (HTTPS via local CA)",
+  dev: "Local dev (no TLS, this machine only)",
+};
+
 export const summarizeRequest = (state) => [
+  {
+    label: "Matrix deployment",
+    value: DEPLOY_MODE_LABEL[state.matrix.deployMode ?? "public"] ?? "Public site",
+  },
   { label: "Matrix homeserver domain", value: state.matrix.homeserverDomain || "—" },
   { label: "Matrix public base URL", value: state.matrix.publicBaseUrl || "—" },
   {
