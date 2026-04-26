@@ -1,16 +1,16 @@
-import { h } from "./vendor/preact.module.js";
-import htm from "./vendor/htm.module.js";
-import { useState } from "./vendor/preact-hooks.module.js";
+import { h } from "../vendor/preact.module.js";
+import htm from "../vendor/htm.module.js";
+import { useState } from "../vendor/preact-hooks.module.js";
 
-import { apiPost } from "./api.js";
-import { CheckList } from "./components/CheckList.js";
+import { apiPost } from "../api.js";
+import { CheckList } from "../components/CheckList.js";
 import {
   Checkbox,
   ErrorBanner,
   Field,
   NumberInput,
   TextInput,
-} from "./forms.js";
+} from "../forms.js";
 
 const html = htm.bind(h);
 
