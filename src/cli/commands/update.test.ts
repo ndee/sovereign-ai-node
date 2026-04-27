@@ -74,15 +74,15 @@ describe("buildInstallerUrl", () => {
   });
 
   it("substitutes a custom ref into the template", () => {
-    expect(buildInstallerUrl({ ref: "dev" })).toBe(
-      "https://raw.githubusercontent.com/ndee/sovereign-ai-node/dev/scripts/install.sh",
+    expect(buildInstallerUrl({ ref: "v1.2.3" })).toBe(
+      "https://github.com/ndee/sovereign-ai-node/releases/download/v1.2.3/install.sh",
     );
   });
 
   it("prefers --installer-url over --ref", () => {
-    expect(buildInstallerUrl({ installerUrl: "https://custom.example.org/x.sh", ref: "dev" })).toBe(
-      "https://custom.example.org/x.sh",
-    );
+    expect(
+      buildInstallerUrl({ installerUrl: "https://custom.example.org/x.sh", ref: "v1.2.3" }),
+    ).toBe("https://custom.example.org/x.sh");
   });
 
   it("prefers the env URL over --installer-url", () => {
@@ -95,26 +95,26 @@ describe("buildInstallerUrl", () => {
   });
 
   it("prefers the env ref over --ref when no URL is provided", () => {
-    expect(buildInstallerUrl({ ref: "dev", envRef: "rc" })).toBe(
-      "https://raw.githubusercontent.com/ndee/sovereign-ai-node/rc/scripts/install.sh",
+    expect(buildInstallerUrl({ ref: "v1.2.3", envRef: "v2.0.0" })).toBe(
+      "https://github.com/ndee/sovereign-ai-node/releases/download/v2.0.0/install.sh",
     );
   });
 
   it("uses latestRef when no explicit override is provided", () => {
     expect(buildInstallerUrl({ latestRef: "v2.1.0" })).toBe(
-      `https://raw.githubusercontent.com/${GITHUB_REPO}/v2.1.0/scripts/install.sh`,
+      `https://github.com/${GITHUB_REPO}/releases/download/v2.1.0/install.sh`,
     );
   });
 
   it("prefers --ref over latestRef", () => {
-    expect(buildInstallerUrl({ ref: "dev", latestRef: "v2.1.0" })).toBe(
-      `https://raw.githubusercontent.com/${GITHUB_REPO}/dev/scripts/install.sh`,
+    expect(buildInstallerUrl({ ref: "v1.2.3", latestRef: "v2.1.0" })).toBe(
+      `https://github.com/${GITHUB_REPO}/releases/download/v1.2.3/install.sh`,
     );
   });
 
   it("prefers envRef over latestRef", () => {
-    expect(buildInstallerUrl({ envRef: "rc", latestRef: "v2.1.0" })).toBe(
-      `https://raw.githubusercontent.com/${GITHUB_REPO}/rc/scripts/install.sh`,
+    expect(buildInstallerUrl({ envRef: "v2.0.0", latestRef: "v2.1.0" })).toBe(
+      `https://github.com/${GITHUB_REPO}/releases/download/v2.0.0/install.sh`,
     );
   });
 
@@ -376,13 +376,13 @@ describe("executeUpdateViaInstaller", () => {
     const spawnFn: SpawnerLike = () => ({ status: 0 });
     const result = await executeUpdateViaInstaller(
       {},
-      { fetchFn, spawnFn, env: { SOVEREIGN_NODE_REF: "rc" } },
+      { fetchFn, spawnFn, env: { SOVEREIGN_NODE_REF: "v2.0.0" } },
     );
     expect(calls).toEqual([
-      "https://raw.githubusercontent.com/ndee/sovereign-ai-node/rc/scripts/install.sh",
+      "https://github.com/ndee/sovereign-ai-node/releases/download/v2.0.0/install.sh",
     ]);
     expect(result.installerUrl).toBe(
-      "https://raw.githubusercontent.com/ndee/sovereign-ai-node/rc/scripts/install.sh",
+      "https://github.com/ndee/sovereign-ai-node/releases/download/v2.0.0/install.sh",
     );
   });
 
@@ -398,7 +398,7 @@ describe("executeUpdateViaInstaller", () => {
       { fetchFn, spawnFn, env: {}, resolveLatestRef: async () => "v2.1.0" },
     );
     expect(result.installerUrl).toBe(
-      `https://raw.githubusercontent.com/${GITHUB_REPO}/v2.1.0/scripts/install.sh`,
+      `https://github.com/${GITHUB_REPO}/releases/download/v2.1.0/install.sh`,
     );
   });
 
@@ -407,7 +407,7 @@ describe("executeUpdateViaInstaller", () => {
     const fetchFn: FetchLike = async () => mockResponse({ body: SHEBANG_BODY });
     const spawnFn: SpawnerLike = () => ({ status: 0 });
     await executeUpdateViaInstaller(
-      { ref: "dev" },
+      { ref: "v1.2.3" },
       { fetchFn, spawnFn, env: {}, resolveLatestRef: resolveFn },
     );
     expect(resolveFn).not.toHaveBeenCalled();
