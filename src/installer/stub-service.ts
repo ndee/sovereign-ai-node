@@ -14,8 +14,11 @@ import type {
   InstallJobStatusResponse,
   InstallRequest,
   MatrixOnboardingIssueResult,
+  MatrixOnboardingPublicState,
   PreflightResult,
   ReconfigureResult,
+  SetupUiBootstrapIssueResult,
+  SetupUiBootstrapPublicState,
   SovereignStatus,
   StartInstallResult,
   TestAlertResult,
@@ -284,6 +287,57 @@ export class StubInstallerService implements InstallerService {
       onboardingLink: "https://matrix.example.org/onboard#code=SCFD-0000-0000",
       username: "@operator:matrix.example.org",
     };
+  }
+
+  async getMatrixOnboardingState(): Promise<MatrixOnboardingPublicState | null> {
+    return {
+      issuedAt: "2025-01-01T00:00:00.000Z",
+      expiresAt: "2025-01-01T00:21:00.000Z",
+      failedAttempts: 0,
+      maxAttempts: 5,
+      username: "@operator:matrix.example.org",
+      homeserverUrl: "https://matrix.example.org",
+    };
+  }
+
+  async getAuthStage(): Promise<{
+    stage: "needs-bootstrap" | "needs-password";
+    username?: string;
+  }> {
+    return { stage: "needs-password", username: "@admin:matrix.example.org" };
+  }
+
+  async issueSetupUiBootstrapToken(): Promise<SetupUiBootstrapIssueResult> {
+    return {
+      token: "ABCD-EFGH-JKLM",
+      expiresAt: "2025-01-02T00:00:00.000Z",
+      ttlMinutes: 24 * 60,
+    };
+  }
+
+  async getSetupUiBootstrapState(): Promise<SetupUiBootstrapPublicState | null> {
+    return null;
+  }
+
+  async consumeSetupUiBootstrapToken(
+    token: string,
+  ): Promise<
+    | { ok: true }
+    | { ok: false; reason: "invalid" | "expired" | "consumed" | "locked" | "not-issued" }
+  > {
+    return token === "ABCD-EFGH-JKLM" ? { ok: true } : { ok: false, reason: "invalid" };
+  }
+
+  async verifyOperatorPassword(
+    password: string,
+  ): Promise<
+    | { ok: true; username: string }
+    | { ok: false; reason: "invalid" | "homeserver-unreachable" | "not-configured" }
+  > {
+    if (password === "scaffold-operator-password") {
+      return { ok: true, username: "@admin:matrix.example.org" };
+    }
+    return { ok: false, reason: "invalid" };
   }
 
   async inviteMatrixUser(req: {

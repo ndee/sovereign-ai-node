@@ -1,4 +1,5 @@
 export * from "./api.js";
+export * from "./auth.js";
 export * from "./backup.js";
 export * from "./cli.js";
 export * from "./common.js";

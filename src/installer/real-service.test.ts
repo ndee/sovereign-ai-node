@@ -8546,6 +8546,191 @@ describe("RealInstallerService", () => {
     }
   });
 
+  it("returns the public onboarding state with secrets stripped", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+    await writeRuntimeArtifacts(paths);
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert",
+          cronCommand: "openclaw cron add",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+    });
+
+    try {
+      expect(await service.getMatrixOnboardingState()).toBeNull();
+
+      const issued = await service.issueMatrixOnboardingCode();
+      const publicState = await service.getMatrixOnboardingState();
+
+      expect(publicState).not.toBeNull();
+      expect(publicState).toMatchObject({
+        issuedAt: expect.any(String),
+        expiresAt: issued.expiresAt,
+        failedAttempts: 0,
+        maxAttempts: expect.any(Number),
+        username: "@operator:matrix.example.org",
+        homeserverUrl: "https://matrix.example.org",
+      });
+      expect(publicState).not.toHaveProperty("codeHash");
+      expect(publicState).not.toHaveProperty("codeSalt");
+      expect(publicState).not.toHaveProperty("passwordSecretRef");
+      expect(publicState).not.toHaveProperty("consumedAt");
+
+      const onboardingStatePath = join(
+        paths.stateDir,
+        "bundled-matrix",
+        "matrix-example-org",
+        "onboarding",
+        "state.json",
+      );
+      const stateRaw = JSON.parse(await readFile(onboardingStatePath, "utf8")) as Record<
+        string,
+        unknown
+      >;
+      stateRaw.consumedAt = "2025-01-02T00:00:00.000Z";
+      await writeFile(onboardingStatePath, JSON.stringify(stateRaw, null, 2), "utf8");
+
+      const consumedState = await service.getMatrixOnboardingState();
+      expect(consumedState?.consumedAt).toBe("2025-01-02T00:00:00.000Z");
+
+      await writeFile(onboardingStatePath, "{not json", "utf8");
+      expect(await service.getMatrixOnboardingState()).toBeNull();
+
+      await writeFile(onboardingStatePath, JSON.stringify({ version: 99 }), "utf8");
+      expect(await service.getMatrixOnboardingState()).toBeNull();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null public onboarding state when no runtime config is present", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => {
+          throw new Error("not used");
+        },
+      },
+      preflightChecker: {
+        run: async () => {
+          throw new Error("not used");
+        },
+      },
+      imapTester: {
+        test: async () => {
+          throw new Error("not used");
+        },
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => {
+          throw new Error("not used");
+        },
+      },
+    });
+
+    try {
+      expect(await service.getMatrixOnboardingState()).toBeNull();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("invites a local Matrix user with a shareable onboarding link", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {

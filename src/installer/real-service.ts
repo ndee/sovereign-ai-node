@@ -43,8 +43,11 @@ import {
   installJobStatusResponseSchema,
   installRequestSchema,
   type MatrixOnboardingIssueResult,
+  type MatrixOnboardingPublicState,
   type PreflightResult,
   type ReconfigureResult,
+  type SetupUiBootstrapIssueResult,
+  type SetupUiBootstrapPublicState,
   type SovereignStatus,
   type StartInstallResult,
   type TestAlertResult,
@@ -56,7 +59,15 @@ import {
   buildMatrixOnboardingLink,
   buildMatrixOnboardingUrl,
   issueMatrixOnboardingState,
+  parseMatrixOnboardingState,
 } from "../onboarding/bootstrap-code.js";
+import {
+  issueSetupUiBootstrapState,
+  parseSetupUiBootstrapState,
+  projectSetupUiBootstrapPublicState,
+  redeemSetupUiBootstrapToken,
+  type SetupUiBootstrapState,
+} from "../onboarding/setup-ui-bootstrap.js";
 import {
   type OpenClawBootstrapper,
   resolveRequestedOpenClawVersion,
@@ -1776,6 +1787,193 @@ export class RealInstallerService implements InstallerService {
       onboardingLink: buildMatrixOnboardingLink(onboardingUrl, issued.code),
       username: runtimeConfig.matrix.operator.userId,
     };
+  }
+
+  async getMatrixOnboardingState(): Promise<MatrixOnboardingPublicState | null> {
+    let runtimeConfig: RuntimeConfig;
+    try {
+      runtimeConfig = await this.readRuntimeConfig();
+    } catch {
+      return null;
+    }
+    let statePath: string;
+    try {
+      statePath = this.getMatrixOnboardingStatePath(runtimeConfig);
+    } catch {
+      return null;
+    }
+    let raw: string;
+    try {
+      raw = await readFile(statePath, "utf8");
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return null;
+      }
+      throw error;
+    }
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+    const state = parseMatrixOnboardingState(parsedJson);
+    if (state === null) {
+      return null;
+    }
+    return {
+      issuedAt: state.issuedAt,
+      expiresAt: state.expiresAt,
+      ...(state.consumedAt !== undefined ? { consumedAt: state.consumedAt } : {}),
+      failedAttempts: state.failedAttempts,
+      maxAttempts: state.maxAttempts,
+      username: state.username,
+      homeserverUrl: state.homeserverUrl,
+    };
+  }
+
+  private getSetupUiBootstrapStatePath(): string {
+    return join(this.paths.stateDir, "setup-ui", "bootstrap-state.json");
+  }
+
+  private async ensureSetupUiStateDirOwnership(): Promise<void> {
+    const dir = dirname(this.getSetupUiBootstrapStatePath());
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await this.applyRuntimeOwnership(dir);
+  }
+
+  private async readSetupUiBootstrapState(): Promise<SetupUiBootstrapState | null> {
+    const path = this.getSetupUiBootstrapStatePath();
+    let raw: string;
+    try {
+      raw = await readFile(path, "utf8");
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return null;
+      }
+      throw error;
+    }
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+    return parseSetupUiBootstrapState(parsedJson);
+  }
+
+  async getAuthStage(): Promise<{
+    stage: "needs-bootstrap" | "needs-password";
+    username?: string;
+  }> {
+    let runtimeConfig: RuntimeConfig;
+    try {
+      runtimeConfig = await this.readRuntimeConfig();
+    } catch {
+      return { stage: "needs-bootstrap" };
+    }
+    const passwordSecretRef = runtimeConfig.matrix.operator.passwordSecretRef;
+    if (passwordSecretRef === undefined || passwordSecretRef.length === 0) {
+      return { stage: "needs-bootstrap" };
+    }
+    return { stage: "needs-password", username: runtimeConfig.matrix.operator.userId };
+  }
+
+  async issueSetupUiBootstrapToken(req?: {
+    ttlMinutes?: number;
+  }): Promise<SetupUiBootstrapIssueResult> {
+    const issued = issueSetupUiBootstrapState(
+      req?.ttlMinutes === undefined ? undefined : { ttlMinutes: req.ttlMinutes },
+    );
+    await this.ensureSetupUiStateDirOwnership();
+    await this.writeInstallerJsonFile(this.getSetupUiBootstrapStatePath(), issued.state, 0o600);
+    const ttlMinutes = Math.max(
+      1,
+      Math.round((Date.parse(issued.state.expiresAt) - Date.parse(issued.state.issuedAt)) / 60_000),
+    );
+    return {
+      token: issued.token,
+      expiresAt: issued.state.expiresAt,
+      ttlMinutes,
+    };
+  }
+
+  async getSetupUiBootstrapState(): Promise<SetupUiBootstrapPublicState | null> {
+    const state = await this.readSetupUiBootstrapState();
+    if (state === null) return null;
+    return projectSetupUiBootstrapPublicState(state);
+  }
+
+  async consumeSetupUiBootstrapToken(
+    token: string,
+  ): Promise<
+    | { ok: true }
+    | { ok: false; reason: "invalid" | "expired" | "consumed" | "locked" | "not-issued" }
+  > {
+    const state = await this.readSetupUiBootstrapState();
+    if (state === null) {
+      return { ok: false, reason: "not-issued" };
+    }
+    const result = redeemSetupUiBootstrapToken({ state, token });
+    await this.ensureSetupUiStateDirOwnership();
+    await this.writeInstallerJsonFile(this.getSetupUiBootstrapStatePath(), result.state, 0o600);
+    if (result.ok) {
+      return { ok: true };
+    }
+    return { ok: false, reason: result.reason };
+  }
+
+  async verifyOperatorPassword(
+    password: string,
+  ): Promise<
+    | { ok: true; username: string }
+    | { ok: false; reason: "invalid" | "homeserver-unreachable" | "not-configured" }
+  > {
+    let runtimeConfig: RuntimeConfig;
+    try {
+      runtimeConfig = await this.readRuntimeConfig();
+    } catch {
+      return { ok: false, reason: "not-configured" };
+    }
+    const localpart = runtimeConfig.matrix.operator.localpart;
+    const expectedUserId = runtimeConfig.matrix.operator.userId;
+    const passwordSecretRef = runtimeConfig.matrix.operator.passwordSecretRef;
+    if (
+      localpart === undefined ||
+      localpart.length === 0 ||
+      passwordSecretRef === undefined ||
+      passwordSecretRef.length === 0
+    ) {
+      return { ok: false, reason: "not-configured" };
+    }
+    const endpoint = new URL(
+      "/_matrix/client/v3/login",
+      ensureTrailingSlash(runtimeConfig.matrix.adminBaseUrl),
+    ).toString();
+    let response: Response;
+    try {
+      response = await this.fetchImpl(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          type: "m.login.password",
+          identifier: { type: "m.id.user", user: localpart },
+          password,
+        }),
+      });
+    } catch {
+      return { ok: false, reason: "homeserver-unreachable" };
+    }
+    if (response.ok) {
+      return { ok: true, username: expectedUserId };
+    }
+    if (response.status === 401 || response.status === 403) {
+      return { ok: false, reason: "invalid" };
+    }
+    return { ok: false, reason: "homeserver-unreachable" };
   }
 
   async inviteMatrixUser(req: {

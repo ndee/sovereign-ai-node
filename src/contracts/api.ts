@@ -69,6 +69,12 @@ export const installJobParamsSchema = z.object({
   jobId: idSchema,
 });
 
+export const onboardingIssueRequestSchema = z
+  .object({
+    ttlMinutes: z.number().int().positive().optional(),
+  })
+  .strict();
+
 export const preflightApiSuccessSchema = baseSuccessEnvelopeSchema(preflightResultSchema);
 export const testImapApiSuccessSchema = baseSuccessEnvelopeSchema(testImapResultSchema);
 export const testMatrixApiSuccessSchema = baseSuccessEnvelopeSchema(testMatrixResultSchema);
@@ -88,3 +94,4 @@ export type TestAlertRequest = z.infer<typeof testAlertRequestSchema>;
 export type ReconfigureImapRequest = z.infer<typeof reconfigureImapRequestSchema>;
 export type ReconfigureMatrixRequest = z.infer<typeof reconfigureMatrixRequestSchema>;
 export type ReconfigureOpenrouterRequest = z.infer<typeof reconfigureOpenrouterRequestSchema>;
+export type OnboardingIssueRequest = z.infer<typeof onboardingIssueRequestSchema>;

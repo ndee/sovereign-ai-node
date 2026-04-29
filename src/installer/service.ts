@@ -12,8 +12,11 @@ import type {
   InstallJobStatusResponse,
   InstallRequest,
   MatrixOnboardingIssueResult,
+  MatrixOnboardingPublicState,
   PreflightResult,
   ReconfigureResult,
+  SetupUiBootstrapIssueResult,
+  SetupUiBootstrapPublicState,
   SovereignStatus,
   StartInstallResult,
   TestAlertResult,
@@ -181,6 +184,22 @@ export interface InstallerService {
   reconfigureMatrix(req: ReconfigureMatrixRequest): Promise<ReconfigureResult>;
   reconfigureOpenrouter(req: ReconfigureOpenrouterRequest): Promise<ReconfigureResult>;
   issueMatrixOnboardingCode(req?: { ttlMinutes?: number }): Promise<MatrixOnboardingIssueResult>;
+  getMatrixOnboardingState(): Promise<MatrixOnboardingPublicState | null>;
+  getAuthStage(): Promise<{ stage: "needs-bootstrap" | "needs-password"; username?: string }>;
+  issueSetupUiBootstrapToken(req?: { ttlMinutes?: number }): Promise<SetupUiBootstrapIssueResult>;
+  getSetupUiBootstrapState(): Promise<SetupUiBootstrapPublicState | null>;
+  consumeSetupUiBootstrapToken(
+    token: string,
+  ): Promise<
+    | { ok: true }
+    | { ok: false; reason: "invalid" | "expired" | "consumed" | "locked" | "not-issued" }
+  >;
+  verifyOperatorPassword(
+    password: string,
+  ): Promise<
+    | { ok: true; username: string }
+    | { ok: false; reason: "invalid" | "homeserver-unreachable" | "not-configured" }
+  >;
   inviteMatrixUser(req: {
     username: string;
     ttlMinutes?: number;
