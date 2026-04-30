@@ -197,6 +197,7 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
       return;
     }
 
+    await ensureOpenClawPackageReadable(packageRoot, this.logger);
     await hardenBundledExtensionDirectories(packageRoot);
 
     for (const target of BUNDLED_OPENCLAW_EXTENSION_REPAIR_TARGETS) {
@@ -399,6 +400,90 @@ const resolveInstalledOpenClawPackageRoot = async (
   }
 
   return null;
+};
+
+/**
+ * Ensure the OpenClaw package tree is readable (and traversable) by the
+ * unprivileged service user that loads it via `node /usr/bin/openclaw`.
+ *
+ * The third-party openclaw install.sh occasionally writes the tree under a
+ * restrictive umask (observed: 0o077 on Raspberry Pi OS Bookworm), leaving
+ * directories at 0o700 root:root and files at 0o600 root:root. The
+ * sovereign-node service user then hits MODULE_NOT_FOUND when Node tries
+ * to import any sibling file inside the package.
+ *
+ * Walk the tree and OR in u=rwX,go=rX (read for all; execute for all on
+ * dirs and on files that already had any execute bit). Existing tighter
+ * modes are not loosened beyond r-x.
+ */
+const ensureOpenClawPackageReadable = async (
+  packageRoot: string,
+  logger: { warn: (...args: unknown[]) => void },
+): Promise<void> => {
+  const queue = [packageRoot];
+
+  while (queue.length > 0) {
+    const currentPath = queue.shift();
+    if (currentPath === undefined) {
+      continue;
+    }
+
+    let info: Awaited<ReturnType<typeof stat>>;
+    try {
+      info = await stat(currentPath);
+    } catch (error) {
+      logger.warn(
+        { path: currentPath, error: error instanceof Error ? error.message : String(error) },
+        "Could not stat OpenClaw package entry while ensuring readability",
+      );
+      continue;
+    }
+
+    const currentMode = info.mode & 0o777;
+    const ownerHasExec = (currentMode & 0o100) !== 0;
+    let target = currentMode | 0o444;
+    if (info.isDirectory() || ownerHasExec) {
+      target |= 0o111;
+    }
+    if (target !== currentMode) {
+      try {
+        await chmod(currentPath, target);
+      } catch (error) {
+        logger.warn(
+          {
+            path: currentPath,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          "Failed to chmod OpenClaw package entry to readable mode",
+        );
+      }
+    }
+
+    if (!info.isDirectory()) {
+      continue;
+    }
+
+    let entries: Dirent[];
+    try {
+      entries = await readdir(currentPath, { withFileTypes: true });
+    } catch (error) {
+      logger.warn(
+        {
+          path: currentPath,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        "Could not list OpenClaw package directory while ensuring readability",
+      );
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) {
+        continue;
+      }
+      queue.push(join(currentPath, entry.name));
+    }
+  }
 };
 
 const hardenBundledExtensionDirectories = async (packageRoot: string): Promise<void> => {
