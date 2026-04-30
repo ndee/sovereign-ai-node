@@ -542,6 +542,7 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
         version: "1.0.0",
       },
     ],
+    agentTemplateModel: "qwen/qwen3.5-27b",
   });
 };
 
@@ -9663,6 +9664,7 @@ describe("RealInstallerService", () => {
       expect(instantiated.agent.workspace).toBe(join(paths.stateDir, "node-operator", "workspace"));
       expect(instantiated.agent.matrixUserId).toBe("@node-operator:matrix.example.org");
       expect(instantiated.agent.toolInstanceIds).toEqual(["node-operator-cli"]);
+      expect(instantiated.agent.model).toBe("qwen/qwen3.5-27b");
       expect(
         (await stat(join(paths.stateDir, "node-operator", "workspace", ".openclaw"))).isDirectory(),
       ).toBe(true);
@@ -9687,7 +9689,7 @@ describe("RealInstallerService", () => {
           installed?: Array<{ id?: string; source?: string }>;
         };
         openclawProfile?: {
-          agents?: Array<{ id?: string; botId?: string }>;
+          agents?: Array<{ id?: string; botId?: string; model?: string }>;
         };
         sovereignTools?: {
           instances?: Array<{ id?: string; templateRef?: string }>;
@@ -9703,6 +9705,9 @@ describe("RealInstallerService", () => {
           (entry) => entry.id === "node-operator" && entry.botId === "node-operator",
         ),
       ).toBe(true);
+      expect(
+        config.openclawProfile?.agents?.find((entry) => entry.id === "node-operator")?.model,
+      ).toBe("qwen/qwen3.5-27b");
       expect(config.sovereignTools?.instances).toEqual(
         expect.arrayContaining([
           expect.objectContaining({

@@ -34,6 +34,7 @@ const instantiateBotResultSchema = z.object({
     matrixUserId: z.string().min(1).optional(),
     templateRef: z.string().min(1).optional(),
     toolInstanceIds: z.array(z.string().min(1)).optional(),
+    model: z.string().min(1).optional(),
   }),
   changed: z.boolean(),
   restartRequiredServices: z.array(z.string().min(1)),

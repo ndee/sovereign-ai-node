@@ -27,6 +27,7 @@ export type ManagedAgent = {
   matrixUserId?: string;
   templateRef?: string;
   toolInstanceIds?: string[];
+  model?: string;
 };
 
 export type ManagedAgentListResult = {

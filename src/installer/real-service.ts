@@ -2208,6 +2208,10 @@ export class RealInstallerService implements InstallerService {
         botId: botPackage.manifest.id,
         templateRef: botPackage.templateRef,
         toolInstanceIds,
+        ...(typeof botPackage.template.model === "string" &&
+        botPackage.template.model.trim().length > 0
+          ? { model: botPackage.template.model.trim() }
+          : {}),
       },
       "create",
     );
@@ -3860,6 +3864,7 @@ export class RealInstallerService implements InstallerService {
       ...(entry.toolInstanceIds === undefined || entry.toolInstanceIds.length === 0
         ? {}
         : { toolInstanceIds: [...entry.toolInstanceIds] }),
+      ...(entry.model === undefined ? {} : { model: entry.model }),
     };
   }
 
@@ -4752,6 +4757,7 @@ export default function (api) {
       botId?: string;
       templateRef?: string;
       toolInstanceIds?: string[];
+      model?: string;
     },
     mode: "create" | "update",
   ): Promise<ManagedAgentUpsertResult> {
@@ -4763,11 +4769,14 @@ export default function (api) {
     );
     const requestedTemplateRef = sanitizeOptionalTemplateRef(req.templateRef);
     const requestedToolInstanceIds = sanitizeOptionalToolInstanceIds(req.toolInstanceIds);
+    const requestedModel =
+      typeof req.model === "string" && req.model.trim().length > 0 ? req.model.trim() : undefined;
     const existing = runtimeConfig.openclawProfile.agents.find((entry) => entry.id === id);
 
     if (mode === "create" && existing !== undefined) {
       const nextTemplateRef = requestedTemplateRef ?? existing.templateRef;
       const nextToolInstanceIds = requestedToolInstanceIds ?? existing.toolInstanceIds ?? [];
+      const nextModel = requestedModel ?? existing.model;
       const validated = await this.validateAgentTemplateAndTools(
         nextTemplateRef === undefined
           ? {
@@ -4784,6 +4793,7 @@ export default function (api) {
         existing.workspace !== workspace ||
         existing.botId !== req.botId ||
         existing.templateRef !== nextTemplateRef ||
+        existing.model !== nextModel ||
         !areStringListsEqual(existing.toolInstanceIds ?? [], validated.toolInstanceIds);
       if (changed) {
         existing.workspace = workspace;
@@ -4796,6 +4806,11 @@ export default function (api) {
           delete existing.templateRef;
         } else {
           existing.templateRef = nextTemplateRef;
+        }
+        if (nextModel === undefined) {
+          delete existing.model;
+        } else {
+          existing.model = nextModel;
         }
         existing.toolInstanceIds = validated.toolInstanceIds;
         runtimeConfig.openclawProfile.agents = ensureCoreManagedAgents(
@@ -4832,6 +4847,7 @@ export default function (api) {
     if (existing !== undefined) {
       const nextTemplateRef = requestedTemplateRef ?? existing.templateRef;
       const nextToolInstanceIds = requestedToolInstanceIds ?? existing.toolInstanceIds ?? [];
+      const nextModel = requestedModel ?? existing.model;
       const validated = await this.validateAgentTemplateAndTools(
         nextTemplateRef === undefined
           ? {
@@ -4848,6 +4864,7 @@ export default function (api) {
         existing.workspace !== workspace ||
         (req.botId !== undefined && existing.botId !== req.botId) ||
         existing.templateRef !== nextTemplateRef ||
+        existing.model !== nextModel ||
         !areStringListsEqual(existing.toolInstanceIds ?? [], validated.toolInstanceIds);
       if (changed) {
         existing.workspace = workspace;
@@ -4858,6 +4875,11 @@ export default function (api) {
           delete existing.templateRef;
         } else {
           existing.templateRef = nextTemplateRef;
+        }
+        if (nextModel === undefined) {
+          delete existing.model;
+        } else {
+          existing.model = nextModel;
         }
         existing.toolInstanceIds = validated.toolInstanceIds;
         runtimeConfig.openclawProfile.agents = ensureCoreManagedAgents(
@@ -4902,6 +4924,7 @@ export default function (api) {
         workspace,
         ...(req.botId === undefined ? {} : { botId: req.botId }),
         ...(validated.templateRef === undefined ? {} : { templateRef: validated.templateRef }),
+        ...(requestedModel === undefined ? {} : { model: requestedModel }),
         ...(validated.toolInstanceIds.length === 0
           ? {}
           : { toolInstanceIds: validated.toolInstanceIds }),
@@ -4924,6 +4947,7 @@ export default function (api) {
           workspace,
           ...(req.botId === undefined ? {} : { botId: req.botId }),
           ...(validated.templateRef === undefined ? {} : { templateRef: validated.templateRef }),
+          ...(requestedModel === undefined ? {} : { model: requestedModel }),
           ...(validated.toolInstanceIds.length === 0
             ? {}
             : { toolInstanceIds: validated.toolInstanceIds }),
