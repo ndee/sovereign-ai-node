@@ -1,6 +1,27 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 import type { Logger } from "../logging/logger.js";
 import type { ExecRunner } from "../system/exec.js";
 import { isRecord, parseJsonSafely, truncateText } from "./real-service-shared.js";
+
+// Capture the API service's original HOME at module load, before any other
+// installer code (notably setManagedOpenClawEnv in real-service.ts) mutates
+// process.env.HOME for the OpenClaw subsystem. We need the *service* HOME
+// here, because npm reads .npmrc from $HOME and falls back to the system
+// global prefix (/usr/lib/node_modules) — which is root-owned — when HOME
+// points at a directory without an .npmrc.
+const ORIGINAL_HOME = process.env.HOME ?? homedir();
+
+const buildNpmEnv = (): Record<string, string> => {
+  const home = ORIGINAL_HOME;
+  const prefix = join(home, ".npm-global");
+  return {
+    CI: "1",
+    HOME: home,
+    npm_config_prefix: prefix,
+  };
+};
 
 export const detectInstalledLobsterCli = async (input: {
   execRunner: ExecRunner | null;
@@ -14,14 +35,13 @@ export const detectInstalledLobsterCli = async (input: {
   if (input.execRunner === null) {
     return null;
   }
+  const env = buildNpmEnv();
   const probe = await input.execRunner.run({
     command: "lobster",
     args: ["commands.list | json"],
     options: {
       timeout: input.probeTimeoutMs,
-      env: {
-        CI: "1",
-      },
+      env,
     },
   });
   if (probe.exitCode !== 0) {
@@ -36,9 +56,7 @@ export const detectInstalledLobsterCli = async (input: {
     args: ["list", "-g", input.packageName, "--json", "--depth=0"],
     options: {
       timeout: input.probeTimeoutMs,
-      env: {
-        CI: "1",
-      },
+      env,
     },
   });
   const versionPayload = parseJsonSafely(versionResult.stdout);
@@ -96,9 +114,7 @@ export const ensureLobsterCliInstalled = async (input: {
     args: ["install", "-g", `${input.packageName}@${input.version}`],
     options: {
       timeout: input.installTimeoutMs,
-      env: {
-        CI: "1",
-      },
+      env: buildNpmEnv(),
     },
   });
   if (installResult.exitCode !== 0) {
