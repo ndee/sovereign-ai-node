@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Force a permissive umask so every directory and file the installer creates
+# (app/dist, node_modules, bundled-matrix bind-mounts, runtime config, etc.) is
+# readable by the non-root service user and by the in-container UIDs that bind
+# mount these paths. Without this, hosts whose login.defs / pam_umask leave the
+# install process at 0o077 (observed: Raspberry Pi OS Bookworm) end up with
+# 0o700 directories and 0o600 files everywhere, and the service user gets
+# MODULE_NOT_FOUND on its own dist bundle.
+umask 022
+
 SCRIPT_NAME="$(basename "$0")"
 
 REPO_URL="${SOVEREIGN_NODE_REPO_URL:-https://github.com/ndee/sovereign-ai-node}"
