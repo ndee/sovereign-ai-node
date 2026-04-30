@@ -9541,6 +9541,7 @@ describe("RealInstallerService", () => {
 
     let gatewayRestartCalls = 0;
     const fetchCalls: string[] = [];
+    const openclawCommands: string[] = [];
     const service = new RealInstallerService(createLogger(), paths, {
       openclawBootstrapper: {
         detectInstalled: async () => ({
@@ -9602,6 +9603,26 @@ describe("RealInstallerService", () => {
           homeserverUrl: "https://matrix.example.org",
           checks: [],
         }),
+      },
+      execRunner: {
+        run: async (input): Promise<ExecResult> => {
+          const serialized = [input.command, ...(input.args ?? [])].join(" ");
+          openclawCommands.push(serialized);
+          if (serialized.startsWith("openclaw ")) {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+          return {
+            command: serialized,
+            exitCode: 1,
+            stdout: "",
+            stderr: "unexpected command",
+          };
+        },
       },
       fetchImpl: async (url, init) => {
         fetchCalls.push(url);
@@ -9665,6 +9686,11 @@ describe("RealInstallerService", () => {
       expect(instantiated.agent.matrixUserId).toBe("@node-operator:matrix.example.org");
       expect(instantiated.agent.toolInstanceIds).toEqual(["node-operator-cli"]);
       expect(instantiated.agent.model).toBe("qwen/qwen3.5-27b");
+      expect(
+        openclawCommands.some((command) =>
+          command.startsWith("openclaw approvals allowlist add --agent node-operator "),
+        ),
+      ).toBe(true);
       expect(
         (await stat(join(paths.stateDir, "node-operator", "workspace", ".openclaw"))).isDirectory(),
       ).toBe(true);
