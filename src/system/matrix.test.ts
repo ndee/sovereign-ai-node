@@ -108,6 +108,24 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(synapseDirStat.mode & 0o777).toBe(0o777);
       expect(postgresDirStat.mode & 0o777).toBe(0o777);
 
+      // Parent directories must be traversable by the Synapse and Postgres
+      // container UIDs (non-root) so they can reach their bind-mounts.
+      const baseDirStat = await stat(join(tempRoot, "state", "bundled-matrix"));
+      const projectDirStat = await stat(result.projectDir);
+      expect(baseDirStat.mode & 0o755).toBe(0o755);
+      expect(projectDirStat.mode & 0o755).toBe(0o755);
+
+      // Synapse config files must be readable by the Synapse container's
+      // non-root user (UID 991 in the upstream image).
+      const homeserverStat = await stat(join(result.projectDir, "synapse", "homeserver.yaml"));
+      const signingKeyStat = await stat(
+        join(result.projectDir, "synapse", "matrix.local.test.signing.key"),
+      );
+      const logConfigStat = await stat(join(result.projectDir, "synapse", "log.config"));
+      expect(homeserverStat.mode & 0o644).toBe(0o644);
+      expect(signingKeyStat.mode & 0o644).toBe(0o644);
+      expect(logConfigStat.mode & 0o644).toBe(0o644);
+
       const homeserverText = await readFile(
         join(result.projectDir, "synapse", "homeserver.yaml"),
         "utf8",
