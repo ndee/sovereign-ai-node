@@ -7,6 +7,20 @@ import { ErrorBanner } from "../forms.js";
 
 const html = htm.bind(h);
 
+const TOKEN_ERROR_CODES = new Set([
+  "BOOTSTRAP_TOKEN_CONSUMED",
+  "BOOTSTRAP_TOKEN_EXPIRED",
+  "BOOTSTRAP_TOKEN_INVALID",
+  "BOOTSTRAP_TOKEN_LOCKED",
+  "BOOTSTRAP_TOKEN_NOT_ISSUED",
+]);
+
+const isTokenError = (err) => {
+  if (!err) return false;
+  const code = err.detail?.code ?? err.code;
+  return typeof code === "string" && TOKEN_ERROR_CODES.has(code);
+};
+
 export const Login = ({ stage, username, onAuthenticated }) => {
   const [token, setToken] = useState("");
   const [password, setPassword] = useState("");
@@ -30,14 +44,25 @@ export const Login = ({ stage, username, onAuthenticated }) => {
     }
   };
 
+  const showTokenRecovery = stage === "needs-bootstrap" && isTokenError(error);
+
   return html`
     <div
       style="min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 32px;"
     >
       <div class="card" style="max-width: 460px; width: 100%;">
         <h1 style="font-size: 1.75rem; margin-bottom: 0.5em;">Sovereign AI Node</h1>
-        <p class="muted" style="margin-bottom: 24px;">Setup &amp; admin sign-in</p>
+        <p class="muted" style="margin-bottom: 24px;">Setup & admin sign-in</p>
         <${ErrorBanner} error=${error} />
+        ${showTokenRecovery
+          ? html`
+              <div class="alert alert--info">
+                Issue a fresh token on the node host:
+                <code class="code-block">sudo sovereign-node setup-ui issue-bootstrap-token</code>
+                Then paste the new token below.
+              </div>
+            `
+          : null}
         <form onSubmit=${submit}>
           ${stage === "needs-bootstrap"
             ? html`
