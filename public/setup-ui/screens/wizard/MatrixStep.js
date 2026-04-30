@@ -233,16 +233,28 @@ export const MatrixStep = ({ wizardState, onUpdateSection, onBack, onNext, secre
           type="password"
         />
       <//>
-      <div class="btn-row">
-        <button
-          class="btn btn--secondary"
-          type="button"
-          onClick=${runTest}
-          disabled=${!canTest || busy}
-        >
-          ${busy ? "Testing…" : "Test connection"}
-        </button>
-      </div>
+      ${activeModeId === "public"
+        ? html`
+            <div class="btn-row">
+              <button
+                class="btn btn--secondary"
+                type="button"
+                onClick=${runTest}
+                disabled=${!canTest || busy}
+              >
+                ${busy ? "Testing…" : "Test connection"}
+              </button>
+              <span class="dim" style="align-self: center;">
+                Optional. Only useful if a homeserver is already running at this URL.
+              </span>
+            </div>
+          `
+        : html`
+            <p class="dim" style="font-size: 0.85rem;">
+              No connection test for this mode — the bundled installer will create the
+              homeserver during install.
+            </p>
+          `}
     <//>
   `;
 };
