@@ -180,6 +180,12 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       await mkdir(proxyConfigDir, { recursive: true });
       await mkdir(onboardingDir, { recursive: true });
     }
+    // The Synapse and Postgres containers run as non-root users (UID 991 and
+    // 70 respectively). They need to traverse baseDir and projectDir to reach
+    // their bind-mounted /data, so force those parents to 0o755 even if the
+    // installer was invoked under a restrictive umask.
+    await chmodIgnoreMissing(baseDir, 0o755);
+    await chmodIgnoreMissing(projectDir, 0o755);
     await ensureDirectoryTreesWritable([synapseDir, postgresDir]);
     if (usesReverseProxy) {
       await ensureDirectoryTreesWritable([
@@ -282,6 +288,16 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     }
 
     await Promise.all(writes);
+    // Make the bind-mounted Synapse config files readable by the Synapse
+    // container's non-root user. homeserver.yaml and the signing key already
+    // contain Postgres credentials and shared secrets, so 0o644 does not
+    // weaken the existing threat model — anyone with shell access to baseDir
+    // can already read them.
+    await Promise.all([
+      chmodIgnoreMissing(join(synapseDir, "homeserver.yaml"), 0o644),
+      chmodIgnoreMissing(join(synapseDir, generated.signingKeyFile), 0o644),
+      chmodIgnoreMissing(join(synapseDir, "log.config"), 0o644),
+    ]);
     if (usesReverseProxy) {
       await this.writeOnboardingPage({
         projectDir,
@@ -293,6 +309,8 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
           : {}),
       });
     }
+    await chmodIgnoreMissing(baseDir, 0o755);
+    await chmodIgnoreMissing(projectDir, 0o755);
     await ensureDirectoryTreesWritable([synapseDir, postgresDir]);
     if (usesReverseProxy) {
       await ensureDirectoryTreesWritable([
@@ -2317,6 +2335,22 @@ const ensureDirectoryTreeWritable = async (root: string): Promise<void> => {
 const ensureDirectoryTreesWritable = async (dirs: string[]): Promise<void> => {
   for (const dir of dirs) {
     await ensureDirectoryTreeWritable(dir);
+  }
+};
+
+const chmodIgnoreMissing = async (path: string, mode: number): Promise<void> => {
+  try {
+    await chmod(path, mode);
+  } catch (error) {
+    if (
+      error !== null &&
+      typeof error === "object" &&
+      "code" in error &&
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+    ) {
+      return;
+    }
+    throw error;
   }
 };
 
