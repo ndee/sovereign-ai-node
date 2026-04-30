@@ -37,6 +37,8 @@ const PHASE_OF = (stepId) => {
   return "Installing";
 };
 
+const TERMINAL_STATES = new Set(["succeeded", "skipped", "warned", "failed", "canceled"]);
+
 const groupSteps = (steps) => {
   const phases = new Map();
   for (const step of steps) {
@@ -48,13 +50,23 @@ const groupSteps = (steps) => {
   }
   return Array.from(phases.values()).map((entry) => {
     const states = entry.steps.map((s) => s.state);
-    let state = "pending";
-    if (states.some((s) => s === "failed")) state = "failed";
-    else if (states.some((s) => s === "running")) state = "running";
-    else if (states.every((s) => s === "succeeded" || s === "skipped")) {
-      state = states.every((s) => s === "skipped") ? "skipped" : "succeeded";
-    } else if (states.some((s) => s === "succeeded")) {
+    let state;
+    if (states.some((s) => s === "failed")) {
+      state = "failed";
+    } else if (states.some((s) => s === "canceled")) {
+      state = "canceled";
+    } else if (states.some((s) => s === "running")) {
       state = "running";
+    } else if (states.every((s) => TERMINAL_STATES.has(s))) {
+      // All sub-steps reached a terminal state — pick the highest-signal one.
+      if (states.some((s) => s === "warned")) state = "warned";
+      else if (states.every((s) => s === "skipped")) state = "skipped";
+      else state = "succeeded";
+    } else if (states.some((s) => TERMINAL_STATES.has(s))) {
+      // Mixed: some sub-steps already terminal, others still pending — show running.
+      state = "running";
+    } else {
+      state = "pending";
     }
     return { ...entry, state };
   });
@@ -65,6 +77,8 @@ const PHASE_TONE = {
   running: "running",
   succeeded: "ok",
   failed: "fail",
+  canceled: "fail",
+  warned: "warn",
   skipped: "pending",
 };
 

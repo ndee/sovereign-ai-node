@@ -23,13 +23,24 @@ export const TextInput = ({ value, onInput, placeholder, type = "text", disabled
   />
 `;
 
-export const NumberInput = ({ value, onInput, placeholder, disabled = false }) => html`
+export const NumberInput = ({
+  value,
+  onInput,
+  placeholder,
+  disabled = false,
+  min,
+  max,
+  step,
+}) => html`
   <input
     class="input"
     type="number"
     value=${value ?? ""}
     placeholder=${placeholder ?? ""}
     disabled=${disabled}
+    min=${min ?? undefined}
+    max=${max ?? undefined}
+    step=${step ?? undefined}
     onInput=${(event) => {
       const raw = event.currentTarget.value;
       onInput(raw === "" ? undefined : Number(raw));

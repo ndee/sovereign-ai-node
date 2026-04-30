@@ -87,6 +87,8 @@ export const MailboxStep = ({ wizardState, onUpdateSection, onBack, onNext, secr
         <${Field} label="Port">
           <${NumberInput}
             value=${i.port}
+            min=${1}
+            max=${65535}
             onInput=${(value) => onUpdateSection("imap", { port: value ?? 993 })}
           />
         <//>
