@@ -102,13 +102,10 @@ export const Wizard = ({ route, onModeChange }) => {
     [onModeChange],
   );
 
-  const onFailed = useCallback(
-    () => {
-      update({ jobId: null });
-      goto("review");
-    },
-    [update],
-  );
+  const onBackToReview = useCallback(() => {
+    update({ jobId: null });
+    goto("review");
+  }, [update]);
 
   const onManageNode = useCallback(() => {
     reset();
@@ -167,9 +164,8 @@ export const Wizard = ({ route, onModeChange }) => {
         wizardState=${state}
         secrets=${secrets}
         onUpdateWizard=${update}
-        onBack=${next("review")}
+        onBackToReview=${onBackToReview}
         onSucceeded=${onSucceeded}
-        onFailed=${onFailed}
       />`;
     case "done":
       return html`<${SuccessStep} result=${installResult} onManageNode=${onManageNode} />`;

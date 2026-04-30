@@ -68,40 +68,73 @@ const PHASE_TONE = {
   skipped: "pending",
 };
 
-export const ProgressStep = ({ wizardState, secrets, onUpdateWizard, onBack, onSucceeded, onFailed }) => {
+const findFailedStep = (steps) => steps?.find((s) => s.state === "failed") ?? null;
+
+export const ProgressStep = ({
+  wizardState,
+  secrets,
+  onUpdateWizard,
+  onBackToReview,
+  onSucceeded,
+}) => {
   const [job, setJob] = useState(null);
+  const [terminalResult, setTerminalResult] = useState(null);
   const [error, setError] = useState(null);
-  const [starting, setStarting] = useState(wizardState.jobId === null);
+  const [submitting, setSubmitting] = useState(wizardState.jobId === null);
+  const [submitElapsed, setSubmitElapsed] = useState(0);
+  const [retryCount, setRetryCount] = useState(0);
   const startedRef = useRef(false);
 
+  // Submit POST /api/install/run once. Re-run when retryCount changes (manual retry).
   useEffect(() => {
-    if (startedRef.current) return undefined;
     if (wizardState.jobId !== null) {
+      // We already have a job id from a prior session; the polling effect will pick it up.
       startedRef.current = true;
+      setSubmitting(false);
       return undefined;
     }
+    if (startedRef.current && retryCount === 0) return undefined;
     startedRef.current = true;
     let cancelled = false;
+    setSubmitting(true);
+    setError(null);
+    setTerminalResult(null);
+    setJob(null);
     (async () => {
       try {
         const request = buildInstallRequest(wizardState, secrets);
         const response = await apiPost("/api/install/run", request);
         if (cancelled) return;
-        onUpdateWizard({ jobId: response.job.jobId });
-        setJob(response.job);
+        const j = response.job;
+        onUpdateWizard({ jobId: j.jobId });
+        setJob(j);
+        if (j.state === "succeeded" || j.state === "failed" || j.state === "canceled") {
+          // Server returned terminal state directly; the polling effect won't add anything.
+          // Stash the full result so we can render the failure (or hand off on success).
+          // The poll loop will still run once and produce the same outcome — that's fine.
+        }
       } catch (err) {
         if (cancelled) return;
         setError(err);
       } finally {
-        if (!cancelled) setStarting(false);
+        if (!cancelled) setSubmitting(false);
       }
     })();
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [retryCount]);
 
+  // Heartbeat counter while we're waiting on the POST so the UI shows progress.
+  useEffect(() => {
+    if (!submitting) return undefined;
+    setSubmitElapsed(0);
+    const t = window.setInterval(() => setSubmitElapsed((n) => n + 1), 1000);
+    return () => window.clearInterval(t);
+  }, [submitting]);
+
+  // Poll job status. Stays on this screen on failure so the operator can see the error.
   useEffect(() => {
     if (wizardState.jobId === null) return undefined;
     let cancelled = false;
@@ -118,7 +151,9 @@ export const ProgressStep = ({ wizardState, secrets, onUpdateWizard, onBack, onS
           return;
         }
         if (result.job.state === "failed" || result.job.state === "canceled") {
-          onFailed(result);
+          setTerminalResult(result);
+          // Clear jobId so a manual retry starts fresh, but keep the result on screen.
+          onUpdateWizard({ jobId: null });
           return;
         }
       } catch (err) {
@@ -137,18 +172,52 @@ export const ProgressStep = ({ wizardState, secrets, onUpdateWizard, onBack, onS
   }, [wizardState.jobId]);
 
   const phases = job ? groupSteps(job.steps) : [];
+  const failedStep = terminalResult ? findFailedStep(terminalResult.job.steps) : null;
+  const terminalError = terminalResult?.error ?? failedStep?.error ?? null;
+
+  const onTryAgain = () => {
+    startedRef.current = false;
+    setRetryCount((n) => n + 1);
+  };
 
   return html`
     <${WizardShell}
       stepIndex=${7}
-      title="Installing"
-      subtitle="Hang tight — this typically takes 2–5 minutes."
-      onBack=${onBack}
+      title=${terminalResult ? "Install failed" : "Installing"}
+      subtitle=${terminalResult
+        ? "The install couldn't finish. See the failed step below."
+        : "Hang tight — this typically takes 2–5 minutes."}
       showBack=${false}
       showNext=${false}
     >
       ${error ? html`<${ErrorBanner} error=${error} />` : null}
-      ${starting ? html`<p class="muted">Starting install…</p>` : null}
+
+      ${submitting && !job
+        ? html`
+            <div class="alert alert--info">
+              Submitting install request… ${submitElapsed > 0 ? `${submitElapsed}s` : ""}
+              <br />
+              <span class="dim">
+                The server runs each step synchronously, so this request stays open until the
+                install finishes (or fails). You'll see step-by-step results below as soon as the
+                response arrives.
+              </span>
+            </div>
+          `
+        : null}
+
+      ${terminalResult
+        ? html`
+            <div class="alert alert--error">
+              <strong>Install failed at:</strong>
+              ${" "}${failedStep?.label ?? "an early step"}
+              ${terminalError
+                ? html`<br /><code>${terminalError.code}</code>: ${terminalError.message}`
+                : null}
+            </div>
+          `
+        : null}
+
       ${phases.length > 0
         ? html`
             <ul class="steps phase-steps">
@@ -163,6 +232,7 @@ export const ProgressStep = ({ wizardState, secrets, onUpdateWizard, onBack, onS
             </ul>
           `
         : null}
+
       ${job
         ? html`
             <details class="phase-detail">
@@ -171,13 +241,31 @@ export const ProgressStep = ({ wizardState, secrets, onUpdateWizard, onBack, onS
                 ${job.steps.map(
                   (step) => html`
                     <li>
-                      <span>${step.label}</span>
+                      <span>
+                        ${step.label}
+                        ${step.error
+                          ? html`<br /><span class="dim">
+                              <code>${step.error.code}</code>: ${step.error.message}
+                            </span>`
+                          : null}
+                      </span>
                       <span class=${`badge badge--${step.state}`}>${step.state}</span>
                     </li>
                   `,
                 )}
               </ul>
             </details>
+          `
+        : null}
+
+      ${terminalResult
+        ? html`
+            <div class="wizard-step__nav">
+              <button class="btn btn--secondary" type="button" onClick=${onBackToReview}>
+                Back to review
+              </button>
+              <button class="btn" type="button" onClick=${onTryAgain}>Try again</button>
+            </div>
           `
         : null}
     <//>
