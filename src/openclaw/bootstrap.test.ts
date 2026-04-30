@@ -102,6 +102,69 @@ describe("ShellOpenClawBootstrapper", () => {
     expect((await stat(memoryCoreIndexPath)).mode & 0o022).toBe(0);
   });
 
+  it("opens up the OpenClaw package tree so the unprivileged service user can read it", async () => {
+    // Reproduces the Raspberry Pi OS Bookworm scenario where the third-party
+    // openclaw install.sh ran under a restrictive umask (0o077), leaving the
+    // package tree at 0o700 root:root with 0o600 files. Node then hits
+    // MODULE_NOT_FOUND when the service user tries to import any sibling.
+    const globalRoot = await mkdtemp(join(tmpdir(), "openclaw-bootstrap-"));
+    const openclawRoot = join(globalRoot, "openclaw");
+    const distDir = join(openclawRoot, "dist");
+    const distFile = join(distDir, "openclaw.js");
+    const binFile = join(openclawRoot, "openclaw.mjs");
+    const extensionsRoot = join(openclawRoot, "extensions");
+    await mkdir(distDir, { recursive: true });
+    await mkdir(extensionsRoot, { recursive: true });
+    await writeFile(join(openclawRoot, "package.json"), '{ "name": "openclaw" }\n', "utf8");
+    await writeFile(distFile, "export {};\n", "utf8");
+    await writeFile(binFile, "#!/usr/bin/env node\n", "utf8");
+
+    // Simulate the broken-umask install: 0o700 dirs, 0o600 files, executable
+    // entrypoint at 0o700.
+    await chmod(openclawRoot, 0o700);
+    await chmod(distDir, 0o700);
+    await chmod(extensionsRoot, 0o700);
+    await chmod(distFile, 0o600);
+    await chmod(binFile, 0o700);
+
+    const execRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        if (input.command === "npm" && input.args?.[0] === "root") {
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: globalRoot,
+            stderr: "",
+          };
+        }
+        return {
+          command: [input.command, ...(input.args ?? [])].join(" "),
+          exitCode: 0,
+          stdout: SOVEREIGN_PINNED_OPENCLAW_VERSION,
+          stderr: "",
+        };
+      },
+    };
+
+    const bootstrapper = new ShellOpenClawBootstrapper(execRunner, createLogger());
+    await bootstrapper.ensureInstalled({
+      version: SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
+      noOnboard: true,
+      noPrompt: true,
+      skipIfCompatibleInstalled: true,
+    });
+
+    // Directories must be traversable by everyone.
+    expect((await stat(openclawRoot)).mode & 0o005).toBe(0o005);
+    expect((await stat(distDir)).mode & 0o005).toBe(0o005);
+    // Plain files must be readable by everyone.
+    expect((await stat(distFile)).mode & 0o004).toBe(0o004);
+    // Executable files keep their executable bit AND become world-readable.
+    const binMode = (await stat(binFile)).mode & 0o777;
+    expect(binMode & 0o004).toBe(0o004);
+    expect(binMode & 0o001).toBe(0o001);
+  });
+
   it("resolves pinned-by-sovereign to the concrete pinned version during install", async () => {
     const globalRoot = await mkdtemp(join(tmpdir(), "openclaw-bootstrap-"));
     const extensionDir = await writeBundledMatrixExtensionPackage(globalRoot);
