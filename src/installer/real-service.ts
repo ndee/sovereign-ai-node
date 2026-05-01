@@ -10218,6 +10218,14 @@ export default function (api) {
     const runtimePayload = {
       ...(preservedMeta === undefined ? {} : { meta: preservedMeta }),
       gateway: {
+        // mode must be set; otherwise modern OpenClaw refuses to start the
+        // gateway ("gateway.mode is unset; gateway start will be blocked"),
+        // which makes every `openclaw cron list` / `openclaw agent register`
+        // call fail with `gateway closed (1006 abnormal closure)` because
+        // there's no daemon to connect to. We always run the gateway in
+        // local mode (loopback only); remote-relay deployments still bind
+        // loopback and tunnel via the relay-tunnel systemd service.
+        mode: "local" as const,
         bind: "loopback" as const,
         ...(preservedGatewayAuth === undefined ? {} : { auth: preservedGatewayAuth }),
       },
