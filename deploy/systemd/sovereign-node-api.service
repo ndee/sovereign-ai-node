@@ -12,7 +12,11 @@ WorkingDirectory=__APP_DIR__
 ExecStart=/usr/local/bin/sovereign-node-api
 Restart=on-failure
 RestartSec=2
-NoNewPrivileges=true
+# NoNewPrivileges intentionally NOT set: the API service uses scoped
+# passwordless sudo (see /etc/sudoers.d/sovereign-node-gateway) to install
+# and manage the OpenClaw gateway systemd unit during install. Hardening
+# is preserved by the sudoers fragment limiting escalation to a fixed set
+# of commands against a single unit name.
 LimitNOFILE=65536
 
 [Install]
