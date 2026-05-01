@@ -8335,7 +8335,33 @@ export default function (api) {
       await this.applyConfiguredRuntimeOwnership(this.paths.openclawServiceHome, runtimeConfig);
       await this.applyConfiguredRuntimeOwnership(managedTempDir, runtimeConfig);
       await mkdir(dirname(unitPath), { recursive: true });
-      await writeFile(unitPath, unitContents, "utf8");
+      // Try a direct write first (fast path when the API is run as root or
+      // owns /etc/systemd/system). On EACCES, fall back to `sudo -n tee`
+      // using the scoped sudoers fragment dropped by configure_system_hygiene.
+      try {
+        await writeFile(unitPath, unitContents, "utf8");
+      } catch (writeError) {
+        const code = (writeError as NodeJS.ErrnoException).code;
+        if (code !== "EACCES" && code !== "EPERM") throw writeError;
+        if (this.execRunner === null) throw writeError;
+        const teeResult = await this.execRunner.run({
+          command: "sudo",
+          args: ["-n", "tee", unitPath],
+          options: {
+            input: unitContents,
+            stdin: "pipe",
+            timeout: 5_000,
+          },
+        });
+        if (teeResult.exitCode !== 0) {
+          throw new Error(
+            `sudo tee ${unitPath} exited ${teeResult.exitCode}: ${truncateText(
+              teeResult.stderr,
+              400,
+            )}`,
+          );
+        }
+      }
     } catch (error) {
       this.logger.warn(
         {
@@ -8353,8 +8379,19 @@ export default function (api) {
       ["restart", unitName],
       ["is-active", unitName],
     ];
+    // Probe whether systemctl needs sudo. If the runtime is the root install
+    // path, plain `systemctl` works; if it's the API service running as
+    // sovereign-node, we need `sudo -n systemctl …` against the scoped
+    // sudoers fragment installed by configure_system_hygiene.
+    const probeRoot = await this.safeExec("systemctl", ["status", "--no-pager", unitName]);
+    const needsSudo =
+      probeRoot.ok &&
+      probeRoot.result.exitCode !== 0 &&
+      /must be (root|run)/i.test(`${probeRoot.result.stderr} ${probeRoot.result.stdout}`);
+    const systemctlCommand = needsSudo ? "sudo" : "systemctl";
+    const systemctlArgsPrefix = needsSudo ? ["-n", "systemctl"] : [];
     for (const args of commands) {
-      const result = await this.safeExec("systemctl", args);
+      const result = await this.safeExec(systemctlCommand, [...systemctlArgsPrefix, ...args]);
       if (!result.ok) {
         this.logger.warn(
           {
