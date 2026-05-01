@@ -10239,7 +10239,13 @@ export default function (api) {
       channels: {
         matrix: {
           enabled: true,
-          homeserver: runtimeConfig.matrix.adminBaseUrl,
+          // homeserver is intentionally NOT set at the channels.matrix level.
+          // Modern OpenClaw expects per-account homeservers under
+          // channels.matrix.accounts.<id>.homeserver. Setting a top-level
+          // homeserver triggers the OpenClaw doctor migration ("Moved
+          // channels.matrix single-account top-level values into
+          // channels.matrix.accounts.default"), which fails the install
+          // because doctor's interactive prompt blocks `openclaw cron list`.
           threadReplies: "always",
           ...(!hasSharedServiceBot && preferredDefaultAccountId !== undefined
             ? { defaultAccount: preferredDefaultAccountId }

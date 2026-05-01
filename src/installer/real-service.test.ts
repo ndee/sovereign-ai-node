@@ -2515,7 +2515,11 @@ describe("RealInstallerService", () => {
       expect(openclawConfig.plugins?.entries?.lobster?.enabled).toBe(true);
       expect(openclawConfig.plugins?.entries?.["llm-task"]?.enabled).toBe(true);
       expect(openclawConfig.channels?.matrix?.enabled).toBe(true);
-      expect(openclawConfig.channels?.matrix?.homeserver).toBe("http://127.0.0.1:8008");
+      // Top-level homeserver is intentionally absent under modern OpenClaw
+      // shape; per-account homeservers live under accounts.<id>.homeserver.
+      // Setting it at the top would trigger doctor's single-account
+      // migration prompt and block subsequent CLI calls.
+      expect(openclawConfig.channels?.matrix?.homeserver).toBeUndefined();
       expect(openclawConfig.channels?.matrix?.threadReplies).toBe("always");
       expect(openclawConfig.channels?.matrix?.userId).toBeUndefined();
       expect(openclawConfig.channels?.matrix?.groupAllowFrom).toEqual([
