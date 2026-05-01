@@ -10239,13 +10239,19 @@ export default function (api) {
       channels: {
         matrix: {
           enabled: true,
-          // homeserver is intentionally NOT set at the channels.matrix level.
-          // Modern OpenClaw expects per-account homeservers under
-          // channels.matrix.accounts.<id>.homeserver. Setting a top-level
-          // homeserver triggers the OpenClaw doctor migration ("Moved
+          // Single-account top-level fields (homeserver, dm, groupPolicy,
+          // groupAllowFrom, groups) are intentionally NOT set at the
+          // channels.matrix level. Modern OpenClaw expects them per-account
+          // under channels.matrix.accounts.<id>.{...}. Setting any of them
+          // at the top triggers the OpenClaw doctor migration ("Moved
           // channels.matrix single-account top-level values into
-          // channels.matrix.accounts.default"), which fails the install
-          // because doctor's interactive prompt blocks `openclaw cron list`.
+          // channels.matrix.accounts.default"), and doctor's interactive
+          // clack-style prompt then bleeds onto the stdout of every
+          // subsequent `openclaw …` invocation, breaking JSON parsers and
+          // closing the gateway WebSocket. Each entry in matrixAccounts
+          // above already carries its own per-account dm / groupPolicy /
+          // groupAllowFrom / groups, so nothing useful is lost by dropping
+          // the top-level duplicates.
           threadReplies: "always",
           ...(!hasSharedServiceBot && preferredDefaultAccountId !== undefined
             ? { defaultAccount: preferredDefaultAccountId }
@@ -10254,33 +10260,6 @@ export default function (api) {
             ? {}
             : {
                 accounts: matrixAccounts,
-              }),
-          ...(federationOpen
-            ? {
-                dm: {
-                  policy: "open" as const,
-                },
-                groupPolicy: "open" as const,
-                groups: buildMatrixGroupEntries({
-                  roomId: runtimeConfig.matrix.alertRoom.roomId,
-                  users: [],
-                  autoReply: true,
-                  requireMention: false,
-                }),
-              }
-            : {
-                dm: {
-                  policy: "allowlist" as const,
-                  allowFrom: matrixParticipantAllowlist,
-                },
-                groupPolicy: "allowlist" as const,
-                groupAllowFrom: matrixParticipantAllowlist,
-                groups: buildMatrixGroupEntries({
-                  roomId: runtimeConfig.matrix.alertRoom.roomId,
-                  users: matrixParticipantAllowlist,
-                  autoReply: true,
-                  requireMention: false,
-                }),
               }),
         },
       },
