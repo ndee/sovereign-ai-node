@@ -2229,6 +2229,17 @@ export class RealInstallerService implements InstallerService {
         "OpenClaw bindings unavailable while instantiating bot; agent registered but exec approvals and matrix bind not applied",
       );
     }
+    try {
+      await this.ensureManagedMatrixAccessTokens(await this.readRuntimeConfig());
+    } catch (error) {
+      this.logger.warn(
+        {
+          agentId: botPackage.manifest.id,
+          error: describeError(error),
+        },
+        "Matrix access token validation/refresh failed while instantiating bot; agent registered but token may be stale",
+      );
+    }
     const bot = (await this.listSovereignBots()).bots.find(
       (entry) => entry.id === botPackage.manifest.id,
     );
