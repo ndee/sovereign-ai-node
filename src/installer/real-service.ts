@@ -8335,15 +8335,18 @@ export default function (api) {
       await this.applyConfiguredRuntimeOwnership(this.paths.openclawServiceHome, runtimeConfig);
       await this.applyConfiguredRuntimeOwnership(managedTempDir, runtimeConfig);
       await mkdir(dirname(unitPath), { recursive: true });
-      // Try a direct write first (fast path when the API is run as root or
-      // owns /etc/systemd/system). On EACCES, fall back to `sudo -n tee`
-      // using the scoped sudoers fragment dropped by configure_system_hygiene.
+      // Try a direct writeFile first (fast path when running as root, e.g.
+      // the bootstrap install context, or in unit tests where the test
+      // process owns the unit dir). On EACCES/EPERM, fall back to
+      // `sudo -n tee` against the scoped sudoers fragment dropped by
+      // configure_system_hygiene at install time.
       try {
         await writeFile(unitPath, unitContents, "utf8");
       } catch (writeError) {
         const code = (writeError as NodeJS.ErrnoException).code;
-        if (code !== "EACCES" && code !== "EPERM") throw writeError;
-        if (this.execRunner === null) throw writeError;
+        if ((code !== "EACCES" && code !== "EPERM") || this.execRunner === null) {
+          throw writeError;
+        }
         const teeResult = await this.execRunner.run({
           command: "sudo",
           args: ["-n", "tee", unitPath],
@@ -8379,19 +8382,28 @@ export default function (api) {
       ["restart", unitName],
       ["is-active", unitName],
     ];
-    // Probe whether systemctl needs sudo. If the runtime is the root install
-    // path, plain `systemctl` works; if it's the API service running as
-    // sovereign-node, we need `sudo -n systemctl …` against the scoped
-    // sudoers fragment installed by configure_system_hygiene.
-    const probeRoot = await this.safeExec("systemctl", ["status", "--no-pager", unitName]);
-    const needsSudo =
-      probeRoot.ok &&
-      probeRoot.result.exitCode !== 0 &&
-      /must be (root|run)/i.test(`${probeRoot.result.stderr} ${probeRoot.result.stdout}`);
-    const systemctlCommand = needsSudo ? "sudo" : "systemctl";
-    const systemctlArgsPrefix = needsSudo ? ["-n", "systemctl"] : [];
+    // Plain systemctl first; fall back to `sudo -n systemctl` when the
+    // call fails with polkit's "Interactive authentication required"
+    // (the runtime API service hits this when invoked from a service
+    // context as a non-root user). The bootstrap install path runs as
+    // root and never needs the fallback.
+    const runSystemctl = async (
+      args: string[],
+    ): Promise<Awaited<ReturnType<typeof this.safeExec>>> => {
+      const direct = await this.safeExec("systemctl", args);
+      if (
+        direct.ok &&
+        direct.result.exitCode !== 0 &&
+        /interactive authentication required|polkit|must be (root|run)/i.test(
+          `${direct.result.stderr} ${direct.result.stdout}`,
+        )
+      ) {
+        return await this.safeExec("sudo", ["-n", "systemctl", ...args]);
+      }
+      return direct;
+    };
     for (const args of commands) {
-      const result = await this.safeExec(systemctlCommand, [...systemctlArgsPrefix, ...args]);
+      const result = await runSystemctl(args);
       if (!result.ok) {
         this.logger.warn(
           {
