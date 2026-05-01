@@ -1327,13 +1327,46 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     }
   }
 
+  /**
+   * Re-claim ownership of a path that may have been written by Docker as root
+   * (postgres-data, etc.). Uses the scoped sudoers fragment dropped at install
+   * time. No-op when running as root or when the path is already ours.
+   */
+  private async reclaimOwnership(path: string): Promise<void> {
+    try {
+      await access(path, fsConstants.R_OK | fsConstants.W_OK);
+      return;
+    } catch {
+      // continue — path is not (yet) writable to us
+    }
+    const myUid = process.getuid?.() ?? 0;
+    const myGid = process.getgid?.() ?? 0;
+    if (myUid === 0) return;
+    const result = await this.execRunner.run({
+      command: "sudo",
+      args: ["-n", "chown", "-R", `${myUid}:${myGid}`, path],
+      options: { timeout: 30_000 },
+    });
+    if (result.exitCode !== 0) {
+      this.logger.warn(
+        { path, exitCode: result.exitCode, stderr: result.stderr },
+        "sudo chown reclaim failed; subsequent operations may fail with EACCES",
+      );
+    }
+  }
+
   private async resetBundledPostgresState(provision: BundledMatrixProvisionResult): Promise<void> {
+    const postgresDir = join(provision.projectDir, "postgres-data");
+    // Postgres container writes data dir as root inside the container (uid 70).
+    // Reclaim ownership before backup/rm/readdir do anything that scans it.
+    await this.reclaimOwnership(postgresDir);
     await this.backupPostgresDataBeforeReset(provision);
     await this.runComposeCommand(provision.projectDir, provision.composeFilePath, [
       "down",
       "--remove-orphans",
     ]);
-    const postgresDir = join(provision.projectDir, "postgres-data");
+    // After down, Docker may still hold the dir; reclaim once more to be safe.
+    await this.reclaimOwnership(postgresDir);
     await rm(postgresDir, { recursive: true, force: true });
     await mkdir(postgresDir, { recursive: true });
     await ensureDirectoryTreeWritable(postgresDir);
