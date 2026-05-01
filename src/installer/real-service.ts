@@ -2215,6 +2215,20 @@ export class RealInstallerService implements InstallerService {
       },
       "create",
     );
+    try {
+      await this.ensureManagedAgentOpenClawBindings(await this.readRuntimeConfig());
+    } catch (error) {
+      if (!isCoreAgentBindingBestEffortSkippable(error)) {
+        throw error;
+      }
+      this.logger.warn(
+        {
+          agentId: botPackage.manifest.id,
+          error: describeError(error),
+        },
+        "OpenClaw bindings unavailable while instantiating bot; agent registered but exec approvals and matrix bind not applied",
+      );
+    }
     const bot = (await this.listSovereignBots()).bots.find(
       (entry) => entry.id === botPackage.manifest.id,
     );
