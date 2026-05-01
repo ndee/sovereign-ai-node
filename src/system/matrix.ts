@@ -169,7 +169,32 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     const composeFilePath = join(projectDir, "compose.yaml");
     const envFilePath = join(projectDir, ".env");
 
-    await mkdir(synapseDir, { recursive: true });
+    // The bundled Matrix project dir may have been left in a bad ownership
+    // state by a prior partially-completed install: docker-compose mounts
+    // postgres-data as root via volume bind, and on a re-run the API
+    // service (running as a non-root user) can no longer mkdir siblings
+    // under the now-root-owned project dir. Attempt the mkdir directly
+    // first; if EACCES, escalate via the scoped sudoers fragment to
+    // chown -R the project dir back to the caller, then retry.
+    try {
+      await mkdir(synapseDir, { recursive: true });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "EACCES" && code !== "EPERM") throw err;
+      const myUid = process.getuid?.() ?? 0;
+      const myGid = process.getgid?.() ?? 0;
+      const sudoChown = await this.execRunner.run({
+        command: "sudo",
+        args: ["-n", "chown", "-R", `${myUid}:${myGid}`, projectDir],
+        options: { timeout: 10_000 },
+      });
+      if (sudoChown.exitCode !== 0) {
+        throw new Error(
+          `mkdir ${synapseDir} failed with EACCES and sudo chown fallback exited ${sudoChown.exitCode}: ${sudoChown.stderr}`,
+        );
+      }
+      await mkdir(synapseDir, { recursive: true });
+    }
     await mkdir(postgresDir, { recursive: true });
     if (usesReverseProxy) {
       await mkdir(wellKnownDir, { recursive: true });

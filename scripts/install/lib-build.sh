@@ -181,13 +181,19 @@ configure_system_hygiene() {
   install -d -m 0755 /etc/sudoers.d
   cat > "$sudoers_path" <<EOF
 # Managed by sovereign-ai-node installer. Scoped sudo for the runtime
-# API service to manage the OpenClaw gateway systemd unit.
+# API service to manage the OpenClaw gateway systemd unit and the
+# bundled-Matrix project directory.
 ${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/tee /etc/systemd/system/sovereign-openclaw-gateway.service
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl daemon-reload
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl restart sovereign-openclaw-gateway, /bin/systemctl restart sovereign-openclaw-gateway.service
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl enable --now sovereign-openclaw-gateway, /bin/systemctl enable --now sovereign-openclaw-gateway.service
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl is-active sovereign-openclaw-gateway, /bin/systemctl is-active sovereign-openclaw-gateway.service
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl status sovereign-openclaw-gateway, /bin/systemctl status sovereign-openclaw-gateway.service
+# Allow re-claiming ownership of bundled-matrix project subdirectories
+# after docker-compose has touched them as root. Restricted to that
+# path; the *:* in the chown spec keeps it bounded to numeric uid:gid.
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/chown -R [0-9]*\:[0-9]* /var/lib/sovereign-node/bundled-matrix/*
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/chown -R [0-9]*\:[0-9]* /var/lib/sovereign-node/bundled-matrix/*
 EOF
   chmod 0440 "$sudoers_path"
   # Validate; if invalid, remove so we don't break sudo entirely.
