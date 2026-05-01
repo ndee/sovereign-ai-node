@@ -194,6 +194,10 @@ ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl status sovereign-openclaw-ga
 # path; the *:* in the chown spec keeps it bounded to numeric uid:gid.
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/chown -R [0-9]*\:[0-9]* /var/lib/sovereign-node/bundled-matrix/*
 ${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/chown -R [0-9]*\:[0-9]* /var/lib/sovereign-node/bundled-matrix/*
+# Allow re-claiming ownership of /etc/sovereign-node/secrets and its
+# entries when a previous run left them root-owned.
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets, /bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets/*
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets, /usr/bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets/*
 EOF
   chmod 0440 "$sudoers_path"
   # Validate; if invalid, remove so we don't break sudo entirely.

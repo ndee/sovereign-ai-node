@@ -10601,16 +10601,69 @@ export default function (api) {
     return join(dirname(this.paths.configPath), "matrix-agent-access-tokens");
   }
 
+  /**
+   * Re-claim ownership of a path via the scoped sudoers fragment when
+   * mkdir/chmod hit EPERM/EACCES (e.g. the dir was created by the bootstrap
+   * install.sh as root and isn't writable to the runtime API user). No-op
+   * when already root or when sudo is unavailable.
+   */
+  private async sudoReclaimOwnership(path: string): Promise<boolean> {
+    if (typeof process.getuid !== "function") return false;
+    const myUid = process.getuid();
+    if (myUid === 0) return false;
+    const myGid = (typeof process.getgid === "function" ? process.getgid() : null) ?? 0;
+    if (this.execRunner === null) return false;
+    const result = await this.execRunner.run({
+      command: "sudo",
+      args: ["-n", "chown", "-R", `${myUid}:${myGid}`, path],
+      options: { timeout: 30_000 },
+    });
+    if (result.exitCode !== 0) {
+      this.logger.warn(
+        {
+          path,
+          exitCode: result.exitCode,
+          stderr: truncateText(result.stderr, 400),
+        },
+        "sudo chown reclaim failed",
+      );
+      return false;
+    }
+    return true;
+  }
+
   private async ensureSecretsDir(): Promise<string> {
     if (this.resolvedSecretsDir !== null) {
       return this.resolvedSecretsDir;
     }
 
-    try {
+    const tryEnsure = async (): Promise<void> => {
       await mkdir(this.paths.secretsDir, { recursive: true });
       await chmod(this.paths.secretsDir, 0o700);
       await this.applyServiceOwnership(this.paths.secretsDir);
       await access(this.paths.secretsDir, fsConstants.W_OK);
+    };
+
+    try {
+      try {
+        await tryEnsure();
+      } catch (firstError) {
+        const code = (firstError as NodeJS.ErrnoException).code;
+        if (code === "EPERM" || code === "EACCES") {
+          // The bootstrap install.sh creates /etc/sovereign-node/secrets
+          // as root before chowning it. If that chown didn't take (or a
+          // wipe/restore cycle reset ownership), the runtime API can't
+          // chmod/access the dir. Reclaim ownership via scoped sudo and
+          // retry.
+          if (await this.sudoReclaimOwnership(this.paths.secretsDir)) {
+            await tryEnsure();
+          } else {
+            throw firstError;
+          }
+        } else {
+          throw firstError;
+        }
+      }
       this.resolvedSecretsDir = this.paths.secretsDir;
       return this.resolvedSecretsDir;
     } catch (error) {
