@@ -9651,6 +9651,20 @@ describe("RealInstallerService", () => {
             },
           );
         }
+        if (url.endsWith("/_matrix/client/v3/account/whoami")) {
+          const authorization = new Headers(init?.headers).get("Authorization") ?? "";
+          const token = authorization.replace(/^Bearer\s+/u, "");
+          const isFreshToken = token.endsWith("-token");
+          return new Response(
+            JSON.stringify({
+              user_id: `@${token.replace(/-token$/, "")}:matrix.example.org`,
+            }),
+            {
+              status: isFreshToken ? 200 : 401,
+              headers: { "Content-Type": "application/json" },
+            },
+          );
+        }
         if (url.includes("/_matrix/client/v3/rooms/") && url.endsWith("/invite")) {
           return new Response("{}", {
             status: 200,
@@ -9754,6 +9768,9 @@ describe("RealInstallerService", () => {
       expect(fetchCalls.some((url) => url.endsWith("/_matrix/client/v3/login"))).toBe(true);
       expect(fetchCalls.some((url) => url.endsWith("/invite"))).toBe(true);
       expect(fetchCalls.some((url) => url.endsWith("/join"))).toBe(true);
+      expect(fetchCalls.some((url) => url.endsWith("/_matrix/client/v3/account/whoami"))).toBe(
+        true,
+      );
     } finally {
       if (priorOpenrouterApiKey === undefined) {
         delete process.env.OPENROUTER_API_KEY;
