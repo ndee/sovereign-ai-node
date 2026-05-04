@@ -89,45 +89,46 @@ const HandoffBlock = ({ result, wizardState }) => {
 const LanPreconditionsCard = ({ wizardState }) => {
   if (wizardState?.matrix?.deployMode !== "lan") return null;
   const domain = wizardState?.matrix?.homeserverDomain ?? "matrix.lan.local";
-  const slug = slugifyProjectName(domain);
-  const caPath = `/var/lib/sovereign-node/bundled-matrix/${slug}/reverse-proxy-data/caddy/pki/authorities/local/root.crt`;
 
   return html`
     <div class="card">
       <h3>Before this homeserver works on your LAN</h3>
       <p class="muted">
-        You picked <strong>Local LAN</strong>. The bundled stack is reachable on the node, but
-        each device that wants to use it needs three things set up:
+        You picked <strong>Local LAN</strong>. The reverse proxy is up and Caddy issued a TLS
+        cert that includes this node's LAN IP, so you can reach it at
+        <code>https://&lt;node-LAN-IP&gt;/</code> from any device on your network — once that
+        device trusts the Caddy CA.
       </p>
       <ol class="bullet-list">
         <li>
-          <strong>DNS resolution.</strong> Point <code>${domain}</code> at this node's LAN IP.
-          On a router with DNS overrides (UniFi, OPNsense, OpenWrt) add a host entry. Or, on
-          each device, add a line to <code>/etc/hosts</code> (macOS/Linux) or
-          <code>%SystemRoot%\\System32\\drivers\\etc\\hosts</code> (Windows):
-          <code class="code-block">&lt;node-LAN-IP&gt; ${domain}</code>
-          <span class="dim">
-            Note: <code>.local</code> is mDNS-reserved on macOS/iOS; plain DNS overrides may not
-            work there. Consider switching the homeserver domain to something not under
-            <code>.local</code> if you have Apple devices.
-          </span>
-        </li>
-        <li>
-          <strong>TLS trust.</strong> Caddy issued itself a private CA. Pull its root cert off
-          the node and import it into each device's trust store:
-          <code class="code-block">${caPath}</code>
+          <strong>Trust the Caddy CA.</strong> The proxy serves the root cert at the path
+          below. Download it on each device:
+          <code class="code-block">curl -k https://&lt;node-LAN-IP&gt;/downloads/caddy-root-ca.crt -o caddy-root-ca.crt</code>
+          Then import:
           <span class="dim">
             macOS: open in Keychain → System → drag-drop, set "Always Trust".<br />
             Linux: copy to <code>/usr/local/share/ca-certificates/</code> → run
             <code>sudo update-ca-certificates</code>.<br />
-            Windows: <code>certmgr.msc</code> → Trusted Root Certification Authorities → Import.
+            Windows: <code>certmgr.msc</code> → Trusted Root Certification Authorities → Import.<br />
+            iOS/Android: AirDrop / share the file → Settings prompts for cert install + trust.
           </span>
         </li>
         <li>
-          <strong>Port 443.</strong> The bundled reverse proxy listens on
-          <code>:443</code> for HTTPS. Confirm with
-          <code class="code-block">curl -k https://${domain}/ </code>
-          from another device. If your firewall blocks LAN port 443 you'll need to open it.
+          <strong>Port 443.</strong> The reverse proxy listens on <code>:443</code>. Verify
+          with
+          <code class="code-block">curl -k https://&lt;node-LAN-IP&gt;/</code>
+          from another device. Adjust LAN/host firewall if blocked.
+        </li>
+        <li>
+          <strong>Optional — DNS.</strong> If you want clients to use the friendlier name
+          <code>${domain}</code> instead of the IP, add a router DNS rewrite or per-device
+          <code>/etc/hosts</code> entry:
+          <code class="code-block">&lt;node-LAN-IP&gt; ${domain}</code>
+          <span class="dim">
+            Not required — the cert is valid for the IP, so the IP works on its own. Note that
+            <code>.local</code> is mDNS-reserved on macOS/iOS and plain DNS overrides for it
+            may be ignored there.
+          </span>
         </li>
       </ol>
     </div>

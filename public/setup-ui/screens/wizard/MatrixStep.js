@@ -64,8 +64,9 @@ const PublicGuidance = () => html`
 const LanGuidance = () => html`
   <div class="alert alert--info">
     The bundled reverse proxy will run a local certificate authority and issue itself an HTTPS
-    certificate for the homeserver domain you pick. You'll be asked to trust that CA on each
-    Element client device after install.
+    certificate for the homeserver domain <em>and</em> this node's LAN IP. You can reach the
+    homeserver at <code>https://&lt;node-LAN-IP&gt;/</code> right after install — DNS is
+    optional. Each client device just needs to trust the Caddy CA once.
   </div>
 `;
 

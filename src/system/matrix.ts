@@ -9,6 +9,7 @@ import type { InstallRequest, TestMatrixResult } from "../contracts/index.js";
 import type { Logger } from "../logging/logger.js";
 import type { ExecResult, ExecRunner } from "./exec.js";
 import type { MatrixAvatarResolver } from "./matrix-avatars.js";
+import { detectLanIPv4 } from "./lan-ips.js";
 import {
   buildOnboardingPageUrl,
   normalizeEmbeddedSvg,
@@ -137,6 +138,8 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     private readonly logger: Logger,
     private readonly paths: SovereignPaths,
     private readonly fetchImpl: FetchLike = defaultFetch,
+    // Inject for tests; in production resolves to detectLanIPv4().
+    private readonly lanIpProvider: () => string[] = detectLanIPv4,
   ) {}
 
   async provision(req: InstallRequest): Promise<BundledMatrixProvisionResult> {
@@ -293,10 +296,21 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         publicBaseUrl,
       });
       const onboardingMode = resolveOnboardingMode(accessMode, tlsMode);
+      // For Local LAN (tls internal), include this host's LAN IPv4
+      // addresses in the cert so operators can reach the homeserver via
+      // https://<lan-ip>/ without needing DNS or /etc/hosts entries on
+      // every device. Caddy issues a single internal cert covering both
+      // the hostname and each IP listed in the site directive.
+      const lanIPv4 =
+        onboardingMode === "internal"
+          ? this.lanIpProvider().filter(
+              (ip) => ip !== new URL(publicBaseUrl).hostname,
+            )
+          : [];
       writes.push(
         writeFile(
           join(proxyDir, "Caddyfile"),
-          `${renderCaddyfile(new URL(publicBaseUrl).hostname, onboardingMode)}\n`,
+          `${renderCaddyfile(new URL(publicBaseUrl).hostname, onboardingMode, lanIPv4)}\n`,
           "utf8",
         ),
         writeFile(
@@ -2286,14 +2300,28 @@ const validateBundledTlsMode = (input: {
   }
 };
 
-const renderCaddyfile = (siteHostname: string, tlsMode: BundledMatrixOnboardingMode): string =>
-  [
+const renderCaddyfile = (
+  siteHostname: string,
+  tlsMode: BundledMatrixOnboardingMode,
+  extraSiteNames: ReadonlyArray<string> = [],
+): string => {
+  // For Local LAN (tls internal), include the LAN IPs as additional site
+  // names so Caddy issues a single internal cert that's valid for both
+  // the hostname and the IP. Operators can then visit https://<lan-ip>/
+  // after trusting the Caddy root CA — no DNS / /etc/hosts entry
+  // required.
+  const additionalNames = tlsMode === "internal" ? extraSiteNames : [];
+  const allNames = [siteHostname, ...additionalNames]
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0);
+  const siteDirective = tlsMode === "relay" ? ":80" : allNames.join(", ");
+  return [
     "{",
     "  admin off",
     ...(tlsMode === "internal" ? [`  default_sni ${siteHostname}`] : []),
     "}",
     "",
-    `${tlsMode === "relay" ? ":80" : siteHostname} {`,
+    `${siteDirective} {`,
     ...(tlsMode === "internal" ? ["  tls internal"] : []),
     "  @wellKnown path /.well-known/matrix/client /.well-known/matrix/server",
     "  handle @wellKnown {",
@@ -2338,6 +2366,7 @@ const renderCaddyfile = (siteHostname: string, tlsMode: BundledMatrixOnboardingM
     "  }",
     "}",
   ].join("\n");
+};
 
 const renderWellKnownFiles = (input: {
   accessMode: BundledMatrixAccessMode;
