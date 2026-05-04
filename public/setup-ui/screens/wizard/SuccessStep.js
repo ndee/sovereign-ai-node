@@ -4,17 +4,9 @@ import { useEffect, useState } from "../../vendor/preact-hooks.module.js";
 
 import { apiGet, apiPost } from "../../api.js";
 import { WizardShell } from "../../components/WizardShell.js";
-import { ErrorBanner } from "../../forms.js";
+import { CopyButton, ErrorBanner } from "../../forms.js";
 
 const html = htm.bind(h);
-
-const copy = async (value) => {
-  try {
-    await navigator.clipboard.writeText(value);
-  } catch {
-    // Clipboard unavailable; the value is selectable in the UI.
-  }
-};
 
 const isOutstanding = (state) => {
   if (state === null) return false;
@@ -24,11 +16,128 @@ const isOutstanding = (state) => {
   return true;
 };
 
-export const SuccessStep = ({ result, onManageNode }) => {
+const inferOperatorUserId = (wizardState) => {
+  const localpart = wizardState?.operator?.username?.trim();
+  const domain = wizardState?.matrix?.homeserverDomain?.trim();
+  if (!localpart || !domain) return null;
+  if (localpart.startsWith("@") && localpart.includes(":")) return localpart;
+  return `@${localpart}:${domain}`;
+};
+
+// Project slug used by docker-compose for the bundled-Matrix stack.
+// Mirrors slugifyProjectName() in src/system/matrix.ts.
+const slugifyProjectName = (domain) =>
+  (domain ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") ||
+  "matrix";
+
+const HandoffBlock = ({ result, wizardState }) => {
+  const fromResult = result?.nextSteps;
+  const homeserverUrl = fromResult?.elementHomeserverUrl ?? wizardState?.matrix?.publicBaseUrl;
+  const operatorUserId =
+    fromResult?.operatorUsername ?? inferOperatorUserId(wizardState) ?? "(operator)";
+  const roomName = fromResult?.roomName ?? wizardState?.matrix?.alertRoomName ?? "Sovereign Alerts";
+  const deployMode = wizardState?.matrix?.deployMode ?? "public";
+  const homeserverReachable = deployMode === "public";
+  const tunnelOnly = deployMode === "dev";
+
+  return html`
+    ${homeserverUrl
+      ? html`
+          ${homeserverReachable
+            ? html`
+                <a
+                  class="btn btn--xl"
+                  href=${homeserverUrl}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                >
+                  Open Element →
+                </a>
+              `
+            : null}
+          <dl class="kv kv--compact">
+            <dt>Operator</dt>
+            <dd>${operatorUserId}</dd>
+            <dt>Alert room</dt>
+            <dd>${roomName}</dd>
+            <dt>Homeserver</dt>
+            <dd>${homeserverUrl}</dd>
+          </dl>
+        `
+      : null}
+    ${tunnelOnly
+      ? html`
+          <div class="alert alert--info">
+            <strong>Local dev mode.</strong> The homeserver is bound to
+            <code>http://127.0.0.1:8008</code> on the node host and isn't reachable from
+            another machine. To connect from your laptop, open an SSH tunnel:
+            <code class="code-block">ssh -L 8008:127.0.0.1:8008 &lt;node-host&gt;</code>
+            Then open <code>http://127.0.0.1:8008</code> in your browser.
+          </div>
+        `
+      : null}
+    ${result?.nextSteps?.notes && result.nextSteps.notes.length > 0
+      ? html`
+          <ul class="bullet-list">
+            ${result.nextSteps.notes.map((note) => html`<li>${note}</li>`)}
+          </ul>
+        `
+      : null}
+  `;
+};
+
+const LanPreconditionsCard = ({ wizardState }) => {
+  if (wizardState?.matrix?.deployMode !== "lan") return null;
+  const domain = wizardState?.matrix?.homeserverDomain ?? "matrix.lan.local";
+  const slug = slugifyProjectName(domain);
+  const caPath = `/var/lib/sovereign-node/bundled-matrix/${slug}/reverse-proxy-data/caddy/pki/authorities/local/root.crt`;
+
+  return html`
+    <div class="card">
+      <h3>Before this homeserver works on your LAN</h3>
+      <p class="muted">
+        You picked <strong>Local LAN</strong>. The bundled stack is reachable on the node, but
+        each device that wants to use it needs three things set up:
+      </p>
+      <ol class="bullet-list">
+        <li>
+          <strong>DNS resolution.</strong> Point <code>${domain}</code> at this node's LAN IP.
+          On a router with DNS overrides (UniFi, OPNsense, OpenWrt) add a host entry. Or, on
+          each device, add a line to <code>/etc/hosts</code> (macOS/Linux) or
+          <code>%SystemRoot%\\System32\\drivers\\etc\\hosts</code> (Windows):
+          <code class="code-block">&lt;node-LAN-IP&gt; ${domain}</code>
+          <span class="dim">
+            Note: <code>.local</code> is mDNS-reserved on macOS/iOS; plain DNS overrides may not
+            work there. Consider switching the homeserver domain to something not under
+            <code>.local</code> if you have Apple devices.
+          </span>
+        </li>
+        <li>
+          <strong>TLS trust.</strong> Caddy issued itself a private CA. Pull its root cert off
+          the node and import it into each device's trust store:
+          <code class="code-block">${caPath}</code>
+          <span class="dim">
+            macOS: open in Keychain → System → drag-drop, set "Always Trust".<br />
+            Linux: copy to <code>/usr/local/share/ca-certificates/</code> → run
+            <code>sudo update-ca-certificates</code>.<br />
+            Windows: <code>certmgr.msc</code> → Trusted Root Certification Authorities → Import.
+          </span>
+        </li>
+        <li>
+          <strong>Port 443.</strong> The bundled reverse proxy listens on
+          <code>:443</code> for HTTPS. Confirm with
+          <code class="code-block">curl -k https://${domain}/ </code>
+          from another device. If your firewall blocks LAN port 443 you'll need to open it.
+        </li>
+      </ol>
+    </div>
+  `;
+};
+
+export const SuccessStep = ({ result, wizardState, onManageNode }) => {
   const [issued, setIssued] = useState(null);
   const [issueError, setIssueError] = useState(null);
   const [busy, setBusy] = useState(false);
-  const nextSteps = result?.nextSteps;
 
   useEffect(() => {
     let cancelled = false;
@@ -38,7 +147,6 @@ export const SuccessStep = ({ result, onManageNode }) => {
         const state = await apiGet("/api/onboarding/state");
         if (cancelled) return;
         if (isOutstanding(state)) {
-          // Don't auto-invalidate an outstanding code.
           setBusy(false);
           return;
         }
@@ -77,33 +185,7 @@ export const SuccessStep = ({ result, onManageNode }) => {
       showBack=${false}
       showNext=${false}
     >
-      ${nextSteps
-        ? html`
-            <a
-              class="btn btn--xl"
-              href=${nextSteps.elementHomeserverUrl}
-              target="_blank"
-              rel="noreferrer noopener"
-            >
-              Open Element →
-            </a>
-            <dl class="kv kv--compact">
-              <dt>Operator</dt>
-              <dd>${nextSteps.operatorUsername}</dd>
-              <dt>Alert room</dt>
-              <dd>${nextSteps.roomName}</dd>
-              <dt>Homeserver</dt>
-              <dd>${nextSteps.elementHomeserverUrl}</dd>
-            </dl>
-            ${nextSteps.notes && nextSteps.notes.length > 0
-              ? html`
-                  <ul class="bullet-list">
-                    ${nextSteps.notes.map((note) => html`<li>${note}</li>`)}
-                  </ul>
-                `
-              : null}
-          `
-        : null}
+      <${HandoffBlock} result=${result} wizardState=${wizardState} />
 
       ${issueError ? html`<${ErrorBanner} error=${issueError} />` : null}
       ${busy && issued === null
@@ -117,16 +199,8 @@ export const SuccessStep = ({ result, onManageNode }) => {
             </p>
             <code class="code-block code-block--lg">${issued.code}</code>
             <div class="btn-row">
-              <button class="btn btn--secondary" type="button" onClick=${() => copy(issued.code)}>
-                Copy code
-              </button>
-              <button
-                class="btn btn--secondary"
-                type="button"
-                onClick=${() => copy(issued.onboardingLink)}
-              >
-                Copy link
-              </button>
+              <${CopyButton} value=${issued.code} label="Copy code" />
+              <${CopyButton} value=${issued.onboardingLink} label="Copy link" />
               <a
                 class="btn btn--secondary"
                 href=${issued.onboardingLink}
@@ -148,6 +222,8 @@ export const SuccessStep = ({ result, onManageNode }) => {
                 `
               : null}
           `}
+
+      <${LanPreconditionsCard} wizardState=${wizardState} />
 
       <div class="alert alert--info">
         Sign in to Element with the code, accept the invite to your alert room, and close this

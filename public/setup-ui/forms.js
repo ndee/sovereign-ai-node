@@ -1,7 +1,59 @@
 import { h } from "./vendor/preact.module.js";
 import htm from "./vendor/htm.module.js";
+import { useState } from "./vendor/preact-hooks.module.js";
 
 const html = htm.bind(h);
+
+// Copy `value` to the clipboard. Tries the modern Clipboard API first;
+// falls back to a hidden textarea + document.execCommand("copy"), which
+// is the only path that works on insecure HTTP origins (the wizard runs
+// over plain HTTP on LAN IPs, where navigator.clipboard is undefined).
+// Returns true on success, false on failure.
+export const copyToClipboard = async (value) => {
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+  } catch {
+    // fall through to legacy path
+  }
+  try {
+    const textarea = document.createElement("textarea");
+    textarea.value = value;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    textarea.style.pointerEvents = "none";
+    document.body.appendChild(textarea);
+    textarea.select();
+    textarea.setSelectionRange(0, value.length);
+    const ok = document.execCommand("copy");
+    document.body.removeChild(textarea);
+    return ok;
+  } catch {
+    return false;
+  }
+};
+
+export const CopyButton = ({ value, label, kind = "secondary" }) => {
+  const [state, setState] = useState("idle");
+  const onClick = async () => {
+    const ok = await copyToClipboard(value);
+    setState(ok ? "ok" : "fail");
+    window.setTimeout(() => setState("idle"), 2500);
+  };
+  const klass = kind === "primary" ? "btn" : `btn btn--${kind}`;
+  return html`
+    <button class=${klass} type="button" onClick=${onClick}>
+      ${state === "ok"
+        ? "Copied"
+        : state === "fail"
+          ? "Copy failed — select manually"
+          : (label ?? "Copy")}
+    </button>
+  `;
+};
 
 export const Field = ({ label, hint, children }) => html`
   <label class="field">

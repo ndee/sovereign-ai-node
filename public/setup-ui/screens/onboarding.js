@@ -3,7 +3,7 @@ import htm from "../vendor/htm.module.js";
 import { useEffect, useState } from "../vendor/preact-hooks.module.js";
 
 import { apiGet, apiPost } from "../api.js";
-import { ErrorBanner } from "../forms.js";
+import { CopyButton, ErrorBanner } from "../forms.js";
 
 const html = htm.bind(h);
 
@@ -13,14 +13,6 @@ const isOutstanding = (state) => {
   if (Date.parse(state.expiresAt) <= Date.now()) return false;
   if (state.failedAttempts >= state.maxAttempts) return false;
   return true;
-};
-
-const copy = async (value) => {
-  try {
-    await navigator.clipboard.writeText(value);
-  } catch {
-    // Clipboard API unavailable; the value is still selectable in the UI.
-  }
 };
 
 const ConfirmDialog = ({ onCancel, onConfirm, busy }) => html`
@@ -158,20 +150,8 @@ export const Onboarding = () => {
               <p class="muted">Hand this code and link to the operator. Expires ${issued.expiresAt}.</p>
               <code class="code-block code-block--lg">${issued.code}</code>
               <div class="btn-row">
-                <button
-                  class="btn btn--secondary"
-                  type="button"
-                  onClick=${() => copy(issued.code)}
-                >
-                  Copy code
-                </button>
-                <button
-                  class="btn btn--secondary"
-                  type="button"
-                  onClick=${() => copy(issued.onboardingLink)}
-                >
-                  Copy link
-                </button>
+                <${CopyButton} value=${issued.code} label="Copy code" />
+                <${CopyButton} value=${issued.onboardingLink} label="Copy link" />
                 <a class="btn btn--secondary" href=${issued.onboardingLink} target="_blank" rel="noreferrer">
                   Open link
                 </a>

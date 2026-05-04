@@ -168,7 +168,11 @@ export const Wizard = ({ route, onModeChange }) => {
         onSucceeded=${onSucceeded}
       />`;
     case "done":
-      return html`<${SuccessStep} result=${installResult} onManageNode=${onManageNode} />`;
+      return html`<${SuccessStep}
+        result=${installResult}
+        wizardState=${state}
+        onManageNode=${onManageNode}
+      />`;
     default:
       return null;
   }
