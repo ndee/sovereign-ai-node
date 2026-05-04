@@ -80,8 +80,19 @@ export const Wizard = ({ route, onModeChange }) => {
         } else {
           goto("progress");
         }
-      } catch {
-        // ignore — operator can retry from the wizard
+      } catch (err) {
+        if (cancelled) return;
+        // The persisted jobId may point at a job that no longer exists
+        // server-side (e.g. after a state wipe). Treat it as "no job to
+        // resume" and start fresh, instead of leaving the operator
+        // staring at a "Install job not found" error forever.
+        const code = err?.detail?.code ?? err?.code;
+        if (code === "INSTALL_JOB_NOT_FOUND") {
+          update({ jobId: null });
+        }
+        // Other failures (network blip, auth expired) — leave the jobId
+        // in place so a refresh can retry. The operator can also walk
+        // back to Welcome from the URL bar.
       }
     })();
     return () => {

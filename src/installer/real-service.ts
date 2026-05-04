@@ -997,7 +997,12 @@ export class RealInstallerService implements InstallerService {
   async getInstallJob(jobId: string): Promise<InstallJobStatusResponse> {
     const record = await this.readJobRecord(jobId);
     if (record === null) {
-      throw new Error(`Install job not found: ${jobId}`);
+      throw {
+        code: "INSTALL_JOB_NOT_FOUND",
+        message: `Install job not found: ${jobId}`,
+        retryable: false,
+        details: { jobId },
+      };
     }
 
     return record.response;

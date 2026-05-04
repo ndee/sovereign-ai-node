@@ -172,6 +172,23 @@ export const ProgressStep = ({
         }
       } catch (err) {
         if (cancelled) return;
+        // The job we're polling may have been wiped server-side (state
+        // reset, log rotation, etc.). Clear the stale jobId so the wizard
+        // doesn't loop on it and the operator can hit "Try again" or go
+        // back to review.
+        const code = err?.detail?.code ?? err?.code;
+        if (code === "INSTALL_JOB_NOT_FOUND") {
+          onUpdateWizard({ jobId: null });
+          setTerminalResult(null);
+          setError({
+            detail: {
+              code: "INSTALL_JOB_NOT_FOUND",
+              message:
+                "This install job no longer exists on the node (likely because the node state was reset). Go back to Review and start a new install.",
+            },
+          });
+          return;
+        }
         setError(err);
         return;
       }

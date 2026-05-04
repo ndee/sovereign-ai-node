@@ -2111,6 +2111,15 @@ describe("RealInstallerService", () => {
       expect(stored.job.jobId).toBe(started.job.jobId);
       expect(stored.job.state).toBe("failed");
 
+      // An unknown / stale jobId must throw a typed INSTALL_JOB_NOT_FOUND
+      // error so the wizard can clear the localStorage jobId on rehydrate
+      // instead of looping on a generic API error.
+      await expect(service.getInstallJob("job_does-not-exist")).rejects.toMatchObject({
+        code: "INSTALL_JOB_NOT_FOUND",
+        retryable: false,
+        details: { jobId: "job_does-not-exist" },
+      });
+
       const files = await readdir(paths.installJobsDir);
       expect(files.some((name) => name.includes(started.job.jobId))).toBe(true);
       expect(preflightCalls).toBe(1);
