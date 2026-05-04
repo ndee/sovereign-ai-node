@@ -8,6 +8,12 @@ Type=simple
 User=__SERVICE_USER__
 Group=__SERVICE_GROUP__
 EnvironmentFile=-__ENV_FILE__
+# Include /var/lib/sovereign-node/.npm-global/bin so the API service can
+# resolve openclaw and lobster CLIs after the install step has put them
+# there. Without this, the systemd default minimal PATH wins, the
+# verification step that runs `openclaw --version` fails, and install
+# fails at openclaw_bootstrap_cli with OPENCLAW_INSTALL_FAILED.
+Environment=PATH=/var/lib/sovereign-node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/snap/bin
 WorkingDirectory=__APP_DIR__
 ExecStart=/usr/local/bin/sovereign-node-api
 Restart=on-failure
