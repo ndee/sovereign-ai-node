@@ -1,8 +1,8 @@
 import { h } from "../../vendor/preact.module.js";
 import htm from "../../vendor/htm.module.js";
-import { useState } from "../../vendor/preact-hooks.module.js";
+import { useEffect, useState } from "../../vendor/preact-hooks.module.js";
 
-import { apiPost } from "../../api.js";
+import { apiGet, apiPost } from "../../api.js";
 import { CheckList } from "../../components/CheckList.js";
 import { WizardShell } from "../../components/WizardShell.js";
 import { Checkbox, ErrorBanner, Field, TextInput } from "../../forms.js";
@@ -30,11 +30,31 @@ const DEPLOY_MODES = [
   },
 ];
 
-const PRESETS = {
-  // Public defaults are intentionally empty — the operator owns the real domain.
-  public: { homeserverDomain: "", publicBaseUrl: "" },
-  lan: { homeserverDomain: "matrix.lan.local", publicBaseUrl: "https://matrix.lan.local" },
-  dev: { homeserverDomain: "matrix.local.test", publicBaseUrl: "http://127.0.0.1:8008" },
+// Fallback LAN publicBaseUrl when host-info hasn't loaded yet (or returned no
+// IPs). The Caddy IP-cert covers any IP the operator types in later, and the
+// homeserver domain still drives MXIDs/server name; this hostname URL just
+// fails to load in the browser until DNS/CA are set up. The fetch in
+// useEffect normally replaces this before the operator gets here.
+const LAN_FALLBACK_PUBLIC_BASE_URL = "https://matrix.lan.local";
+
+const buildPresets = (lanIPv4) => {
+  const lanIp = Array.isArray(lanIPv4) && lanIPv4.length > 0 ? lanIPv4[0] : null;
+  const lanPublicBaseUrl = lanIp ? `https://${lanIp}/` : LAN_FALLBACK_PUBLIC_BASE_URL;
+  return {
+    // Public defaults are intentionally empty — the operator owns the real domain.
+    public: { homeserverDomain: "", publicBaseUrl: "" },
+    lan: { homeserverDomain: "matrix.lan.local", publicBaseUrl: lanPublicBaseUrl },
+    dev: { homeserverDomain: "matrix.local.test", publicBaseUrl: "http://127.0.0.1:8008" },
+  };
+};
+
+// Recognize all historical LAN preset URLs so we don't refuse to overwrite a
+// stale persisted value when host-info finally arrives. Includes the
+// hostname-based default and any IP-based URL.
+const isKnownLanPublicBaseUrl = (value) => {
+  if (typeof value !== "string") return false;
+  if (value === LAN_FALLBACK_PUBLIC_BASE_URL) return true;
+  return /^https:\/\/\d{1,3}(\.\d{1,3}){3}\/?$/.test(value);
 };
 
 const ModeCard = ({ mode, active, onSelect }) => html`
@@ -83,22 +103,58 @@ export const MatrixStep = ({ wizardState, onUpdateSection, onBack, onNext, secre
   const [busy, setBusy] = useState(false);
   const [testResult, setTestResult] = useState(null);
   const [error, setError] = useState(null);
+  const [lanIPv4, setLanIPv4] = useState(null);
 
   const activeModeId = m.deployMode ?? "public";
+  const presets = buildPresets(lanIPv4);
+
+  // Fetch the host's LAN IPs once on mount so the Local LAN preset can default
+  // publicBaseUrl to https://<IP>/ — the Caddy local-CA cert covers IPs.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await apiGet("/api/setup-ui/host-info");
+        if (cancelled) return;
+        setLanIPv4(Array.isArray(result?.lanIPv4) ? result.lanIPv4 : []);
+      } catch {
+        if (cancelled) return;
+        setLanIPv4([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Once host-info arrives, refresh a stale persisted LAN publicBaseUrl
+  // (e.g. matrix.lan.local from an earlier session) to the IP-based default.
+  useEffect(() => {
+    if (lanIPv4 === null) return;
+    if (activeModeId !== "lan") return;
+    const preset = buildPresets(lanIPv4).lan;
+    if (m.publicBaseUrl === preset.publicBaseUrl) return;
+    if (!isKnownLanPublicBaseUrl(m.publicBaseUrl)) return;
+    onUpdateSection("matrix", { publicBaseUrl: preset.publicBaseUrl });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lanIPv4, activeModeId]);
 
   const onSelectMode = (mode) => {
-    const preset = PRESETS[mode.id] ?? {};
+    const preset = presets[mode.id] ?? {};
+    const allPresets = Object.values(presets);
     onUpdateSection("matrix", {
       deployMode: mode.id,
       tlsMode: mode.tlsMode,
       // Only prefill URL/domain when blank or matches a known preset, so we don't
       // clobber values the operator has typed.
       homeserverDomain:
-        m.homeserverDomain && !Object.values(PRESETS).some((p) => p.homeserverDomain === m.homeserverDomain)
+        m.homeserverDomain && !allPresets.some((p) => p.homeserverDomain === m.homeserverDomain)
           ? m.homeserverDomain
           : preset.homeserverDomain,
       publicBaseUrl:
-        m.publicBaseUrl && !Object.values(PRESETS).some((p) => p.publicBaseUrl === m.publicBaseUrl)
+        m.publicBaseUrl &&
+        !allPresets.some((p) => p.publicBaseUrl === m.publicBaseUrl) &&
+        !(mode.id === "lan" && isKnownLanPublicBaseUrl(m.publicBaseUrl))
           ? m.publicBaseUrl
           : preset.publicBaseUrl,
     });

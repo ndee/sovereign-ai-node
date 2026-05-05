@@ -5,6 +5,10 @@ import { fileURLToPath } from "node:url";
 import fastifyStatic from "@fastify/static";
 import type { FastifyInstance } from "fastify";
 
+import { setupUiHostInfoResultSchema } from "../../contracts/api.js";
+import { detectLanIPv4 } from "../../system/lan-ips.js";
+import { sendApiError, sendApiSuccess } from "../response.js";
+
 const SETUP_UI_PREFIX = "/setup-ui/";
 
 // Resolve the on-disk root for the setup UI. In dev (`tsx`), this file lives at
@@ -44,4 +48,13 @@ export const registerSetupUiRoutes = async (server: FastifyInstance): Promise<vo
   });
 
   server.get("/", (_request, reply) => reply.redirect(SETUP_UI_PREFIX, 302));
+
+  server.get("/api/setup-ui/host-info", async (_request, reply) => {
+    try {
+      const result = { lanIPv4: detectLanIPv4() };
+      return sendApiSuccess(reply, result, setupUiHostInfoResultSchema);
+    } catch (error) {
+      return sendApiError(reply, 500, error);
+    }
+  });
 };

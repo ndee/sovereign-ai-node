@@ -75,6 +75,14 @@ export const onboardingIssueRequestSchema = z
   })
   .strict();
 
+// Result for GET /api/setup-ui/host-info — surfaces the host's RFC1918
+// IPv4 addresses so the first-run wizard can prefill an IP-based
+// publicBaseUrl in Local LAN mode (where the Caddy cert covers the IP
+// directly and no DNS is required).
+export const setupUiHostInfoResultSchema = z.object({
+  lanIPv4: z.array(z.string().min(1)),
+});
+
 export const preflightApiSuccessSchema = baseSuccessEnvelopeSchema(preflightResultSchema);
 export const testImapApiSuccessSchema = baseSuccessEnvelopeSchema(testImapResultSchema);
 export const testMatrixApiSuccessSchema = baseSuccessEnvelopeSchema(testMatrixResultSchema);
@@ -84,6 +92,9 @@ export const testAlertApiSuccessSchema = baseSuccessEnvelopeSchema(testAlertResu
 export const statusApiSuccessSchema = baseSuccessEnvelopeSchema(sovereignStatusSchema);
 export const doctorApiSuccessSchema = baseSuccessEnvelopeSchema(doctorReportSchema);
 export const reconfigureApiSuccessSchema = baseSuccessEnvelopeSchema(reconfigureResultSchema);
+export const setupUiHostInfoApiSuccessSchema = baseSuccessEnvelopeSchema(
+  setupUiHostInfoResultSchema,
+);
 
 export const apiErrorSchema = baseErrorEnvelopeSchema;
 
@@ -95,3 +106,4 @@ export type ReconfigureImapRequest = z.infer<typeof reconfigureImapRequestSchema
 export type ReconfigureMatrixRequest = z.infer<typeof reconfigureMatrixRequestSchema>;
 export type ReconfigureOpenrouterRequest = z.infer<typeof reconfigureOpenrouterRequestSchema>;
 export type OnboardingIssueRequest = z.infer<typeof onboardingIssueRequestSchema>;
+export type SetupUiHostInfoResult = z.infer<typeof setupUiHostInfoResultSchema>;

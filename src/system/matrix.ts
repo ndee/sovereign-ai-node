@@ -8,8 +8,8 @@ import type { CheckResult } from "../contracts/common.js";
 import type { InstallRequest, TestMatrixResult } from "../contracts/index.js";
 import type { Logger } from "../logging/logger.js";
 import type { ExecResult, ExecRunner } from "./exec.js";
-import type { MatrixAvatarResolver } from "./matrix-avatars.js";
 import { detectLanIPv4 } from "./lan-ips.js";
+import type { MatrixAvatarResolver } from "./matrix-avatars.js";
 import {
   buildOnboardingPageUrl,
   normalizeEmbeddedSvg,
@@ -303,9 +303,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       // the hostname and each IP listed in the site directive.
       const lanIPv4 =
         onboardingMode === "internal"
-          ? this.lanIpProvider().filter(
-              (ip) => ip !== new URL(publicBaseUrl).hostname,
-            )
+          ? this.lanIpProvider().filter((ip) => ip !== new URL(publicBaseUrl).hostname)
           : [];
       writes.push(
         writeFile(

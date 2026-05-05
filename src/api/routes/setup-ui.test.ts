@@ -101,4 +101,21 @@ describe("setup-ui routes", () => {
       await server.close();
     }
   });
+
+  it("returns the host's LAN IPv4 addresses at /api/setup-ui/host-info", async () => {
+    const server = await buildTestApp();
+    try {
+      const response = await server.inject({ method: "GET", url: "/api/setup-ui/host-info" });
+      expect(response.statusCode).toBe(200);
+      const body = response.json() as { ok: boolean; result: { lanIPv4: string[] } };
+      expect(body.ok).toBe(true);
+      expect(Array.isArray(body.result.lanIPv4)).toBe(true);
+      for (const ip of body.result.lanIPv4) {
+        expect(typeof ip).toBe("string");
+        expect(ip.length).toBeGreaterThan(0);
+      }
+    } finally {
+      await server.close();
+    }
+  });
 });

@@ -1,10 +1,6 @@
 import { networkInterfaces } from "node:os";
 
-const PRIVATE_RANGES = [
-  /^10\./,
-  /^192\.168\./,
-  /^172\.(1[6-9]|2\d|3[01])\./,
-];
+const PRIVATE_RANGES = [/^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./];
 
 /**
  * Returns all IPv4 addresses on non-loopback, non-internal network
