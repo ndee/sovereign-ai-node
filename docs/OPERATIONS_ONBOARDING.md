@@ -135,13 +135,7 @@ The default bundled install still needs a few real inputs:
 
 ### Primary Command (Current Contract)
 
-The main operator command should be:
-
-```bash
-sovereign-node install
-```
-
-This command can run directly with a prepared request file, but the default operator flow is the guided bootstrap script.
+The supported operator install path is the guided bootstrap script:
 
 For most operators, use:
 
@@ -149,16 +143,18 @@ For most operators, use:
 curl -fsSL <sovereign-node-installer-url> | sudo bash
 ```
 
+`sovereign-node install` currently remains an internal scaffold/developer entrypoint. In normal operator flows it exits with a message directing the user back to `scripts/install.sh` unless `SOVEREIGN_INTERNAL_INSTALL=1` is set.
+
 Notes:
 
 - the installer script now starts with an explicit `Install / Update / Exit` action menu in interactive mode
 - `Update` reuses existing settings and request file, fetches the selected installer ref/URL before rerunning in update mode, defaults to the latest GitHub release tag when no explicit ref/URL override is supplied (falling back to `main` if that lookup fails), and the CLI entrypoint must run as root (`sudo sovereign-node update`) while still requiring `sovereign-node migrate` first when pending migrations exist
 - for legacy single-instance Mail Sentinel installs, `sovereign-node migrate` now carries the active top-level IMAP settings and IMAP secret ref into the installer-managed `mail-sentinel` instance so update can continue without re-entering mailbox credentials
 - `Install` on an existing system behaves as reconfigure with prefilled defaults
-- `sovereign-node install` owns OpenClaw installation in the default path.
+- `scripts/install.sh` owns OpenClaw installation in the default path.
 - Operators should not run `openclaw onboard` in the default Sovereign flow.
 
-### What `sovereign-node install` Must Do
+### What the guided install flow must do
 
 In the default bundled mode, the installer should perform these steps in order:
 
@@ -213,14 +209,12 @@ openclaw gateway install
 
 Use `openclaw gateway install --force` when the installer needs to rewrite an existing service entry.
 
-### CLI Commands for Ongoing Operations (Target Contract)
+### CLI Commands for Ongoing Operations
 
-Recommended operator command set:
+Current operator-facing commands:
 
 - `sovereign-node status`
 - `sovereign-node doctor`
-- `sovereign-node logs`
-- `sovereign-node test-alert`
 - `sudo sovereign-node update`
 - `sovereign-node migrate`
 - `sovereign-node mail-sentinels list`
@@ -228,9 +222,16 @@ Recommended operator command set:
 - `sovereign-node mail-sentinels create <id> ...`
 - `sovereign-node mail-sentinels update <id> ...`
 - `sovereign-node mail-sentinels delete <id>`
-- `sovereign-node reconfigure imap`
 - `sovereign-node reconfigure matrix`
 - `sovereign-node reconfigure openrouter`
+
+Scaffold / not-yet-production operator surfaces:
+
+- `sovereign-node logs`
+- `sovereign-node test-alert`
+- `sovereign-node reconfigure imap`
+
+These commands exist today, but they still use scaffold behavior rather than full production-backed implementations.
 
 Operational note for legacy/default Mail Sentinel installs:
 
