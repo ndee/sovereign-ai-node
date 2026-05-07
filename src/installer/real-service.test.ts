@@ -542,6 +542,7 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
         version: "1.0.0",
       },
     ],
+    agentTemplateModel: "qwen/qwen3.5-27b",
   });
 };
 
@@ -9712,6 +9713,7 @@ describe("RealInstallerService", () => {
 
     let gatewayRestartCalls = 0;
     const fetchCalls: string[] = [];
+    const openclawCommands: string[] = [];
     const service = new RealInstallerService(createLogger(), paths, {
       openclawBootstrapper: {
         detectInstalled: async () => ({
@@ -9774,6 +9776,26 @@ describe("RealInstallerService", () => {
           checks: [],
         }),
       },
+      execRunner: {
+        run: async (input): Promise<ExecResult> => {
+          const serialized = [input.command, ...(input.args ?? [])].join(" ");
+          openclawCommands.push(serialized);
+          if (serialized.startsWith("openclaw ")) {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+          return {
+            command: serialized,
+            exitCode: 1,
+            stdout: "",
+            stderr: "unexpected command",
+          };
+        },
+      },
       fetchImpl: async (url, init) => {
         fetchCalls.push(url);
         if (url.includes("/_synapse/admin/v2/users/")) {
@@ -9797,6 +9819,20 @@ describe("RealInstallerService", () => {
             }),
             {
               status: 200,
+              headers: { "Content-Type": "application/json" },
+            },
+          );
+        }
+        if (url.endsWith("/_matrix/client/v3/account/whoami")) {
+          const authorization = new Headers(init?.headers).get("Authorization") ?? "";
+          const token = authorization.replace(/^Bearer\s+/u, "");
+          const isFreshToken = token.endsWith("-token");
+          return new Response(
+            JSON.stringify({
+              user_id: `@${token.replace(/-token$/, "")}:matrix.example.org`,
+            }),
+            {
+              status: isFreshToken ? 200 : 401,
               headers: { "Content-Type": "application/json" },
             },
           );
@@ -9835,6 +9871,12 @@ describe("RealInstallerService", () => {
       expect(instantiated.agent.workspace).toBe(join(paths.stateDir, "node-operator", "workspace"));
       expect(instantiated.agent.matrixUserId).toBe("@node-operator:matrix.example.org");
       expect(instantiated.agent.toolInstanceIds).toEqual(["node-operator-cli"]);
+      expect(instantiated.agent.model).toBe("qwen/qwen3.5-27b");
+      expect(
+        openclawCommands.some((command) =>
+          command.startsWith("openclaw approvals allowlist add --agent node-operator "),
+        ),
+      ).toBe(true);
       expect(
         (await stat(join(paths.stateDir, "node-operator", "workspace", ".openclaw"))).isDirectory(),
       ).toBe(true);
@@ -9859,7 +9901,7 @@ describe("RealInstallerService", () => {
           installed?: Array<{ id?: string; source?: string }>;
         };
         openclawProfile?: {
-          agents?: Array<{ id?: string; botId?: string }>;
+          agents?: Array<{ id?: string; botId?: string; model?: string }>;
         };
         sovereignTools?: {
           instances?: Array<{ id?: string; templateRef?: string }>;
@@ -9875,6 +9917,9 @@ describe("RealInstallerService", () => {
           (entry) => entry.id === "node-operator" && entry.botId === "node-operator",
         ),
       ).toBe(true);
+      expect(
+        config.openclawProfile?.agents?.find((entry) => entry.id === "node-operator")?.model,
+      ).toBe("qwen/qwen3.5-27b");
       expect(config.sovereignTools?.instances).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -9895,6 +9940,9 @@ describe("RealInstallerService", () => {
       expect(fetchCalls.some((url) => url.endsWith("/_matrix/client/v3/login"))).toBe(true);
       expect(fetchCalls.some((url) => url.endsWith("/invite"))).toBe(true);
       expect(fetchCalls.some((url) => url.endsWith("/join"))).toBe(true);
+      expect(fetchCalls.some((url) => url.endsWith("/_matrix/client/v3/account/whoami"))).toBe(
+        true,
+      );
     } finally {
       if (priorOpenrouterApiKey === undefined) {
         delete process.env.OPENROUTER_API_KEY;
