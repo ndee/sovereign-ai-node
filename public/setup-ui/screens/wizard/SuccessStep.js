@@ -24,6 +24,31 @@ const inferOperatorUserId = (wizardState) => {
   return `@${localpart}:${domain}`;
 };
 
+// Build https://app.element.io/#/login?hs_url=...&login_hint=... — a hosted
+// Element Web client prefilled with the operator's homeserver and username.
+// Mirrors buildElementWebLoginLink() in src/system/matrix-onboarding-page.ts.
+const buildElementWebLoginLink = (publicBaseUrl, operatorUserId) => {
+  if (!publicBaseUrl) return null;
+  const params = `hs_url=${encodeURIComponent(publicBaseUrl)}`;
+  const hint =
+    operatorUserId && operatorUserId !== "(operator)"
+      ? `&login_hint=${encodeURIComponent(operatorUserId)}`
+      : "";
+  return `https://app.element.io/#/login?${params}${hint}`;
+};
+
+// Pull just the host (hostname or IP, no port) out of a URL string. Used to
+// substitute the actual LAN IP into preconditions copy where we previously
+// printed the literal placeholder "<node-LAN-IP>". Returns null on parse
+// failure so callers can fall back gracefully.
+const hostnameFromUrl = (url) => {
+  try {
+    return new URL(url).hostname || null;
+  } catch {
+    return null;
+  }
+};
+
 // Project slug used by docker-compose for the bundled-Matrix stack.
 // Mirrors slugifyProjectName() in src/system/matrix.ts.
 const slugifyProjectName = (domain) =>
@@ -37,17 +62,23 @@ const HandoffBlock = ({ result, wizardState }) => {
     fromResult?.operatorUsername ?? inferOperatorUserId(wizardState) ?? "(operator)";
   const roomName = fromResult?.roomName ?? wizardState?.matrix?.alertRoomName ?? "Sovereign Alerts";
   const deployMode = wizardState?.matrix?.deployMode ?? "public";
-  const homeserverReachable = deployMode === "public";
+  // Open Element makes sense whenever the homeserver is reachable from the
+  // operator's current device. Public has DNS + a real cert; Local LAN has
+  // a Caddy IP-cert that the operator's browser already trusts (or will,
+  // per the preconditions card below). Local dev binds 127.0.0.1 only, so
+  // there's nothing for app.element.io to talk to.
+  const showOpenElement = deployMode === "public" || deployMode === "lan";
   const tunnelOnly = deployMode === "dev";
+  const elementWebUrl = showOpenElement ? buildElementWebLoginLink(homeserverUrl, operatorUserId) : null;
 
   return html`
     ${homeserverUrl
       ? html`
-          ${homeserverReachable
+          ${elementWebUrl
             ? html`
                 <a
                   class="btn btn--xl"
-                  href=${homeserverUrl}
+                  href=${elementWebUrl}
                   target="_blank"
                   rel="noreferrer noopener"
                 >
@@ -71,7 +102,7 @@ const HandoffBlock = ({ result, wizardState }) => {
             <strong>Local dev mode.</strong> The homeserver is bound to
             <code>http://127.0.0.1:8008</code> on the node host and isn't reachable from
             another machine. To connect from your laptop, open an SSH tunnel:
-            <code class="code-block">ssh -L 8008:127.0.0.1:8008 &lt;node-host&gt;</code>
+            <code class="code-block">${"ssh -L 8008:127.0.0.1:8008 <node-host>"}</code>
             Then open <code>http://127.0.0.1:8008</code> in your browser.
           </div>
         `
@@ -89,41 +120,49 @@ const HandoffBlock = ({ result, wizardState }) => {
 const LanPreconditionsCard = ({ wizardState }) => {
   if (wizardState?.matrix?.deployMode !== "lan") return null;
   const domain = wizardState?.matrix?.homeserverDomain ?? "matrix.lan.local";
+  const publicBaseUrl = wizardState?.matrix?.publicBaseUrl ?? "";
+  const host = hostnameFromUrl(publicBaseUrl) ?? "<node-LAN-IP>";
+  const baseHttps = `https://${host}`;
+  const caUrl = `${baseHttps}/downloads/caddy-root-ca.crt`;
 
   return html`
     <div class="card">
       <h3>Before this homeserver works on your LAN</h3>
       <p class="muted">
         You picked <strong>Local LAN</strong>. The reverse proxy is up and Caddy issued a TLS
-        cert that includes this node's LAN IP, so you can reach it at
-        <code>https://&lt;node-LAN-IP&gt;/</code> from any device on your network — once that
-        device trusts the Caddy CA.
+        cert that includes this node's LAN IP, so you can reach it at ${" "}
+        <code>${`${baseHttps}/`}</code> from any device on your network — once that device
+        trusts the Caddy CA.
       </p>
       <ol class="bullet-list">
         <li>
-          <strong>Trust the Caddy CA.</strong> The proxy serves the root cert at the path
-          below. Download it on each device:
-          <code class="code-block">curl -k https://&lt;node-LAN-IP&gt;/downloads/caddy-root-ca.crt -o caddy-root-ca.crt</code>
+          <strong>Trust the Caddy CA.</strong> The reverse proxy serves the root cert. Download
+          it on each device — either click ${" "}
+          <a href=${caUrl} target="_blank" rel="noreferrer noopener">this link</a> ${" "}
+          (you may have to dismiss a one-time browser warning, since the device doesn't trust
+          the CA yet), or run on the device:
+          <code class="code-block">${`curl -k ${caUrl} -o caddy-root-ca.crt`}</code>
           Then import:
           <span class="dim">
             macOS: open in Keychain → System → drag-drop, set "Always Trust".<br />
-            Linux: copy to <code>/usr/local/share/ca-certificates/</code> → run
+            Linux: copy to <code>/usr/local/share/ca-certificates/</code> → run ${" "}
             <code>sudo update-ca-certificates</code>.<br />
-            Windows: <code>certmgr.msc</code> → Trusted Root Certification Authorities → Import.<br />
+            Windows: <code>certmgr.msc</code> → Trusted Root Certification Authorities →
+            Import.<br />
             iOS/Android: AirDrop / share the file → Settings prompts for cert install + trust.
           </span>
         </li>
         <li>
           <strong>Port 443.</strong> The reverse proxy listens on <code>:443</code>. Verify
-          with
-          <code class="code-block">curl -k https://&lt;node-LAN-IP&gt;/</code>
-          from another device. Adjust LAN/host firewall if blocked.
+          from another device with
+          <code class="code-block">${`curl -k ${baseHttps}/`}</code>
+          and adjust LAN or host firewall rules if blocked.
         </li>
         <li>
-          <strong>Optional — DNS.</strong> If you want clients to use the friendlier name
-          <code>${domain}</code> instead of the IP, add a router DNS rewrite or per-device
+          <strong>Optional — DNS.</strong> If you'd rather use the friendly name ${" "}
+          <code>${domain}</code> instead of the IP, add a router DNS rewrite or a per-device
           <code>/etc/hosts</code> entry:
-          <code class="code-block">&lt;node-LAN-IP&gt; ${domain}</code>
+          <code class="code-block">${`${host} ${domain}`}</code>
           <span class="dim">
             Not required — the cert is valid for the IP, so the IP works on its own. Note that
             <code>.local</code> is mDNS-reserved on macOS/iOS and plain DNS overrides for it
