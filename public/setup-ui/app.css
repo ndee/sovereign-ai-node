@@ -642,6 +642,29 @@ code {
   font-family: var(--headline-font);
 }
 
+.review-section__title {
+  margin: 24px 0 8px;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+.review-section__title:first-of-type {
+  margin-top: 0;
+}
+
+.precondition__title {
+  margin: 20px 0 6px;
+  font-size: 1rem;
+  font-family: var(--headline-font);
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text);
+}
+.precondition__title:first-of-type {
+  margin-top: 8px;
+}
+
 .phase-steps li {
   font-weight: 500;
   font-size: 0.95rem;

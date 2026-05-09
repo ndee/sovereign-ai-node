@@ -52,7 +52,7 @@ export const Login = ({ stage, username, onAuthenticated }) => {
     >
       <div class="card" style="max-width: 460px; width: 100%;">
         <h1 style="font-size: 1.75rem; margin-bottom: 0.5em;">Sovereign AI Node</h1>
-        <p class="muted" style="margin-bottom: 24px;">Setup & admin sign-in</p>
+        <p class="muted" style="margin-bottom: 24px;">Open-core setup access</p>
         <${ErrorBanner} error=${error} />
         ${showTokenRecovery
           ? html`
@@ -67,10 +67,8 @@ export const Login = ({ stage, username, onAuthenticated }) => {
           ${stage === "needs-bootstrap"
             ? html`
                 <p class="muted" style="font-size: 0.92rem;">
-                  No operator credential is configured yet. Enter the bootstrap token printed
-                  during install (or run
-                  <code>sudo sovereign-node setup-ui issue-bootstrap-token</code> to get a new
-                  one).
+                  Use the bootstrap token created during install to unlock local setup and
+                  admin access.
                 </p>
                 <label class="field">
                   <span class="field__label">Bootstrap token</span>
@@ -84,6 +82,10 @@ export const Login = ({ stage, username, onAuthenticated }) => {
                     disabled=${busy}
                   />
                 </label>
+                <p class="dim" style="font-size: 0.85rem; margin-top: 8px;">
+                  No valid token? Issue a new one on the node host:
+                  <code>sudo sovereign-node setup-ui issue-bootstrap-token</code>
+                </p>
               `
             : html`
                 <p class="muted" style="font-size: 0.92rem;">
@@ -105,7 +107,7 @@ export const Login = ({ stage, username, onAuthenticated }) => {
               `}
           <div class="btn-row">
             <button class="btn" type="submit" disabled=${busy}>
-              ${busy ? "Signing in…" : "Sign in"}
+              ${busy ? "Signing in…" : "Continue"}
             </button>
           </div>
         </form>

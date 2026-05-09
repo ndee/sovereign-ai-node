@@ -52,7 +52,7 @@ export const MailboxStep = ({ wizardState, onUpdateSection, onBack, onNext, secr
     <${WizardShell}
       stepIndex=${3}
       title="Mailbox connection"
-      subtitle="Mail Sentinel watches a mailbox over IMAP and triages incoming mail in Matrix."
+      subtitle="Mail Sentinel watches one mailbox over IMAP and surfaces important incoming signals in Matrix."
       onBack=${onBack}
       onNext=${onNext}
       nextDisabled=${!canContinue || busy}
@@ -64,7 +64,7 @@ export const MailboxStep = ({ wizardState, onUpdateSection, onBack, onNext, secr
           ? html`
               <div class="alert alert--${testResult.ok ? "success" : "error"}">
                 ${testResult.ok
-                  ? `Mailbox auth ok on ${testResult.host}:${testResult.port} (${
+                  ? `Mailbox connection looks good — ${testResult.host}:${testResult.port} (${
                       testResult.tls ? "TLS" : "plain"
                     }).`
                   : "Mailbox connection failed. Re-check host, port, TLS, and credentials."}
@@ -109,7 +109,7 @@ export const MailboxStep = ({ wizardState, onUpdateSection, onBack, onNext, secr
       <//>
       <${Field}
         label="Password"
-        hint="App password recommended. Stored only in the node's managed secret store, never in your browser."
+        hint="An app password is recommended. It is sent to your node during setup and written to the node's managed secret store."
       >
         <${TextInput}
           value=${secrets.imapPassword}
@@ -117,7 +117,10 @@ export const MailboxStep = ({ wizardState, onUpdateSection, onBack, onNext, secr
           type="password"
         />
       <//>
-      <${Field} label="Folder">
+      <${Field}
+        label="Folder"
+        hint="Defaults to INBOX. Change only if you want Mail Sentinel to watch a different folder."
+      >
         <${TextInput}
           value=${i.mailbox}
           onInput=${(value) => onUpdateSection("imap", { mailbox: value })}

@@ -168,24 +168,48 @@ const DEPLOY_MODE_LABEL = {
   dev: "Local dev (no TLS, this machine only)",
 };
 
+// Build the Review step summary, grouped into sections so the operator can
+// scan one area at a time. Secrets stay out of this list — they're handled
+// separately by the Review step's secrets-ok banner.
 export const summarizeRequest = (state) => [
   {
-    label: "Matrix deployment",
-    value: DEPLOY_MODE_LABEL[state.matrix.deployMode ?? "public"] ?? "Public site",
+    title: "Matrix",
+    rows: [
+      {
+        label: "Deployment mode",
+        value: DEPLOY_MODE_LABEL[state.matrix.deployMode ?? "public"] ?? "Public site",
+      },
+      { label: "Matrix URL", value: state.matrix.publicBaseUrl || "—" },
+      { label: "Homeserver domain", value: state.matrix.homeserverDomain || "—" },
+      {
+        label: "Federation",
+        value: state.matrix.federationEnabled ? "enabled" : "disabled (recommended)",
+      },
+      { label: "Alert room", value: state.matrix.alertRoomName || "Sovereign Alerts" },
+      { label: "Operator", value: state.operator.username || "—" },
+    ],
   },
-  { label: "Matrix homeserver domain", value: state.matrix.homeserverDomain || "—" },
-  { label: "Matrix public base URL", value: state.matrix.publicBaseUrl || "—" },
   {
-    label: "Federation",
-    value: state.matrix.federationEnabled ? "enabled" : "disabled (recommended)",
+    title: "Mailbox",
+    rows: [
+      { label: "Host", value: state.imap.host || "—" },
+      { label: "Port", value: String(state.imap.port ?? 993) },
+      { label: "TLS", value: state.imap.tls ? "on" : "off" },
+      { label: "Username", value: state.imap.username || "—" },
+      { label: "Folder", value: state.imap.mailbox || "INBOX" },
+    ],
   },
-  { label: "Alert room name", value: state.matrix.alertRoomName || "Sovereign Alerts" },
-  { label: "Operator username", value: state.operator.username || "—" },
-  { label: "Mailbox host", value: state.imap.host || "—" },
-  { label: "Mailbox port", value: String(state.imap.port ?? 993) },
-  { label: "Mailbox TLS", value: state.imap.tls ? "on" : "off" },
-  { label: "Mailbox username", value: state.imap.username || "—" },
-  { label: "Mailbox folder", value: state.imap.mailbox || "INBOX" },
-  { label: "LLM provider model", value: state.openrouter.model || "(default)" },
-  { label: "Modules", value: (state.bots.selected ?? []).join(", ") || "—" },
+  {
+    title: "Provider",
+    rows: [{ label: "Initial default model", value: state.openrouter.model || "(default)" }],
+  },
+  {
+    title: "Components",
+    rows: [
+      {
+        label: "Included",
+        value: (state.bots.selected ?? []).join(", ") || "—",
+      },
+    ],
+  },
 ];

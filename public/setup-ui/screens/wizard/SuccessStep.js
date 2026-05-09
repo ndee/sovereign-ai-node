@@ -55,6 +55,26 @@ const slugifyProjectName = (domain) =>
   (domain ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") ||
   "matrix";
 
+// Decide how to surface a failure of POST /api/onboarding/issue. Some errors
+// are *expected and temporary* on the Done page right after install — the
+// runtime config is still being written, so CONFIG_NOT_FOUND can flicker
+// briefly. Render those as neutral "still finalizing" info, not as red
+// failures contradicting the success heading. Truly fatal errors stay red.
+const classifyIssueError = (err) => {
+  if (!err) return null;
+  const code = err?.detail?.code ?? err?.code;
+  const message = err?.detail?.message ?? err?.message ?? "";
+  if (code === "CONFIG_NOT_FOUND" || /CONFIG_NOT_FOUND|runtime config/i.test(message)) {
+    return {
+      tone: "warn",
+      title: "Node finalizing",
+      body: "The runtime config is still being written. Click Issue onboarding code in a moment.",
+    };
+  }
+  // Anything else stays as a regular red ErrorBanner.
+  return null;
+};
+
 const HandoffBlock = ({ result, wizardState }) => {
   const fromResult = result?.nextSteps;
   const homeserverUrl = fromResult?.elementHomeserverUrl ?? wizardState?.matrix?.publicBaseUrl;
@@ -121,55 +141,59 @@ const LanPreconditionsCard = ({ wizardState }) => {
   if (wizardState?.matrix?.deployMode !== "lan") return null;
   const domain = wizardState?.matrix?.homeserverDomain ?? "matrix.lan.local";
   const publicBaseUrl = wizardState?.matrix?.publicBaseUrl ?? "";
-  const host = hostnameFromUrl(publicBaseUrl) ?? "<node-LAN-IP>";
+  const host = hostnameFromUrl(publicBaseUrl) ?? "your-LAN-IP";
   const baseHttps = `https://${host}`;
   const caUrl = `${baseHttps}/downloads/caddy-root-ca.crt`;
 
   return html`
     <div class="card">
-      <h3>Before this homeserver works on your LAN</h3>
+      <h3>Connecting devices to your LAN homeserver</h3>
       <p class="muted">
-        You picked <strong>Local LAN</strong>. The reverse proxy is up and Caddy issued a TLS
-        cert that includes this node's LAN IP, so you can reach it at ${" "}
-        <code>${`${baseHttps}/`}</code> from any device on your network — once that device
-        trusts the Caddy CA.
+        Caddy issued a local TLS cert for <code>${baseHttps}/</code>. Each device that
+        wants to reach Matrix needs to trust the local CA once.
       </p>
-      <ol class="bullet-list">
-        <li>
-          <strong>Trust the Caddy CA.</strong> The reverse proxy serves the root cert. Download
-          it on each device — either click ${" "}
-          <a href=${caUrl} target="_blank" rel="noreferrer noopener">this link</a> ${" "}
-          (you may have to dismiss a one-time browser warning, since the device doesn't trust
-          the CA yet), or run on the device:
-          <code class="code-block">${`curl -k ${caUrl} -o caddy-root-ca.crt`}</code>
-          Then import:
-          <span class="dim">
-            macOS: open in Keychain → System → drag-drop, set "Always Trust".<br />
-            Linux: copy to <code>/usr/local/share/ca-certificates/</code> → run ${" "}
-            <code>sudo update-ca-certificates</code>.<br />
-            Windows: <code>certmgr.msc</code> → Trusted Root Certification Authorities →
-            Import.<br />
-            iOS/Android: AirDrop / share the file → Settings prompts for cert install + trust.
-          </span>
-        </li>
-        <li>
-          <strong>Port 443.</strong> The reverse proxy listens on <code>:443</code>. Verify
-          from another device with
-          <code class="code-block">${`curl -k ${baseHttps}/`}</code>
-          and adjust LAN or host firewall rules if blocked.
-        </li>
-        <li>
-          <strong>Optional — DNS.</strong> If you'd rather use the friendly name ${" "}
-          <code>${domain}</code> instead of the IP, add a router DNS rewrite or a per-device
-          <code>/etc/hosts</code> entry:
-          <code class="code-block">${`${host} ${domain}`}</code>
-          <span class="dim">
-            Not required — the cert is valid for the IP, so the IP works on its own. Note that
-            <code>.local</code> is mDNS-reserved on macOS/iOS and plain DNS overrides for it
-            may be ignored there.
-          </span>
-        </li>
-      </ol>
+
+      <h4 class="precondition__title">1. Trust the local CA</h4>
+      <p class="muted">
+        Download the root cert on each device. The first time, your browser will warn that
+        the page isn't trusted yet — that's expected; accept the warning to download.
+      </p>
+      <p>
+        <a href=${caUrl} target="_blank" rel="noreferrer noopener">
+          Download caddy-root-ca.crt
+        </a>
+      </p>
+      <p class="muted">Or run on a headless device:</p>
+      <code class="code-block">${`curl -k ${caUrl} -o caddy-root-ca.crt`}</code>
+      <p class="dim" style="margin-top: 8px;">
+        macOS: open in Keychain → System → drag-drop, set "Always Trust".<br />
+        Linux: copy to <code>/usr/local/share/ca-certificates/</code> → run ${" "}
+        <code>sudo update-ca-certificates</code>.<br />
+        Windows: <code>certmgr.msc</code> → Trusted Root Certification Authorities → Import.<br />
+        iOS/Android: AirDrop or share the file → Settings prompts to install and trust it.
+      </p>
+
+      <h4 class="precondition__title">2. Verify port 443</h4>
+      <p class="muted">
+        From another device on the LAN, confirm the reverse proxy is reachable. Adjust
+        LAN or host firewall rules if blocked.
+      </p>
+      <code class="code-block">${`curl -k ${baseHttps}/`}</code>
+
+      <h4 class="precondition__title">3. Optional — friendly hostname</h4>
+      <p class="muted">
+        If you'd rather type a name than an IP, add a router DNS rewrite or a per-device
+        <code>/etc/hosts</code> entry. Not required — the IP works on its own.
+      </p>
+      <code class="code-block">${`${host} ${domain}`}</code>
+      ${domain.endsWith(".local")
+        ? html`
+            <p class="dim" style="margin-top: 8px;">
+              Heads up: <code>.local</code> is mDNS-reserved on macOS/iOS — plain DNS
+              overrides for it may be ignored on those devices.
+            </p>
+          `
+        : null}
     </div>
   `;
 };
@@ -217,17 +241,38 @@ export const SuccessStep = ({ result, wizardState, onManageNode }) => {
     }
   };
 
+  const deployMode = wizardState?.matrix?.deployMode ?? "public";
+  const benignIssue = classifyIssueError(issueError);
+  // Title and subtitle are mode-aware. We deliberately do NOT say "Your node
+  // is ready" while a fatal banner is in play — see classifyIssueError above.
+  const title =
+    deployMode === "dev"
+      ? "Local dev install completed"
+      : "Your node is installed";
+  const subtitle =
+    deployMode === "dev"
+      ? "Local dev mode — only this machine can reach Matrix directly. Daily operation moves to Matrix once you connect a client."
+      : "From here, daily operation moves to Matrix. This web UI stays available for setup changes and admin tasks.";
+
   return html`
     <${WizardShell}
       stepIndex=${8}
-      title="Your node is ready"
-      subtitle="From here, the rest of operations happens in Matrix."
+      title=${title}
+      subtitle=${subtitle}
       showBack=${false}
       showNext=${false}
     >
       <${HandoffBlock} result=${result} wizardState=${wizardState} />
 
-      ${issueError ? html`<${ErrorBanner} error=${issueError} />` : null}
+      ${issueError && benignIssue
+        ? html`
+            <div class="alert alert--warn">
+              <strong>${benignIssue.title}.</strong> ${benignIssue.body}
+            </div>
+          `
+        : issueError
+          ? html`<${ErrorBanner} error=${issueError} />`
+          : null}
       ${busy && issued === null
         ? html`<p class="muted">Issuing your one-time onboarding code…</p>`
         : null}
@@ -267,7 +312,7 @@ export const SuccessStep = ({ result, wizardState, onManageNode }) => {
 
       <div class="alert alert--info">
         Sign in to Element with the code, accept the invite to your alert room, and close this
-        tab when you're done. You can come back here later for credential changes.
+        tab when you're done. Setup changes and admin tasks remain here.
       </div>
 
       <p class="dim wizard-step__exit">

@@ -9,7 +9,7 @@ const DEFAULT_MODULES = [
   {
     id: "mail-sentinel",
     name: "Mail Sentinel",
-    summary: "Watches your mailbox and triages incoming mail in Matrix.",
+    summary: "Watches one mailbox and posts important signals in Matrix.",
   },
   {
     id: "node-operator",
@@ -21,8 +21,8 @@ const DEFAULT_MODULES = [
 export const ModulesStep = ({ onBack, onNext }) => html`
   <${WizardShell}
     stepIndex=${5}
-    title="Modules"
-    subtitle="The two core modules. Both are recommended and both run locally on your node."
+    title="Installed components"
+    subtitle="These components are included in the current open-core setup."
     onBack=${onBack}
     onNext=${onNext}
     nextLabel="Continue"
@@ -35,13 +35,14 @@ export const ModulesStep = ({ onBack, onNext }) => html`
               <h3 class="module-list__name">${mod.name}</h3>
               <p class="muted">${mod.summary}</p>
             </div>
-            <span class="badge badge--ok">on</span>
+            <span class="badge badge--ok">included</span>
           </li>
         `,
       )}
     </ul>
-    <div class="alert alert--info">
-      Customising the module list is coming later. For now both modules are installed by default.
-    </div>
+    <p class="dim" style="font-size: 0.85rem;">
+      Both run locally on your node. Choosing components à la carte is not part of the
+      open-core flow today.
+    </p>
   <//>
 `;

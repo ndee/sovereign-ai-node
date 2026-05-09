@@ -14,7 +14,7 @@ export const ProviderStep = ({ wizardState, onUpdateSection, onBack, onNext, sec
     <${WizardShell}
       stepIndex=${4}
       title="LLM provider"
-      subtitle="The agents reach an LLM through OpenRouter. You can change this later."
+      subtitle="Mail Sentinel currently uses OpenRouter as the supported LLM provider in open core."
       onBack=${onBack}
       onNext=${onNext}
       nextDisabled=${!canContinue}
@@ -22,7 +22,7 @@ export const ProviderStep = ({ wizardState, onUpdateSection, onBack, onNext, sec
     >
       <${Field}
         label="OpenRouter API key"
-        hint="Your key is written to the node's managed secret store, never to your browser. Required to start."
+        hint="Required. Sent to your node during setup and written to its managed secret store."
       >
         <${TextInput}
           value=${secrets.openrouterApiKey}
@@ -32,8 +32,8 @@ export const ProviderStep = ({ wizardState, onUpdateSection, onBack, onNext, sec
         />
       <//>
       <${Field}
-        label="Default model"
-        hint="A small, capable default. Change later from the admin console."
+        label="Initial default model"
+        hint="This is only the initial default. You can change it later from the admin console."
       >
         <${TextInput}
           value=${o.model}
@@ -42,8 +42,8 @@ export const ProviderStep = ({ wizardState, onUpdateSection, onBack, onNext, sec
         />
       <//>
       <div class="alert alert--info">
-        Validation runs server-side at install time. If the key is wrong, install will surface that
-        in the progress step.
+        The key is validated server-side when install starts. An invalid key will surface as a
+        clear error on the install step, with a way back here to fix it.
       </div>
     <//>
   `;

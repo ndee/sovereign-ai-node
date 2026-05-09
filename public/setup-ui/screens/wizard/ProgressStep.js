@@ -4,31 +4,35 @@ import { useEffect, useRef, useState } from "../../vendor/preact-hooks.module.js
 
 import { apiGet, apiPost } from "../../api.js";
 import { WizardShell } from "../../components/WizardShell.js";
-import { ErrorBanner } from "../../forms.js";
+import { CopyButton, ErrorBanner } from "../../forms.js";
 import { buildInstallRequest } from "./state.js";
 
 const html = htm.bind(h);
 
+// Group raw installer step IDs into product-level phases the operator sees on
+// the main progress list. Detailed step IDs stay accessible in the "Step
+// detail" disclosure. Internal framework names (OpenClaw etc.) are kept out of
+// the primary phase labels.
 const PHASE_OF = (stepId) => {
   if (stepId === "preflight") return "Preparing runtime";
   if (stepId === "openclaw_bootstrap_cli" || stepId === "openclaw_bundled_plugin_tools") {
-    return "Installing OpenClaw";
+    return "Installing runtime backend";
   }
   if (stepId === "imap_validate") return "Connecting mailbox";
-  if (stepId === "relay_enroll") return "Connecting relay";
+  if (stepId === "relay_enroll") return "__relay__"; // suppressed unless relay was opted in
   if (
     stepId === "matrix_provision" ||
     stepId === "matrix_bootstrap_accounts" ||
     stepId === "matrix_bootstrap_room"
   ) {
-    return "Connecting Matrix";
+    return "Setting up Matrix";
   }
   if (
     stepId === "openclaw_gateway_service_install" ||
     stepId === "openclaw_configure" ||
     stepId === "bots_configure"
   ) {
-    return "Activating modules";
+    return "Activating components";
   }
   if (stepId === "mail_sentinel_scan_timer" || stepId === "mail_sentinel_register") {
     return "Activating Mail Sentinel";
@@ -39,10 +43,25 @@ const PHASE_OF = (stepId) => {
 
 const TERMINAL_STATES = new Set(["succeeded", "skipped", "warned", "failed", "canceled"]);
 
+// In open core, relay is opt-in and not part of the default install. The
+// installer still emits a relay_enroll step that no-ops when relay isn't
+// configured — hide that phase from the progress rollup unless the step
+// actually did real work or failed. We detect "real work" by looking at the
+// step's state (skipped means no-op).
 const groupSteps = (steps) => {
   const phases = new Map();
   for (const step of steps) {
     const phase = PHASE_OF(step.id);
+    if (phase === "__relay__") {
+      // Only surface a relay phase if the step actually ran or failed.
+      if (step.state === "skipped" || step.state === "pending") continue;
+      const visiblePhase = "Connecting relay";
+      if (!phases.has(visiblePhase)) {
+        phases.set(visiblePhase, { phase: visiblePhase, steps: [] });
+      }
+      phases.get(visiblePhase).steps.push(step);
+      continue;
+    }
     if (!phases.has(phase)) {
       phases.set(phase, { phase, steps: [] });
     }
@@ -84,11 +103,79 @@ const PHASE_TONE = {
 
 const findFailedStep = (steps) => steps?.find((s) => s.state === "failed") ?? null;
 
+// Translate a failed installer step into a calm, human summary plus a
+// suggested next action. Returns { summary, suggestion } — both strings.
+// summary stays short; suggestion is one actionable sentence. Raw error
+// codes/messages remain available below as the verbatim "Raw error".
+const humanizeFailure = (failedStep, terminalError) => {
+  const code = terminalError?.code ?? failedStep?.error?.code ?? "";
+  const message = terminalError?.message ?? failedStep?.error?.message ?? "";
+  const stepLabel = failedStep?.label ?? "an early step";
+
+  // Permission / EPERM / EACCES: usually means the installer wasn't run with
+  // enough privilege, or a previous run left files owned by a different user.
+  if (/EPERM|EACCES|permission denied/i.test(`${code} ${message}`)) {
+    return {
+      summary: `${stepLabel} failed because the installer could not write to a required path on this machine.`,
+      suggestion:
+        "Re-run install with sudo/root privileges on the target machine. If a previous run left files owned by another user, you may need to remove or chown them first.",
+    };
+  }
+  // IMAP / mailbox issues
+  if (failedStep?.id === "imap_validate" || /IMAP/i.test(code)) {
+    return {
+      summary: `${stepLabel} failed — the mailbox connection didn't authenticate.`,
+      suggestion:
+        "Re-check the mailbox host, username, app password, and whether the host is reachable from this machine. Then go back to the Mailbox step and Test connection again.",
+    };
+  }
+  // OpenRouter / provider issues
+  if (/OPENROUTER|provider|invalid.*key/i.test(`${code} ${message}`)) {
+    return {
+      summary: `${stepLabel} failed — the LLM provider key was not accepted.`,
+      suggestion:
+        "Re-check your OpenRouter key, then go back to the Provider step and re-enter it.",
+    };
+  }
+  // Matrix / homeserver issues
+  if (failedStep?.id?.startsWith("matrix_") || /matrix|homeserver/i.test(`${code} ${message}`)) {
+    return {
+      summary: `${stepLabel} failed while preparing your Matrix homeserver.`,
+      suggestion:
+        "If you're on Local LAN, confirm port 443 is free. If you're on Public, confirm DNS, port 80, and port 443 are reachable from the public internet.",
+    };
+  }
+  // Generic
+  return {
+    summary: `${stepLabel} could not finish.`,
+    suggestion:
+      "Open Step detail below for the full step list and the raw error. Try again once you have addressed the cause.",
+  };
+};
+
+// Detect the schema-validation error returned by POST /api/install/run when
+// the request body fails contract validation (e.g. missing OpenRouter key).
+// Surfaced as a calmer "configuration incomplete" UI rather than a raw
+// API_ERROR banner.
+const validationProviderHints = (err) => {
+  const detail = err?.detail ?? err;
+  const message = detail?.message ?? "";
+  const lowered = message.toLowerCase();
+  if (lowered.includes("openrouter") && lowered.includes("required")) {
+    return {
+      title: "Provider configuration incomplete",
+      body: "Your OpenRouter key is missing or was not submitted correctly. Return to the Provider step and enter it again.",
+    };
+  }
+  return null;
+};
+
 export const ProgressStep = ({
   wizardState,
   secrets,
   onUpdateWizard,
   onBackToReview,
+  onBackToProvider,
   onSucceeded,
 }) => {
   const [job, setJob] = useState(null);
@@ -205,51 +292,121 @@ export const ProgressStep = ({
   const phases = job ? groupSteps(job.steps) : [];
   const failedStep = terminalResult ? findFailedStep(terminalResult.job.steps) : null;
   const terminalError = terminalResult?.error ?? failedStep?.error ?? null;
+  const humanFailure =
+    terminalResult && (failedStep || terminalError)
+      ? humanizeFailure(failedStep, terminalError)
+      : null;
+
+  // Validation/contract errors arrive *before* a job exists. Surface them as a
+  // calm "configuration incomplete" UI rather than a raw API_ERROR banner.
+  const validationHint = error && !job ? validationProviderHints(error) : null;
+
+  const deployMode = wizardState?.matrix?.deployMode ?? "public";
+  const installSubtitle =
+    deployMode === "public"
+      ? "Your node is being prepared locally. The bundled reverse proxy may take a few minutes to obtain a public TLS cert."
+      : "Your node is being prepared locally. This can take a few minutes depending on machine speed.";
 
   const onTryAgain = () => {
     startedRef.current = false;
     setRetryCount((n) => n + 1);
   };
 
+  // Build a single multi-line string the operator can copy when reporting an
+  // issue or pasting into a prompt. Includes the failed step, the raw error
+  // code/message, and the full step list with statuses.
+  const rawErrorCopy = () => {
+    if (!terminalResult) return "";
+    const lines = [];
+    lines.push(`Install failed at: ${failedStep?.label ?? "(unknown step)"}`);
+    if (terminalError) {
+      lines.push(`${terminalError.code ?? "ERROR"}: ${terminalError.message ?? "(no message)"}`);
+    }
+    lines.push("");
+    lines.push("Step list:");
+    for (const s of terminalResult.job.steps ?? []) {
+      lines.push(`- [${s.state}] ${s.id}${s.label ? ` — ${s.label}` : ""}`);
+      if (s.error) lines.push(`    ${s.error.code ?? "ERROR"}: ${s.error.message ?? ""}`);
+    }
+    return lines.join("\n");
+  };
+
   return html`
     <${WizardShell}
       stepIndex=${7}
-      title=${terminalResult ? "Install failed" : "Installing"}
-      subtitle=${terminalResult
-        ? "The install couldn't finish. See the failed step below."
-        : "Hang tight — this typically takes 2–5 minutes."}
+      title=${validationHint
+        ? validationHint.title
+        : terminalResult
+          ? "Install stopped before completion"
+          : "Installing"}
+      subtitle=${validationHint
+        ? validationHint.body
+        : terminalResult
+          ? "We saved enough state for you to retry. See the failed step below for what stopped it."
+          : installSubtitle}
       showBack=${false}
       showNext=${false}
     >
-      ${error ? html`<${ErrorBanner} error=${error} />` : null}
+      ${error && !validationHint ? html`<${ErrorBanner} error=${error} />` : null}
 
-      ${submitting && !job
+      ${validationHint
+        ? html`
+            <div class="wizard-step__nav">
+              <button class="btn btn--secondary" type="button" onClick=${onBackToReview}>
+                Back to review
+              </button>
+              ${onBackToProvider
+                ? html`
+                    <button class="btn" type="button" onClick=${onBackToProvider}>
+                      Back to provider
+                    </button>
+                  `
+                : null}
+            </div>
+            <details class="phase-detail">
+              <summary>Technical detail</summary>
+              <p class="muted">
+                <code>${error?.detail?.code ?? error?.code ?? "API_ERROR"}</code>:
+                ${" "}${error?.detail?.message ?? error?.message ?? ""}
+              </p>
+            </details>
+          `
+        : null}
+
+      ${!validationHint && submitting && !job
         ? html`
             <div class="alert alert--info">
               Submitting install request… ${submitElapsed > 0 ? `${submitElapsed}s` : ""}
               <br />
               <span class="dim">
-                The server runs each step synchronously, so this request stays open until the
-                install finishes (or fails). You'll see step-by-step results below as soon as the
-                response arrives.
+                The server runs each step in sequence, so this request stays open until the
+                install finishes (or stops). Progress will appear below as soon as the response
+                arrives.
               </span>
             </div>
           `
         : null}
 
-      ${terminalResult
+      ${terminalResult && humanFailure
         ? html`
             <div class="alert alert--error">
-              <strong>Install failed at:</strong>
-              ${" "}${failedStep?.label ?? "an early step"}
+              <strong>${humanFailure.summary}</strong>
+              <p style="margin: 8px 0 0;">${humanFailure.suggestion}</p>
               ${terminalError
-                ? html`<br /><code>${terminalError.code}</code>: ${terminalError.message}`
+                ? html`
+                    <p class="dim" style="margin: 8px 0 0; font-size: 0.85rem;">
+                      Raw error: <code>${terminalError.code}</code>: ${terminalError.message}
+                    </p>
+                  `
                 : null}
+              <div class="btn-row" style="margin-top: 12px;">
+                <${CopyButton} value=${rawErrorCopy()} label="Copy raw error" />
+              </div>
             </div>
           `
         : null}
 
-      ${phases.length > 0
+      ${!validationHint && phases.length > 0
         ? html`
             <ul class="steps phase-steps">
               ${phases.map(
@@ -264,9 +421,9 @@ export const ProgressStep = ({
           `
         : null}
 
-      ${job
+      ${!validationHint && job
         ? html`
-            <details class="phase-detail">
+            <details class="phase-detail" open=${terminalResult ? true : undefined}>
               <summary>Step detail</summary>
               <ul class="steps">
                 ${job.steps.map(

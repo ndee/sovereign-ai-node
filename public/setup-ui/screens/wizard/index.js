@@ -118,6 +118,11 @@ export const Wizard = ({ route, onModeChange }) => {
     goto("review");
   }, [update]);
 
+  const onBackToProvider = useCallback(() => {
+    update({ jobId: null });
+    goto("provider");
+  }, [update]);
+
   const onManageNode = useCallback(() => {
     reset();
     setSecrets({ operatorPassword: "", imapPassword: "", openrouterApiKey: "" });
@@ -176,6 +181,7 @@ export const Wizard = ({ route, onModeChange }) => {
         secrets=${secrets}
         onUpdateWizard=${update}
         onBackToReview=${onBackToReview}
+        onBackToProvider=${onBackToProvider}
         onSucceeded=${onSucceeded}
       />`;
     case "done":

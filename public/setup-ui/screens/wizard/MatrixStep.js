@@ -13,7 +13,7 @@ const DEPLOY_MODES = [
   {
     id: "public",
     title: "Public site",
-    summary: "Real domain, real TLS, reachable from the internet.",
+    summary: "Advanced: real domain, real TLS, reachable from the internet.",
     tlsMode: "auto",
   },
   {
@@ -25,7 +25,7 @@ const DEPLOY_MODES = [
   {
     id: "dev",
     title: "Local dev",
-    summary: "No TLS, only this machine. Fastest way to try it out.",
+    summary: "Plain HTTP on this machine only. Best for trying the full setup once.",
     tlsMode: "local-dev",
   },
 ];
@@ -70,30 +70,52 @@ const ModeCard = ({ mode, active, onSelect }) => html`
 
 const PublicGuidance = () => html`
   <div class="alert alert--info">
-    <strong>Before you continue, make sure your router/firewall is set up:</strong>
+    <strong>Advanced path.</strong> Best for operators comfortable with DNS, ports, and
+    router/firewall setup. Before you continue, confirm:
     <ul class="bullet-list" style="margin-top: 8px;">
-      <li>DNS: your homeserver domain (e.g. <code>matrix.example.com</code>) resolves to this machine's public IP.</li>
-      <li>Port <code>80</code> open to this machine — used once for the TLS certificate challenge.</li>
-      <li>Port <code>443</code> open to this machine — Element clients connect here.</li>
-      <li>If you enable federation below: also open port <code>8448</code>.</li>
+      <li>Your domain resolves to this machine's public IP.</li>
+      <li>Port <code>80</code> is open for the TLS certificate challenge.</li>
+      <li>Port <code>443</code> is open for Matrix and Element traffic.</li>
+      <li>If you enable federation below, port <code>8448</code> is also open.</li>
     </ul>
-    <span class="dim">If you don't have a domain or open ports, pick <strong>Local LAN</strong> or <strong>Local dev</strong> instead.</span>
+    <span class="dim">Don't have a domain or open ports? Pick <strong>Local LAN</strong> or <strong>Local dev</strong>.</span>
   </div>
 `;
 
-const LanGuidance = () => html`
-  <div class="alert alert--info">
-    The bundled reverse proxy will run a local certificate authority and issue itself an HTTPS
-    certificate for the homeserver domain <em>and</em> this node's LAN IP. You can reach the
-    homeserver at <code>https://&lt;node-LAN-IP&gt;/</code> right after install — DNS is
-    optional. Each client device just needs to trust the Caddy CA once.
-  </div>
-`;
+const LanGuidance = ({ lanIp }) => {
+  const ipExample = lanIp ?? "<your-LAN-IP>";
+  return html`
+    <div class="alert alert--info">
+      The bundled reverse proxy runs a local CA and issues a TLS cert that covers this node's
+      LAN IP <em>and</em> any homeserver hostname you set below.
+      <ul class="bullet-list" style="margin-top: 8px;">
+        <li>
+          <strong>Reach by IP immediately.</strong> ${" "}
+          <code>${`https://${ipExample}/`}</code> works right after install.
+        </li>
+        <li>
+          <strong>Optional friendly hostname.</strong> Add a router DNS rewrite or per-device
+          <code>/etc/hosts</code> entry later if you'd rather use a name than an IP.
+        </li>
+        <li>
+          <strong>Trust the local CA once per device.</strong> The Done page links to the
+          download and shows per-OS import steps.
+        </li>
+      </ul>
+      <span class="dim">
+        Avoid <code>.local</code> hostnames if you have iOS/macOS clients — that suffix is
+        mDNS-reserved and plain DNS overrides may be ignored.
+      </span>
+    </div>
+  `;
+};
 
 const DevGuidance = () => html`
   <div class="alert alert--info">
-    Plain HTTP on <code>127.0.0.1:8008</code>. Only reachable from this machine. Good for trying
-    the wizard end-to-end without DNS, certificates, or a real homeserver.
+    Best for trying the full setup on a single machine. Only this machine can reach the
+    homeserver directly — there is no TLS and no LAN exposure. To use Element from a laptop,
+    SSH-tunnel <code>8008</code> to your workstation. The bundled homeserver will be created
+    during install; there is nothing to test yet.
   </div>
 `;
 
@@ -185,11 +207,22 @@ export const MatrixStep = ({ wizardState, onUpdateSection, onBack, onNext, secre
     }
   };
 
+  const lanIp = Array.isArray(lanIPv4) && lanIPv4.length > 0 ? lanIPv4[0] : null;
+
+  // Mode-aware copy — keep the URL field a single conceptual field across all
+  // modes, but adjust the helper so it makes sense per mode.
+  const matrixUrlHint =
+    activeModeId === "dev"
+      ? "Filled automatically for local-only setup. Only this machine can reach it."
+      : activeModeId === "lan"
+        ? "How operators will reach Matrix on your LAN. Defaults to this node's IP — change to a hostname if you've set up DNS for it."
+        : "The URL operators will use to reach Matrix from the internet, e.g. https://matrix.example.com.";
+
   return html`
     <${WizardShell}
       stepIndex=${2}
-      title="Matrix homeserver"
-      subtitle="Matrix is your node's control plane. After install, you'll talk to the agents in Element."
+      title="Matrix control plane"
+      subtitle="Choose how operators will reach Matrix after install."
       onBack=${onBack}
       onNext=${onNext}
       nextDisabled=${!canContinue || busy}
@@ -224,24 +257,21 @@ export const MatrixStep = ({ wizardState, onUpdateSection, onBack, onNext, secre
         )}
       </div>
       ${activeModeId === "public" ? html`<${PublicGuidance} />` : null}
-      ${activeModeId === "lan" ? html`<${LanGuidance} />` : null}
+      ${activeModeId === "lan" ? html`<${LanGuidance} lanIp=${lanIp} />` : null}
       ${activeModeId === "dev" ? html`<${DevGuidance} />` : null}
 
-      <${Field}
-        label="Public base URL"
-        hint=${activeModeId === "dev"
-          ? "Filled in for you. Only this machine can reach it."
-          : "The URL operators will use to reach Matrix from the outside, e.g. https://matrix.example.com."}
-      >
+      <${Field} label="Matrix URL" hint=${matrixUrlHint}>
         <${TextInput}
           value=${m.publicBaseUrl}
           onInput=${(value) => onUpdateSection("matrix", { publicBaseUrl: value })}
-          placeholder="https://matrix.example.com"
+          placeholder=${activeModeId === "lan" && lanIp
+            ? `https://${lanIp}/`
+            : "https://matrix.example.com"}
         />
       <//>
       <${Field}
         label="Homeserver domain"
-        hint="The Matrix domain part of user IDs (the bit after @user:). Often the same host as above without https://."
+        hint="The Matrix server name — the part after @user: in MXIDs. Often the same host as the URL above, without https://."
       >
         <${TextInput}
           value=${m.homeserverDomain}
@@ -255,14 +285,14 @@ export const MatrixStep = ({ wizardState, onUpdateSection, onBack, onNext, secre
               <${Checkbox}
                 checked=${m.federationEnabled === true}
                 onInput=${(value) => onUpdateSection("matrix", { federationEnabled: value })}
-                label="Allow federation with other homeservers (off is the default and safer for personal nodes)"
+                label="Allow federation with other homeservers (off is the safer default for personal nodes)"
               />
             <//>
           `
         : null}
       <${Field}
-        label="Alert room name"
-        hint="A Matrix room created during install where Mail Sentinel and node-operator post. Defaults to 'Sovereign Alerts'."
+        label="Alert room"
+        hint="Default Matrix room for Mail Sentinel and node-operator alerts. Created during install."
       >
         <${TextInput}
           value=${m.alertRoomName}
@@ -272,7 +302,7 @@ export const MatrixStep = ({ wizardState, onUpdateSection, onBack, onNext, secre
       <//>
       <${Field}
         label="Operator username"
-        hint="Your Matrix username on this homeserver. Just the localpart, e.g. 'operator'."
+        hint="A local Matrix account created during install. Just the localpart, e.g. 'operator'."
       >
         <${TextInput}
           value=${op.username}
@@ -282,7 +312,7 @@ export const MatrixStep = ({ wizardState, onUpdateSection, onBack, onNext, secre
       <//>
       <${Field}
         label="Operator password"
-        hint="Used to create your operator account on the bundled homeserver. Minimum 8 characters."
+        hint="Created on your bundled homeserver during install. Minimum 8 characters."
       >
         <${TextInput}
           value=${secrets.operatorPassword}
@@ -302,16 +332,11 @@ export const MatrixStep = ({ wizardState, onUpdateSection, onBack, onNext, secre
                 ${busy ? "Testing…" : "Test connection"}
               </button>
               <span class="dim" style="align-self: center;">
-                Optional. Only useful if a homeserver is already running at this URL.
+                Optional. Useful if a homeserver is already running at this URL.
               </span>
             </div>
           `
-        : html`
-            <p class="dim" style="font-size: 0.85rem;">
-              No connection test for this mode — the bundled installer will create the
-              homeserver during install.
-            </p>
-          `}
+        : null}
     <//>
   `;
 };

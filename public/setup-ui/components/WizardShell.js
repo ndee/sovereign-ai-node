@@ -35,7 +35,7 @@ export const WizardShell = ({
     <header class="wizard-shell__header">
       <div class="wizard-shell__brand">
         Sovereign AI Node
-        <small>Local setup</small>
+        <small>Open-core setup · DIY self-hosted</small>
       </div>
       <${Stepper} steps=${STEP_LABELS} currentIndex=${stepIndex} />
     </header>

@@ -52,7 +52,7 @@ export const Preflight = ({ wizardState, onUpdateWizard, onBack, onNext }) => {
     <${WizardShell}
       stepIndex=${1}
       title="Preflight checks"
-      subtitle="A quick look at your machine. Most warnings are safe to continue past."
+      subtitle="A quick look at your machine. Most warnings are safe to continue past — read them first."
       onBack=${onBack}
       onNext=${onNext}
       nextDisabled=${!canProceed || busy}
@@ -69,7 +69,7 @@ export const Preflight = ({ wizardState, onUpdateWizard, onBack, onNext }) => {
                   : overall === "pass"
                     ? "All checks passed."
                     : overall === "warn"
-                      ? "Some checks reported warnings. You can continue, but read them first."
+                      ? "Some checks reported warnings. Review them, then continue if they don't apply to this machine."
                       : "Some checks failed. Resolve the items below before continuing."}
               </div>
             `}
