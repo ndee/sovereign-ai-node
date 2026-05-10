@@ -43,18 +43,19 @@ const PHASE_OF = (stepId) => {
 
 const TERMINAL_STATES = new Set(["succeeded", "skipped", "warned", "failed", "canceled"]);
 
-// In open core, relay is opt-in and not part of the default install. The
-// installer still emits a relay_enroll step that no-ops when relay isn't
-// configured — hide that phase from the progress rollup unless the step
-// actually did real work or failed. We detect "real work" by looking at the
-// step's state (skipped means no-op).
-const groupSteps = (steps) => {
+// In open core, relay is opt-in and not part of the default install path.
+// The installer still emits a relay_enroll step in the job log; hide it from
+// the primary progress rollup entirely when the operator did not configure
+// relay. We only surface the phase if relay was explicitly enabled. This
+// keeps relay framed as an optional convenience, not a core dependency.
+const groupSteps = (steps, { relayConfigured = false } = {}) => {
   const phases = new Map();
   for (const step of steps) {
     const phase = PHASE_OF(step.id);
     if (phase === "__relay__") {
-      // Only surface a relay phase if the step actually ran or failed.
-      if (step.state === "skipped" || step.state === "pending") continue;
+      // Default open core: hide entirely. If relay was configured, surface
+      // the phase so the operator can see it run or report a failure.
+      if (!relayConfigured) continue;
       const visiblePhase = "Connecting relay";
       if (!phases.has(visiblePhase)) {
         phases.set(visiblePhase, { phase: visiblePhase, steps: [] });
@@ -107,10 +108,19 @@ const findFailedStep = (steps) => steps?.find((s) => s.state === "failed") ?? nu
 // suggested next action. Returns { summary, suggestion } — both strings.
 // summary stays short; suggestion is one actionable sentence. Raw error
 // codes/messages remain available below as the verbatim "Raw error".
-const humanizeFailure = (failedStep, terminalError) => {
+//
+// `friendlyLabel(step)` is provided by the caller so the summary text uses
+// the operator-facing label (e.g. "Install runtime backend") instead of the
+// raw framework label ("Install OpenClaw CLI"). Falls back to the raw label
+// if no friendly mapping exists.
+const humanizeFailure = (failedStep, terminalError, friendlyLabel) => {
   const code = terminalError?.code ?? failedStep?.error?.code ?? "";
   const message = terminalError?.message ?? failedStep?.error?.message ?? "";
-  const stepLabel = failedStep?.label ?? "an early step";
+  const stepLabel = failedStep
+    ? typeof friendlyLabel === "function"
+      ? friendlyLabel(failedStep)
+      : (failedStep.label ?? "an early step")
+    : "an early step";
 
   // Permission / EPERM / EACCES: usually means the installer wasn't run with
   // enough privilege, or a previous run left files owned by a different user.
@@ -289,13 +299,16 @@ export const ProgressStep = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wizardState.jobId]);
 
-  const phases = job ? groupSteps(job.steps) : [];
+  // The wizard never configures relay in default open core today. If a
+  // future code path opts in (e.g. an Advanced section) it would set
+  // wizardState.connectivity or wizardState.relay; treat those as the
+  // signal to surface relay phases and the relay step in detail.
+  const relayConfigured =
+    wizardState?.connectivity?.mode === "relay" || wizardState?.relay !== undefined;
+
+  const phases = job ? groupSteps(job.steps, { relayConfigured }) : [];
   const failedStep = terminalResult ? findFailedStep(terminalResult.job.steps) : null;
   const terminalError = terminalResult?.error ?? failedStep?.error ?? null;
-  const humanFailure =
-    terminalResult && (failedStep || terminalError)
-      ? humanizeFailure(failedStep, terminalError)
-      : null;
 
   // Validation/contract errors arrive *before* a job exists. Surface them as a
   // calm "configuration incomplete" UI rather than a raw API_ERROR banner.
@@ -306,6 +319,30 @@ export const ProgressStep = ({
     deployMode === "public"
       ? "Your node is being prepared locally. The bundled reverse proxy may take a few minutes to obtain a public TLS cert."
       : "Your node is being prepared locally. This can take a few minutes depending on machine speed.";
+
+  // Re-label raw step labels for the primary UI. Backend labels keep their
+  // framework name (OpenClaw etc.) for logs and audit; the wizard's detail
+  // list shows operator-facing names. Anything not mapped falls back to the
+  // server-supplied label so new steps still appear.
+  const FRIENDLY_STEP_LABEL = {
+    openclaw_bootstrap_cli: "Install runtime backend",
+    openclaw_bundled_plugin_tools: "Install bundled plugin tools",
+    openclaw_gateway_service_install: "Install runtime gateway service",
+    openclaw_configure: "Configure runtime",
+  };
+  const friendlyLabel = (step) => FRIENDLY_STEP_LABEL[step.id] ?? step.label ?? step.id;
+
+  // Filter the detail-list too: drop the relay step entirely when relay
+  // wasn't configured. The phase rollup already hides "Connecting relay"
+  // in that case; the detail list should match.
+  const visibleJobSteps = job
+    ? job.steps.filter((s) => relayConfigured || s.id !== "relay_enroll")
+    : [];
+
+  const humanFailure =
+    terminalResult && (failedStep || terminalError)
+      ? humanizeFailure(failedStep, terminalError, friendlyLabel)
+      : null;
 
   const onTryAgain = () => {
     startedRef.current = false;
@@ -426,11 +463,11 @@ export const ProgressStep = ({
             <details class="phase-detail" open=${terminalResult ? true : undefined}>
               <summary>Step detail</summary>
               <ul class="steps">
-                ${job.steps.map(
+                ${visibleJobSteps.map(
                   (step) => html`
                     <li>
                       <span>
-                        ${step.label}
+                        ${friendlyLabel(step)}
                         ${step.error
                           ? html`<br /><span class="dim">
                               <code>${step.error.code}</code>: ${step.error.message}

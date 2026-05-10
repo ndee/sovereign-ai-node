@@ -13,7 +13,7 @@ const DEPLOY_MODES = [
   {
     id: "public",
     title: "Public site",
-    summary: "Advanced: real domain, real TLS, reachable from the internet.",
+    summary: "Real domain, real TLS, reachable from the internet. Advanced — needs DNS and open ports.",
     tlsMode: "auto",
   },
   {
@@ -70,15 +70,18 @@ const ModeCard = ({ mode, active, onSelect }) => html`
 
 const PublicGuidance = () => html`
   <div class="alert alert--info">
-    <strong>Advanced path.</strong> Best for operators comfortable with DNS, ports, and
-    router/firewall setup. Before you continue, confirm:
+    <strong>For operators comfortable with DNS, ports, and router/firewall setup.</strong>
+    Before you continue, confirm:
     <ul class="bullet-list" style="margin-top: 8px;">
       <li>Your domain resolves to this machine's public IP.</li>
       <li>Port <code>80</code> is open for the TLS certificate challenge.</li>
       <li>Port <code>443</code> is open for Matrix and Element traffic.</li>
       <li>If you enable federation below, port <code>8448</code> is also open.</li>
     </ul>
-    <span class="dim">Don't have a domain or open ports? Pick <strong>Local LAN</strong> or <strong>Local dev</strong>.</span>
+    <span class="dim">
+      Don't have a domain or open ports? Pick <strong>Local LAN</strong> or
+      <strong>Local dev</strong>.
+    </span>
   </div>
 `;
 
@@ -103,8 +106,9 @@ const LanGuidance = ({ lanIp }) => {
         </li>
       </ul>
       <span class="dim">
-        Avoid <code>.local</code> hostnames if you have iOS/macOS clients — that suffix is
-        mDNS-reserved and plain DNS overrides may be ignored.
+        Note: <code>.local</code> hostnames can be ignored on iOS/macOS in favor of mDNS. If
+        you plan to reach this node from Apple devices, use a non-<code>.local</code>
+        hostname or the IP.
       </span>
     </div>
   `;
@@ -112,10 +116,15 @@ const LanGuidance = ({ lanIp }) => {
 
 const DevGuidance = () => html`
   <div class="alert alert--info">
-    Best for trying the full setup on a single machine. Only this machine can reach the
-    homeserver directly — there is no TLS and no LAN exposure. To use Element from a laptop,
-    SSH-tunnel <code>8008</code> to your workstation. The bundled homeserver will be created
-    during install; there is nothing to test yet.
+    <ul class="bullet-list" style="margin: 0;">
+      <li>Best for trying the full setup on a single machine.</li>
+      <li>Only this machine can reach Matrix directly.</li>
+      <li>
+        Use an SSH tunnel if you want to connect from your laptop:
+        <code class="code-block" style="margin-top: 6px;">${"ssh -L 8008:127.0.0.1:8008 <node-host>"}</code>
+      </li>
+      <li>The bundled homeserver will be created during install.</li>
+    </ul>
   </div>
 `;
 
@@ -332,7 +341,8 @@ export const MatrixStep = ({ wizardState, onUpdateSection, onBack, onNext, secre
                 ${busy ? "Testing…" : "Test connection"}
               </button>
               <span class="dim" style="align-self: center;">
-                Optional. Useful if a homeserver is already running at this URL.
+                Optional — not required to continue. Only useful if a homeserver is already
+                running at this URL.
               </span>
             </div>
           `

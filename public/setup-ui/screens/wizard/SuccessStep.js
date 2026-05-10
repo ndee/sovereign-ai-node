@@ -58,8 +58,9 @@ const slugifyProjectName = (domain) =>
 // Decide how to surface a failure of POST /api/onboarding/issue. Some errors
 // are *expected and temporary* on the Done page right after install — the
 // runtime config is still being written, so CONFIG_NOT_FOUND can flicker
-// briefly. Render those as neutral "still finalizing" info, not as red
-// failures contradicting the success heading. Truly fatal errors stay red.
+// briefly. Render those as a neutral "still completing" info block, not as
+// a red failure contradicting the success heading. Truly fatal errors stay
+// red.
 const classifyIssueError = (err) => {
   if (!err) return null;
   const code = err?.detail?.code ?? err?.code;
@@ -67,8 +68,10 @@ const classifyIssueError = (err) => {
   if (code === "CONFIG_NOT_FOUND" || /CONFIG_NOT_FOUND|runtime config/i.test(message)) {
     return {
       tone: "warn",
-      title: "Node finalizing",
-      body: "The runtime config is still being written. Click Issue onboarding code in a moment.",
+      // The node *is* installed; the runtime is just still writing the last
+      // bits of config. We say so plainly instead of "Node finalizing",
+      // which read as both done-and-not-done at once.
+      body: "Final runtime setup is still completing. Onboarding will be available in a moment.",
     };
   }
   // Anything else stays as a regular red ErrorBanner.
@@ -265,11 +268,7 @@ export const SuccessStep = ({ result, wizardState, onManageNode }) => {
       <${HandoffBlock} result=${result} wizardState=${wizardState} />
 
       ${issueError && benignIssue
-        ? html`
-            <div class="alert alert--warn">
-              <strong>${benignIssue.title}.</strong> ${benignIssue.body}
-            </div>
-          `
+        ? html`<div class="alert alert--warn">${benignIssue.body}</div>`
         : issueError
           ? html`<${ErrorBanner} error=${issueError} />`
           : null}
