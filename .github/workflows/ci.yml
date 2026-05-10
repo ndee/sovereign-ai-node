@@ -45,6 +45,7 @@ jobs:
             relay
             e2e
             deps
+            setup-ui
           requireScope: false
 
   lint:

@@ -351,6 +351,10 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       fakeExecRunner,
       createLogger(),
       paths,
+      undefined,
+      // No additional LAN IPs in this fixture — keep the cert site list
+      // identical to the publicBaseUrl host (192.168.0.54).
+      () => [],
     );
 
     try {
@@ -407,6 +411,118 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(recordedExecCalls).toHaveLength(2);
       expect(recordedExecCalls.some((call) => call.command === "qrencode")).toBe(true);
       expect(recordedExecCalls.some((call) => call.command === "docker")).toBe(true);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("includes detected LAN IPv4 addresses as additional Caddy site names for Local LAN installs", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-matrix-test-"));
+    const fakeExecRunner: ExecRunner = {
+      async run(input) {
+        if (input.command === "qrencode") {
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+            stderr: "",
+          };
+        }
+        if (input.command === "docker") {
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          };
+        }
+        return {
+          command: [input.command, ...(input.args ?? [])].join(" "),
+          exitCode: 127,
+          stdout: "",
+          stderr: "command not found",
+        };
+      },
+    };
+
+    const paths = buildPaths(tempRoot);
+    const provisioner = new DockerComposeBundledMatrixProvisioner(
+      fakeExecRunner,
+      createLogger(),
+      paths,
+      undefined,
+      // Stub two LAN IPs; the cert should cover both alongside the
+      // hostname so https://192.168.0.181/ and https://10.0.0.5/ are
+      // accepted by browsers that trust the Caddy CA.
+      () => ["192.168.0.181", "10.0.0.5"],
+    );
+
+    try {
+      const req = buildInstallRequest();
+      req.matrix.homeserverDomain = "matrix.lan.local";
+      req.matrix.publicBaseUrl = "https://matrix.lan.local";
+      req.matrix.tlsMode = "internal";
+      const result = await provisioner.provision(req);
+
+      const caddyText = await readFile(
+        join(result.projectDir, "reverse-proxy", "Caddyfile"),
+        "utf8",
+      );
+      // Site directive lists hostname + each LAN IP, comma-separated.
+      expect(caddyText).toContain("matrix.lan.local, 192.168.0.181, 10.0.0.5 {");
+      // default_sni stays at the hostname (Caddy uses it when SNI is absent).
+      expect(caddyText).toContain("default_sni matrix.lan.local");
+      expect(caddyText).toContain("tls internal");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does not duplicate the publicBaseUrl host if it is also in the LAN IP list", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-matrix-test-"));
+    const fakeExecRunner: ExecRunner = {
+      async run(input) {
+        if (input.command === "qrencode") {
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+            stderr: "",
+          };
+        }
+        return {
+          command: [input.command, ...(input.args ?? [])].join(" "),
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        };
+      },
+    };
+
+    const paths = buildPaths(tempRoot);
+    const provisioner = new DockerComposeBundledMatrixProvisioner(
+      fakeExecRunner,
+      createLogger(),
+      paths,
+      undefined,
+      () => ["192.168.0.54", "10.0.0.5"],
+    );
+
+    try {
+      const req = buildInstallRequest();
+      req.matrix.homeserverDomain = "matrix.local.test";
+      req.matrix.publicBaseUrl = "https://192.168.0.54:8448";
+      req.matrix.tlsMode = "internal";
+      const result = await provisioner.provision(req);
+
+      const caddyText = await readFile(
+        join(result.projectDir, "reverse-proxy", "Caddyfile"),
+        "utf8",
+      );
+      // 192.168.0.54 is the publicBaseUrl host and was also in the LAN list;
+      // it must appear exactly once in the site directive.
+      expect(caddyText).toContain("192.168.0.54, 10.0.0.5 {");
+      expect(caddyText).not.toContain("192.168.0.54, 192.168.0.54");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }

@@ -387,8 +387,14 @@ export const DEFAULT_OPENROUTER_MODEL = "qwen/qwen3.5-9b";
 export const MANAGED_OPENCLAW_DM_SCOPE = "per-channel-peer";
 export const DEFAULT_INSTALL_REQUEST_FILE = "/etc/sovereign-node/install-request.json";
 export const DEFAULT_HOST_RESOURCES_PLAN_FILE = "/etc/sovereign-node/host-resources.json";
-export const DEFAULT_SERVICE_USER = "root";
-export const DEFAULT_SERVICE_GROUP = "root";
+// Default service identity for the bundled installer. Matches the User=
+// in deploy/systemd/sovereign-node-api.service. Falling back to "root"
+// here causes the OpenClaw gateway unit (and its tmp/ cache tree) to be
+// generated with User=root, which then conflicts with the API service
+// running as sovereign-node trying to read/write the same tmp/jiti
+// cache.
+export const DEFAULT_SERVICE_USER = "sovereign-node";
+export const DEFAULT_SERVICE_GROUP = "sovereign-node";
 export const RELAY_TUNNEL_SYSTEMD_UNIT = "sovereign-matrix-relay-tunnel.service";
 export const RELAY_TUNNEL_DEFAULT_IMAGE = "ghcr.io/fatedier/frpc:v0.61.1";
 export const RELAY_LOCAL_EDGE_PORT = 18080;

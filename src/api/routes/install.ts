@@ -66,7 +66,16 @@ export const registerInstallRoutes = (server: FastifyInstance, app: AppContainer
       const result = await app.installerService.getInstallJob(params.jobId);
       return sendApiSuccess(reply, result, installJobStatusResponseSchema);
     } catch (error) {
-      return sendApiError(reply, 400, error);
+      // Distinguish "this job no longer exists" from other failures so the
+      // wizard can clear stale localStorage jobIds without surfacing a
+      // generic API_ERROR to the operator.
+      const status =
+        typeof error === "object" &&
+        error !== null &&
+        (error as { code?: unknown }).code === "INSTALL_JOB_NOT_FOUND"
+          ? 404
+          : 400;
+      return sendApiError(reply, status, error);
     }
   });
 

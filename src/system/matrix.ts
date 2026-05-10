@@ -8,6 +8,7 @@ import type { CheckResult } from "../contracts/common.js";
 import type { InstallRequest, TestMatrixResult } from "../contracts/index.js";
 import type { Logger } from "../logging/logger.js";
 import type { ExecResult, ExecRunner } from "./exec.js";
+import { detectLanIPv4 } from "./lan-ips.js";
 import type { MatrixAvatarResolver } from "./matrix-avatars.js";
 import {
   buildOnboardingPageUrl,
@@ -137,6 +138,8 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     private readonly logger: Logger,
     private readonly paths: SovereignPaths,
     private readonly fetchImpl: FetchLike = defaultFetch,
+    // Inject for tests; in production resolves to detectLanIPv4().
+    private readonly lanIpProvider: () => string[] = detectLanIPv4,
   ) {}
 
   async provision(req: InstallRequest): Promise<BundledMatrixProvisionResult> {
@@ -169,7 +172,32 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     const composeFilePath = join(projectDir, "compose.yaml");
     const envFilePath = join(projectDir, ".env");
 
-    await mkdir(synapseDir, { recursive: true });
+    // The bundled Matrix project dir may have been left in a bad ownership
+    // state by a prior partially-completed install: docker-compose mounts
+    // postgres-data as root via volume bind, and on a re-run the API
+    // service (running as a non-root user) can no longer mkdir siblings
+    // under the now-root-owned project dir. Attempt the mkdir directly
+    // first; if EACCES, escalate via the scoped sudoers fragment to
+    // chown -R the project dir back to the caller, then retry.
+    try {
+      await mkdir(synapseDir, { recursive: true });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "EACCES" && code !== "EPERM") throw err;
+      const myUid = process.getuid?.() ?? 0;
+      const myGid = process.getgid?.() ?? 0;
+      const sudoChown = await this.execRunner.run({
+        command: "sudo",
+        args: ["-n", "chown", "-R", `${myUid}:${myGid}`, projectDir],
+        options: { timeout: 10_000 },
+      });
+      if (sudoChown.exitCode !== 0) {
+        throw new Error(
+          `mkdir ${synapseDir} failed with EACCES and sudo chown fallback exited ${sudoChown.exitCode}: ${sudoChown.stderr}`,
+        );
+      }
+      await mkdir(synapseDir, { recursive: true });
+    }
     await mkdir(postgresDir, { recursive: true });
     if (usesReverseProxy) {
       await mkdir(wellKnownDir, { recursive: true });
@@ -268,10 +296,19 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         publicBaseUrl,
       });
       const onboardingMode = resolveOnboardingMode(accessMode, tlsMode);
+      // For Local LAN (tls internal), include this host's LAN IPv4
+      // addresses in the cert so operators can reach the homeserver via
+      // https://<lan-ip>/ without needing DNS or /etc/hosts entries on
+      // every device. Caddy issues a single internal cert covering both
+      // the hostname and each IP listed in the site directive.
+      const lanIPv4 =
+        onboardingMode === "internal"
+          ? this.lanIpProvider().filter((ip) => ip !== new URL(publicBaseUrl).hostname)
+          : [];
       writes.push(
         writeFile(
           join(proxyDir, "Caddyfile"),
-          `${renderCaddyfile(new URL(publicBaseUrl).hostname, onboardingMode)}\n`,
+          `${renderCaddyfile(new URL(publicBaseUrl).hostname, onboardingMode, lanIPv4)}\n`,
           "utf8",
         ),
         writeFile(
@@ -1302,13 +1339,46 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     }
   }
 
+  /**
+   * Re-claim ownership of a path that may have been written by Docker as root
+   * (postgres-data, etc.). Uses the scoped sudoers fragment dropped at install
+   * time. No-op when running as root or when the path is already ours.
+   */
+  private async reclaimOwnership(path: string): Promise<void> {
+    try {
+      await access(path, fsConstants.R_OK | fsConstants.W_OK);
+      return;
+    } catch {
+      // continue — path is not (yet) writable to us
+    }
+    const myUid = process.getuid?.() ?? 0;
+    const myGid = process.getgid?.() ?? 0;
+    if (myUid === 0) return;
+    const result = await this.execRunner.run({
+      command: "sudo",
+      args: ["-n", "chown", "-R", `${myUid}:${myGid}`, path],
+      options: { timeout: 30_000 },
+    });
+    if (result.exitCode !== 0) {
+      this.logger.warn(
+        { path, exitCode: result.exitCode, stderr: result.stderr },
+        "sudo chown reclaim failed; subsequent operations may fail with EACCES",
+      );
+    }
+  }
+
   private async resetBundledPostgresState(provision: BundledMatrixProvisionResult): Promise<void> {
+    const postgresDir = join(provision.projectDir, "postgres-data");
+    // Postgres container writes data dir as root inside the container (uid 70).
+    // Reclaim ownership before backup/rm/readdir do anything that scans it.
+    await this.reclaimOwnership(postgresDir);
     await this.backupPostgresDataBeforeReset(provision);
     await this.runComposeCommand(provision.projectDir, provision.composeFilePath, [
       "down",
       "--remove-orphans",
     ]);
-    const postgresDir = join(provision.projectDir, "postgres-data");
+    // After down, Docker may still hold the dir; reclaim once more to be safe.
+    await this.reclaimOwnership(postgresDir);
     await rm(postgresDir, { recursive: true, force: true });
     await mkdir(postgresDir, { recursive: true });
     await ensureDirectoryTreeWritable(postgresDir);
@@ -2228,14 +2298,28 @@ const validateBundledTlsMode = (input: {
   }
 };
 
-const renderCaddyfile = (siteHostname: string, tlsMode: BundledMatrixOnboardingMode): string =>
-  [
+const renderCaddyfile = (
+  siteHostname: string,
+  tlsMode: BundledMatrixOnboardingMode,
+  extraSiteNames: ReadonlyArray<string> = [],
+): string => {
+  // For Local LAN (tls internal), include the LAN IPs as additional site
+  // names so Caddy issues a single internal cert that's valid for both
+  // the hostname and the IP. Operators can then visit https://<lan-ip>/
+  // after trusting the Caddy root CA — no DNS / /etc/hosts entry
+  // required.
+  const additionalNames = tlsMode === "internal" ? extraSiteNames : [];
+  const allNames = [siteHostname, ...additionalNames]
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0);
+  const siteDirective = tlsMode === "relay" ? ":80" : allNames.join(", ");
+  return [
     "{",
     "  admin off",
     ...(tlsMode === "internal" ? [`  default_sni ${siteHostname}`] : []),
     "}",
     "",
-    `${tlsMode === "relay" ? ":80" : siteHostname} {`,
+    `${siteDirective} {`,
     ...(tlsMode === "internal" ? ["  tls internal"] : []),
     "  @wellKnown path /.well-known/matrix/client /.well-known/matrix/server",
     "  handle @wellKnown {",
@@ -2280,6 +2364,7 @@ const renderCaddyfile = (siteHostname: string, tlsMode: BundledMatrixOnboardingM
     "  }",
     "}",
   ].join("\n");
+};
 
 const renderWellKnownFiles = (input: {
   accessMode: BundledMatrixAccessMode;

@@ -2112,6 +2112,15 @@ describe("RealInstallerService", () => {
       expect(stored.job.jobId).toBe(started.job.jobId);
       expect(stored.job.state).toBe("failed");
 
+      // An unknown / stale jobId must throw a typed INSTALL_JOB_NOT_FOUND
+      // error so the wizard can clear the localStorage jobId on rehydrate
+      // instead of looping on a generic API error.
+      await expect(service.getInstallJob("job_does-not-exist")).rejects.toMatchObject({
+        code: "INSTALL_JOB_NOT_FOUND",
+        retryable: false,
+        details: { jobId: "job_does-not-exist" },
+      });
+
       const files = await readdir(paths.installJobsDir);
       expect(files.some((name) => name.includes(started.job.jobId))).toBe(true);
       expect(preflightCalls).toBe(1);
@@ -2484,6 +2493,7 @@ describe("RealInstallerService", () => {
             threadReplies?: string;
             userId?: string;
             defaultAccount?: string;
+            dm?: { enabled?: boolean; policy?: string; allowFrom?: string[] };
             groupAllowFrom?: string[];
             groups?: Record<string, { allow?: boolean; users?: string[] }>;
             accounts?: Record<
@@ -2516,24 +2526,19 @@ describe("RealInstallerService", () => {
       expect(openclawConfig.plugins?.entries?.lobster?.enabled).toBe(true);
       expect(openclawConfig.plugins?.entries?.["llm-task"]?.enabled).toBe(true);
       expect(openclawConfig.channels?.matrix?.enabled).toBe(true);
-      expect(openclawConfig.channels?.matrix?.homeserver).toBe("http://127.0.0.1:8008");
+      // Top-level homeserver is intentionally absent under modern OpenClaw
+      // shape; per-account homeservers live under accounts.<id>.homeserver.
+      // Setting it at the top would trigger doctor's single-account
+      // migration prompt and block subsequent CLI calls.
+      expect(openclawConfig.channels?.matrix?.homeserver).toBeUndefined();
       expect(openclawConfig.channels?.matrix?.threadReplies).toBe("always");
       expect(openclawConfig.channels?.matrix?.userId).toBeUndefined();
-      expect(openclawConfig.channels?.matrix?.groupAllowFrom).toEqual([
-        "@operator:matrix.example.org",
-      ]);
-      expect(openclawConfig.channels?.matrix?.groups?.["!alerts:matrix.example.org"]).toEqual(
-        expect.objectContaining({
-          allow: true,
-          users: ["@operator:matrix.example.org"],
-        }),
-      );
-      expect(openclawConfig.channels?.matrix?.groups?.["*"]).toEqual(
-        expect.objectContaining({
-          allow: true,
-          users: ["@operator:matrix.example.org"],
-        }),
-      );
+      // Top-level dm/groupPolicy/groupAllowFrom/groups are intentionally
+      // absent — modern OpenClaw expects them per-account. Per-account
+      // assertions below cover the behavior.
+      expect(openclawConfig.channels?.matrix?.dm).toBeUndefined();
+      expect(openclawConfig.channels?.matrix?.groupAllowFrom).toBeUndefined();
+      expect(openclawConfig.channels?.matrix?.groups).toBeUndefined();
       expect(openclawConfig.channels?.matrix?.defaultAccount).toBe("mail-sentinel");
       expect(Object.keys(openclawConfig.channels?.matrix?.accounts ?? {}).sort()).toEqual([
         "mail-sentinel",
@@ -8547,6 +8552,191 @@ describe("RealInstallerService", () => {
     }
   });
 
+  it("returns the public onboarding state with secrets stripped", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+    await writeRuntimeArtifacts(paths);
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert",
+          cronCommand: "openclaw cron add",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+    });
+
+    try {
+      expect(await service.getMatrixOnboardingState()).toBeNull();
+
+      const issued = await service.issueMatrixOnboardingCode();
+      const publicState = await service.getMatrixOnboardingState();
+
+      expect(publicState).not.toBeNull();
+      expect(publicState).toMatchObject({
+        issuedAt: expect.any(String),
+        expiresAt: issued.expiresAt,
+        failedAttempts: 0,
+        maxAttempts: expect.any(Number),
+        username: "@operator:matrix.example.org",
+        homeserverUrl: "https://matrix.example.org",
+      });
+      expect(publicState).not.toHaveProperty("codeHash");
+      expect(publicState).not.toHaveProperty("codeSalt");
+      expect(publicState).not.toHaveProperty("passwordSecretRef");
+      expect(publicState).not.toHaveProperty("consumedAt");
+
+      const onboardingStatePath = join(
+        paths.stateDir,
+        "bundled-matrix",
+        "matrix-example-org",
+        "onboarding",
+        "state.json",
+      );
+      const stateRaw = JSON.parse(await readFile(onboardingStatePath, "utf8")) as Record<
+        string,
+        unknown
+      >;
+      stateRaw.consumedAt = "2025-01-02T00:00:00.000Z";
+      await writeFile(onboardingStatePath, JSON.stringify(stateRaw, null, 2), "utf8");
+
+      const consumedState = await service.getMatrixOnboardingState();
+      expect(consumedState?.consumedAt).toBe("2025-01-02T00:00:00.000Z");
+
+      await writeFile(onboardingStatePath, "{not json", "utf8");
+      expect(await service.getMatrixOnboardingState()).toBeNull();
+
+      await writeFile(onboardingStatePath, JSON.stringify({ version: 99 }), "utf8");
+      expect(await service.getMatrixOnboardingState()).toBeNull();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null public onboarding state when no runtime config is present", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => {
+          throw new Error("not used");
+        },
+      },
+      preflightChecker: {
+        run: async () => {
+          throw new Error("not used");
+        },
+      },
+      imapTester: {
+        test: async () => {
+          throw new Error("not used");
+        },
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => {
+          throw new Error("not used");
+        },
+      },
+    });
+
+    try {
+      expect(await service.getMatrixOnboardingState()).toBeNull();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("invites a local Matrix user with a shareable onboarding link", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {
@@ -8877,21 +9067,11 @@ describe("RealInstallerService", () => {
           },
         },
       ]);
-      expect(openclawConfig.channels?.matrix?.dm?.allowFrom).toEqual([
-        "@operator:matrix.example.org",
-        "@satoshi:matrix.example.org",
-      ]);
-      expect(openclawConfig.channels?.matrix?.groupAllowFrom).toEqual([
-        "@operator:matrix.example.org",
-        "@satoshi:matrix.example.org",
-      ]);
-      expect(
-        openclawConfig.channels?.matrix?.groups?.["!alerts:matrix.example.org"]?.users,
-      ).toEqual(["@operator:matrix.example.org", "@satoshi:matrix.example.org"]);
-      expect(openclawConfig.channels?.matrix?.groups?.["*"]?.users).toEqual([
-        "@operator:matrix.example.org",
-        "@satoshi:matrix.example.org",
-      ]);
+      // Top-level legacy single-account fields are absent; per-account
+      // variants below carry the allowlist.
+      expect(openclawConfig.channels?.matrix?.dm).toBeUndefined();
+      expect(openclawConfig.channels?.matrix?.groupAllowFrom).toBeUndefined();
+      expect(openclawConfig.channels?.matrix?.groups).toBeUndefined();
       expect(
         openclawConfig.channels?.matrix?.accounts?.["bitcoin-skill-match"]?.dm?.allowFrom,
       ).toEqual(["@operator:matrix.example.org", "@satoshi:matrix.example.org"]);
@@ -9060,18 +9240,10 @@ describe("RealInstallerService", () => {
         };
       };
 
-      expect(openclawConfig.channels?.matrix?.dm?.allowFrom).toEqual([
-        "@operator:matrix.example.org",
-      ]);
-      expect(openclawConfig.channels?.matrix?.groupAllowFrom).toEqual([
-        "@operator:matrix.example.org",
-      ]);
-      expect(
-        openclawConfig.channels?.matrix?.groups?.["!alerts:matrix.example.org"]?.users,
-      ).toEqual(["@operator:matrix.example.org"]);
-      expect(openclawConfig.channels?.matrix?.groups?.["*"]?.users).toEqual([
-        "@operator:matrix.example.org",
-      ]);
+      // Top-level fields absent; per-account variants carry the allowlist.
+      expect(openclawConfig.channels?.matrix?.dm).toBeUndefined();
+      expect(openclawConfig.channels?.matrix?.groupAllowFrom).toBeUndefined();
+      expect(openclawConfig.channels?.matrix?.groups).toBeUndefined();
       expect(
         openclawConfig.channels?.matrix?.accounts?.["bitcoin-skill-match"]?.dm?.allowFrom,
       ).toEqual(["@operator:matrix.example.org"]);
@@ -10869,15 +11041,12 @@ describe("RealInstallerService", () => {
 
       expect(openclawConfig.meta?.lastTouchedVersion).toBe("2026.3.13");
       expect(openclawConfig.gateway?.auth).toEqual(seededGatewayAuth);
-      expect(openclawConfig.channels?.matrix?.dm?.policy).toBe("open");
-      expect(openclawConfig.channels?.matrix?.groupPolicy).toBe("open");
+      // Top-level dm/groupPolicy/groups absent — federation policy is now
+      // expressed per-account inside accounts.<id>.{...}.
+      expect(openclawConfig.channels?.matrix?.dm).toBeUndefined();
+      expect(openclawConfig.channels?.matrix?.groupPolicy).toBeUndefined();
       expect(openclawConfig.channels?.matrix?.groupAllowFrom).toBeUndefined();
-      expect(
-        openclawConfig.channels?.matrix?.groups?.["!alerts:matrix.example.org"]?.autoReply,
-      ).toBe(true);
-      expect(
-        openclawConfig.channels?.matrix?.groups?.["!alerts:matrix.example.org"]?.requireMention,
-      ).toBe(false);
+      expect(openclawConfig.channels?.matrix?.groups).toBeUndefined();
 
       const btcAccount = openclawConfig.channels?.matrix?.accounts?.["bitcoin-skill-match"];
       expect(btcAccount?.dm?.enabled).toBe(true);
@@ -11021,24 +11190,36 @@ describe("RealInstallerService", () => {
         join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
         "utf8",
       );
+      type AccountShape = {
+        dm?: { policy?: string; allowFrom?: string[] };
+        groupPolicy?: string;
+        groups?: Record<string, { autoReply?: boolean; requireMention?: boolean }>;
+      };
       const openclawConfig = JSON.parse(openclawRaw) as {
         channels?: {
           matrix?: {
             dm?: { policy?: string; allowFrom?: string[] };
             groupPolicy?: string;
             groups?: Record<string, { autoReply?: boolean; requireMention?: boolean }>;
+            accounts?: Record<string, AccountShape>;
           };
         };
       };
-      expect(openclawConfig.channels?.matrix?.dm?.policy).toBe("open");
-      expect(openclawConfig.channels?.matrix?.dm?.allowFrom).toBeUndefined();
-      expect(openclawConfig.channels?.matrix?.groupPolicy).toBe("open");
-      expect(
-        openclawConfig.channels?.matrix?.groups?.["!alerts:matrix.example.org"]?.autoReply,
-      ).toBe(true);
-      expect(
-        openclawConfig.channels?.matrix?.groups?.["!alerts:matrix.example.org"]?.requireMention,
-      ).toBe(false);
+      // Federation policy is per-account under modern OpenClaw shape.
+      // Top-level fields are intentionally absent.
+      expect(openclawConfig.channels?.matrix?.dm).toBeUndefined();
+      expect(openclawConfig.channels?.matrix?.groupPolicy).toBeUndefined();
+      expect(openclawConfig.channels?.matrix?.groups).toBeUndefined();
+      const accounts = openclawConfig.channels?.matrix?.accounts ?? {};
+      const accountIds = Object.keys(accounts);
+      expect(accountIds.length).toBeGreaterThan(0);
+      for (const id of accountIds) {
+        const a = accounts[id];
+        expect(a?.dm?.policy).toBe("open");
+        expect(a?.dm?.allowFrom).toBeUndefined();
+        expect(a?.groupPolicy).toBe("open");
+        expect(a?.groups?.["!alerts:matrix.example.org"]).toBeDefined();
+      }
     } finally {
       if (priorOpenrouterApiKey === undefined) {
         delete process.env.OPENROUTER_API_KEY;

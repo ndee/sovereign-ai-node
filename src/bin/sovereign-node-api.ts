@@ -5,7 +5,7 @@ import { createApp } from "../app/create-app.js";
 
 const main = async (): Promise<void> => {
   const app = createApp();
-  const server = buildApiServer(app);
+  const server = await buildApiServer(app);
   const host = process.env.SOVEREIGN_NODE_API_HOST ?? "127.0.0.1";
   const port = Number(process.env.SOVEREIGN_NODE_API_PORT ?? "8787");
 
