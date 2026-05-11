@@ -1,7 +1,7 @@
 {
   "name": "sovereign-ai-node",
-  "version": "2.1.0",
-  "private": true,
+  "version": "2.2.1",
+  "private": false,
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -12,12 +12,47 @@
     "sovereign-node-api": "./dist/sovereign-node-api.js",
     "sovereign-tool": "./dist/sovereign-tool.js"
   },
+  "files": [
+    "dist",
+    "public",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/lib/index.d.ts",
+      "import": "./dist/lib/index.js"
+    },
+    "./installer": {
+      "types": "./dist/lib/installer.d.ts",
+      "import": "./dist/lib/installer.js"
+    },
+    "./api": {
+      "types": "./dist/lib/api.d.ts",
+      "import": "./dist/lib/api.js"
+    },
+    "./system": {
+      "types": "./dist/lib/system.d.ts",
+      "import": "./dist/lib/system.js"
+    },
+    "./app": {
+      "types": "./dist/lib/app.d.ts",
+      "import": "./dist/lib/app.js"
+    },
+    "./contracts": {
+      "types": "./dist/lib/contracts.d.ts",
+      "import": "./dist/lib/contracts.js"
+    },
+    "./package.json": "./package.json",
+    "./public/setup-ui/*": "./public/setup-ui/*"
+  },
   "scripts": {
     "dev:cli": "tsx src/bin/sovereign-node.ts",
     "dev:api": "tsx src/bin/sovereign-node-api.ts",
     "dev:tool": "tsx src/bin/sovereign-tool.ts",
-    "build": "tsup src/bin/sovereign-node.ts src/bin/sovereign-node-api.ts src/bin/sovereign-node-onboarding-api.ts src/bin/sovereign-tool.ts --format esm --dts --out-dir dist",
+    "build": "tsup",
     "postbuild": "node -e \"require('node:fs').cpSync('public','dist/public',{recursive:true})\"",
+    "prepare": "[ -d dist/lib ] || npm run build",
     "typecheck": "tsc --noEmit",
     "lint": "biome check src/",
     "lint:fix": "biome check --write src/",
