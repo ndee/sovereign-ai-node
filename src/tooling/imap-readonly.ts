@@ -590,6 +590,11 @@ export class ImapReadonlyToolService {
             const messages = fetched
               .map((message) => resolveFetchSummary(message))
               .sort((left, right) => right.uid - left.uid);
+            const openMailbox = client.mailbox;
+            const uidValidity =
+              openMailbox !== false && typeof openMailbox.uidValidity === "bigint"
+                ? openMailbox.uidValidity.toString()
+                : undefined;
 
             return {
               instanceId: instance.instanceId,
@@ -597,6 +602,7 @@ export class ImapReadonlyToolService {
               query: input.query,
               totalMatches: sortedUids.length,
               messages,
+              ...(uidValidity === undefined ? {} : { uidValidity }),
             };
           },
         ),

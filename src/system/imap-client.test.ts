@@ -14,6 +14,7 @@ const createNoopClient = (): ImapClientLike => ({
     release: () => {},
   }),
   logout: async () => {},
+  mailbox: false,
   mailboxOpen: async () => ({
     path: "INBOX",
     delimiter: "/",

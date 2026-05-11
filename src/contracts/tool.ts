@@ -26,6 +26,7 @@ export const imapSearchMailResultSchema = z.object({
   query: z.string().min(1),
   totalMatches: z.number().int().nonnegative(),
   messages: z.array(imapMessageSummarySchema),
+  uidValidity: z.string().min(1).optional(),
 });
 
 export const imapReadMailResultSchema = z.object({
