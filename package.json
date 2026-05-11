@@ -1,6 +1,6 @@
 {
   "name": "sovereign-ai-node",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "private": false,
   "type": "module",
   "engines": {
@@ -52,6 +52,7 @@
     "dev:tool": "tsx src/bin/sovereign-tool.ts",
     "build": "tsup",
     "postbuild": "node -e \"require('node:fs').cpSync('public','dist/public',{recursive:true})\"",
+    "prepare": "[ -d dist/lib ] || npm run build",
     "typecheck": "tsc --noEmit",
     "lint": "biome check src/",
     "lint:fix": "biome check --write src/",
