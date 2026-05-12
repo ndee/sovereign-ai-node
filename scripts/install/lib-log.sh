@@ -26,8 +26,9 @@ Options:
   --install-root <path>    Install root (default: /opt/sovereign-ai-node)
   --service-user <user>    systemd service user (default: sovereign-node)
   --service-group <group>  systemd service group (default: same as service user)
-  --api-host <host>        API bind host (default: 127.0.0.1)
-  --api-port <port>        API bind port (default: 8787)
+  --api-host <host>        API and setup-UI bind host (default: 127.0.0.1; use 0.0.0.0 to
+                            reach the setup UI from other machines on the LAN)
+  --api-port <port>        API and setup-UI bind port (default: 8787)
   --request-file <path>    Install request output path (default: /etc/sovereign-node/install-request.json)
   --install                Force Install mode (new install / reconfigure)
   --update                 Force Update mode (reuse existing request/config)

@@ -389,6 +389,16 @@ export const matrixOnboardingIssueResultSchema = z.object({
   username: z.string().min(1),
 });
 
+export const matrixOnboardingPublicStateSchema = z.object({
+  issuedAt: isoTimestampSchema,
+  expiresAt: isoTimestampSchema,
+  consumedAt: isoTimestampSchema.optional(),
+  failedAttempts: z.number().int().nonnegative(),
+  maxAttempts: z.number().int().positive(),
+  username: z.string().min(1),
+  homeserverUrl: z.string().min(1),
+});
+
 export const testImapResultSchema = z.object({
   ok: z.boolean(),
   host: z.string().min(1),
@@ -437,3 +447,4 @@ export type TestImapResult = z.infer<typeof testImapResultSchema>;
 export type TestMatrixResult = z.infer<typeof testMatrixResultSchema>;
 export type StartInstallResult = z.infer<typeof startInstallResultSchema>;
 export type MatrixOnboardingIssueResult = z.infer<typeof matrixOnboardingIssueResultSchema>;
+export type MatrixOnboardingPublicState = z.infer<typeof matrixOnboardingPublicStateSchema>;

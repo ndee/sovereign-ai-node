@@ -29,6 +29,7 @@ export type ImapClientLike = Pick<
   | "fetchOne"
   | "getMailboxLock"
   | "logout"
+  | "mailbox"
   | "mailboxOpen"
   | "search"
 >;

@@ -11,6 +11,24 @@ by the `.github/workflows/release.yml` workflow.
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-05-11
+
+Patch on top of v2.2.0 so downstream consumers can install this package directly from GitHub.
+
+- Add a `prepare` script that runs `npm run build` when `dist/lib/` is missing, so `npm install github:ndee/sovereign-ai-node#vX.Y.Z` produces a fully built tree (the GitHub Release tarball ships sources only). Local checkouts with an existing `dist/` are skipped to avoid redundant rebuilds.
+
+See the [v2.2.1 GitHub Release](https://github.com/ndee/sovereign-ai-node/releases/tag/v2.2.1) for the full commit list.
+
+## [2.2.0] - 2026-05-11
+
+Library-friendly distribution: the package now exposes its installer pipeline, API server building blocks, and supporting helpers as importable entry-points so downstream consumers can build on top of this codebase without reaching into deep internal paths.
+
+- Build splits into binaries (flat under `dist/`) and library modules (under `dist/lib/`) via a new `tsup.config.ts`.
+- `package.json` declares `files` and `exports` for `./installer`, `./api`, `./app`, `./system`, `./contracts`, plus passthrough access to `./public/setup-ui/*` wizard assets.
+- Thin re-export barrels live under `src/lib/`. No runtime behavior changes; CLI/API binary paths are preserved.
+
+See the [v2.2.0 GitHub Release](https://github.com/ndee/sovereign-ai-node/releases/tag/v2.2.0) for the full commit list.
+
 ## [2.1.0] - 2026-04-25
 
 Installer refactor: `scripts/install.sh` is now a 207-line orchestrator that sources 13 topical libraries from `scripts/install/lib-*.sh` (down from a 3,883-line monolith). The release workflow concatenates the orchestrator + libraries via `scripts/install/build.sh` and uploads the bundled file as the GitHub Release asset.
@@ -27,6 +45,8 @@ Bootstrap release formalizing the semantic versioning scheme for this project.
 See the [v2.0.0 GitHub Release](https://github.com/ndee/sovereign-ai-node/releases/tag/v2.0.0)
 for details.
 
-[Unreleased]: https://github.com/ndee/sovereign-ai-node/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/ndee/sovereign-ai-node/compare/v2.2.1...HEAD
+[2.2.1]: https://github.com/ndee/sovereign-ai-node/releases/tag/v2.2.1
+[2.2.0]: https://github.com/ndee/sovereign-ai-node/releases/tag/v2.2.0
 [2.1.0]: https://github.com/ndee/sovereign-ai-node/releases/tag/v2.1.0
 [2.0.0]: https://github.com/ndee/sovereign-ai-node/releases/tag/v2.0.0

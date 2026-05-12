@@ -209,3 +209,57 @@ NODE
     print_onboarding_qr "$onboarding_url"
   fi
 }
+
+print_setup_ui_access_guidance() {
+  local bootstrap_json setup_ui_host display_host
+
+  bootstrap_json="$(sovereign-node setup-ui issue-bootstrap-token --json 2>/dev/null || true)"
+
+  display_host="${API_HOST}"
+  if [[ "$API_HOST" == "0.0.0.0" || "$API_HOST" == "::" ]]; then
+    if command -v hostname >/dev/null 2>&1; then
+      setup_ui_host="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    fi
+    if [[ -z "${setup_ui_host:-}" ]]; then
+      setup_ui_host="<this host's LAN IP>"
+    fi
+    display_host="$setup_ui_host"
+  fi
+
+  node - "$bootstrap_json" "$display_host" "$API_HOST" "$API_PORT" <<'NODE'
+const bootstrapRaw = process.argv[2] ?? "";
+const displayHost = process.argv[3] ?? "127.0.0.1";
+const bindHost = process.argv[4] ?? "127.0.0.1";
+const port = process.argv[5] ?? "8787";
+
+let bootstrap = {};
+try {
+  const parsed = JSON.parse(bootstrapRaw);
+  bootstrap = parsed?.result ?? {};
+} catch {
+  bootstrap = {};
+}
+
+const url = `http://${displayHost}:${port}/`;
+const lines = [
+  "",
+  "Setup UI:",
+  `- URL: ${url}`,
+];
+if (typeof bootstrap.token === "string" && bootstrap.token.length > 0) {
+  lines.push(`- Bootstrap token: ${bootstrap.token}`);
+}
+if (typeof bootstrap.expiresAt === "string" && bootstrap.expiresAt.length > 0) {
+  lines.push(`- Token expires: ${bootstrap.expiresAt}`);
+}
+lines.push("- Sign in once with the bootstrap token, then use your Matrix password going forward.");
+lines.push("- Regenerate the token: sudo sovereign-node setup-ui issue-bootstrap-token");
+if (bindHost === "127.0.0.1") {
+  lines.push("- The API is bound to 127.0.0.1; reachable only from this host.");
+  lines.push("  Re-run install.sh with --api-host 0.0.0.0 to expose the UI on the LAN.");
+} else {
+  lines.push(`- The API is bound to ${bindHost}; auth is required regardless of bind address.`);
+}
+process.stdout.write(`${lines.join("\n")}\n`);
+NODE
+}

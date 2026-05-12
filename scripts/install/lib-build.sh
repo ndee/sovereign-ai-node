@@ -170,6 +170,41 @@ configure_system_hygiene() {
     /etc/systemd/system/sovereign-node-disk-check.timer
   systemctl daemon-reload
   systemctl enable --now sovereign-node-disk-check.timer 2>/dev/null || true
+
+  # --- sudoers fragment: scoped passwordless sudo for the runtime API ---
+  # The sovereign-node-api service runs as ${SERVICE_USER} (non-root) and
+  # needs to install/start the OpenClaw gateway systemd unit during a
+  # bundled-Matrix install. Dropping a narrow sudoers rule lets it
+  # tee/move the unit file and run systemctl against that one unit, with
+  # no other sudo capabilities.
+  local sudoers_path="/etc/sudoers.d/sovereign-node-gateway"
+  install -d -m 0755 /etc/sudoers.d
+  cat > "$sudoers_path" <<EOF
+# Managed by sovereign-ai-node installer. Scoped sudo for the runtime
+# API service to manage the OpenClaw gateway systemd unit and the
+# bundled-Matrix project directory.
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/tee /etc/systemd/system/sovereign-openclaw-gateway.service
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl daemon-reload
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl restart sovereign-openclaw-gateway, /bin/systemctl restart sovereign-openclaw-gateway.service
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl enable --now sovereign-openclaw-gateway, /bin/systemctl enable --now sovereign-openclaw-gateway.service
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl is-active sovereign-openclaw-gateway, /bin/systemctl is-active sovereign-openclaw-gateway.service
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl status sovereign-openclaw-gateway, /bin/systemctl status sovereign-openclaw-gateway.service
+# Allow re-claiming ownership of bundled-matrix project subdirectories
+# after docker-compose has touched them as root. Restricted to that
+# path; the *:* in the chown spec keeps it bounded to numeric uid:gid.
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/chown -R [0-9]*\:[0-9]* /var/lib/sovereign-node/bundled-matrix/*
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/chown -R [0-9]*\:[0-9]* /var/lib/sovereign-node/bundled-matrix/*
+# Allow re-claiming ownership of /etc/sovereign-node/secrets and its
+# entries when a previous run left them root-owned.
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets, /bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets/*
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets, /usr/bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets/*
+EOF
+  chmod 0440 "$sudoers_path"
+  # Validate; if invalid, remove so we don't break sudo entirely.
+  if ! visudo -cf "$sudoers_path" >/dev/null 2>&1; then
+    rm -f "$sudoers_path"
+    log "WARN: sudoers fragment for ${SERVICE_USER} failed validation; removed"
+  fi
 }
 
 install_request_template() {

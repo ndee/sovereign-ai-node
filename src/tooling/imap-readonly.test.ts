@@ -111,6 +111,14 @@ const createNoopClient = (): ImapClientLike => ({
     release: () => {},
   }),
   logout: async () => {},
+  mailbox: {
+    path: "INBOX",
+    delimiter: "/",
+    flags: new Set(),
+    uidValidity: 1n,
+    uidNext: 1,
+    exists: 0,
+  },
   mailboxOpen: async () => ({
     path: "INBOX",
     delimiter: "/",
@@ -239,6 +247,32 @@ describe("imap-readonly tool service", () => {
     expect(result.totalMatches).toBe(2);
     expect(result.messages.map((message) => message.uid)).toEqual([27, 12]);
     expect(result.messages[0]?.subject).toBe("Quarterly Report");
+    expect(result.uidValidity).toBe("1");
+  });
+
+  it("omits uidValidity when the client does not expose an open mailbox", async () => {
+    process.env[TEST_SECRET_ENV] = "bridge-pass";
+
+    const runtimeConfig = buildRuntimeConfig(`env:${TEST_SECRET_ENV}`);
+    const service = new ImapReadonlyToolService({
+      configLoader: async () => runtimeConfig,
+      runner: async (_account, handler) => {
+        const client: ImapClientLike = {
+          ...createNoopClient(),
+          mailbox: false,
+          search: async () => [],
+        };
+        return await handler(client);
+      },
+    });
+
+    const result = await service.searchMail({
+      instanceId: "mail-sentinel-imap",
+      query: "ALL",
+      limit: 5,
+    });
+
+    expect(result.uidValidity).toBeUndefined();
   });
 
   it("treats a leading configured mailbox token as redundant during search", async () => {
