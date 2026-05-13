@@ -302,14 +302,14 @@ Normative onboarding rules:
 
 Purpose:
 
-- download `scripts/install.sh` from the selected Sovereign ref/URL and re-run the install flow in update mode using the saved install request file
+- download the selected Sovereign installer and re-run the install flow in update mode using the saved install request file
 
 Behavior:
 
 - MUST require root privileges and instruct the operator to re-run with `sudo` when invoked as a non-root user
 - MUST fail clearly when pending migrations exist
 - MUST instruct the operator to run `sovereign-node migrate` first when that happens
-- when no explicit installer ref/URL override is supplied, SHOULD resolve the latest GitHub release tag first and fall back to `main` only when that lookup fails
+- when no explicit installer ref/URL override is supplied, SHOULD resolve the latest GitHub release tag first, download that release's `install.sh` asset, and fall back to `main` only when that lookup fails
 - explicit `--ref`, `--installer-url`, `SOVEREIGN_NODE_REF`, and `SOVEREIGN_NODE_INSTALL_SH_URL` inputs override the default latest-release lookup
 
 ## `sovereign-node migrate`
@@ -362,12 +362,13 @@ Minimum OpenClaw-related checks in `DoctorReport.checks` should include:
 
 Purpose:
 
-- show recent logs for `sovereign-node`, bundled services, and selected components
+- target contract: show recent logs for `sovereign-node`, bundled services, and selected components
 
 Behavior:
 
-- text mode is human-readable
-- `--json` emits NDJSON log events
+- current implementation is scaffold-only
+- text mode currently prints a placeholder message instead of streaming persisted logs
+- `--json` currently emits scaffold NDJSON events (`status`, `log`, `end`) rather than a live log backend
 
 NDJSON event schema:
 
@@ -395,10 +396,11 @@ Purpose:
 
 Purpose:
 
-- update IMAP settings/credentials and validate them before persisting
+- target contract: update IMAP settings/credentials and validate them before persisting
 
 Behavior:
 
+- current CLI surface is scaffold-only and invokes reconfigure with placeholder IMAP values
 - for the legacy/default `mail-sentinel` instance, the top-level `imap` section is the authoritative source for the instance IMAP host, port, TLS mode, username, mailbox, and password secret ref
 - when the top-level `imap` section is configured, update/reconfigure flows MUST overwrite stale legacy/default per-instance IMAP values with the top-level values
 - this reconciliation rule applies to the legacy/default `mail-sentinel` instance and MUST NOT be generalized to unrelated multi-instance Mail Sentinel entries without an explicit operator action
