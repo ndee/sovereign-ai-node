@@ -17,9 +17,7 @@ const BUNDLED_OPENCLAW_EXTENSION_REPAIR_TARGETS = [
 ] as const;
 
 // Sovereign pins a specific OpenClaw release to ensure stability.
-// 2026.3.13 includes health-monitor fixes for long-polling channels (Matrix),
-// cron isolated-session deadlock prevention, and numerous security patches.
-export const SOVEREIGN_PINNED_OPENCLAW_VERSION = "2026.3.13";
+export const SOVEREIGN_PINNED_OPENCLAW_VERSION = "2026.5.12";
 export const SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS = "pinned-by-sovereign";
 
 export type OpenClawInstallOptions = {
