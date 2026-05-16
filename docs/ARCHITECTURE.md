@@ -242,12 +242,13 @@ Repo helper scripts may automate repeated CLI sequences, but the runtime remains
 
 ## Operator Install Surfaces (CLI and Wizard)
 
-`sovereign-ai-node` may expose operator-friendly install and onboarding surfaces on top of the OpenClaw runtime, but these do not replace OpenClaw itself.
+`sovereign-ai-node` ships operator-friendly install and admin surfaces on top of the OpenClaw runtime, but these do not replace OpenClaw itself.
 
 Supported surface model:
 
 - `sovereign-node` CLI for opinionated update, migration, status, diagnostics, template, agent, and helper workflows
-- Sovereign Wizard UI (web UI) for guided onboarding and day-1 operations
+- Sovereign Setup UI at `/setup-ui/` for guided browser-based setup and admin access to the same backend logic
+- Matrix onboarding page at `/onboard` for client-password bootstrap after install
 - `openclaw` CLI for runtime-native inspection, debugging, and break-glass operations
 
 Core rules:
@@ -255,8 +256,9 @@ Core rules:
 - `openclaw` remains available and documented
 - The default Sovereign install path owns host bootstrap, including OpenClaw installation
 - Sovereign uses the official OpenClaw installer flow and skips `openclaw onboard` in the default path
-- CLI and Wizard should use the same installer/provisioning backend logic (no duplicated provisioning implementations)
-- The wizard is an operator setup/status UI, not a replacement for Element or other end-user chat clients
+- CLI and Setup UI use the same installer/provisioning backend logic (no duplicated provisioning implementations)
+- The Setup UI is an operator setup/status UI, not a replacement for Element or other end-user chat clients
+- `/setup-ui/` access starts with a one-time bootstrap token issued by `sudo sovereign-node setup-ui issue-bootstrap-token`; after bootstrap, later admin sign-in uses the operator's Matrix password via `/api/auth/login`
 - Operator flows may simplify setup (for example bundled Matrix), but must preserve explicit configuration and auditability
 
 Related docs define the operator journey, deployment defaults, and installer contracts:

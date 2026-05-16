@@ -46,6 +46,15 @@ sudo sovereign-node update
 
 This downloads the bundled `install.sh` from the latest release and re-runs it in update mode. Pin a specific version with `--ref vX.Y.Z`.
 
+## Setup UI and admin sign-in
+
+Current installs also ship a local browser-based setup/admin surface at `/setup-ui/` on the node.
+
+- First-run browser access uses a one-time bootstrap token.
+- Issue or rotate that token with `sudo sovereign-node setup-ui issue-bootstrap-token`.
+- After the first successful sign-in, later admin sign-in uses the operator's Matrix password.
+- Matrix client onboarding still happens separately through `/onboard` and `sudo sovereign-node onboarding issue`.
+
 ### Recovery: hosts stuck on v2.0.0
 
 `sovereign-node update` on v2.0.0 fetched the orchestrator script from `raw.githubusercontent.com` and silently exited 1 because the orchestrator requires a sibling `install/` library tree that was never downloaded. v2.1.0+ hosts use the bundled release asset and update normally.
