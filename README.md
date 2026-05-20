@@ -77,6 +77,32 @@ curl -fsSL https://github.com/ndee/sovereign-ai-node/releases/latest/download/in
 
 After this completes, future updates can use `sudo sovereign-node update`.
 
+## Using `sovereign-ai-node` as a package
+
+`sovereign-ai-node` now ships build output and public subpath exports for Node-based integrations.
+
+Install from npm or directly from GitHub:
+
+```bash
+npm install sovereign-ai-node
+```
+
+```bash
+npm install github:ndee/sovereign-ai-node
+```
+
+GitHub installs run the package `prepare` step automatically, so `dist/` is built during install when it is not already present.
+
+Current entrypoints:
+
+* `sovereign-ai-node` — combined top-level exports
+* `sovereign-ai-node/installer` — installer services and job runner types
+* `sovereign-ai-node/api` — Fastify route registration helpers and auth/session utilities
+* `sovereign-ai-node/app` — app container creation
+* `sovereign-ai-node/system` — system helpers such as LAN IPv4 detection
+* `sovereign-ai-node/contracts` — shared Zod-backed contracts and schemas
+* `sovereign-ai-node/public/setup-ui/*` — bundled setup UI assets
+
 ## Architecture
 
 Sovereign AI Node is the runtime and control plane layer. Bot packages are defined and versioned separately in [`sovereign-ai-bots`](https://github.com/ndee/sovereign-ai-bots).
