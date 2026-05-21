@@ -217,6 +217,7 @@ Current operator-facing commands:
 - `sovereign-node doctor`
 - `sudo sovereign-node update`
 - `sovereign-node migrate`
+- `sudo sovereign-node setup-ui issue-bootstrap-token`
 - `sovereign-node mail-sentinels list`
 - `sovereign-node mail-sentinels show <id>`
 - `sovereign-node mail-sentinels create <id> ...`
@@ -312,9 +313,30 @@ Minimum runtime signals the operator should be able to inspect:
 
 ## Sovereign Wizard UI (Web UI, Same Backend Logic)
 
-The Wizard UI is a guided alternative to the CLI-first flow and must reuse the same installer/provisioning backend.
+The shipped Setup UI is a guided browser surface at `/setup-ui/` and reuses the same installer/provisioning backend as the CLI.
 
-Recommended Wizard flow:
+Current auth flow:
+
+1. issue a one-time bootstrap token with:
+
+```bash
+sudo sovereign-node setup-ui issue-bootstrap-token
+```
+
+2. open `/setup-ui/` on the node and sign in once with that token
+3. after bootstrap, later Setup UI sign-in uses the operator's Matrix password instead of another bootstrap token
+4. Matrix client onboarding still uses `/onboard` and `sudo sovereign-node onboarding issue`
+
+Current Setup UI/backend surfaces:
+
+- `GET /` redirects to `/setup-ui/`
+- `GET /setup-ui/` serves the browser app shell
+- `GET /api/auth/state` reports whether the node is in `needs-bootstrap` or `needs-password` mode
+- `POST /api/auth/login` accepts either the one-time bootstrap token or the operator Matrix password, depending on the current auth stage
+- `POST /api/auth/logout` clears the browser session
+- `GET /api/setup-ui/host-info` returns detected LAN IPv4 addresses so LAN installs can prefill an IP-based Matrix URL
+
+Recommended Setup UI flow:
 
 1. Welcome
 2. Preflight
@@ -333,7 +355,7 @@ Current Wizard handoff behavior:
 - Local LAN installs show the real CA download URL for the node's current LAN IP so operators can trust the generated local CA on each device
 - Local dev installs do not offer the hosted Element link; they show the required `ssh -L 8008:127.0.0.1:8008 <node-host>` tunnel instead
 
-Wizard design constraints:
+Setup UI design constraints:
 
 - Do not duplicate provisioning logic in frontend code
 - Show step-level progress and failures for long-running installs
