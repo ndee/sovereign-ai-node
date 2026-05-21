@@ -316,13 +316,22 @@ The Wizard UI is a guided alternative to the CLI-first flow and must reuse the s
 
 Recommended Wizard flow:
 
-1. Preflight
-2. IMAP Credentials
+1. Welcome
+2. Preflight
 3. Matrix Setup (Bundled)
-4. Install and Provision
-5. Element Connect
-6. Send Test Alert
-7. Status
+4. IMAP Mailbox
+5. Provider
+6. Modules
+7. Review
+8. Install and Provision
+9. Done / Matrix handoff
+
+Current Wizard handoff behavior:
+
+- the browser persists wizard state locally so refreshes or a closed tab can resume the same install job
+- the Done step links straight into hosted Element for public and LAN installs using the resolved Matrix URL and operator login hint
+- Local LAN installs show the real CA download URL for the node's current LAN IP so operators can trust the generated local CA on each device
+- Local dev installs do not offer the hosted Element link; they show the required `ssh -L 8008:127.0.0.1:8008 <node-host>` tunnel instead
 
 Wizard design constraints:
 
