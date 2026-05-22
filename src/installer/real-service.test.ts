@@ -6610,6 +6610,7 @@ describe("RealInstallerService", () => {
 
       const runtimeConfigRaw = await readFile(paths.configPath, "utf8");
       const runtimeConfig = JSON.parse(runtimeConfigRaw) as {
+        openrouter?: { apiKeySecretRef?: string };
         matrix?: {
           bot?: {
             accessTokenSecretRef?: string;
@@ -6624,6 +6625,15 @@ describe("RealInstallerService", () => {
           }>;
         };
       };
+
+      // Issue #164: env: secretRefs must be materialized to file: refs at
+      // install time so the api service (running under systemd, without the
+      // installer shell's env) can still resolve them later.
+      const expectedOpenrouterSecretRef = `file:${join(paths.secretsDir, "openrouter-api-key")}`;
+      expect(runtimeConfig.openrouter?.apiKeySecretRef).toBe(expectedOpenrouterSecretRef);
+      expect((await readFile(join(paths.secretsDir, "openrouter-api-key"), "utf8")).trim()).toBe(
+        "sk-or-test",
+      );
       const botTokenPath =
         runtimeConfig.matrix?.bot?.accessTokenSecretRef?.startsWith("file:") === true
           ? runtimeConfig.matrix.bot.accessTokenSecretRef.slice("file:".length)
