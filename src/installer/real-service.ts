@@ -10518,6 +10518,13 @@ export default function (api) {
     }
 
     if (imap.secretRef !== undefined && imap.secretRef.length > 0) {
+      // See materializeEnvSecretRef for why env: refs are resolved here:
+      // the api service can't read them later under systemd (issue #164).
+      const materializedRef = await this.materializeEnvSecretRef({
+        secretRef: imap.secretRef,
+        fileName: "imap-password",
+        missingErrorCode: "IMAP_SECRET_READ_FAILED",
+      });
       return {
         status: "configured",
         host: imap.host,
@@ -10525,7 +10532,7 @@ export default function (api) {
         tls: imap.tls,
         username: imap.username,
         mailbox: imap.mailbox ?? "INBOX",
-        secretRef: imap.secretRef,
+        secretRef: materializedRef,
       };
     }
 
@@ -10556,7 +10563,16 @@ export default function (api) {
     openrouter: InstallRequest["openrouter"],
   ): Promise<string> {
     if (openrouter.secretRef !== undefined && openrouter.secretRef.length > 0) {
-      return openrouter.secretRef;
+      // env: refs are install-time only: the api service runs under systemd
+      // and doesn't inherit the installer shell's environment, so persisting
+      // env: into the runtime config would break secret resolution at runtime
+      // (see issue #164). Materialize to a file now while we still have the
+      // value in process.env.
+      return this.materializeEnvSecretRef({
+        secretRef: openrouter.secretRef,
+        fileName: "openrouter-api-key",
+        missingErrorCode: "SECRET_READ_FAILED",
+      });
     }
 
     if (openrouter.apiKey !== undefined && openrouter.apiKey.length > 0) {
@@ -10564,7 +10580,7 @@ export default function (api) {
     }
 
     if (process.env.OPENROUTER_API_KEY !== undefined && process.env.OPENROUTER_API_KEY.length > 0) {
-      return "env:OPENROUTER_API_KEY";
+      return this.writeSecretFile("openrouter-api-key", process.env.OPENROUTER_API_KEY);
     }
 
     throw {
@@ -10573,6 +10589,27 @@ export default function (api) {
         "OpenRouter credentials are missing (provide openrouter.apiKey or openrouter.secretRef)",
       retryable: false,
     };
+  }
+
+  private async materializeEnvSecretRef(input: {
+    secretRef: string;
+    fileName: string;
+    missingErrorCode: string;
+  }): Promise<string> {
+    if (!input.secretRef.startsWith("env:")) {
+      return input.secretRef;
+    }
+    const key = input.secretRef.slice("env:".length);
+    const value = process.env[key];
+    if (value === undefined || value.length === 0) {
+      throw {
+        code: input.missingErrorCode,
+        message: "Secret environment variable is not set",
+        retryable: false,
+        details: { secretRef: input.secretRef },
+      };
+    }
+    return this.writeSecretFile(input.fileName, value);
   }
 
   private async writeSecretFile(fileName: string, value: string): Promise<string> {
