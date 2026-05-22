@@ -22,6 +22,7 @@ export const stepStateSchema = z.enum([
 
 export const jobStepIdSchema = z.enum([
   "preflight",
+  "prepare_docker_runtime",
   "openclaw_bootstrap_cli",
   "openclaw_bundled_plugin_tools",
   "imap_validate",
@@ -46,6 +47,8 @@ export const jobStepSchema = z.object({
   endedAt: isoTimestampSchema.optional(),
   error: errorDetailSchema.optional(),
   details: z.record(z.string(), z.unknown()).optional(),
+  progressNote: z.string().min(1).optional(),
+  progressUpdatedAt: isoTimestampSchema.optional(),
 });
 
 export const installJobSummarySchema = z.object({

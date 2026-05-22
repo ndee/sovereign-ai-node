@@ -6,6 +6,7 @@ import { ShellOpenClawBootstrapper } from "../openclaw/bootstrap.js";
 import { ShellOpenClawGatewayServiceManager } from "../openclaw/gateway-service.js";
 import { ShellOpenClawManagedAgentRegistrar } from "../openclaw/managed-agent.js";
 import { RealBackupService } from "../system/backup.js";
+import { ShellDockerRuntimePreparer } from "../system/docker-runtime.js";
 import { ExecaExecRunner } from "../system/exec.js";
 import { SocketImapTester } from "../system/imap.js";
 import { DockerComposeBundledMatrixProvisioner } from "../system/matrix.js";
@@ -23,6 +24,7 @@ export const createApp = () => {
     DEFAULT_PATHS,
   );
   const preflightChecker = new ShellHostPreflightChecker(execRunner, logger);
+  const dockerRuntimePreparer = new ShellDockerRuntimePreparer(execRunner, logger);
   const openclawGatewayServiceManager = new ShellOpenClawGatewayServiceManager(execRunner, logger);
   const managedAgentRegistrar = new ShellOpenClawManagedAgentRegistrar(execRunner, logger);
   const botCatalog = new FilesystemBotCatalog();
@@ -36,6 +38,7 @@ export const createApp = () => {
       managedAgentRegistrar,
       botCatalog,
       preflightChecker,
+      dockerRuntimePreparer,
       imapTester,
       matrixProvisioner,
       execRunner,

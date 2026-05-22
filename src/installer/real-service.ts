@@ -90,6 +90,7 @@ import type {
   ManagedAgentRegistrationResult,
   OpenClawManagedAgentRegistrar,
 } from "../openclaw/managed-agent.js";
+import type { DockerRuntimePreparer } from "../system/docker-runtime.js";
 import type { ExecResult, ExecRunner } from "../system/exec.js";
 import type { ImapTester } from "../system/imap.js";
 import type {
@@ -324,6 +325,7 @@ type RealInstallerServiceDeps = {
   managedAgentRegistrar?: OpenClawManagedAgentRegistrar;
   botCatalog?: BotCatalog;
   preflightChecker: HostPreflightChecker;
+  dockerRuntimePreparer?: DockerRuntimePreparer;
   imapTester: ImapTester;
   matrixProvisioner: BundledMatrixProvisioner;
   execRunner?: ExecRunner;
@@ -350,6 +352,8 @@ export class RealInstallerService implements InstallerService {
 
   private readonly preflightChecker: HostPreflightChecker;
 
+  private readonly dockerRuntimePreparer: DockerRuntimePreparer;
+
   private readonly imapTester: ImapTester;
 
   private readonly matrixProvisioner: BundledMatrixProvisioner;
@@ -374,6 +378,17 @@ export class RealInstallerService implements InstallerService {
       };
     this.botCatalog = deps.botCatalog ?? new FilesystemBotCatalog();
     this.preflightChecker = deps.preflightChecker;
+    this.dockerRuntimePreparer = deps.dockerRuntimePreparer ?? {
+      // Default to a probe-only no-op preparer so the install pipeline can
+      // run in test contexts and on hosts where docker is already installed
+      // and the helper script is not present. Production wiring in
+      // create-app.ts supplies a real ShellDockerRuntimePreparer.
+      prepare: async () => ({
+        alreadyPresent: true,
+        ranInstaller: false,
+        probe: { cli: true, compose: true },
+      }),
+    };
     this.imapTester = deps.imapTester;
     this.matrixProvisioner = deps.matrixProvisioner;
     this.execRunner = deps.execRunner ?? null;
@@ -7203,6 +7218,15 @@ export default function (api) {
         },
       },
       {
+        id: "prepare_docker_runtime",
+        label: "Prepare Docker runtime",
+        run: async (_ctx, reportProgress) => {
+          await this.dockerRuntimePreparer.prepare(async (note) => {
+            await reportProgress(note);
+          });
+        },
+      },
+      {
         id: "matrix_provision",
         label: "Provision bundled Matrix stack",
         run: async () => {
@@ -7214,7 +7238,7 @@ export default function (api) {
       {
         id: "matrix_bootstrap_accounts",
         label: "Bootstrap Matrix accounts",
-        run: async () => {
+        run: async (_ctx, reportProgress) => {
           if (stepState.matrixProvision === undefined) {
             throw {
               code: "INSTALL_INTERNAL_STATE",
@@ -7254,6 +7278,9 @@ export default function (api) {
                   : { botLocalpart: bootstrapBotLocalpart }),
                 avatarResolver: accountsAvatarResolver,
                 ...(previousBotAvatarSha256 === undefined ? {} : { previousBotAvatarSha256 }),
+                onProgress: async (note) => {
+                  await reportProgress(note);
+                },
               },
             );
           } catch (error) {
@@ -7290,7 +7317,7 @@ export default function (api) {
       {
         id: "matrix_bootstrap_room",
         label: "Bootstrap Matrix alert room",
-        run: async () => {
+        run: async (_ctx, reportProgress) => {
           if (stepState.matrixProvision === undefined) {
             throw {
               code: "INSTALL_INTERNAL_STATE",
@@ -7327,6 +7354,9 @@ export default function (api) {
               ...(previousAlertRoom === undefined ? {} : { previousAlertRoom }),
               avatarResolver,
               ...(previousAvatarSha256 === undefined ? {} : { previousAvatarSha256 }),
+              onProgress: async (note) => {
+                await reportProgress(note);
+              },
             },
           );
         },

@@ -2061,3 +2061,75 @@ describe("DockerComposeBundledMatrixProvisioner.setRoomAvatar", () => {
     }
   });
 });
+
+describe("DockerComposeBundledMatrixProvisioner onProgress reporting", () => {
+  it("emits compose progress notes during bootstrapAccounts", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-test-"));
+    const recordedNotes: string[] = [];
+
+    const fakeExecRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        const args = input.args ?? [];
+        if (
+          input.command === "docker" &&
+          (args.includes("config") ||
+            args.includes("up") ||
+            args.includes("register_new_matrix_user"))
+        ) {
+          return {
+            command: [input.command, ...args].join(" "),
+            exitCode: 0,
+            stdout: "ok",
+            stderr: "",
+          };
+        }
+        return {
+          command: [input.command, ...args].join(" "),
+          exitCode: 127,
+          stdout: "",
+          stderr: "command not found",
+        };
+      },
+    };
+
+    const fakeFetch = async (url: string, init?: RequestInit): Promise<Response> => {
+      if (url.endsWith("/_matrix/client/versions")) {
+        return jsonResponse({ versions: ["v1.1"] });
+      }
+      if (url.endsWith("/_matrix/client/v3/login")) {
+        const payload = parseBody(init?.body);
+        const localpart = readLoginLocalpart(payload) ?? "unknown";
+        return jsonResponse({
+          access_token: `token-${localpart}`,
+          user_id: `@${localpart}:matrix.local.test`,
+        });
+      }
+      return new Response(JSON.stringify({ error: "not-found" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    const paths = buildPaths(tempRoot);
+    const provisioner = new DockerComposeBundledMatrixProvisioner(
+      fakeExecRunner,
+      createLogger(),
+      paths,
+      fakeFetch,
+    );
+
+    try {
+      const req = buildInstallRequest();
+      const provision = await provisioner.provision(req);
+      await provisioner.bootstrapAccounts(req, provision, {
+        onProgress: (note) => {
+          recordedNotes.push(note);
+        },
+      });
+
+      expect(recordedNotes).toContain("Starting bundled Matrix containers (docker compose up)");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
