@@ -2263,6 +2263,7 @@ describe("RealInstallerService", () => {
 
       const stepStates = Object.fromEntries(started.job.steps.map((step) => [step.id, step.state]));
       expect(stepStates.preflight).toBe("succeeded");
+      expect(stepStates.prepare_docker_runtime).toBe("succeeded");
       expect(stepStates.openclaw_bootstrap_cli).toBe("succeeded");
       expect(stepStates.imap_validate).toBe("succeeded");
       expect(stepStates.matrix_provision).toBe("succeeded");

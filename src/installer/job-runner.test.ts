@@ -42,6 +42,42 @@ describe("JobRunner", () => {
     expect(relayStep?.state).toBe("succeeded");
   });
 
+  it("forwards reportProgress writes to the current step and notifies observers", async () => {
+    const snapshots: Array<{ stepId: string; note?: string }> = [];
+    const steps: InstallStep[] = [
+      {
+        id: "prepare_docker_runtime",
+        label: "Prepare Docker runtime",
+        run: async (_ctx, reportProgress) => {
+          await reportProgress("");
+          await reportProgress("  ");
+          await reportProgress("Installing Docker runtime");
+          await reportProgress("Docker runtime installed");
+        },
+      },
+    ];
+
+    const runner = new JobRunner();
+    const result = await runner.run(ctx, steps, (snapshot) => {
+      const step = snapshot.job.steps[0];
+      if (step?.state === "running") {
+        snapshots.push({
+          stepId: step.id,
+          ...(step.progressNote === undefined ? {} : { note: step.progressNote }),
+        });
+      }
+    });
+
+    expect(result.job.state).toBe("succeeded");
+    const finalStep = result.job.steps[0];
+    expect(finalStep?.progressNote).toBe("Docker runtime installed");
+    expect(finalStep?.progressUpdatedAt).toBeDefined();
+    expect(snapshots.filter((s) => s.note !== undefined).map((s) => s.note)).toEqual([
+      "Installing Docker runtime",
+      "Docker runtime installed",
+    ]);
+  });
+
   it("still hard-fails steps without softFail", async () => {
     const steps: InstallStep[] = [
       {
