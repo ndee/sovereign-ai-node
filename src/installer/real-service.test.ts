@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { LoadedBotPackage } from "../bots/catalog.js";
 import type { SovereignPaths } from "../config/paths.js";
-import type { InstallRequest } from "../contracts/index.js";
+import type { InstallJobStatusResponse, InstallRequest } from "../contracts/index.js";
 import { createLogger } from "../logging/logger.js";
 import type {
   OpenClawBootstrapper,
@@ -21,6 +21,21 @@ import type { BundledMatrixProvisioner, BundledMatrixProvisionResult } from "../
 import type { HostPreflightChecker } from "../system/preflight.js";
 import { RealInstallerService } from "./real-service.js";
 import type { RuntimeConfig } from "./real-service-shared.js";
+import type { InstallerService } from "./service.js";
+
+const waitForJob = async (
+  service: InstallerService,
+  jobId: string,
+): Promise<InstallJobStatusResponse> => {
+  for (let i = 0; i < 200; i++) {
+    const result = await service.getInstallJob(jobId);
+    if (result.job.state !== "pending" && result.job.state !== "running") {
+      return result;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Job ${jobId} did not reach a terminal state within 2s`);
+};
 
 const priorBotRepoDir = process.env.SOVEREIGN_BOTS_REPO_DIR;
 const priorBotRepoUrl = process.env.SOVEREIGN_BOTS_REPO_URL;
@@ -2097,16 +2112,17 @@ describe("RealInstallerService", () => {
 
     try {
       const started = await service.startInstall(buildInstallRequest());
+      const finished = await waitForJob(service, started.job.jobId);
 
-      expect(started.job.state).toBe("failed");
-      expect(started.job.steps[0]?.id).toBe("preflight");
-      expect(started.job.steps[0]?.state).toBe("succeeded");
-      expect(started.job.steps[1]?.id).toBe("openclaw_bootstrap_cli");
-      expect(started.job.steps[1]?.state).toBe("succeeded");
-      expect(started.job.steps[2]?.id).toBe("openclaw_bundled_plugin_tools");
-      expect(started.job.steps[3]?.id).toBe("imap_validate");
-      expect(started.job.steps[3]?.state).toBe("warned");
-      expect(started.job.steps[3]?.error?.code).toBe("IMAP_TEST_FAILED");
+      expect(finished.job.state).toBe("failed");
+      expect(finished.job.steps[0]?.id).toBe("preflight");
+      expect(finished.job.steps[0]?.state).toBe("succeeded");
+      expect(finished.job.steps[1]?.id).toBe("openclaw_bootstrap_cli");
+      expect(finished.job.steps[1]?.state).toBe("succeeded");
+      expect(finished.job.steps[2]?.id).toBe("openclaw_bundled_plugin_tools");
+      expect(finished.job.steps[3]?.id).toBe("imap_validate");
+      expect(finished.job.steps[3]?.state).toBe("warned");
+      expect(finished.job.steps[3]?.error?.code).toBe("IMAP_TEST_FAILED");
 
       const stored = await service.getInstallJob(started.job.jobId);
       expect(stored.job.jobId).toBe(started.job.jobId);
@@ -2253,15 +2269,18 @@ describe("RealInstallerService", () => {
 
     try {
       const started = await service.startInstall(buildInstallRequest());
+      const finished = await waitForJob(service, started.job.jobId);
 
-      expect(started.job.state).toBe("failed");
+      expect(finished.job.state).toBe("failed");
       expect(matrixProvisionCalls).toBe(1);
       expect(matrixBootstrapAccountCalls).toBe(1);
       expect(matrixBootstrapRoomCalls).toBe(1);
       expect(gatewayInstallCalls).toBe(1);
       expect(gatewayInstallForceArg).toBe(false);
 
-      const stepStates = Object.fromEntries(started.job.steps.map((step) => [step.id, step.state]));
+      const stepStates = Object.fromEntries(
+        finished.job.steps.map((step) => [step.id, step.state]),
+      );
       expect(stepStates.preflight).toBe("succeeded");
       expect(stepStates.prepare_docker_runtime).toBe("succeeded");
       expect(stepStates.openclaw_bootstrap_cli).toBe("succeeded");
@@ -2415,11 +2434,14 @@ describe("RealInstallerService", () => {
 
     try {
       const started = await service.startInstall(buildInstallRequest());
+      const finished = await waitForJob(service, started.job.jobId);
 
-      expect(started.job.state).toBe("succeeded");
+      expect(finished.job.state).toBe("succeeded");
       expect(matrixTestCalls).toBe(1);
 
-      const stepStates = Object.fromEntries(started.job.steps.map((step) => [step.id, step.state]));
+      const stepStates = Object.fromEntries(
+        finished.job.steps.map((step) => [step.id, step.state]),
+      );
       expect(stepStates.preflight).toBe("succeeded");
       expect(stepStates.openclaw_bootstrap_cli).toBe("succeeded");
       expect(stepStates.imap_validate).toBe("succeeded");
@@ -2755,7 +2777,8 @@ describe("RealInstallerService", () => {
       };
 
       const started = await service.startInstall(req);
-      expect(started.job.state).toBe("succeeded");
+      const finished = await waitForJob(service, started.job.jobId);
+      expect(finished.job.state).toBe("succeeded");
 
       const openclawConfigRaw = await readFile(
         join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
@@ -3060,11 +3083,14 @@ describe("RealInstallerService", () => {
 
     try {
       const started = await service.startInstall(buildInstallRequest());
+      const finished = await waitForJob(service, started.job.jobId);
 
       expect(pluginEnableCalls).toBe(1);
-      expect(started.job.state).toBe("failed");
+      expect(finished.job.state).toBe("failed");
 
-      const stepStates = Object.fromEntries(started.job.steps.map((step) => [step.id, step.state]));
+      const stepStates = Object.fromEntries(
+        finished.job.steps.map((step) => [step.id, step.state]),
+      );
       expect(stepStates.preflight).toBe("succeeded");
       expect(stepStates.openclaw_bootstrap_cli).toBe("succeeded");
       expect(stepStates.imap_validate).toBe("succeeded");
@@ -3196,8 +3222,9 @@ describe("RealInstallerService", () => {
 
     try {
       const started = await service.startInstall(buildInstallRequest());
+      const finished = await waitForJob(service, started.job.jobId);
 
-      expect(started.job.state).toBe("succeeded");
+      expect(finished.job.state).toBe("succeeded");
 
       const updatedConfigRaw = await readFile(paths.configPath, "utf8");
       const updatedConfig = JSON.parse(updatedConfigRaw) as {
@@ -3389,8 +3416,9 @@ describe("RealInstallerService", () => {
 
     try {
       const started = await service.startInstall(buildInstallRequest());
+      const finished = await waitForJob(service, started.job.jobId);
 
-      expect(started.job.state).toBe("succeeded");
+      expect(finished.job.state).toBe("succeeded");
       await expect(readFile(userPolicyPath, "utf8")).resolves.toBe(customUserPolicy);
       await expect(readFile(defaultRulesPath, "utf8")).resolves.toBe(customDefaultRules);
       await expect(readFile(readmePath, "utf8")).resolves.toBe("# Mail Sentinel\n");
@@ -3550,12 +3578,15 @@ describe("RealInstallerService", () => {
 
     try {
       const started = await service.startInstall(buildInstallRequest());
-      expect(started.job.state).toBe("succeeded");
+      const finished = await waitForJob(service, started.job.jobId);
+      expect(finished.job.state).toBe("succeeded");
       expect(gatewayInstallCalls).toBe(1);
       expect(gatewayRestartCalls).toBe(0);
       expect(registrarCalls).toBe(1);
 
-      const stepStates = Object.fromEntries(started.job.steps.map((step) => [step.id, step.state]));
+      const stepStates = Object.fromEntries(
+        finished.job.steps.map((step) => [step.id, step.state]),
+      );
       expect(stepStates.openclaw_gateway_service_install).toBe("succeeded");
       expect(stepStates.openclaw_configure).toBe("succeeded");
       expect(stepStates.bots_configure).toBe("succeeded");
@@ -3810,7 +3841,8 @@ describe("RealInstallerService", () => {
 
     try {
       const started = await service.startInstall(buildInstallRequest());
-      expect(started.job.state).toBe("succeeded");
+      const finished = await waitForJob(service, started.job.jobId);
+      expect(finished.job.state).toBe("succeeded");
       expect(gatewayInstallCalls).toBe(1);
       expect(gatewayRestartCalls).toBe(0);
       expect(registrarCalls).toBe(1);
@@ -3823,7 +3855,9 @@ describe("RealInstallerService", () => {
         ),
       ).toBe(true);
 
-      const stepStates = Object.fromEntries(started.job.steps.map((step) => [step.id, step.state]));
+      const stepStates = Object.fromEntries(
+        finished.job.steps.map((step) => [step.id, step.state]),
+      );
       expect(stepStates.openclaw_gateway_service_install).toBe("succeeded");
       expect(stepStates.openclaw_configure).toBe("succeeded");
       expect(stepStates.bots_configure).toBe("succeeded");
@@ -4134,14 +4168,17 @@ describe("RealInstallerService", () => {
 
     try {
       const started = await service.startInstall(buildInstallRequest());
-      expect(started.job.state).toBe("succeeded");
+      const finished = await waitForJob(service, started.job.jobId);
+      expect(finished.job.state).toBe("succeeded");
       expect(gatewayInstallCalls).toBe(1);
       expect(gatewayRestartCalls).toBe(1);
       expect(gatewayStartCalls).toBe(2);
       expect(registrarCalls).toBe(1);
       expect(systemGatewayStarted).toBe(true);
 
-      const stepStates = Object.fromEntries(started.job.steps.map((step) => [step.id, step.state]));
+      const stepStates = Object.fromEntries(
+        finished.job.steps.map((step) => [step.id, step.state]),
+      );
       expect(stepStates.openclaw_configure).toBe("succeeded");
       expect(stepStates.bots_configure).toBe("succeeded");
       expect(stepStates.smoke_checks).toBe("succeeded");
@@ -4807,9 +4844,12 @@ describe("RealInstallerService", () => {
 
     try {
       const started = await service.startInstall(buildInstallRequest());
-      expect(started.job.state).toBe("succeeded");
+      const finished = await waitForJob(service, started.job.jobId);
+      expect(finished.job.state).toBe("succeeded");
 
-      const stepStates = Object.fromEntries(started.job.steps.map((step) => [step.id, step.state]));
+      const stepStates = Object.fromEntries(
+        finished.job.steps.map((step) => [step.id, step.state]),
+      );
       expect(stepStates.smoke_checks).toBe("succeeded");
       expect(stepStates.test_alert).toBe("succeeded");
       expect(sentMessageBody).toContain("Hello from Mail Sentinel");
@@ -6607,7 +6647,8 @@ describe("RealInstallerService", () => {
       };
 
       const started = await service.startInstall(req);
-      expect(started.job.state).toBe("succeeded");
+      const finished = await waitForJob(service, started.job.jobId);
+      expect(finished.job.state).toBe("succeeded");
 
       const runtimeConfigRaw = await readFile(paths.configPath, "utf8");
       const runtimeConfig = JSON.parse(runtimeConfigRaw) as {
@@ -10164,7 +10205,8 @@ describe("RealInstallerService", () => {
       };
 
       const started = await service.startInstall(req);
-      expect(started.job.state).toBe("succeeded");
+      const finished = await waitForJob(service, started.job.jobId);
+      expect(finished.job.state).toBe("succeeded");
 
       const openclawConfigRaw = await readFile(
         join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
@@ -10421,7 +10463,8 @@ describe("RealInstallerService", () => {
       );
 
       const started = await service.startInstall(req);
-      expect(started.job.state).toBe("succeeded");
+      const finished = await waitForJob(service, started.job.jobId);
+      expect(finished.job.state).toBe("succeeded");
       expect(bootstrapBotLocalpart).toBe("bitcoin-skill-match");
 
       const configRaw = await readFile(paths.configPath, "utf8");
