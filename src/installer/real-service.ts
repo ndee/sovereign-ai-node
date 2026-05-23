@@ -39,6 +39,7 @@ import { type CheckResult, CONTRACT_VERSION, type ComponentHealth } from "../con
 import {
   type DoctorReport,
   type InstallJobStatusResponse,
+  type InstallJobSummary,
   type InstallRequest,
   installJobStatusResponseSchema,
   installRequestSchema,
@@ -992,21 +993,37 @@ export class RealInstallerService implements InstallerService {
       jobId,
     };
 
-    const runResult = await this.jobRunner.run(
-      ctx,
-      this.buildInstallSteps(req),
-      async (snapshot) => {
+    const steps = this.buildInstallSteps(req);
+    const initialJob: InstallJobSummary = {
+      jobId,
+      state: "pending",
+      createdAt: new Date().toISOString(),
+      steps: steps.map((step) => ({
+        id: step.id,
+        label: step.label,
+        state: "pending" as const,
+      })),
+    };
+
+    await this.persistJobSnapshot({
+      installationId,
+      request: req,
+      snapshot: { job: initialJob },
+    });
+
+    this.jobRunner
+      .run(ctx, steps, async (snapshot) => {
         await this.persistJobSnapshot({
           installationId,
           request: req,
           snapshot,
         });
-      },
-    );
+      })
+      .catch((error) => {
+        this.logger.error({ err: error, jobId }, "Background install job failed unexpectedly");
+      });
 
-    return {
-      job: runResult.job,
-    };
+    return { job: initialJob };
   }
 
   async getInstallJob(jobId: string): Promise<InstallJobStatusResponse> {
