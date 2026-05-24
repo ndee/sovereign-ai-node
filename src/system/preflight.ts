@@ -384,7 +384,7 @@ const buildRecommendedActions = (checks: CheckResult[]): string[] => {
       case "docker-cli":
       case "docker-compose":
         add(
-          "Install Docker Engine and Docker Compose on the host for bundled Matrix provisioning.",
+          "Docker is missing; the installer will attempt to install Docker Engine + Compose plugin during the 'Prepare Docker runtime' step.",
         );
         break;
       case "ports-80-443":

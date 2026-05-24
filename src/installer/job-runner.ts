@@ -5,11 +5,13 @@ export type InstallContext = {
   installationId: string;
 };
 
+export type StepProgressReporter = (note: string) => void | Promise<void>;
+
 export interface InstallStep {
   id: JobStepId;
   label: string;
   softFail?: boolean;
-  run(ctx: InstallContext): Promise<void>;
+  run(ctx: InstallContext, reportProgress: StepProgressReporter): Promise<void>;
 }
 
 export type JobRunnerSnapshot = {
@@ -60,8 +62,18 @@ export class JobRunner {
       job.currentStepId = step.id;
       await notify(observer, { job });
 
+      const reportProgress: StepProgressReporter = async (note) => {
+        const trimmed = note.trim();
+        if (trimmed.length === 0) {
+          return;
+        }
+        current.progressNote = trimmed;
+        current.progressUpdatedAt = now();
+        await notify(observer, { job });
+      };
+
       try {
-        await step.run(ctx);
+        await step.run(ctx, reportProgress);
       } catch (caught) {
         const error = normalizeInstallError(caught);
         if (step.softFail === true) {
