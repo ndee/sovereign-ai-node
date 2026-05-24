@@ -158,6 +158,10 @@ Supported secret ref forms (phase-B contract):
 - `file:/etc/sovereign-node/secrets/<name>`
 - `env:VARNAME` (allowed for advanced/manual deployments)
 
+Current bundled-install behavior:
+
+- install requests may reference `env:...` secrets, but the installer may materialize them into file-backed secrets under `/etc/sovereign-node/secrets/` before handing control to long-lived services that do not inherit the caller's shell environment
+
 Transient exception:
 
 - the install/test IMAP API may accept inline credentials for validation, but the backend must not persist them inline.
@@ -232,8 +236,8 @@ Behavior:
 
 - in interactive mode, collect missing inputs
 - submit an install job to the shared installer backend
-- wait for completion by default and stream progress text (non-JSON mode)
-- return final `InstallResult` in `--json` mode
+- return an initial `StartInstallResult` immediately with a `jobId`
+- higher-level installer surfaces poll `GET /api/install/jobs/:jobId` for progress and final outcome
 - install OpenClaw (default path) before configuring the runtime and bot
 
 Required flags:
@@ -248,7 +252,7 @@ Advanced flags (not required for the default operator path):
 
 `--json` result schema:
 
-- `result` MUST be an `InstallResult`
+- `result` MUST be a `StartInstallResult`
 
 ## `sovereign-node status`
 
@@ -972,6 +976,8 @@ Purpose:
 Response:
 
 - `result` MUST be `InstallJobStatusResponse`
+
+If the backend no longer has a record for the requested job, the API returns `INSTALL_JOB_NOT_FOUND` with HTTP 404 so browser or CLI callers can clear stale job references and start again.
 
 ## `POST /api/install/test-alert`
 
