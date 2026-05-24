@@ -524,6 +524,7 @@ type StepState = "pending" | "running" | "succeeded" | "failed" | "canceled" | "
 type JobStep = {
   id:
     | "preflight"
+    | "prepare_docker_runtime"
     | "openclaw_bootstrap_cli"
     | "openclaw_bundled_plugin_tools"
     | "imap_validate"
@@ -544,6 +545,8 @@ type JobStep = {
   endedAt?: ISO8601;
   error?: ErrorDetail;
   details?: Record<string, unknown>;
+  progressNote?: string;
+  progressUpdatedAt?: ISO8601;
 };
 ```
 
@@ -961,7 +964,7 @@ type StartInstallResult = {
 };
 ```
 
-The job should start in state `pending` or `running`.
+The job should start in state `pending` or `running`. The API returns the job summary immediately; callers should poll `GET /api/install/jobs/:jobId` for step progress and final outcome.
 
 ## `GET /api/install/jobs/:jobId`
 

@@ -18,6 +18,8 @@ The current documented path requires:
 
 The installer provisions the Matrix stack (Synapse) and bot runtime (OpenClaw) automatically. Bot-specific prerequisites (e.g. IMAP mailbox credentials for Mail Sentinel) are documented in [`sovereign-ai-bots`](https://github.com/ndee/sovereign-ai-bots).
 
+Docker is not a manual prerequisite on the documented path: the installer now bootstraps Docker Engine + `docker compose` automatically when they are missing.
+
 ## Install
 
 Run the guided installer on a fresh Ubuntu or Debian host (VM, bare metal, or VPS):
