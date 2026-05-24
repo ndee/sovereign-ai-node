@@ -2,9 +2,11 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { resolveInstallRequest } from "./install.js";
+import type { InstallJobStatusResponse } from "../../contracts/index.js";
+
+import { awaitInstallJob, resolveInstallRequest } from "./install.js";
 
 const tempRoots: string[] = [];
 
@@ -107,5 +109,97 @@ describe("resolveInstallRequest", () => {
 
     expect(req.bots?.selected).toEqual(["mail-sentinel", "node-operator"]);
     expect(req.bots?.config).toBeUndefined();
+  });
+});
+
+const makeJobResponse = (
+  state: "pending" | "running" | "succeeded" | "failed" | "canceled",
+): InstallJobStatusResponse => ({
+  job: {
+    jobId: "job_test-1",
+    state,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    steps: [
+      {
+        id: "preflight",
+        label: "Preflight",
+        state: state === "succeeded" ? "succeeded" : "pending",
+      },
+    ],
+  },
+});
+
+describe("awaitInstallJob", () => {
+  const noopSleep = async () => {};
+
+  it("returns immediately when the first poll yields a succeeded job", async () => {
+    const poll = vi.fn().mockResolvedValue(makeJobResponse("succeeded"));
+
+    const result = await awaitInstallJob("job_test-1", poll, { sleepFn: noopSleep });
+
+    expect(result.job.state).toBe("succeeded");
+    expect(poll).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns immediately when the first poll yields a failed job", async () => {
+    const poll = vi.fn().mockResolvedValue(makeJobResponse("failed"));
+
+    const result = await awaitInstallJob("job_test-1", poll, { sleepFn: noopSleep });
+
+    expect(result.job.state).toBe("failed");
+    expect(poll).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns immediately when the first poll yields a canceled job", async () => {
+    const poll = vi.fn().mockResolvedValue(makeJobResponse("canceled"));
+
+    const result = await awaitInstallJob("job_test-1", poll, { sleepFn: noopSleep });
+
+    expect(result.job.state).toBe("canceled");
+    expect(poll).toHaveBeenCalledTimes(1);
+  });
+
+  it("polls until the job transitions from pending to succeeded", async () => {
+    const poll = vi
+      .fn()
+      .mockResolvedValueOnce(makeJobResponse("pending"))
+      .mockResolvedValueOnce(makeJobResponse("running"))
+      .mockResolvedValueOnce(makeJobResponse("succeeded"));
+
+    const result = await awaitInstallJob("job_test-1", poll, { sleepFn: noopSleep });
+
+    expect(result.job.state).toBe("succeeded");
+    expect(poll).toHaveBeenCalledTimes(3);
+  });
+
+  it("polls until the job transitions from running to failed", async () => {
+    const poll = vi
+      .fn()
+      .mockResolvedValueOnce(makeJobResponse("running"))
+      .mockResolvedValueOnce(makeJobResponse("failed"));
+
+    const result = await awaitInstallJob("job_test-1", poll, { sleepFn: noopSleep });
+
+    expect(result.job.state).toBe("failed");
+    expect(poll).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns the last poll result when the deadline expires", async () => {
+    const poll = vi.fn().mockResolvedValue(makeJobResponse("running"));
+
+    const result = await awaitInstallJob("job_test-1", poll, {
+      deadlineMs: 0,
+      sleepFn: noopSleep,
+    });
+
+    expect(result.job.state).toBe("running");
+  });
+
+  it("passes the job id to each poll call", async () => {
+    const poll = vi.fn().mockResolvedValue(makeJobResponse("succeeded"));
+
+    await awaitInstallJob("job_abc-123", poll, { sleepFn: noopSleep });
+
+    expect(poll).toHaveBeenCalledWith("job_abc-123");
   });
 });
