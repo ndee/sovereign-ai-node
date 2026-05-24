@@ -23,6 +23,7 @@ const MATRIX_READY_TIMEOUT_MS = resolveDurationFromEnv(
   600_000,
 );
 const MATRIX_READY_POLL_INTERVAL_MS = 1_500;
+const MATRIX_READY_HEARTBEAT_MS = 30_000;
 const MATRIX_HTTP_TIMEOUT_MS = 8_000;
 const MATRIX_LOGIN_RETRY_ATTEMPTS = 5;
 const MATRIX_LOGIN_RETRY_DELAY_MS = 500;
@@ -78,6 +79,8 @@ export type BundledMatrixRoomBootstrapResult = {
   avatarSha256?: string;
 };
 
+export type MatrixProgressReporter = (note: string) => void | Promise<void>;
+
 export interface BundledMatrixProvisioner {
   provision(req: InstallRequest): Promise<BundledMatrixProvisionResult>;
   resetState?(provision: BundledMatrixProvisionResult): Promise<void>;
@@ -88,6 +91,7 @@ export interface BundledMatrixProvisioner {
       botLocalpart?: string;
       avatarResolver?: MatrixAvatarResolver;
       previousBotAvatarSha256?: string;
+      onProgress?: MatrixProgressReporter;
     },
   ): Promise<BundledMatrixAccountsResult>;
   bootstrapRoom(
@@ -98,6 +102,7 @@ export interface BundledMatrixProvisioner {
       previousAlertRoom?: { roomId: string; roomName: string };
       avatarResolver?: MatrixAvatarResolver;
       previousAvatarSha256?: string;
+      onProgress?: MatrixProgressReporter;
     },
   ): Promise<BundledMatrixRoomBootstrapResult>;
   uploadMedia?(input: {
@@ -407,10 +412,12 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       botLocalpart?: string;
       avatarResolver?: MatrixAvatarResolver;
       previousBotAvatarSha256?: string;
+      onProgress?: MatrixProgressReporter;
     },
   ): Promise<BundledMatrixAccountsResult> {
-    await this.ensureStackRunning(provision);
-    await this.waitForSynapseReadyWithRecovery(provision);
+    const onProgress = options?.onProgress;
+    await this.ensureStackRunning(provision, onProgress);
+    await this.waitForSynapseReadyWithRecovery(provision, onProgress);
 
     const operatorLocalpart = sanitizeMatrixLocalpart(req.operator.username, "operator");
     const botLocalpart = chooseServiceBotLocalpart(operatorLocalpart, options?.botLocalpart);
@@ -642,9 +649,10 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       previousAlertRoom?: { roomId: string; roomName: string };
       avatarResolver?: MatrixAvatarResolver;
       previousAvatarSha256?: string;
+      onProgress?: MatrixProgressReporter;
     },
   ): Promise<BundledMatrixRoomBootstrapResult> {
-    await this.waitForSynapseReady(provision.adminBaseUrl);
+    await this.waitForSynapseReady(provision.adminBaseUrl, options?.onProgress);
 
     const previousRoom = options?.previousAlertRoom;
     if (previousRoom !== undefined && previousRoom.roomId.length > 0) {
@@ -977,12 +985,16 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     };
   }
 
-  private async ensureStackRunning(provision: BundledMatrixProvisionResult): Promise<void> {
+  private async ensureStackRunning(
+    provision: BundledMatrixProvisionResult,
+    onProgress?: MatrixProgressReporter,
+  ): Promise<void> {
     const services = ["postgres", "synapse"];
     if (provision.accessMode === "relay" || provision.tlsMode !== "local-dev") {
       services.push("reverse-proxy");
     }
     const upArgs = ["up", "-d", "--remove-orphans", "--force-recreate", ...services];
+    await emitProgress(onProgress, "Starting bundled Matrix containers (docker compose up)");
     const composeUp = await this.runComposeCommand(
       provision.projectDir,
       provision.composeFilePath,
@@ -992,6 +1004,10 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       return;
     }
 
+    await emitProgress(
+      onProgress,
+      `compose up exited ${composeUp.exitCode}; tearing down and retrying`,
+    );
     const composeDown = await this.runComposeCommand(
       provision.projectDir,
       provision.composeFilePath,
@@ -1196,9 +1212,14 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     throw lastError;
   }
 
-  private async waitForSynapseReady(baseUrl: string): Promise<void> {
-    const deadline = Date.now() + MATRIX_READY_TIMEOUT_MS;
+  private async waitForSynapseReady(
+    baseUrl: string,
+    onProgress?: MatrixProgressReporter,
+  ): Promise<void> {
+    const startedAt = Date.now();
+    const deadline = startedAt + MATRIX_READY_TIMEOUT_MS;
     let lastError = "unknown";
+    let lastHeartbeatAt = 0;
 
     while (Date.now() < deadline) {
       try {
@@ -1218,6 +1239,19 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         lastError = describeError(error);
       }
 
+      const now = Date.now();
+      if (onProgress !== undefined && now - lastHeartbeatAt >= MATRIX_READY_HEARTBEAT_MS) {
+        const elapsedSec = Math.round((now - startedAt) / 1000);
+        await emitProgress(
+          onProgress,
+          `Waiting for Synapse readiness (${elapsedSec}s elapsed; last error: ${truncateText(
+            lastError,
+            160,
+          )})`,
+        );
+        lastHeartbeatAt = now;
+      }
+
       await delay(MATRIX_READY_POLL_INTERVAL_MS);
     }
 
@@ -1235,13 +1269,14 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
 
   private async waitForSynapseReadyWithRecovery(
     provision: BundledMatrixProvisionResult,
+    onProgress?: MatrixProgressReporter,
   ): Promise<void> {
     const diagnosticsTrail: Array<Record<string, unknown>> = [];
     const maxRecoveries = 2;
 
     for (let attempt = 0; attempt <= maxRecoveries; attempt += 1) {
       try {
-        await this.waitForSynapseReady(provision.adminBaseUrl);
+        await this.waitForSynapseReady(provision.adminBaseUrl, onProgress);
         return;
       } catch (error) {
         if (!(isStructuredError(error) && error.code === "MATRIX_WAIT_READY_TIMEOUT")) {
@@ -1270,7 +1305,8 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
             },
             "Matrix readiness timed out without a recoverable Postgres signal; retrying compose stack start once",
           );
-          await this.ensureStackRunning(provision);
+          await emitProgress(onProgress, "Synapse readiness timed out; retrying docker compose up");
+          await this.ensureStackRunning(provision, onProgress);
           continue;
         }
 
@@ -1293,8 +1329,12 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
           "Detected recoverable bundled Matrix Postgres bootstrap mismatch; resetting postgres data and retrying",
         );
 
+        await emitProgress(
+          onProgress,
+          "Resetting bundled Matrix Postgres state and retrying readiness",
+        );
         await this.resetBundledPostgresState(provision);
-        await this.ensureStackRunning(provision);
+        await this.ensureStackRunning(provision, onProgress);
       }
     }
   }
@@ -2561,6 +2601,21 @@ const truncateText = (value: string, maxChars: number): string => {
     return value;
   }
   return `${value.slice(0, maxChars)}...(truncated)`;
+};
+
+const emitProgress = async (
+  onProgress: MatrixProgressReporter | undefined,
+  note: string,
+): Promise<void> => {
+  if (onProgress === undefined) {
+    return;
+  }
+  try {
+    await onProgress(note);
+  } catch {
+    // Progress reporting is best-effort: never let a heartbeat failure
+    // derail the install step itself.
+  }
 };
 
 function resolveDurationFromEnv(name: string, fallbackMs: number): number {

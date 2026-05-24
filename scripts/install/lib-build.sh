@@ -171,6 +171,23 @@ configure_system_hygiene() {
   systemctl daemon-reload
   systemctl enable --now sovereign-node-disk-check.timer 2>/dev/null || true
 
+  # --- docker install helper for the API service ---
+  # The sovereign-node-api service may need to install Docker during a
+  # bundled-Matrix install run that did not go through scripts/install.sh
+  # (typically the pro web installer). Drop a narrowly-scoped helper that
+  # delegates to install_docker_if_needed in lib-runtime-deps.sh and a
+  # sudoers entry so the SERVICE_USER can call exactly that one script.
+  local docker_helper_dir="/usr/local/lib/sovereign-node"
+  local docker_helper_path="${docker_helper_dir}/install-docker.sh"
+  local docker_helper_libs="${docker_helper_dir}/install"
+  install -d -m 0755 "$docker_helper_dir"
+  install -d -m 0755 "$docker_helper_libs"
+  install -m 0755 "$APP_DIR/scripts/install-docker.sh" "$docker_helper_path"
+  install -m 0644 "$APP_DIR/scripts/install/lib-log.sh" "$docker_helper_libs/lib-log.sh"
+  install -m 0644 "$APP_DIR/scripts/install/lib-os.sh" "$docker_helper_libs/lib-os.sh"
+  install -m 0644 "$APP_DIR/scripts/install/lib-runtime-deps.sh" \
+    "$docker_helper_libs/lib-runtime-deps.sh"
+
   # --- sudoers fragment: scoped passwordless sudo for the runtime API ---
   # The sovereign-node-api service runs as ${SERVICE_USER} (non-root) and
   # needs to install/start the OpenClaw gateway systemd unit during a
@@ -198,6 +215,10 @@ ${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/chown -R [0-9]*\:[0-9]* /var/lib/s
 # entries when a previous run left them root-owned.
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets, /bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets/*
 ${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets, /usr/bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets/*
+# Allow installing the Docker runtime via the helper script dropped at
+# install time. The helper is owned root:root and 0755, sources lib-os.sh
+# and lib-runtime-deps.sh, and runs install_docker_if_needed.
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/local/lib/sovereign-node/install-docker.sh
 EOF
   chmod 0440 "$sudoers_path"
   # Validate; if invalid, remove so we don't break sudo entirely.
