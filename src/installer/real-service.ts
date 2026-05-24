@@ -39,6 +39,7 @@ import { type CheckResult, CONTRACT_VERSION, type ComponentHealth } from "../con
 import {
   type DoctorReport,
   type InstallJobStatusResponse,
+  type InstallJobSummary,
   type InstallRequest,
   installJobStatusResponseSchema,
   installRequestSchema,
@@ -90,6 +91,7 @@ import type {
   ManagedAgentRegistrationResult,
   OpenClawManagedAgentRegistrar,
 } from "../openclaw/managed-agent.js";
+import type { DockerRuntimePreparer } from "../system/docker-runtime.js";
 import type { ExecResult, ExecRunner } from "../system/exec.js";
 import type { ImapTester } from "../system/imap.js";
 import type {
@@ -324,6 +326,7 @@ type RealInstallerServiceDeps = {
   managedAgentRegistrar?: OpenClawManagedAgentRegistrar;
   botCatalog?: BotCatalog;
   preflightChecker: HostPreflightChecker;
+  dockerRuntimePreparer?: DockerRuntimePreparer;
   imapTester: ImapTester;
   matrixProvisioner: BundledMatrixProvisioner;
   execRunner?: ExecRunner;
@@ -350,6 +353,8 @@ export class RealInstallerService implements InstallerService {
 
   private readonly preflightChecker: HostPreflightChecker;
 
+  private readonly dockerRuntimePreparer: DockerRuntimePreparer;
+
   private readonly imapTester: ImapTester;
 
   private readonly matrixProvisioner: BundledMatrixProvisioner;
@@ -374,6 +379,17 @@ export class RealInstallerService implements InstallerService {
       };
     this.botCatalog = deps.botCatalog ?? new FilesystemBotCatalog();
     this.preflightChecker = deps.preflightChecker;
+    this.dockerRuntimePreparer = deps.dockerRuntimePreparer ?? {
+      // Default to a probe-only no-op preparer so the install pipeline can
+      // run in test contexts and on hosts where docker is already installed
+      // and the helper script is not present. Production wiring in
+      // create-app.ts supplies a real ShellDockerRuntimePreparer.
+      prepare: async () => ({
+        alreadyPresent: true,
+        ranInstaller: false,
+        probe: { cli: true, compose: true },
+      }),
+    };
     this.imapTester = deps.imapTester;
     this.matrixProvisioner = deps.matrixProvisioner;
     this.execRunner = deps.execRunner ?? null;
@@ -977,21 +993,37 @@ export class RealInstallerService implements InstallerService {
       jobId,
     };
 
-    const runResult = await this.jobRunner.run(
-      ctx,
-      this.buildInstallSteps(req),
-      async (snapshot) => {
+    const steps = this.buildInstallSteps(req);
+    const initialJob: InstallJobSummary = {
+      jobId,
+      state: "pending",
+      createdAt: new Date().toISOString(),
+      steps: steps.map((step) => ({
+        id: step.id,
+        label: step.label,
+        state: "pending" as const,
+      })),
+    };
+
+    await this.persistJobSnapshot({
+      installationId,
+      request: req,
+      snapshot: { job: initialJob },
+    });
+
+    this.jobRunner
+      .run(ctx, steps, async (snapshot) => {
         await this.persistJobSnapshot({
           installationId,
           request: req,
           snapshot,
         });
-      },
-    );
+      })
+      .catch((error) => {
+        this.logger.error({ err: error, jobId }, "Background install job failed unexpectedly");
+      });
 
-    return {
-      job: runResult.job,
-    };
+    return { job: initialJob };
   }
 
   async getInstallJob(jobId: string): Promise<InstallJobStatusResponse> {
@@ -7203,6 +7235,15 @@ export default function (api) {
         },
       },
       {
+        id: "prepare_docker_runtime",
+        label: "Prepare Docker runtime",
+        run: async (_ctx, reportProgress) => {
+          await this.dockerRuntimePreparer.prepare(async (note) => {
+            await reportProgress(note);
+          });
+        },
+      },
+      {
         id: "matrix_provision",
         label: "Provision bundled Matrix stack",
         run: async () => {
@@ -7214,7 +7255,7 @@ export default function (api) {
       {
         id: "matrix_bootstrap_accounts",
         label: "Bootstrap Matrix accounts",
-        run: async () => {
+        run: async (_ctx, reportProgress) => {
           if (stepState.matrixProvision === undefined) {
             throw {
               code: "INSTALL_INTERNAL_STATE",
@@ -7254,6 +7295,9 @@ export default function (api) {
                   : { botLocalpart: bootstrapBotLocalpart }),
                 avatarResolver: accountsAvatarResolver,
                 ...(previousBotAvatarSha256 === undefined ? {} : { previousBotAvatarSha256 }),
+                onProgress: async (note) => {
+                  await reportProgress(note);
+                },
               },
             );
           } catch (error) {
@@ -7290,7 +7334,7 @@ export default function (api) {
       {
         id: "matrix_bootstrap_room",
         label: "Bootstrap Matrix alert room",
-        run: async () => {
+        run: async (_ctx, reportProgress) => {
           if (stepState.matrixProvision === undefined) {
             throw {
               code: "INSTALL_INTERNAL_STATE",
@@ -7327,6 +7371,9 @@ export default function (api) {
               ...(previousAlertRoom === undefined ? {} : { previousAlertRoom }),
               avatarResolver,
               ...(previousAvatarSha256 === undefined ? {} : { previousAvatarSha256 }),
+              onProgress: async (note) => {
+                await reportProgress(note);
+              },
             },
           );
         },
@@ -10518,6 +10565,13 @@ export default function (api) {
     }
 
     if (imap.secretRef !== undefined && imap.secretRef.length > 0) {
+      // See materializeEnvSecretRef for why env: refs are resolved here:
+      // the api service can't read them later under systemd (issue #164).
+      const materializedRef = await this.materializeEnvSecretRef({
+        secretRef: imap.secretRef,
+        fileName: "imap-password",
+        missingErrorCode: "IMAP_SECRET_READ_FAILED",
+      });
       return {
         status: "configured",
         host: imap.host,
@@ -10525,7 +10579,7 @@ export default function (api) {
         tls: imap.tls,
         username: imap.username,
         mailbox: imap.mailbox ?? "INBOX",
-        secretRef: imap.secretRef,
+        secretRef: materializedRef,
       };
     }
 
@@ -10556,7 +10610,16 @@ export default function (api) {
     openrouter: InstallRequest["openrouter"],
   ): Promise<string> {
     if (openrouter.secretRef !== undefined && openrouter.secretRef.length > 0) {
-      return openrouter.secretRef;
+      // env: refs are install-time only: the api service runs under systemd
+      // and doesn't inherit the installer shell's environment, so persisting
+      // env: into the runtime config would break secret resolution at runtime
+      // (see issue #164). Materialize to a file now while we still have the
+      // value in process.env.
+      return this.materializeEnvSecretRef({
+        secretRef: openrouter.secretRef,
+        fileName: "openrouter-api-key",
+        missingErrorCode: "SECRET_READ_FAILED",
+      });
     }
 
     if (openrouter.apiKey !== undefined && openrouter.apiKey.length > 0) {
@@ -10564,7 +10627,7 @@ export default function (api) {
     }
 
     if (process.env.OPENROUTER_API_KEY !== undefined && process.env.OPENROUTER_API_KEY.length > 0) {
-      return "env:OPENROUTER_API_KEY";
+      return this.writeSecretFile("openrouter-api-key", process.env.OPENROUTER_API_KEY);
     }
 
     throw {
@@ -10573,6 +10636,27 @@ export default function (api) {
         "OpenRouter credentials are missing (provide openrouter.apiKey or openrouter.secretRef)",
       retryable: false,
     };
+  }
+
+  private async materializeEnvSecretRef(input: {
+    secretRef: string;
+    fileName: string;
+    missingErrorCode: string;
+  }): Promise<string> {
+    if (!input.secretRef.startsWith("env:")) {
+      return input.secretRef;
+    }
+    const key = input.secretRef.slice("env:".length);
+    const value = process.env[key];
+    if (value === undefined || value.length === 0) {
+      throw {
+        code: input.missingErrorCode,
+        message: "Secret environment variable is not set",
+        retryable: false,
+        details: { secretRef: input.secretRef },
+      };
+    }
+    return this.writeSecretFile(input.fileName, value);
   }
 
   private async writeSecretFile(fileName: string, value: string): Promise<string> {
