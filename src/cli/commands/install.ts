@@ -140,9 +140,8 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
           applyBotCatalogSourceOptions(opts);
           const req = await resolveInstallRequest(opts);
           const started = await app.installerService.startInstall(req);
-          const terminal = await awaitInstallJob(
-            started.job.jobId,
-            (jobId) => app.installerService.getInstallJob(jobId),
+          const terminal = await awaitInstallJob(started.job.jobId, (jobId) =>
+            app.installerService.getInstallJob(jobId),
           );
           writeCliSuccess(command, terminal, installJobStatusResponseSchema, Boolean(opts.json));
           return;

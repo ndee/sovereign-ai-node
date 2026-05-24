@@ -120,7 +120,11 @@ const makeJobResponse = (
     state,
     createdAt: "2026-01-01T00:00:00.000Z",
     steps: [
-      { id: "preflight", label: "Preflight", state: state === "succeeded" ? "succeeded" : "pending" },
+      {
+        id: "preflight",
+        label: "Preflight",
+        state: state === "succeeded" ? "succeeded" : "pending",
+      },
     ],
   },
 });
