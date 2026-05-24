@@ -5,9 +5,10 @@ import type { Command } from "commander";
 import type { AppContainer } from "../../app/create-app.js";
 import { DEFAULT_BOT_REPO_URL } from "../../bots/catalog.js";
 import {
+  type InstallJobStatusResponse,
   type InstallRequest,
+  installJobStatusResponseSchema,
   installRequestSchema,
-  startInstallResultSchema,
 } from "../../contracts/index.js";
 import { DEFAULT_INSTALL_REQUEST_FILE } from "../../installer/real-service-shared.js";
 import { SOVEREIGN_PINNED_OPENCLAW_VERSION } from "../../openclaw/bootstrap.js";
@@ -138,8 +139,11 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
         if (process.env.SOVEREIGN_INTERNAL_INSTALL === "1") {
           applyBotCatalogSourceOptions(opts);
           const req = await resolveInstallRequest(opts);
-          const result = await app.installerService.startInstall(req);
-          writeCliSuccess(command, result, startInstallResultSchema, Boolean(opts.json));
+          const started = await app.installerService.startInstall(req);
+          const terminal = await awaitInstallJob(started.job.jobId, (jobId) =>
+            app.installerService.getInstallJob(jobId),
+          );
+          writeCliSuccess(command, terminal, installJobStatusResponseSchema, Boolean(opts.json));
           return;
         }
         throw new Error(
@@ -150,6 +154,35 @@ export const registerInstallCommand = (program: Command, app: AppContainer): voi
         process.exitCode = 1;
       }
     });
+};
+
+const POLL_INTERVAL_MS = 2_000;
+const POLL_DEADLINE_MS = 30 * 60_000;
+
+type JobPoller = (jobId: string) => Promise<InstallJobStatusResponse>;
+
+const isTerminalState = (state: string): boolean =>
+  state === "succeeded" || state === "failed" || state === "canceled";
+
+export const awaitInstallJob = async (
+  jobId: string,
+  poll: JobPoller,
+  opts: { intervalMs?: number; deadlineMs?: number; sleepFn?: (ms: number) => Promise<void> } = {},
+): Promise<InstallJobStatusResponse> => {
+  const intervalMs = opts.intervalMs ?? POLL_INTERVAL_MS;
+  const deadlineMs = opts.deadlineMs ?? POLL_DEADLINE_MS;
+  const sleep = opts.sleepFn ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const deadline = Date.now() + deadlineMs;
+
+  while (Date.now() < deadline) {
+    const snapshot = await poll(jobId);
+    if (isTerminalState(snapshot.job.state)) {
+      return snapshot;
+    }
+    await sleep(intervalMs);
+  }
+
+  return poll(jobId);
 };
 
 export const resolveInstallRequest = async (
