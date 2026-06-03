@@ -2399,6 +2399,18 @@ const renderCaddyfile = (
           "",
         ]
       : []),
+    // Never expose the Synapse admin API through the public edge. In relay
+    // mode this Caddy site is reachable from the internet via the relay
+    // tunnel, and the catch-all below proxies everything else to Synapse.
+    // The homeserver-admin surface (/_synapse/admin/*, which includes the
+    // shared-secret user registration endpoint) is only ever called by the
+    // installer over loopback (adminBaseUrl = http://127.0.0.1:8008), so it
+    // must not be reachable here. Block it before the catch-all.
+    "  @synapseAdmin path /_synapse/admin /_synapse/admin/*",
+    "  handle @synapseAdmin {",
+    "    respond 403",
+    "  }",
+    "",
     "  handle {",
     "    reverse_proxy synapse:8008",
     "  }",
