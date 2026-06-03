@@ -1,6 +1,29 @@
 import { describe, expect, it } from "vitest";
 
-import { installRequestSchema } from "./install.js";
+import {
+  installRequestSchema,
+  OPERATOR_PASSWORD_MIN_LENGTH,
+  operatorInstallInputSchema,
+} from "./install.js";
+
+describe("operatorInstallInputSchema", () => {
+  it("accepts an omitted password (set later via onboarding)", () => {
+    const parsed = operatorInstallInputSchema.parse({ username: "operator" });
+    expect(parsed.password).toBeUndefined();
+  });
+
+  it("accepts a password at the minimum length", () => {
+    const password = "a".repeat(OPERATOR_PASSWORD_MIN_LENGTH);
+    const parsed = operatorInstallInputSchema.parse({ username: "operator", password });
+    expect(parsed.password).toBe(password);
+  });
+
+  it("rejects a password shorter than the minimum length", () => {
+    const password = "a".repeat(OPERATOR_PASSWORD_MIN_LENGTH - 1);
+    const result = operatorInstallInputSchema.safeParse({ username: "operator", password });
+    expect(result.success).toBe(false);
+  });
+});
 
 describe("installRequestSchema", () => {
   it("accepts managed relay requests without an enrollment token", () => {
