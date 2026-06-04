@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   isCoreAgentBindingBestEffortSkippable,
+  isGatewayUserSystemdUnavailableError,
   parseInstallProvenance,
   parseRuntimeConfigDocument,
 } from "./real-service-shared.js";
@@ -199,5 +200,56 @@ describe("parseRuntimeConfigDocument avatarSha256 round-trip", () => {
     expect(result.matrix.bot.avatarSha256).toBeUndefined();
     expect(result.matrix.alertRoom.avatarSha256).toBeUndefined();
     expect(result.openclawProfile.agents[0]?.matrix?.avatarSha256).toBeUndefined();
+  });
+});
+
+describe("isGatewayUserSystemdUnavailableError", () => {
+  it("treats a system-scope bus permission denial as systemd-unavailable", () => {
+    const error = {
+      code: "OPENCLAW_GATEWAY_INSTALL_FAILED",
+      message: "OpenClaw gateway command exited with non-zero status",
+      details: {
+        stdout: "No gateway token found. Auto-generated one and saving to config.",
+        stderr:
+          "Gateway install failed: Error: systemctl daemon-reload failed: " +
+          "Failed to connect to system scope bus via machine transport: Permission denied\n" +
+          "Reload daemon failed: Transport endpoint is not connected",
+      },
+    };
+
+    expect(isGatewayUserSystemdUnavailableError(error)).toBe(true);
+  });
+
+  it("still treats the user-bus absence as systemd-unavailable", () => {
+    const error = {
+      code: "OPENCLAW_GATEWAY_START_FAILED",
+      details: {
+        stderr: "systemctl --user unavailable: Failed to connect to bus: No medium found",
+      },
+    };
+
+    expect(isGatewayUserSystemdUnavailableError(error)).toBe(true);
+  });
+
+  it("does not classify a system-bus failure that is not a gateway command failure", () => {
+    const error = {
+      code: "SMOKE_CHECKS_FAILED",
+      details: {
+        stderr: "Failed to connect to system scope bus via machine transport: Permission denied",
+      },
+    };
+
+    expect(isGatewayUserSystemdUnavailableError(error)).toBe(false);
+  });
+
+  it("does not classify an unrelated gateway failure as systemd-unavailable", () => {
+    const error = {
+      code: "OPENCLAW_GATEWAY_INSTALL_FAILED",
+      details: {
+        stderr: "Gateway install failed: relay enrollment rejected the node token",
+      },
+    };
+
+    expect(isGatewayUserSystemdUnavailableError(error)).toBe(false);
   });
 });

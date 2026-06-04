@@ -138,8 +138,25 @@ const truncateText = (value: string, maxChars: number): string => {
 };
 
 const looksLikeSystemdUserBusError = (result: ExecResult): boolean =>
-  /systemctl --user unavailable|failed to connect to bus|no medium found/i.test(
-    `${result.stderr}\n${result.stdout}`,
+  isSystemdBusUnavailableMessage(`${result.stderr}\n${result.stdout}`);
+
+/**
+ * Recognizes the systemd/D-Bus failures that mean `openclaw gateway install`
+ * cannot manage a unit from the current process context, so the caller should
+ * fall back to an alternate flow (sudo-user retry, or the system-level gateway
+ * service unit) instead of hard-failing the install.
+ *
+ * Covers both the user-bus absence seen on headless boxes
+ * (`systemctl --user unavailable`, `Failed to connect to bus: No medium found`)
+ * and the system-scope bus permission denial a non-root service user hits when
+ * the OpenClaw CLI shells out to `systemctl daemon-reload`
+ * (`Failed to connect to system scope bus via machine transport: Permission
+ * denied`, followed by `Transport endpoint is not connected`). See
+ * https://github.com/ndee/sovereign-ai-node/issues/177.
+ */
+export const isSystemdBusUnavailableMessage = (message: string): boolean =>
+  /systemctl --user unavailable|failed to connect to (?:bus|system scope bus)|no medium found|transport endpoint is not connected/i.test(
+    message,
   );
 
 const resolveExecutablePath = async (command: string): Promise<string | null> => {
