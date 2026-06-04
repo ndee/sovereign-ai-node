@@ -50,6 +50,10 @@ type ComposeServiceState = {
   state: string;
   /** Human-readable status line from `docker compose ps` (surfaces port-bind errors). */
   status: string;
+  /** Container name from `docker compose ps` (used to inspect `.State.Error`). */
+  name?: string;
+  /** Container `.State.Error` (e.g. the port-bind failure), filled in on demand. */
+  error?: string;
   exitCode?: number;
 };
 
@@ -1136,7 +1140,14 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       composeResult.stdout,
       ...states.map((entry) => entry.status),
     ].join("\n");
-    if (!isPortAllocationConflict(failureText)) {
+    // `docker compose up -d` can exit 0 while a container is stuck in `created`
+    // because of a port-bind failure — in that case the conflict message is NOT in
+    // the compose stdout/stderr or the `ps` status; it lives in the container's
+    // `.State.Error`. Inspect any non-running container to surface it. This is the
+    // exact issue #179 shape (matrix_provision "succeeded", synapse never bound).
+    const inspectedErrors = await this.collectContainerErrors(provision.projectDir, states);
+    const fullFailureText = [failureText, ...inspectedErrors].join("\n");
+    if (!isPortAllocationConflict(fullFailureText)) {
       return;
     }
 
@@ -1169,6 +1180,39 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         serviceStates: states,
       },
     };
+  }
+
+  /**
+   * For every non-running service container, fetch its `.State.Error` via
+   * `docker inspect`. This surfaces the port-bind failure message
+   * ("...port is already allocated") that `docker compose up -d` swallows when it
+   * exits 0 with the container left in `created`. Best-effort: inspect failures
+   * are ignored. Returns the collected error strings.
+   */
+  private async collectContainerErrors(
+    projectDir: string,
+    states: ComposeServiceState[],
+  ): Promise<string[]> {
+    const errors: string[] = [];
+    for (const target of states) {
+      const name = target.name ?? "";
+      if (target.state === "running" || name.length === 0) {
+        continue;
+      }
+      const probe = await this.safeExec(
+        "docker",
+        ["inspect", "--format", "{{.State.Error}}", name],
+        projectDir,
+      );
+      if (probe.ok && probe.result.exitCode === 0) {
+        const text = probe.result.stdout.trim();
+        if (text.length > 0) {
+          errors.push(text);
+          target.error = text;
+        }
+      }
+    }
+    return errors;
   }
 
   /**
@@ -2734,11 +2778,13 @@ const parseComposePsJson = (raw: string): ComposeServiceState[] => {
     }
     const state = typeof record.State === "string" ? record.State.toLowerCase() : "unknown";
     const status = typeof record.Status === "string" ? record.Status : "";
+    const name = typeof record.Name === "string" ? record.Name : undefined;
     const exitCode = typeof record.ExitCode === "number" ? record.ExitCode : undefined;
     states.push({
       service,
       state,
       status,
+      ...(name === undefined ? {} : { name }),
       ...(exitCode === undefined ? {} : { exitCode }),
     });
   }

@@ -2233,6 +2233,9 @@ describe("DockerComposeBundledMatrixProvisioner cross-project conflict handling"
     upExitCode?: number;
     portOwnerStdout?: string;
     portOwnerExitCode?: number;
+    // `docker inspect --format '{{.State.Error}}' <name>` output (the port-bind
+    // failure that compose-up-exit-0 hides in the container's .State.Error).
+    containerError?: string;
     serverName?: string;
   }): Promise<ConflictHarness> => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-conflict-test-"));
@@ -2252,6 +2255,10 @@ describe("DockerComposeBundledMatrixProvisioner cross-project conflict handling"
         }
         if (execInput.command !== "docker") {
           return { command, exitCode: 127, stdout: "", stderr: "command not found" };
+        }
+        // `docker inspect --format '{{.State.Error}}' <name>` container-error probe.
+        if (args.includes("inspect") && args.includes("{{.State.Error}}")) {
+          return { command, exitCode: 0, stdout: input.containerError ?? "", stderr: "" };
         }
         // Raw `docker ps --filter publish=...` port-owner lookup (no "compose").
         if (!args.includes("compose") && args.includes("ps") && args.includes("--filter")) {
@@ -2368,6 +2375,50 @@ describe("DockerComposeBundledMatrixProvisioner cross-project conflict handling"
       });
       // Critically: we must never take the foreign project down ourselves.
       expect(harness.composeSubcommands).not.toContain("down");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("detects the conflict from container .State.Error when compose up exits 0 (issue #179 shape)", async () => {
+    // The exact field bug: `docker compose up -d` exits 0, but synapse is stuck in
+    // `created` and the "port is already allocated" message lives ONLY in the
+    // container's .State.Error — not in compose stdout/stderr or the ps status.
+    // Without inspecting .State.Error this fell through to MATRIX_STACK_START_FAILED.
+    const createdSynapse = [
+      JSON.stringify({
+        Service: "postgres",
+        State: "running",
+        Status: "Up",
+        Name: "ci-postgres-1",
+      }),
+      JSON.stringify({
+        Service: "synapse",
+        State: "created",
+        Status: "Created",
+        Name: "ci-synapse-1",
+      }),
+    ].join("\n");
+    const harness = await buildHarness({
+      upExitCode: 0, // compose up "succeeded" — the trap
+      upStderr: "",
+      psStdout: createdSynapse,
+      containerError:
+        "driver failed programming external connectivity on endpoint ci-synapse-1: " +
+        "Bind for 127.0.0.1:8008 failed: port is already allocated",
+      portOwnerStdout: "pipi2-sovereign-ai-node-com-synapse-1\tpipi2-sovereign-ai-node-com\n",
+    });
+    try {
+      const req = buildInstallRequest();
+      const provision = await harness.provisioner.provision(req);
+      await expect(harness.provisioner.bootstrapAccounts(req, provision)).rejects.toMatchObject({
+        code: "BUNDLED_MATRIX_PORT_CONFLICT",
+        retryable: false,
+        details: {
+          conflictingContainer: "pipi2-sovereign-ai-node-com-synapse-1",
+          conflictingProject: "pipi2-sovereign-ai-node-com",
+        },
+      });
     } finally {
       await harness.cleanup();
     }

@@ -315,16 +315,28 @@ jobs:
           cp test/fixtures/foreign-synapse-compose.yaml /tmp/foreign-synapse/compose.yaml
           docker compose -p pipi2-sovereign-ai-node-com \
             -f /tmp/foreign-synapse/compose.yaml up -d
-          # Wait until the foreign Synapse owns the port.
+
+          # Wait until the foreign server actually answers AND its server_name is
+          # the foreign one. If it never comes up, fail the SEED step loudly rather
+          # than letting the install silently succeed on a free port (that would be
+          # a broken test, not a passing fix).
+          ok=
           for i in $(seq 1 60); do
-            if curl -fs http://127.0.0.1:8008/_matrix/client/versions >/dev/null 2>&1; then
-              echo "Foreign Synapse is up and holding 127.0.0.1:8008"
+            name="$(curl -fs http://127.0.0.1:8008/_matrix/key/v2/server 2>/dev/null | jq -r '.server_name // empty')"
+            if [ "$name" = "foreign.local.test" ]; then
+              echo "Foreign server is up and holding 127.0.0.1:8008 (server_name=$name)"
+              ok=1
               break
             fi
             sleep 2
           done
           ss -tlnp | grep ':8008' || true
           docker ps --filter publish=8008 --format '{{.Names}}\t{{.Label "com.docker.compose.project"}}'
+          if [ -z "$ok" ]; then
+            echo "::error::Foreign squatter never came up on 127.0.0.1:8008 — test fixture broken, cannot reproduce #179"
+            docker compose -p pipi2-sovereign-ai-node-com -f /tmp/foreign-synapse/compose.yaml logs --tail=50 || true
+            exit 1
+          fi
 
       - name: Run installer and assert it fails fast with a port-conflict error
         run: |
