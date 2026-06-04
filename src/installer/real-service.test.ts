@@ -3651,14 +3651,23 @@ describe("RealInstallerService", () => {
       openclawGatewayServiceManager: {
         install: async () => {
           gatewayInstallCalls += 1;
+          // Production-shaped failure (issue #177): the Pro API service runs as
+          // a non-root service user with no user-systemd session, so the
+          // OpenClaw CLI's internal `systemctl daemon-reload` hits the system
+          // scope bus without polkit consent. The install step must classify
+          // this as systemd-unavailable and defer to the system-level gateway
+          // service fallback rather than hard-failing the install.
           throw {
             code: "OPENCLAW_GATEWAY_INSTALL_FAILED",
             message: "OpenClaw gateway command exited with non-zero status",
             retryable: true,
             details: {
               command: "openclaw gateway install",
+              stdout: "No gateway token found. Auto-generated one and saving to config.",
               stderr:
-                "Gateway service check failed: Error: systemctl --user unavailable: Failed to connect to bus: No medium found",
+                "Gateway install failed: Error: systemctl daemon-reload failed: " +
+                "Failed to connect to system scope bus via machine transport: Permission denied\n" +
+                "Reload daemon failed: Transport endpoint is not connected",
             },
           };
         },

@@ -7,6 +7,7 @@ import type { BotConfigValue } from "../bots/catalog.js";
 import type { CheckResult, ComponentHealth } from "../contracts/common.js";
 import type { DoctorReport } from "../contracts/index.js";
 import { resolveRequestedOpenClawVersion } from "../openclaw/bootstrap.js";
+import { isSystemdBusUnavailableMessage } from "../openclaw/gateway-service.js";
 import { formatTemplateRef, parseTemplateRef } from "../templates/catalog.js";
 import type { SovereignTemplateKind } from "./service.js";
 
@@ -1578,7 +1579,7 @@ const isGatewayUserSystemdUnavailableError = (error: unknown): boolean => {
     return false;
   }
 
-  return /systemctl --user unavailable|failed to connect to bus|no medium found/i.test(combined);
+  return isSystemdBusUnavailableMessage(combined);
 };
 
 const isMailSentinelGatewayUnavailableError = (error: unknown): boolean => {

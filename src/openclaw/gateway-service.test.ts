@@ -6,7 +6,10 @@ import { describe, expect, it } from "vitest";
 
 import { createLogger } from "../logging/logger.js";
 import type { ExecInput, ExecResult, ExecRunner } from "../system/exec.js";
-import { ShellOpenClawGatewayServiceManager } from "./gateway-service.js";
+import {
+  isSystemdBusUnavailableMessage,
+  ShellOpenClawGatewayServiceManager,
+} from "./gateway-service.js";
 
 describe("ShellOpenClawGatewayServiceManager", () => {
   it("runs openclaw gateway install with optional --force", async () => {
@@ -168,5 +171,185 @@ describe("ShellOpenClawGatewayServiceManager", () => {
       }
       await rm(commandDir, { recursive: true, force: true });
     }
+  });
+
+  it("retries gateway install via invoking sudo user on a system-scope bus permission denial", async () => {
+    const calls: ExecInput[] = [];
+    const priorSudoUser = process.env.SUDO_USER;
+    const priorSudoUid = process.env.SUDO_UID;
+    process.env.SUDO_USER = "user1";
+    process.env.SUDO_UID = "1000";
+    try {
+      const execRunner: ExecRunner = {
+        run: async (input): Promise<ExecResult> => {
+          calls.push(input);
+          if (input.command === "openclaw") {
+            return {
+              command: "openclaw gateway install",
+              exitCode: 1,
+              stdout: "No gateway token found. Auto-generated one and saving to config.",
+              stderr:
+                "Gateway install failed: Error: systemctl daemon-reload failed: " +
+                "Failed to connect to system scope bus via machine transport: Permission denied\n" +
+                "Reload daemon failed: Transport endpoint is not connected",
+            };
+          }
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: "ok",
+            stderr: "",
+          };
+        },
+      };
+
+      const manager = new ShellOpenClawGatewayServiceManager(execRunner, createLogger());
+      await manager.install();
+
+      expect(calls).toHaveLength(2);
+      expect(calls[0]).toMatchObject({ command: "openclaw", args: ["gateway", "install"] });
+      expect(calls[1]).toMatchObject({ command: "sudo", args: expect.arrayContaining(["user1"]) });
+    } finally {
+      if (priorSudoUser === undefined) {
+        delete process.env.SUDO_USER;
+      } else {
+        process.env.SUDO_USER = priorSudoUser;
+      }
+      if (priorSudoUid === undefined) {
+        delete process.env.SUDO_UID;
+      } else {
+        process.env.SUDO_UID = priorSudoUid;
+      }
+    }
+  });
+});
+
+describe("ShellOpenClawGatewayServiceManager start/restart", () => {
+  it("runs openclaw gateway start", async () => {
+    const calls: ExecInput[] = [];
+    const execRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        calls.push(input);
+        return { command: "openclaw gateway start", exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    const manager = new ShellOpenClawGatewayServiceManager(execRunner, createLogger());
+    await manager.start();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ command: "openclaw", args: ["gateway", "start"] });
+  });
+
+  it("runs openclaw gateway restart", async () => {
+    const calls: ExecInput[] = [];
+    const execRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        calls.push(input);
+        return { command: "openclaw gateway restart", exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    const manager = new ShellOpenClawGatewayServiceManager(execRunner, createLogger());
+    await manager.restart();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ command: "openclaw", args: ["gateway", "restart"] });
+  });
+
+  it("throws a restart error when the sudo-user retry also fails", async () => {
+    const priorSudoUser = process.env.SUDO_USER;
+    const priorSudoUid = process.env.SUDO_UID;
+    process.env.SUDO_USER = "user1";
+    process.env.SUDO_UID = "1000";
+    try {
+      const execRunner: ExecRunner = {
+        run: async (input): Promise<ExecResult> => ({
+          command: [input.command, ...(input.args ?? [])].join(" "),
+          exitCode: 1,
+          stdout: "",
+          // Long stderr exercises the truncation path in the structured error.
+          stderr: `systemctl --user unavailable: ${"x".repeat(5000)}`,
+        }),
+      };
+
+      const manager = new ShellOpenClawGatewayServiceManager(execRunner, createLogger());
+      await expect(manager.restart()).rejects.toMatchObject({
+        code: "OPENCLAW_GATEWAY_RESTART_FAILED",
+        details: {
+          stderr: expect.stringContaining("...(truncated)"),
+        },
+      });
+    } finally {
+      if (priorSudoUser === undefined) {
+        delete process.env.SUDO_USER;
+      } else {
+        process.env.SUDO_USER = priorSudoUser;
+      }
+      if (priorSudoUid === undefined) {
+        delete process.env.SUDO_UID;
+      } else {
+        process.env.SUDO_UID = priorSudoUid;
+      }
+    }
+  });
+
+  it("skips the sudo-user fallback when SUDO_UID is not numeric", async () => {
+    const calls: ExecInput[] = [];
+    const priorSudoUser = process.env.SUDO_USER;
+    const priorSudoUid = process.env.SUDO_UID;
+    process.env.SUDO_USER = "user1";
+    process.env.SUDO_UID = "not-a-number";
+    try {
+      const execRunner: ExecRunner = {
+        run: async (input): Promise<ExecResult> => {
+          calls.push(input);
+          return {
+            command: "openclaw gateway install",
+            exitCode: 1,
+            stdout: "",
+            stderr: "systemctl --user unavailable: Failed to connect to bus: No medium found",
+          };
+        },
+      };
+
+      const manager = new ShellOpenClawGatewayServiceManager(execRunner, createLogger());
+      await expect(manager.install()).rejects.toMatchObject({
+        code: "OPENCLAW_GATEWAY_INSTALL_FAILED",
+      });
+      // Invalid uid means no sudo fallback is attempted; only the primary runs.
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ command: "openclaw" });
+    } finally {
+      if (priorSudoUser === undefined) {
+        delete process.env.SUDO_USER;
+      } else {
+        process.env.SUDO_USER = priorSudoUser;
+      }
+      if (priorSudoUid === undefined) {
+        delete process.env.SUDO_UID;
+      } else {
+        process.env.SUDO_UID = priorSudoUid;
+      }
+    }
+  });
+});
+
+describe("isSystemdBusUnavailableMessage", () => {
+  it.each([
+    "systemctl --user unavailable",
+    "Gateway service check failed: Failed to connect to bus: No medium found",
+    "Failed to connect to system scope bus via machine transport: Permission denied",
+    "Reload daemon failed: Transport endpoint is not connected",
+  ])("recognizes systemd/D-Bus unavailability: %s", (message) => {
+    expect(isSystemdBusUnavailableMessage(message)).toBe(true);
+  });
+
+  it.each([
+    "Gateway install failed: relay enrollment rejected the node token",
+    "Error: connection refused",
+    "",
+  ])("does not match unrelated failures: %s", (message) => {
+    expect(isSystemdBusUnavailableMessage(message)).toBe(false);
   });
 });
