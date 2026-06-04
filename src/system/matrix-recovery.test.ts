@@ -90,9 +90,24 @@ describe("DockerComposeBundledMatrixProvisioner readiness recovery", () => {
     const fakeExecRunner: ExecRunner = {
       run: async (input): Promise<ExecResult> => {
         recordedExecCalls.push(input);
+        const args = input.args ?? [];
+        if (input.command === "docker" && args.includes("ps") && args.includes("--format")) {
+          return {
+            command: [input.command, ...args].join(" "),
+            exitCode: 0,
+            stdout: JSON.stringify({
+              Service: "postgres",
+              State: "running",
+              Status: "Up",
+            })
+              .concat("\n")
+              .concat(JSON.stringify({ Service: "synapse", State: "running", Status: "Up" })),
+            stderr: "",
+          };
+        }
         if (input.command === "docker") {
           return {
-            command: [input.command, ...(input.args ?? [])].join(" "),
+            command: [input.command, ...args].join(" "),
             exitCode: 0,
             stdout: "ok",
             stderr: "",
@@ -108,6 +123,10 @@ describe("DockerComposeBundledMatrixProvisioner readiness recovery", () => {
     };
 
     const fakeFetch = async (url: string, init?: RequestInit): Promise<Response> => {
+      if (url.endsWith("/_matrix/key/v2/server")) {
+        return jsonResponse({ server_name: "matrix.local.test" });
+      }
+
       if (url.endsWith("/_matrix/client/versions")) {
         versionsRequests += 1;
         if (versionsRequests === 1) {

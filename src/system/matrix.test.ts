@@ -636,6 +636,14 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
     const fakeExecRunner: ExecRunner = {
       run: async (input): Promise<ExecResult> => {
         recordedExecCalls.push(input);
+        if (isComposePsCall(input)) {
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: composePsRunningJson(),
+            stderr: "",
+          };
+        }
         if (input.command === "docker") {
           const args = input.args ?? [];
           if (
@@ -663,10 +671,9 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
     const fakeFetch = async (url: string, init?: RequestInit): Promise<Response> => {
       recordedFetchUrls.push(url);
 
-      if (url.endsWith("/_matrix/client/versions")) {
-        return jsonResponse({
-          versions: ["v1.1", "v1.2"],
-        });
+      const readiness = matrixReadinessResponse(url);
+      if (readiness !== undefined) {
+        return readiness;
       }
 
       if (url.endsWith("/_matrix/client/v3/login")) {
@@ -767,6 +774,14 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
     const fakeExecRunner: ExecRunner = {
       run: async (input): Promise<ExecResult> => {
         recordedExecCalls.push(input);
+        if (isComposePsCall(input)) {
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: composePsRunningJson(),
+            stderr: "",
+          };
+        }
         if (input.command === "docker") {
           const args = input.args ?? [];
           if (
@@ -793,10 +808,9 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
     };
 
     const fakeFetch = async (url: string, init?: RequestInit): Promise<Response> => {
-      if (url.endsWith("/_matrix/client/versions")) {
-        return jsonResponse({
-          versions: ["v1.1", "v1.2"],
-        });
+      const readiness = matrixReadinessResponse(url);
+      if (readiness !== undefined) {
+        return readiness;
       }
 
       if (url.endsWith("/_matrix/client/v3/login")) {
@@ -857,6 +871,14 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
     const fakeExecRunner: ExecRunner = {
       run: async (input): Promise<ExecResult> => {
         recordedExecCalls.push(input);
+        if (isComposePsCall(input)) {
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: composePsRunningJson(),
+            stderr: "",
+          };
+        }
         if (input.command === "docker") {
           const args = input.args ?? [];
           if (
@@ -883,10 +905,9 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
     };
 
     const fakeFetch = async (url: string, init?: RequestInit): Promise<Response> => {
-      if (url.endsWith("/_matrix/client/versions")) {
-        return jsonResponse({
-          versions: ["v1.1", "v1.2"],
-        });
+      const readiness = matrixReadinessResponse(url);
+      if (readiness !== undefined) {
+        return readiness;
       }
 
       if (url.endsWith("/_matrix/client/v3/login")) {
@@ -960,6 +981,14 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
     const fakeExecRunner: ExecRunner = {
       run: async (input): Promise<ExecResult> => {
         recordedExecCalls.push(input);
+        if (isComposePsCall(input)) {
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: composePsRunningJson(),
+            stderr: "",
+          };
+        }
         if (input.command === "docker") {
           const args = input.args ?? [];
           if (
@@ -986,10 +1015,9 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
     };
 
     const fakeFetch = async (url: string, init?: RequestInit): Promise<Response> => {
-      if (url.endsWith("/_matrix/client/versions")) {
-        return jsonResponse({
-          versions: ["v1.1", "v1.2"],
-        });
+      const readiness = matrixReadinessResponse(url);
+      if (readiness !== undefined) {
+        return readiness;
       }
 
       if (url.endsWith("/_matrix/client/v3/login")) {
@@ -1294,6 +1322,51 @@ const jsonResponse = (payload: unknown, status = 200): Response =>
       "Content-Type": "application/json",
     },
   });
+
+// Default homeserver domain produced by buildInstallRequest().
+const DEFAULT_TEST_HOMESERVER_DOMAIN = "matrix.local.test";
+
+// `docker compose ps --format json` payload reporting every service running.
+// Mirrors the NDJSON shape modern compose emits (one object per line).
+const composePsRunningJson = (
+  services: string[] = ["postgres", "synapse", "reverse-proxy"],
+): string =>
+  services
+    .map((service) =>
+      JSON.stringify({ Service: service, State: "running", Status: "Up (healthy)" }),
+    )
+    .join("\n");
+
+// `/_matrix/key/v2/server` identity payload for a given homeserver domain.
+// An empty string omits `server_name` entirely, simulating a response with no
+// usable identity field.
+const serverKeyResponse = (serverName = DEFAULT_TEST_HOMESERVER_DOMAIN): Response =>
+  jsonResponse(
+    serverName.length === 0
+      ? { valid_until_ts: 0, verify_keys: {} }
+      : { server_name: serverName, valid_until_ts: 0, verify_keys: {} },
+  );
+
+// True when a fake exec call is a `docker compose ps` invocation.
+const isComposePsCall = (input: ExecInput): boolean =>
+  input.command === "docker" &&
+  (input.args ?? []).includes("ps") &&
+  (input.args ?? []).includes("--format");
+
+// Answer the readiness + identity probes a successful provision now performs.
+// Returns undefined for unrelated URLs so callers can chain their own handling.
+const matrixReadinessResponse = (
+  url: string,
+  serverName = DEFAULT_TEST_HOMESERVER_DOMAIN,
+): Response | undefined => {
+  if (url.endsWith("/_matrix/client/versions")) {
+    return jsonResponse({ versions: ["v1.1", "v1.2"] });
+  }
+  if (url.endsWith("/_matrix/key/v2/server")) {
+    return serverKeyResponse(serverName);
+  }
+  return undefined;
+};
 
 const parseBody = (value: unknown): Record<string, unknown> => {
   if (typeof value !== "string") {
@@ -2070,6 +2143,14 @@ describe("DockerComposeBundledMatrixProvisioner onProgress reporting", () => {
     const fakeExecRunner: ExecRunner = {
       run: async (input): Promise<ExecResult> => {
         const args = input.args ?? [];
+        if (isComposePsCall(input)) {
+          return {
+            command: [input.command, ...args].join(" "),
+            exitCode: 0,
+            stdout: composePsRunningJson(),
+            stderr: "",
+          };
+        }
         if (
           input.command === "docker" &&
           (args.includes("config") ||
@@ -2093,8 +2174,9 @@ describe("DockerComposeBundledMatrixProvisioner onProgress reporting", () => {
     };
 
     const fakeFetch = async (url: string, init?: RequestInit): Promise<Response> => {
-      if (url.endsWith("/_matrix/client/versions")) {
-        return jsonResponse({ versions: ["v1.1"] });
+      const readiness = matrixReadinessResponse(url);
+      if (readiness !== undefined) {
+        return readiness;
       }
       if (url.endsWith("/_matrix/client/v3/login")) {
         const payload = parseBody(init?.body);
@@ -2131,5 +2213,437 @@ describe("DockerComposeBundledMatrixProvisioner onProgress reporting", () => {
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
+  });
+});
+
+describe("DockerComposeBundledMatrixProvisioner cross-project conflict handling", () => {
+  // Records the docker compose subcommands the provisioner issues so tests can
+  // assert it never takes down a foreign project.
+  type ConflictHarness = {
+    provisioner: DockerComposeBundledMatrixProvisioner;
+    composeSubcommands: string[];
+    cleanup: () => Promise<void>;
+  };
+
+  const buildHarness = async (input: {
+    // A single ps payload, or one payload per successive `compose ps` call.
+    psStdout: string | string[];
+    psThrows?: boolean;
+    upStderr?: string;
+    upExitCode?: number;
+    portOwnerStdout?: string;
+    portOwnerExitCode?: number;
+    serverName?: string;
+  }): Promise<ConflictHarness> => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-conflict-test-"));
+    const composeSubcommands: string[] = [];
+    const psStdouts = Array.isArray(input.psStdout) ? input.psStdout : [input.psStdout];
+    let psCallIndex = 0;
+
+    const fakeExecRunner: ExecRunner = {
+      run: async (execInput): Promise<ExecResult> => {
+        const args = execInput.args ?? [];
+        const command = [execInput.command, ...args].join(" ");
+        // When ps is unavailable, both the `docker compose ps` and the legacy
+        // `docker-compose ps` fallback must throw so runComposeCommand surfaces
+        // MATRIX_COMPOSE_UNAVAILABLE and inspectComposeServiceStates hits its catch.
+        if (input.psThrows && args.includes("ps") && args.includes("--format")) {
+          throw new Error("docker compose ps unavailable");
+        }
+        if (execInput.command !== "docker") {
+          return { command, exitCode: 127, stdout: "", stderr: "command not found" };
+        }
+        // Raw `docker ps --filter publish=...` port-owner lookup (no "compose").
+        if (!args.includes("compose") && args.includes("ps") && args.includes("--filter")) {
+          return {
+            command,
+            exitCode: input.portOwnerExitCode ?? 0,
+            stdout: input.portOwnerStdout ?? "",
+            stderr: "",
+          };
+        }
+        if (isComposePsCall(execInput)) {
+          const stdout = psStdouts[Math.min(psCallIndex, psStdouts.length - 1)] ?? "";
+          psCallIndex += 1;
+          return { command, exitCode: 0, stdout, stderr: "" };
+        }
+        if (args.includes("config")) {
+          return { command, exitCode: 0, stdout: "services:\n  synapse: {}\n", stderr: "" };
+        }
+        if (args.includes("up")) {
+          composeSubcommands.push("up");
+          return {
+            command,
+            exitCode: input.upExitCode ?? 0,
+            stdout: "",
+            stderr: input.upStderr ?? "",
+          };
+        }
+        if (args.includes("down")) {
+          composeSubcommands.push("down");
+          return { command, exitCode: 0, stdout: "", stderr: "" };
+        }
+        return { command, exitCode: 0, stdout: "ok", stderr: "" };
+      },
+    };
+
+    const fakeFetch = async (url: string, init?: RequestInit): Promise<Response> => {
+      const readiness = matrixReadinessResponse(url, input.serverName);
+      if (readiness !== undefined) {
+        return readiness;
+      }
+      if (url.endsWith("/_matrix/client/v3/login")) {
+        const localpart = readLoginLocalpart(parseBody(init?.body)) ?? "unknown";
+        return jsonResponse({
+          access_token: `token-${localpart}`,
+          user_id: `@${localpart}:matrix.local.test`,
+        });
+      }
+      if (url.endsWith("/_matrix/client/v3/createRoom")) {
+        return jsonResponse({ room_id: "!alerts:matrix.local.test" });
+      }
+      return jsonResponse({});
+    };
+
+    const provisioner = new DockerComposeBundledMatrixProvisioner(
+      fakeExecRunner,
+      createLogger(),
+      buildPaths(tempRoot),
+      fakeFetch,
+    );
+
+    return {
+      provisioner,
+      composeSubcommands,
+      cleanup: () => rm(tempRoot, { recursive: true, force: true }),
+    };
+  };
+
+  it("does not treat a created-but-not-running Synapse as a successful start", async () => {
+    // compose up exits 0, but ps shows synapse stuck in `created` (no port conflict),
+    // so the local down/up retry runs; it stays created → MATRIX_STACK_START_FAILED.
+    const harness = await buildHarness({
+      psStdout: [
+        JSON.stringify({ Service: "postgres", State: "running", Status: "Up" }),
+        JSON.stringify({ Service: "synapse", State: "created", Status: "Created" }),
+      ].join("\n"),
+    });
+    try {
+      const req = buildInstallRequest();
+      const provision = await harness.provisioner.provision(req);
+      await expect(harness.provisioner.bootstrapAccounts(req, provision)).rejects.toMatchObject({
+        code: "MATRIX_STACK_START_FAILED",
+      });
+      // The created service must NOT have been accepted as running.
+      expect(harness.composeSubcommands).toContain("down");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("bails with BUNDLED_MATRIX_PORT_CONFLICT naming the foreign project and fix command", async () => {
+    const harness = await buildHarness({
+      upExitCode: 1,
+      upStderr:
+        "Error response from daemon: failed to set up container networking: " +
+        "Bind for 127.0.0.1:8008 failed: port is already allocated",
+      psStdout: JSON.stringify({
+        Service: "synapse",
+        State: "created",
+        Status: "Created",
+      }),
+      portOwnerStdout: "pipi2-sovereign-ai-node-com-synapse-1\tpipi2-sovereign-ai-node-com\n",
+    });
+    try {
+      const req = buildInstallRequest();
+      const provision = await harness.provisioner.provision(req);
+      await expect(harness.provisioner.bootstrapAccounts(req, provision)).rejects.toMatchObject({
+        code: "BUNDLED_MATRIX_PORT_CONFLICT",
+        retryable: false,
+        details: {
+          conflictingContainer: "pipi2-sovereign-ai-node-com-synapse-1",
+          conflictingProject: "pipi2-sovereign-ai-node-com",
+          suggestedFix: "docker compose -p pipi2-sovereign-ai-node-com down",
+        },
+      });
+      // Critically: we must never take the foreign project down ourselves.
+      expect(harness.composeSubcommands).not.toContain("down");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("falls back to docker rm fix when the conflicting container has no compose project", async () => {
+    const harness = await buildHarness({
+      upExitCode: 1,
+      upStderr: "Bind for 127.0.0.1:8008 failed: port is already allocated",
+      psStdout: JSON.stringify({ Service: "synapse", State: "created", Status: "Created" }),
+      // Container with an empty compose-project label.
+      portOwnerStdout: "rogue-synapse\t\n",
+    });
+    try {
+      const req = buildInstallRequest();
+      const provision = await harness.provisioner.provision(req);
+      await expect(harness.provisioner.bootstrapAccounts(req, provision)).rejects.toMatchObject({
+        code: "BUNDLED_MATRIX_PORT_CONFLICT",
+        details: {
+          conflictingContainer: "rogue-synapse",
+          suggestedFix: "docker rm -f rogue-synapse",
+        },
+      });
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("still reports a port conflict when the owning container cannot be identified", async () => {
+    const harness = await buildHarness({
+      upExitCode: 1,
+      upStderr: "Bind for 127.0.0.1:8008 failed: port is already allocated",
+      psStdout: JSON.stringify({ Service: "synapse", State: "created", Status: "Created" }),
+      portOwnerStdout: "", // docker ps returns nothing
+    });
+    try {
+      const req = buildInstallRequest();
+      const provision = await harness.provisioner.provision(req);
+      await expect(harness.provisioner.bootstrapAccounts(req, provision)).rejects.toMatchObject({
+        code: "BUNDLED_MATRIX_PORT_CONFLICT",
+        message: expect.stringContaining("another container"),
+      });
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("rejects with MATRIX_FOREIGN_SYNAPSE_ON_PORT when the responding server_name differs", async () => {
+    // Stack starts cleanly, readiness passes, but the Synapse on the port belongs
+    // to a different homeserver domain than the one we provisioned.
+    const harness = await buildHarness({
+      psStdout: composePsRunningJson(["postgres", "synapse", "reverse-proxy"]),
+      serverName: "pipi2.sovereign-ai-node.com",
+    });
+    try {
+      const req = buildInstallRequest();
+      req.matrix.tlsMode = "internal";
+      req.matrix.publicBaseUrl = "https://matrix.local.test:8448";
+      const provision = await harness.provisioner.provision(req);
+      await expect(harness.provisioner.bootstrapAccounts(req, provision)).rejects.toMatchObject({
+        code: "MATRIX_FOREIGN_SYNAPSE_ON_PORT",
+        retryable: false,
+        details: {
+          expectedServerName: "matrix.local.test",
+          actualServerName: "pipi2.sovereign-ai-node.com",
+        },
+      });
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("rejects when the responding server omits its server_name entirely", async () => {
+    // `/_matrix/key/v2/server` answers but without a usable server_name string.
+    const harness = await buildHarness({
+      psStdout: composePsRunningJson(["postgres", "synapse", "reverse-proxy"]),
+      serverName: "", // → server_name: "" → treated as unidentifiable
+    });
+    try {
+      const req = buildInstallRequest();
+      req.matrix.tlsMode = "internal";
+      req.matrix.publicBaseUrl = "https://matrix.local.test:8448";
+      const provision = await harness.provisioner.provision(req);
+      await expect(harness.provisioner.bootstrapAccounts(req, provision)).rejects.toMatchObject({
+        code: "MATRIX_FOREIGN_SYNAPSE_ON_PORT",
+        message: expect.stringContaining("got 'unknown'"),
+        details: { actualServerName: "" },
+      });
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("proceeds when the responding server_name matches the provisioned domain", async () => {
+    const harness = await buildHarness({
+      psStdout: composePsRunningJson(["postgres", "synapse"]),
+      serverName: "matrix.local.test",
+    });
+    try {
+      const req = buildInstallRequest();
+      const provision = await harness.provisioner.provision(req);
+      const accounts = await harness.provisioner.bootstrapAccounts(req, provision);
+      expect(accounts.operator.userId).toBe("@operator:matrix.local.test");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("recovers when the first start is partial but the down/up retry brings services up", async () => {
+    // 1st ps: synapse created (partial). 2nd ps (after down/up): all running.
+    const harness = await buildHarness({
+      psStdout: [
+        [
+          JSON.stringify({ Service: "postgres", State: "running", Status: "Up" }),
+          JSON.stringify({ Service: "synapse", State: "created", Status: "Created" }),
+        ].join("\n"),
+        composePsRunningJson(["postgres", "synapse"]),
+      ],
+      serverName: "matrix.local.test",
+    });
+    try {
+      const req = buildInstallRequest();
+      const provision = await harness.provisioner.provision(req);
+      const accounts = await harness.provisioner.bootstrapAccounts(req, provision);
+      expect(accounts.operator.userId).toBe("@operator:matrix.local.test");
+      // The recovery down/up retry must have run.
+      expect(harness.composeSubcommands).toContain("down");
+      expect(harness.composeSubcommands.filter((c) => c === "up")).toHaveLength(2);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("treats containers as not-running when `compose ps` itself fails", async () => {
+    // ps throws on every call → inspection yields no running services → the start
+    // is never accepted and the flow ultimately fails (no port conflict here).
+    const harness = await buildHarness({
+      psStdout: "",
+      psThrows: true,
+    });
+    try {
+      const req = buildInstallRequest();
+      const provision = await harness.provisioner.provision(req);
+      await expect(harness.provisioner.bootstrapAccounts(req, provision)).rejects.toMatchObject({
+        code: "MATRIX_STACK_START_FAILED",
+      });
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("reports a port conflict even when the docker ps owner lookup fails", async () => {
+    const harness = await buildHarness({
+      upExitCode: 1,
+      upStderr: "Bind for 127.0.0.1:8008 failed: port is already allocated",
+      psStdout: JSON.stringify({ Service: "synapse", State: "created", Status: "Created" }),
+      portOwnerExitCode: 1, // docker ps lookup errors out
+    });
+    try {
+      const req = buildInstallRequest();
+      const provision = await harness.provisioner.provision(req);
+      await expect(harness.provisioner.bootstrapAccounts(req, provision)).rejects.toMatchObject({
+        code: "BUNDLED_MATRIX_PORT_CONFLICT",
+        message: expect.stringContaining("another container"),
+      });
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("recognizes a generic 'address already in use' as a port conflict", async () => {
+    const harness = await buildHarness({
+      upExitCode: 1,
+      // Generalized port-conflict phrasing (not the docker-proxy specific message).
+      upStderr: "listen tcp 127.0.0.1:8008: bind: address already in use",
+      psStdout: JSON.stringify({ Service: "synapse", State: "created", Status: "Created" }),
+      portOwnerStdout: "rogue-synapse\n",
+    });
+    try {
+      const req = buildInstallRequest();
+      const provision = await harness.provisioner.provision(req);
+      await expect(harness.provisioner.bootstrapAccounts(req, provision)).rejects.toMatchObject({
+        code: "BUNDLED_MATRIX_PORT_CONFLICT",
+        details: {
+          conflictingContainer: "rogue-synapse",
+          conflictingProject: "",
+          suggestedFix: "docker rm -f rogue-synapse",
+        },
+      });
+    } finally {
+      await harness.cleanup();
+    }
+  });
+});
+
+describe("compose ps JSON parsing", () => {
+  // Drive ensureStackRunning with a scripted sequence of `compose ps` payloads so
+  // each `parseComposePsJson` shape (array, NDJSON-with-blanks, empty) is exercised.
+  const runWithPsSequence = async (psStdoutByCall: string[]): Promise<void> => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-psjson-test-"));
+    let psCallIndex = 0;
+    const fakeExecRunner: ExecRunner = {
+      run: async (execInput): Promise<ExecResult> => {
+        const args = execInput.args ?? [];
+        const command = [execInput.command, ...args].join(" ");
+        if (execInput.command !== "docker") {
+          return { command, exitCode: 127, stdout: "", stderr: "" };
+        }
+        if (isComposePsCall(execInput)) {
+          const stdout = psStdoutByCall[Math.min(psCallIndex, psStdoutByCall.length - 1)] ?? "";
+          psCallIndex += 1;
+          return { command, exitCode: 0, stdout, stderr: "" };
+        }
+        if (args.includes("config")) {
+          return { command, exitCode: 0, stdout: "services:\n  synapse: {}\n", stderr: "" };
+        }
+        return { command, exitCode: 0, stdout: "ok", stderr: "" };
+      },
+    };
+    const fakeFetch = async (url: string, init?: RequestInit): Promise<Response> => {
+      const readiness = matrixReadinessResponse(url);
+      if (readiness !== undefined) {
+        return readiness;
+      }
+      if (url.endsWith("/_matrix/client/v3/login")) {
+        const localpart = readLoginLocalpart(parseBody(init?.body)) ?? "unknown";
+        return jsonResponse({
+          access_token: `token-${localpart}`,
+          user_id: `@${localpart}:matrix.local.test`,
+        });
+      }
+      return jsonResponse({});
+    };
+    const provisioner = new DockerComposeBundledMatrixProvisioner(
+      fakeExecRunner,
+      createLogger(),
+      buildPaths(tempRoot),
+      fakeFetch,
+    );
+    try {
+      const req = buildInstallRequest();
+      const provision = await provisioner.provision(req);
+      const accounts = await provisioner.bootstrapAccounts(req, provision);
+      expect(accounts.operator.userId).toBe("@operator:matrix.local.test");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  };
+
+  it("accepts the JSON-array form and tolerates junk / Name-only / exit-code entries", async () => {
+    await runWithPsSequence([
+      JSON.stringify([
+        // Junk array element (not an object) — skipped.
+        null,
+        // Entry identified by `Name` instead of `Service`, carrying an exit code.
+        { Name: "matrix-extra", State: "exited", Status: "Exited (0)", ExitCode: 0 },
+        // Entry with neither Service nor Name — skipped.
+        { State: "running" },
+        // Extra service with no State/Status fields → normalized to "unknown"/"".
+        { Service: "extra-sidecar" },
+        { Service: "postgres", State: "running", Status: "Up" },
+        { Service: "synapse", State: "running", Status: "Up" },
+      ]),
+    ]);
+  });
+
+  it("handles empty output then NDJSON with a blank line on retry", async () => {
+    await runWithPsSequence([
+      // 1st call: empty output → parsed as no services → not running → retry.
+      "",
+      // 2nd call (after down/up): NDJSON with a blank line that must be skipped.
+      [
+        JSON.stringify({ Service: "postgres", State: "running", Status: "Up" }),
+        "",
+        JSON.stringify({ Service: "synapse", State: "running", Status: "Up" }),
+      ].join("\n"),
+    ]);
   });
 });
