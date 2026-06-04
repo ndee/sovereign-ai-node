@@ -11,6 +11,14 @@ by the `.github/workflows/release.yml` workflow.
 
 ## [Unreleased]
 
+## [2.2.2] - 2026-06-04
+
+Patch fixing a bundled-Matrix install failure on hosts with leftover containers from prior install attempts.
+
+- Fix [#179](https://github.com/ndee/sovereign-ai-node/issues/179): when a different compose project's Synapse already owns `127.0.0.1:8008`, the install no longer silently bootstraps against the wrong homeserver (which surfaced as `MATRIX_LOGIN_FAILED` / 500 `M_UNKNOWN` at `matrix_bootstrap_accounts`). The installer now validates actual container state after `docker compose up` (instead of trusting its exit code), detects the cross-project port conflict — including when the failure is only in the container's `.State.Error` after a `compose up` that exited 0 — and fails fast with an actionable `BUNDLED_MATRIX_PORT_CONFLICT` naming the conflicting container/project. It also verifies the responding Synapse's `server_name` matches the provisioned homeserver before bootstrapping (`MATRIX_FOREIGN_SYNAPSE_ON_PORT`).
+
+See the [v2.2.2 GitHub Release](https://github.com/ndee/sovereign-ai-node/releases/tag/v2.2.2) for the full commit list.
+
 ## [2.2.1] - 2026-05-11
 
 Patch on top of v2.2.0 so downstream consumers can install this package directly from GitHub.
