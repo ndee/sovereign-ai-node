@@ -151,6 +151,7 @@ Notes:
 - `Update` reuses existing settings and request file, fetches the selected installer ref/URL before rerunning in update mode, defaults to the latest GitHub release tag when no explicit ref/URL override is supplied (falling back to `main` if that lookup fails), and the CLI entrypoint must run as root (`sudo sovereign-node update`) while still requiring `sovereign-node migrate` first when pending migrations exist
 - for legacy single-instance Mail Sentinel installs, `sovereign-node migrate` now carries the active top-level IMAP settings and IMAP secret ref into the installer-managed `mail-sentinel` instance so update can continue without re-entering mailbox credentials
 - `Install` on an existing system behaves as reconfigure with prefilled defaults
+- when Docker Engine or the Compose plugin is missing, the installer bootstraps them automatically before bundled Matrix provisioning continues
 - `scripts/install.sh` owns OpenClaw installation in the default path.
 - Operators should not run `openclaw onboard` in the default Sovereign flow.
 
@@ -159,20 +160,21 @@ Notes:
 In the default bundled mode, the installer should perform these steps in order:
 
 1. Run preflight checks (ports, disk, DNS resolution, container runtime, clock).
-2. Install OpenClaw CLI using the official OpenClaw installer script (pinned version, `--no-onboard`, non-interactive).
-3. Verify the installed OpenClaw version is the Sovereign-pinned compatible version.
-4. Collect and test IMAP credentials.
-5. Collect Matrix domain settings and apply safe defaults.
-6. Provision the bundled Matrix stack.
-7. Create Matrix operator account and required core-agent accounts, then apply the bundled Matrix avatars that are present for the service bot, alert room, and managed agents.
-8. Create a private alert room and invite operator + core agents.
-9. Write Sovereign-managed OpenClaw config/profile and secrets references.
-10. Install/repair the OpenClaw gateway service and start it.
-11. Install/configure required OpenClaw plugins.
-12. Install/pin core templates and instantiate core agent/tool runtime entries.
-13. Register `mail-sentinel` polling resources.
-14. Run health checks and synthetic hello alerts from core agents.
-15. Print Element connection details and next steps.
+2. Prepare the Docker runtime for the bundled stack; if Docker Engine or `docker compose` is missing, install them automatically.
+3. Install OpenClaw CLI using the official OpenClaw installer script (pinned version, `--no-onboard`, non-interactive).
+4. Verify the installed OpenClaw version is the Sovereign-pinned compatible version.
+5. Collect and test IMAP credentials.
+6. Collect Matrix domain settings and apply safe defaults.
+7. Provision the bundled Matrix stack.
+8. Create Matrix operator account and required core-agent accounts, then apply the bundled Matrix avatars that are present for the service bot, alert room, and managed agents.
+9. Create a private alert room and invite operator + core agents.
+10. Write Sovereign-managed OpenClaw config/profile and secrets references.
+11. Install/repair the OpenClaw gateway service and start it.
+12. Install/configure required OpenClaw plugins.
+13. Install/pin core templates and instantiate core agent/tool runtime entries.
+14. Register `mail-sentinel` polling resources.
+15. Run health checks and synthetic hello alerts from core agents.
+16. Print Element connection details and next steps.
 
 Current default core instantiation:
 
