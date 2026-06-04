@@ -65,7 +65,7 @@ These defaults are binding for the phase-B bundled install profile unless explic
   - Element Mobile
   - `app.element.io` with custom homeserver
 - self-hosted Element Web: optional, not required for phase 1
-- template lifecycle: installer manages signed/pinned core templates
+- template lifecycle: installer manages pinned, schema-validated core templates
 - core runtime bootstrap: installer instantiates core Sovereign agents and tool instances
 
 ## Sovereign Runtime Objects (Normative Vocabulary)
@@ -73,10 +73,11 @@ These defaults are binding for the phase-B bundled install profile unless explic
 Installer- and operator-facing contracts in this document use the following model:
 
 - `Sovereign Agent Template`
-  - Signed, pinned manifest for agent behavior.
+  - Pinned, schema-validated manifest for agent behavior. (Not cryptographically
+    signed yet — see the integrity note in ARCHITECTURE.md.)
   - Defines workspace materialization and tool-template requirements.
 - `Sovereign Tool Template`
-  - Signed, pinned manifest for a least-privilege capability contract.
+  - Pinned, schema-validated manifest for a least-privilege capability contract.
   - Defines required config keys, secret refs, and allowed command/tool surface.
 - `Sovereign Tool Instance`
   - Installation-local binding of a tool template to concrete config and secret refs.

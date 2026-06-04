@@ -86,9 +86,9 @@ Core rule:
 Operator-facing runtime objects:
 
 - `Sovereign agent templates`
-  - Signed/pinned manifests for agent behavior and workspace materialization.
+  - Pinned, schema-validated manifests for agent behavior and workspace materialization.
 - `Sovereign tool templates`
-  - Signed/pinned manifests for least-privilege capability contracts.
+  - Pinned, schema-validated manifests for least-privilege capability contracts.
 - `Sovereign tool instances`
   - Concrete bindings of a tool template to real config/secrets.
 - `Sovereign agents`
