@@ -318,6 +318,19 @@ const SOVEREIGN_EXECUTABLE_PATHS: Record<string, string> = {
   "sovereign-tool": "/usr/local/bin/sovereign-tool",
 };
 
+// Root-owned helpers dropped by configure_system_hygiene (lib-build.sh) and
+// granted to the service user via a scoped sudoers fragment. They replace the
+// former root-equivalent `sudo tee <unit>` and glob `sudo chown -R` grants.
+const GATEWAY_UNIT_INSTALL_HELPER =
+  process.env.SOVEREIGN_NODE_GATEWAY_UNIT_HELPER?.trim() ||
+  "/usr/local/lib/sovereign-node/install-gateway-unit.sh";
+const CHOWN_RECLAIM_HELPER =
+  process.env.SOVEREIGN_NODE_CHOWN_RECLAIM_HELPER?.trim() ||
+  "/usr/local/lib/sovereign-node/chown-reclaim.sh";
+// Allowlist keys understood by chown-reclaim.sh. The service user passes a
+// key, never a path; the helper maps each key to a fixed canonical path.
+const CHOWN_RECLAIM_KEY_SECRETS = "secrets";
+
 const DEFAULT_MATRIX_USER_INVITE_TTL_MINUTES = 1_440;
 
 type RealInstallerServiceDeps = {
@@ -8428,6 +8441,12 @@ export default function (api) {
       "",
     ].join("\n");
 
+    // When the unit is installed via the root helper (fallback path below),
+    // the helper performs daemon-reload + enable itself, and the service user
+    // is no longer granted standalone `sudo systemctl daemon-reload`/`enable`.
+    // Track that so we don't re-issue (and fail) those commands afterwards.
+    let unitInstalledViaHelper = false;
+
     try {
       await mkdir(this.paths.openclawServiceHome, { recursive: true });
       await mkdir(managedTempDir, { recursive: true });
@@ -8438,9 +8457,12 @@ export default function (api) {
       await mkdir(dirname(unitPath), { recursive: true });
       // Try a direct writeFile first (fast path when running as root, e.g.
       // the bootstrap install context, or in unit tests where the test
-      // process owns the unit dir). On EACCES/EPERM, fall back to
-      // `sudo -n tee` against the scoped sudoers fragment dropped by
-      // configure_system_hygiene at install time.
+      // process owns the unit dir). On EACCES/EPERM, fall back to the
+      // root-owned install-gateway-unit.sh helper via the scoped sudoers
+      // fragment dropped by configure_system_hygiene at install time. The
+      // helper forces the unit's User=/Group= to the trusted service
+      // identity, so the service user cannot install a User=root unit and
+      // escalate — unlike the previous raw `sudo tee` grant.
       try {
         await writeFile(unitPath, unitContents, "utf8");
       } catch (writeError) {
@@ -8448,23 +8470,25 @@ export default function (api) {
         if ((code !== "EACCES" && code !== "EPERM") || this.execRunner === null) {
           throw writeError;
         }
-        const teeResult = await this.execRunner.run({
+        const helperResult = await this.execRunner.run({
           command: "sudo",
-          args: ["-n", "tee", unitPath],
+          args: ["-n", GATEWAY_UNIT_INSTALL_HELPER],
           options: {
             input: unitContents,
             stdin: "pipe",
-            timeout: 5_000,
+            timeout: 10_000,
           },
         });
-        if (teeResult.exitCode !== 0) {
+        if (helperResult.exitCode !== 0) {
           throw new Error(
-            `sudo tee ${unitPath} exited ${teeResult.exitCode}: ${truncateText(
-              teeResult.stderr,
+            `${GATEWAY_UNIT_INSTALL_HELPER} exited ${helperResult.exitCode}: ${truncateText(
+              helperResult.stderr,
               400,
             )}`,
           );
         }
+        // The helper already ran daemon-reload + enable as root.
+        unitInstalledViaHelper = true;
       }
     } catch (error) {
       this.logger.warn(
@@ -8477,12 +8501,21 @@ export default function (api) {
       return false;
     }
 
-    const commands: string[][] = [
-      ["daemon-reload"],
-      ["enable", "--now", unitName],
-      ["restart", unitName],
-      ["is-active", unitName],
-    ];
+    // When the unit was written directly (root bootstrap path), we still need
+    // daemon-reload + enable here. When it went through the root helper, the
+    // helper already did both as root and the service user is not granted
+    // those standalone systemctl verbs, so issue only restart/is-active.
+    const commands: string[][] = unitInstalledViaHelper
+      ? [
+          ["restart", unitName],
+          ["is-active", unitName],
+        ]
+      : [
+          ["daemon-reload"],
+          ["enable", "--now", unitName],
+          ["restart", unitName],
+          ["is-active", unitName],
+        ];
     // Plain systemctl first; fall back to `sudo -n systemctl` when the
     // call fails with polkit's "Interactive authentication required"
     // (the runtime API service hits this when invoked from a service
@@ -10740,10 +10773,15 @@ export default function (api) {
   }
 
   /**
-   * Re-claim ownership of a path via the scoped sudoers fragment when
+   * Re-claim ownership of a path via the scoped chown-reclaim.sh helper when
    * mkdir/chmod hit EPERM/EACCES (e.g. the dir was created by the bootstrap
    * install.sh as root and isn't writable to the runtime API user). No-op
-   * when already root or when sudo is unavailable.
+   * when already root, when sudo is unavailable, or when the path is not one
+   * of the helper's allowlisted reclaim targets.
+   *
+   * The helper takes an allowlist KEY (not a path) and refuses symlinked
+   * targets, so the service user can no longer redirect a recursive chown
+   * via a planted symlink as it could with the former glob `sudo chown -R`.
    */
   private async sudoReclaimOwnership(path: string): Promise<boolean> {
     if (typeof process.getuid !== "function") return false;
@@ -10751,15 +10789,30 @@ export default function (api) {
     if (myUid === 0) return false;
     const myGid = (typeof process.getgid === "function" ? process.getgid() : null) ?? 0;
     if (this.execRunner === null) return false;
+
+    // Map the requested path to a chown-reclaim allowlist key. Only the
+    // secrets dir is reclaimed today; anything else is not granted.
+    let key: string;
+    if (path === this.paths.secretsDir || path.startsWith(`${this.paths.secretsDir}/`)) {
+      key = CHOWN_RECLAIM_KEY_SECRETS;
+    } else {
+      this.logger.warn(
+        { path },
+        "sudo chown reclaim skipped: path is not an allowlisted reclaim target",
+      );
+      return false;
+    }
+
     const result = await this.execRunner.run({
       command: "sudo",
-      args: ["-n", "chown", "-R", `${myUid}:${myGid}`, path],
+      args: ["-n", CHOWN_RECLAIM_HELPER, key, String(myUid), String(myGid)],
       options: { timeout: 30_000 },
     });
     if (result.exitCode !== 0) {
       this.logger.warn(
         {
           path,
+          key,
           exitCode: result.exitCode,
           stderr: truncateText(result.stderr, 400),
         },

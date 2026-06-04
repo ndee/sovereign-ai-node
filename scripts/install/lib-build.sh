@@ -188,33 +188,56 @@ configure_system_hygiene() {
   install -m 0644 "$APP_DIR/scripts/install/lib-runtime-deps.sh" \
     "$docker_helper_libs/lib-runtime-deps.sh"
 
+  # --- gateway-unit + chown reclaim helpers for the API service ---
+  # These root-owned helpers replace raw `sudo tee <unit>` and
+  # `sudo chown -R <glob>` grants. The gateway-unit helper forces the unit's
+  # User=/Group= to the trusted service identity (so the service user cannot
+  # write a User=root unit and escalate); the chown-reclaim helper maps an
+  # allowlist key to a fixed path and refuses symlinked targets.
+  install -m 0755 "$APP_DIR/scripts/install/install-gateway-unit.sh" \
+    "${docker_helper_dir}/install-gateway-unit.sh"
+  install -m 0755 "$APP_DIR/scripts/install/chown-reclaim.sh" \
+    "${docker_helper_dir}/chown-reclaim.sh"
+
+  # Trusted service identity for install-gateway-unit.sh. Root-owned and
+  # world-readable; the service user can read it but cannot write it (the
+  # parent /etc/sovereign-node is root-owned 0755), so it cannot influence
+  # which account the gateway unit runs as.
+  install -d -m 0755 /etc/sovereign-node
+  cat > /etc/sovereign-node/gateway-service-identity <<EOF
+user=${SERVICE_USER}
+group=${SERVICE_GROUP:-${SERVICE_USER}}
+EOF
+  chmod 0644 /etc/sovereign-node/gateway-service-identity
+
   # --- sudoers fragment: scoped passwordless sudo for the runtime API ---
   # The sovereign-node-api service runs as ${SERVICE_USER} (non-root) and
   # needs to install/start the OpenClaw gateway systemd unit during a
-  # bundled-Matrix install. Dropping a narrow sudoers rule lets it
-  # tee/move the unit file and run systemctl against that one unit, with
-  # no other sudo capabilities.
+  # bundled-Matrix install. It is granted ONLY:
+  #   * the validating install-gateway-unit.sh helper (which forces the
+  #     unit's User=/Group= and performs daemon-reload + enable as root),
+  #   * non-escalating systemctl verbs (restart/is-active/status) on the
+  #     one gateway unit,
+  #   * the chown-reclaim.sh helper (allowlisted paths, symlink-safe),
+  #   * the docker install helper.
+  # It is deliberately NOT granted `tee` over the unit file, standalone
+  # `daemon-reload`/`enable`, or glob `chown -R`, all of which were
+  # root-equivalent.
   local sudoers_path="/etc/sudoers.d/sovereign-node-gateway"
   install -d -m 0755 /etc/sudoers.d
   cat > "$sudoers_path" <<EOF
 # Managed by sovereign-ai-node installer. Scoped sudo for the runtime
 # API service to manage the OpenClaw gateway systemd unit and the
 # bundled-Matrix project directory.
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/tee /etc/systemd/system/sovereign-openclaw-gateway.service
-${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl daemon-reload
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/local/lib/sovereign-node/install-gateway-unit.sh
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl restart sovereign-openclaw-gateway, /bin/systemctl restart sovereign-openclaw-gateway.service
-${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl enable --now sovereign-openclaw-gateway, /bin/systemctl enable --now sovereign-openclaw-gateway.service
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl is-active sovereign-openclaw-gateway, /bin/systemctl is-active sovereign-openclaw-gateway.service
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl status sovereign-openclaw-gateway, /bin/systemctl status sovereign-openclaw-gateway.service
-# Allow re-claiming ownership of bundled-matrix project subdirectories
-# after docker-compose has touched them as root. Restricted to that
-# path; the *:* in the chown spec keeps it bounded to numeric uid:gid.
-${SERVICE_USER} ALL=(root) NOPASSWD: /bin/chown -R [0-9]*\:[0-9]* /var/lib/sovereign-node/bundled-matrix/*
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/chown -R [0-9]*\:[0-9]* /var/lib/sovereign-node/bundled-matrix/*
-# Allow re-claiming ownership of /etc/sovereign-node/secrets and its
-# entries when a previous run left them root-owned.
-${SERVICE_USER} ALL=(root) NOPASSWD: /bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets, /bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets/*
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets, /usr/bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets/*
+# Re-claim ownership of bundled-matrix / secrets dirs left root-owned by
+# docker-compose or the bootstrap install. The helper maps an allowlist
+# key to a fixed canonical path and refuses symlinked targets, so a
+# planted symlink can no longer redirect the recursive chown.
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/local/lib/sovereign-node/chown-reclaim.sh
 # Allow installing the Docker runtime via the helper script dropped at
 # install time. The helper is owned root:root and 0755, sources lib-os.sh
 # and lib-runtime-deps.sh, and runs install_docker_if_needed.
