@@ -36,6 +36,16 @@ sudo bash scripts/install.sh --source-dir "$(pwd)"
 
 The local-checkout flow uses the multi-file installer under `scripts/install/`. The `scripts/install.sh` you see in this repo is the orchestrator; it sources `scripts/install/lib-*.sh` at runtime. The single-file `install.sh` shipped via the release URL is built from the same sources by `scripts/install/build.sh` during the release workflow.
 
+### Using the repo as a package
+
+Downstream consumers can also install tagged versions straight from GitHub:
+
+```bash
+npm install github:ndee/sovereign-ai-node#v2.2.1
+```
+
+That install path now builds `dist/lib/` automatically when the published tree only contains sources. The supported import surfaces are the top-level package plus `sovereign-ai-node/installer`, `sovereign-ai-node/api`, `sovereign-ai-node/app`, `sovereign-ai-node/system`, and `sovereign-ai-node/contracts`. Wizard assets remain available under `sovereign-ai-node/public/setup-ui/*`.
+
 ## Update
 
 Once installed, update to the latest release with:
