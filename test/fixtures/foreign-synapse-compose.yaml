@@ -1,0 +1,30 @@
+# A minimal "foreign" Matrix Synapse stack that squats on 127.0.0.1:8008 — the
+# same host port the bundled-matrix installer binds. Used by the CI
+# `rerun-after-partial-failure` scenario to reproduce the field bug from
+# https://github.com/ndee/sovereign-ai-node/issues/179: a leftover install from
+# a different compose project owns the port, so the new install's Synapse can
+# never bind it.
+#
+# It is configured for a DIFFERENT homeserver domain ("foreign.local.test") than
+# the install request ("ci.local.test"), so it also exercises the server-identity
+# guard (MATRIX_FOREIGN_SYNAPSE_ON_PORT) if a probe ever reaches it.
+services:
+  synapse:
+    image: matrixdotorg/synapse:v1.125.0
+    # Generate a self-contained config on first boot for the foreign domain, then
+    # start normally. SQLite keeps it dependency-free and fast for CI.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        if [ ! -f /data/homeserver.yaml ]; then
+          SYNAPSE_SERVER_NAME=foreign.local.test \
+          SYNAPSE_REPORT_STATS=no \
+          /start.py generate
+        fi
+        exec /start.py
+    ports:
+      - "127.0.0.1:8008:8008"
+    environment:
+      SYNAPSE_SERVER_NAME: foreign.local.test
+      SYNAPSE_REPORT_STATS: "no"

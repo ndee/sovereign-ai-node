@@ -277,3 +277,95 @@ jobs:
           if [ -n "$COMPOSE_DIR" ]; then
             cd "$COMPOSE_DIR" && docker compose logs --tail=100 2>&1 || true
           fi
+
+  e2e_rerun_after_partial_failure:
+    name: E2E Install (rerun after partial failure)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Clone bot catalog repo
+        run: |
+          BOT_REF="${GITHUB_HEAD_REF:-main}"
+          if git ls-remote --exit-code --heads https://github.com/ndee/sovereign-ai-bots "$BOT_REF" >/dev/null 2>&1; then
+            git clone --depth 1 --branch "$BOT_REF" https://github.com/ndee/sovereign-ai-bots /tmp/sovereign-ai-bots
+          else
+            git clone --depth 1 https://github.com/ndee/sovereign-ai-bots /tmp/sovereign-ai-bots
+          fi
+
+      - name: Pre-pull Docker images
+        run: |
+          docker pull postgres:16-alpine &
+          docker pull matrixdotorg/synapse:v1.125.0 &
+          wait
+
+      # Reproduce issue #179: a leftover install from a *different* compose
+      # project squats on 127.0.0.1:8008 before the new install runs.
+      - name: Seed a leftover foreign Matrix project on the install port
+        run: |
+          mkdir -p /tmp/foreign-synapse
+          cp test/fixtures/foreign-synapse-compose.yaml /tmp/foreign-synapse/compose.yaml
+          docker compose -p pipi2-sovereign-ai-node-com \
+            -f /tmp/foreign-synapse/compose.yaml up -d
+          # Wait until the foreign Synapse owns the port.
+          for i in $(seq 1 60); do
+            if curl -fs http://127.0.0.1:8008/_matrix/client/versions >/dev/null 2>&1; then
+              echo "Foreign Synapse is up and holding 127.0.0.1:8008"
+              break
+            fi
+            sleep 2
+          done
+          ss -tlnp | grep ':8008' || true
+          docker ps --filter publish=8008 --format '{{.Names}}\t{{.Label "com.docker.compose.project"}}'
+
+      - name: Run installer and assert it fails fast with a port-conflict error
+        run: |
+          cp test/fixtures/ci-install-request.json /tmp/ci-install-request.json
+
+          set +e
+          OUT="$(sudo env "PATH=$PATH" bash scripts/install.sh \
+            --source-dir "$GITHUB_WORKSPACE" \
+            --bots-source-dir /tmp/sovereign-ai-bots \
+            --request-file /tmp/ci-install-request.json \
+            --install \
+            --non-interactive 2>&1)"
+          STATUS=$?
+          set -e
+
+          echo "$OUT"
+          echo "installer exit code: $STATUS"
+
+          # The install MUST fail (non-zero) ...
+          if [ "$STATUS" -eq 0 ]; then
+            echo "::error::Install unexpectedly succeeded while a foreign Synapse owned the port"
+            exit 1
+          fi
+          # ... and it MUST be the actionable port-conflict / foreign-Synapse error,
+          # NOT the old MATRIX_LOGIN_FAILED 500 against the wrong homeserver.
+          if echo "$OUT" | grep -qE 'BUNDLED_MATRIX_PORT_CONFLICT|MATRIX_FOREIGN_SYNAPSE_ON_PORT'; then
+            echo "Install correctly reported a cross-project port conflict."
+          else
+            echo "::error::Install failed, but not with the expected port-conflict error code"
+            echo "$OUT" | grep -iE 'MATRIX_LOGIN_FAILED|M_UNKNOWN' && \
+              echo "::error::Saw the pre-fix MATRIX_LOGIN_FAILED symptom — issue #179 not fixed"
+            exit 1
+          fi
+        timeout-minutes: 15
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== foreign synapse logs ==="
+          docker compose -p pipi2-sovereign-ai-node-com -f /tmp/foreign-synapse/compose.yaml logs --tail=100 2>&1 || true
+          echo "=== docker ps -a ==="
+          docker ps -a || true
+          echo "=== request file ==="
+          cat /tmp/ci-install-request.json 2>/dev/null | jq . || true

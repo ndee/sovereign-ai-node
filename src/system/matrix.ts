@@ -44,6 +44,15 @@ const MATRIX_ONBOARDING_API_PORT = 8090;
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
+type ComposeServiceState = {
+  service: string;
+  /** Lowercased compose container state: "running" | "created" | "exited" | "missing" | ... */
+  state: string;
+  /** Human-readable status line from `docker compose ps` (surfaces port-bind errors). */
+  status: string;
+  exitCode?: number;
+};
+
 type BundledMatrixTlsMode = "auto" | "internal" | "local-dev";
 type BundledMatrixAccessMode = "direct" | "relay";
 type BundledMatrixOnboardingMode = Exclude<BundledMatrixTlsMode, "local-dev"> | "relay";
@@ -652,7 +661,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       onProgress?: MatrixProgressReporter;
     },
   ): Promise<BundledMatrixRoomBootstrapResult> {
-    await this.waitForSynapseReady(provision.adminBaseUrl, options?.onProgress);
+    await this.waitForSynapseReady(provision, options?.onProgress);
 
     const previousRoom = options?.previousAlertRoom;
     if (previousRoom !== undefined && previousRoom.roomId.length > 0) {
@@ -1000,13 +1009,24 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       provision.composeFilePath,
       upArgs,
     );
-    if (composeUp.exitCode === 0) {
+    // `docker compose up -d` can exit 0 while a service is stuck in `created`
+    // (e.g. a port-bind failure leaves the container created but never promoted
+    // to running). Never trust the exit code alone — inspect the actual state of
+    // every expected service before declaring success.
+    const firstStates = await this.inspectComposeServiceStates(provision, services);
+    if (composeUp.exitCode === 0 && allServicesRunning(firstStates)) {
       return;
     }
 
+    // Before the local down/up retry — which can only ever clean up *this*
+    // compose project — check whether the failure is a cross-project port
+    // conflict. If a different project owns 127.0.0.1:8008, the local retry is
+    // hopeless and proceeding would silently bootstrap against the wrong Synapse.
+    await this.bailOnCrossProjectPortConflict(provision, services, composeUp, firstStates);
+
     await emitProgress(
       onProgress,
-      `compose up exited ${composeUp.exitCode}; tearing down and retrying`,
+      `compose up did not bring all services up (exit ${composeUp.exitCode}); tearing down and retrying`,
     );
     const composeDown = await this.runComposeCommand(
       provision.projectDir,
@@ -1018,7 +1038,8 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       provision.composeFilePath,
       upArgs,
     );
-    if (retryUp.exitCode === 0) {
+    const retryStates = await this.inspectComposeServiceStates(provision, services);
+    if (retryUp.exitCode === 0 && allServicesRunning(retryStates)) {
       this.logger.warn(
         {
           projectDir: provision.projectDir,
@@ -1029,6 +1050,11 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       return;
     }
 
+    // The retry may itself have hit a cross-project conflict (e.g. the foreign
+    // project came up between attempts). Surface the actionable error rather than
+    // a generic start failure.
+    await this.bailOnCrossProjectPortConflict(provision, services, retryUp, retryStates);
+
     throw {
       code: "MATRIX_STACK_START_FAILED",
       message: "Failed to start bundled Matrix services with Docker Compose",
@@ -1038,6 +1064,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
           exitCode: composeUp.exitCode,
           stderr: truncateText(composeUp.stderr, 4000),
           stdout: truncateText(composeUp.stdout, 4000),
+          serviceStates: firstStates,
         },
         downAttempt: {
           exitCode: composeDown.exitCode,
@@ -1048,11 +1075,135 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
           exitCode: retryUp.exitCode,
           stderr: truncateText(retryUp.stderr, 4000),
           stdout: truncateText(retryUp.stdout, 4000),
+          serviceStates: retryStates,
         },
         projectDir: provision.projectDir,
         composeFilePath: provision.composeFilePath,
       },
     };
+  }
+
+  /**
+   * Inspect the live state of every expected compose service via
+   * `docker compose ps --format json`. Compose emits either a JSON array or
+   * newline-delimited JSON objects depending on its version; both are handled.
+   * Services absent from the output are reported with state `"missing"`.
+   */
+  private async inspectComposeServiceStates(
+    provision: BundledMatrixProvisionResult,
+    services: string[],
+  ): Promise<ComposeServiceState[]> {
+    let parsed: ComposeServiceState[] = [];
+    try {
+      const result = await this.runComposeCommand(provision.projectDir, provision.composeFilePath, [
+        "ps",
+        "-a",
+        "--format",
+        "json",
+      ]);
+      parsed = parseComposePsJson(result.stdout);
+    } catch (error) {
+      this.logger.warn(
+        { projectDir: provision.projectDir, error: describeError(error) },
+        "Failed to inspect bundled Matrix container states; treating as not-running",
+      );
+    }
+    const byService = new Map(parsed.map((entry) => [entry.service, entry]));
+    return services.map(
+      (service) =>
+        byService.get(service) ?? {
+          service,
+          state: "missing",
+          status: "",
+        },
+    );
+  }
+
+  /**
+   * If the stack failed to start because 127.0.0.1:8008 is already allocated by a
+   * *different* compose project's container, bail with an actionable error that
+   * names the conflicting container/project and a one-line fix. We never take the
+   * foreign project down ourselves — it may be another live install.
+   */
+  private async bailOnCrossProjectPortConflict(
+    provision: BundledMatrixProvisionResult,
+    services: string[],
+    composeResult: ExecResult,
+    states: ComposeServiceState[],
+  ): Promise<void> {
+    const failureText = [
+      composeResult.stderr,
+      composeResult.stdout,
+      ...states.map((entry) => entry.status),
+    ].join("\n");
+    if (!isPortAllocationConflict(failureText)) {
+      return;
+    }
+
+    const owner = await this.findHostPortOwner(provision.projectDir, 8008);
+    const fixCommand =
+      owner !== undefined && owner.project.length > 0
+        ? `docker compose -p ${owner.project} down`
+        : owner !== undefined
+          ? `docker rm -f ${owner.name}`
+          : "docker ps --filter publish=8008 to find the owner, then take it down";
+
+    throw {
+      code: "BUNDLED_MATRIX_PORT_CONFLICT",
+      message:
+        owner !== undefined
+          ? `Host port 127.0.0.1:8008 is already allocated by container '${owner.name}'` +
+            `${owner.project.length > 0 ? ` (compose project '${owner.project}')` : ""}; ` +
+            `stop it before installing: ${fixCommand}`
+          : "Host port 127.0.0.1:8008 is already allocated by another container; " +
+            `stop it before installing: ${fixCommand}`,
+      retryable: false,
+      details: {
+        port: 8008,
+        ...(owner === undefined
+          ? {}
+          : { conflictingContainer: owner.name, conflictingProject: owner.project }),
+        suggestedFix: fixCommand,
+        projectDir: provision.projectDir,
+        expectedServices: services,
+        serviceStates: states,
+      },
+    };
+  }
+
+  /**
+   * Best-effort lookup of which container currently publishes the given host
+   * port, via a raw (non-compose) `docker ps`. Returns the container name and its
+   * compose project label (empty string when the container isn't compose-managed).
+   */
+  private async findHostPortOwner(
+    projectDir: string,
+    port: number,
+  ): Promise<{ name: string; project: string } | undefined> {
+    const probe = await this.safeExec(
+      "docker",
+      [
+        "ps",
+        "--filter",
+        `publish=${port}`,
+        "--format",
+        '{{.Names}}\t{{.Label "com.docker.compose.project"}}',
+      ],
+      projectDir,
+    );
+    if (!probe.ok || probe.result.exitCode !== 0) {
+      return undefined;
+    }
+    const line = probe.result.stdout
+      .split("\n")
+      .map((entry) => entry.trim())
+      .find((entry) => entry.length > 0);
+    if (line === undefined) {
+      return undefined;
+    }
+    // A non-empty trimmed line always yields a non-empty first tab-segment.
+    const [name = "", project = ""] = line.split("\t");
+    return { name, project: project.trim() };
   }
 
   private async registerSynapseUser(
@@ -1213,9 +1364,10 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
   }
 
   private async waitForSynapseReady(
-    baseUrl: string,
+    provision: BundledMatrixProvisionResult,
     onProgress?: MatrixProgressReporter,
   ): Promise<void> {
+    const baseUrl = provision.adminBaseUrl;
     const startedAt = Date.now();
     const deadline = startedAt + MATRIX_READY_TIMEOUT_MS;
     let lastError = "unknown";
@@ -1232,10 +1384,20 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
           retryable: true,
         });
         if (Array.isArray(payload.versions)) {
-          return;
+          // A live Synapse is answering on the port — but is it *ours*? On a host
+          // with leftover installs, a different project's Synapse can own 8008 and
+          // answer the readiness probe, leading us to bootstrap accounts against
+          // the wrong homeserver. Verify server identity before proceeding (throws
+          // MATRIX_FOREIGN_SYNAPSE_ON_PORT on mismatch).
+          return await this.verifySynapseIdentity(provision);
         }
         lastError = "versions array missing from readiness response";
       } catch (error) {
+        if (isStructuredError(error) && error.code === "MATRIX_FOREIGN_SYNAPSE_ON_PORT") {
+          // The port is owned by a foreign Synapse — retrying the readiness loop
+          // cannot fix that. Surface the actionable error immediately.
+          throw error;
+        }
         lastError = describeError(error);
       }
 
@@ -1267,6 +1429,43 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     };
   }
 
+  /**
+   * Confirm the Synapse answering on the install port is the one we just
+   * provisioned, by matching its advertised `server_name` (from the
+   * unauthenticated `/_matrix/key/v2/server` endpoint, always present regardless
+   * of federation config) against the provision's homeserver domain. A mismatch
+   * means a different project's Synapse owns the port — throw a non-retryable
+   * error rather than bootstrapping against the wrong homeserver.
+   */
+  private async verifySynapseIdentity(provision: BundledMatrixProvisionResult): Promise<void> {
+    const payload = await this.matrixJsonRequest<{ server_name?: unknown }>({
+      baseUrl: provision.adminBaseUrl,
+      path: "/_matrix/key/v2/server",
+      method: "GET",
+      errorCode: "MATRIX_READY_CHECK_FAILED",
+      errorMessage: "Matrix server identity check failed",
+      retryable: true,
+    });
+    const actual = typeof payload.server_name === "string" ? payload.server_name.trim() : "";
+    const expected = provision.homeserverDomain.trim();
+    if (actual.length === 0 || actual.toLowerCase() !== expected.toLowerCase()) {
+      throw {
+        code: "MATRIX_FOREIGN_SYNAPSE_ON_PORT",
+        message:
+          `A different Matrix homeserver is answering on ${provision.adminBaseUrl}: ` +
+          `expected server_name '${expected}' but got '${actual.length > 0 ? actual : "unknown"}'. ` +
+          "A leftover install from another project is holding the port — stop it before retrying " +
+          "(docker ps --filter publish=8008 to find the owner).",
+        retryable: false,
+        details: {
+          baseUrl: provision.adminBaseUrl,
+          expectedServerName: expected,
+          actualServerName: actual,
+        },
+      };
+    }
+  }
+
   private async waitForSynapseReadyWithRecovery(
     provision: BundledMatrixProvisionResult,
     onProgress?: MatrixProgressReporter,
@@ -1276,7 +1475,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
 
     for (let attempt = 0; attempt <= maxRecoveries; attempt += 1) {
       try {
-        await this.waitForSynapseReady(provision.adminBaseUrl, onProgress);
+        await this.waitForSynapseReady(provision, onProgress);
         return;
       } catch (error) {
         if (!(isStructuredError(error) && error.code === "MATRIX_WAIT_READY_TIMEOUT")) {
@@ -2477,6 +2676,73 @@ const chmodIgnoreMissing = async (path: string, mode: number): Promise<void> => 
     }
     throw error;
   }
+};
+
+const allServicesRunning = (states: ComposeServiceState[]): boolean =>
+  states.length > 0 && states.every((entry) => entry.state === "running");
+
+const isPortAllocationConflict = (value: string): boolean =>
+  /port is already allocated/i.test(value) ||
+  /bind for [^\n]*failed: port is already allocated/i.test(value) ||
+  /address already in use/i.test(value);
+
+/**
+ * Parse `docker compose ps --format json` output. Compose emits either a single
+ * JSON array or newline-delimited JSON objects depending on its version; both are
+ * handled. Unparseable input yields an empty list (caller treats that as
+ * "not running"). The `State`, `Status` and `Service`/`Name` fields are mapped to
+ * a normalized {@link ComposeServiceState}.
+ */
+const parseComposePsJson = (raw: string): ComposeServiceState[] => {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    return [];
+  }
+
+  const records: unknown[] = [];
+  const whole = parseJsonSafely(trimmed);
+  if (Array.isArray(whole)) {
+    records.push(...whole);
+  } else if (isRecord(whole)) {
+    records.push(whole);
+  } else {
+    for (const line of trimmed.split("\n")) {
+      const candidate = line.trim();
+      if (candidate.length === 0) {
+        continue;
+      }
+      const parsed = parseJsonSafely(candidate);
+      if (isRecord(parsed)) {
+        records.push(parsed);
+      }
+    }
+  }
+
+  const states: ComposeServiceState[] = [];
+  for (const record of records) {
+    if (!isRecord(record)) {
+      continue;
+    }
+    const service =
+      typeof record.Service === "string" && record.Service.length > 0
+        ? record.Service
+        : typeof record.Name === "string"
+          ? record.Name
+          : "";
+    if (service.length === 0) {
+      continue;
+    }
+    const state = typeof record.State === "string" ? record.State.toLowerCase() : "unknown";
+    const status = typeof record.Status === "string" ? record.Status : "";
+    const exitCode = typeof record.ExitCode === "number" ? record.ExitCode : undefined;
+    states.push({
+      service,
+      state,
+      status,
+      ...(exitCode === undefined ? {} : { exitCode }),
+    });
+  }
+  return states;
 };
 
 const isRecoverablePostgresBootstrapFailure = (value: string): boolean =>
