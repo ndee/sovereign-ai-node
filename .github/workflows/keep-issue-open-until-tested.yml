@@ -1,0 +1,63 @@
+name: Keep issue open until tested
+
+# When a PR is merged, GitHub auto-closes any issue the PR references with a
+# closing keyword (Closes/Fixes/Resolves). Policy here: a merged issue must stay
+# OPEN until a human has tested it. This workflow reopens such issues and applies
+# the `testing` label so the dispatch conductor + human know it's awaiting test.
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  keep-open:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reopen referenced issues and mark testing
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const text = `${pr.title || ''}\n${pr.body || ''}`;
+            // Collect #NNN references in this repo (ignore owner/repo#NNN cross-refs).
+            const nums = new Set();
+            for (const m of text.matchAll(/(?:^|[^\/\w])#(\d+)\b/g)) {
+              nums.add(parseInt(m[1], 10));
+            }
+            if (nums.size === 0) {
+              core.info('No same-repo #issue references found in PR title/body.');
+              return;
+            }
+            const LABEL = 'testing';
+            // Ensure the label exists (no-op if present); skip silently if creation not allowed.
+            try {
+              await github.rest.issues.getLabel({ ...context.repo, name: LABEL });
+            } catch (e) {
+              try {
+                await github.rest.issues.createLabel({ ...context.repo, name: LABEL, color: 'fbca04',
+                  description: 'Merged; awaiting human testing before close' });
+                core.info(`Created '${LABEL}' label.`);
+              } catch (e2) { core.warning(`Could not ensure '${LABEL}' label: ${e2.message}`); }
+            }
+            for (const n of nums) {
+              let issue;
+              try {
+                issue = (await github.rest.issues.get({ ...context.repo, issue_number: n })).data;
+              } catch (e) { core.info(`#${n} not an issue here (${e.status}); skipping.`); continue; }
+              if (issue.pull_request) { continue; } // it's a PR, not an issue
+              if (issue.state === 'closed') {
+                await github.rest.issues.update({ ...context.repo, issue_number: n, state: 'open' });
+                core.info(`Reopened #${n} (auto-closed by merged PR #${pr.number}).`);
+              }
+              const has = (issue.labels || []).some(l => (l.name || l) === LABEL);
+              if (!has) {
+                await github.rest.issues.addLabels({ ...context.repo, issue_number: n, labels: [LABEL] });
+                core.info(`Added '${LABEL}' to #${n}.`);
+              }
+              await github.rest.issues.createComment({ ...context.repo, issue_number: n,
+                body: `Kept open by policy: PR #${pr.number} merged, but this issue stays open with \`${LABEL}\` until tested by a human. Close it after testing.` });
+            }
