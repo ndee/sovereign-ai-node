@@ -158,6 +158,11 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     private readonly fetchImpl: FetchLike = defaultFetch,
     // Inject for tests; in production resolves to detectLanIPv4().
     private readonly lanIpProvider: () => string[] = detectLanIPv4,
+    // Off by default. When the configured state dir is not writable, production
+    // must fast-fail loudly rather than silently scaffold into a throwaway
+    // `.sovereign-node-dev/` dir under cwd (which loses Synapse state and
+    // restart-loops). Only scaffold/dev/test execution opts in.
+    private readonly allowDevFallback = false,
   ) {}
 
   async provision(req: InstallRequest): Promise<BundledMatrixProvisionResult> {
@@ -2130,13 +2135,23 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       this.resolvedBaseDir = preferred;
       return preferred;
     } catch (error) {
+      const reason = describeErrorReason(error);
+      if (!this.allowDevFallback) {
+        throw new Error(
+          `Bundled Matrix state dir is not writable: ${preferred} (${reason}). ` +
+            "Refusing to fall back to a local dev directory in production because " +
+            "Synapse would lose its homeserver state and restart-loop " +
+            "(MATRIX_LOGIN_FAILED). Ensure the directory exists and is writable by " +
+            "the service user, then re-run the install.",
+        );
+      }
       const fallback = resolve(process.cwd(), ".sovereign-node-dev", "bundled-matrix");
       await mkdir(fallback, { recursive: true });
       this.logger.debug(
         {
           preferredMatrixStateDir: preferred,
           fallbackMatrixStateDir: fallback,
-          error: error instanceof Error ? error.message : String(error),
+          error: reason,
         },
         "Bundled Matrix state dir is not writable; using local fallback for scaffold/dev execution",
       );
@@ -2233,6 +2248,14 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     );
   }
 }
+
+/**
+ * Extract a human-readable reason string from an unknown thrown value.
+ * Exported so the state-dir fast-fail paths (which must name the cause in their
+ * error message) can be covered for both Error and non-Error inputs.
+ */
+export const describeErrorReason = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
 
 type EnvTemplateInput = {
   homeserverDomain: string;

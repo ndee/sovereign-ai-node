@@ -100,6 +100,7 @@ import type {
   BundledMatrixProvisionResult,
   BundledMatrixRoomBootstrapResult,
 } from "../system/matrix.js";
+import { describeErrorReason } from "../system/matrix.js";
 import {
   FilesystemMatrixAvatarResolver,
   type MatrixAvatarResolver,
@@ -331,6 +332,11 @@ type RealInstallerServiceDeps = {
   matrixProvisioner: BundledMatrixProvisioner;
   execRunner?: ExecRunner;
   fetchImpl?: FetchLike;
+  // Off by default. When the configured state/secrets dirs are not writable,
+  // production must fast-fail loudly rather than silently scaffold into a
+  // throwaway `.sovereign-node-dev/` dir under cwd. Only scaffold/dev/test
+  // execution opts in.
+  allowDevFallback?: boolean;
 };
 
 export class RealInstallerService implements InstallerService {
@@ -342,6 +348,10 @@ export class RealInstallerService implements InstallerService {
   private resolvedSecretsDir: string | null = null;
   private resolvedRuntimeOwnership: { uid: number; gid: number } | null | undefined = undefined;
   private managedOpenClawEnv: Record<string, string> | null | undefined = undefined;
+
+  // Off by default; production must fast-fail when state/secrets dirs are not
+  // writable rather than silently scaffold into a throwaway local dir.
+  private readonly allowDevFallback: boolean;
 
   private readonly openclawBootstrapper: OpenClawBootstrapper;
 
@@ -394,6 +404,7 @@ export class RealInstallerService implements InstallerService {
     this.matrixProvisioner = deps.matrixProvisioner;
     this.execRunner = deps.execRunner ?? null;
     this.fetchImpl = deps.fetchImpl ?? defaultFetch;
+    this.allowDevFallback = deps.allowDevFallback ?? false;
   }
 
   private async listBotPackages(): Promise<LoadedBotPackage[]> {
@@ -7244,6 +7255,13 @@ export default function (api) {
         },
       },
       {
+        id: "provision_state_dirs",
+        label: "Provision state directories",
+        run: async () => {
+          await this.provisionStateDirs();
+        },
+      },
+      {
         id: "matrix_provision",
         label: "Provision bundled Matrix stack",
         run: async () => {
@@ -8017,13 +8035,21 @@ export default function (api) {
       this.resolvedInstallJobsDir = this.paths.installJobsDir;
       return this.resolvedInstallJobsDir;
     } catch (error) {
+      const reason = describeErrorReason(error);
+      if (!this.allowDevFallback) {
+        throw new Error(
+          `Install jobs dir is not writable: ${this.paths.installJobsDir} (${reason}). ` +
+            "Refusing to fall back to a local dev directory in production. Ensure the " +
+            "directory exists and is writable by the service user, then re-run the install.",
+        );
+      }
       const fallback = resolve(process.cwd(), ".sovereign-node-dev", "install-jobs");
       await mkdir(fallback, { recursive: true });
       this.logger.debug(
         {
           preferredInstallJobsDir: this.paths.installJobsDir,
           fallbackInstallJobsDir: fallback,
-          error: error instanceof Error ? error.message : String(error),
+          error: reason,
         },
         "Install jobs dir is not writable; using local fallback for scaffold/dev execution",
       );
@@ -10770,6 +10796,61 @@ export default function (api) {
     return true;
   }
 
+  /**
+   * Eagerly ensure the install-time state directories exist and are writable,
+   * before any Matrix/Synapse provisioning runs. In production this fast-fails
+   * with a clear, named error + remedy rather than letting a downstream step
+   * silently scaffold into a throwaway `.sovereign-node-dev/` dir under cwd
+   * (which loses Synapse state and restart-loops -> MATRIX_LOGIN_FAILED).
+   *
+   * Delegates to the hardened ensure* helpers, which already throw (when dev
+   * fallback is not allowed) with the offending path and remedy. The Matrix
+   * provisioner owns the bundled-matrix base dir under stateDir; we probe
+   * stateDir writability here so the failure surfaces early in the install UI
+   * instead of mid-Matrix-provision.
+   */
+  private async provisionStateDirs(): Promise<void> {
+    const checks: Array<{ label: string; run: () => Promise<unknown> }> = [
+      {
+        label: "state dir",
+        run: async () => {
+          try {
+            await mkdir(this.paths.stateDir, { recursive: true });
+            await access(this.paths.stateDir, fsConstants.W_OK);
+          } catch (error) {
+            // Dev/scaffold execution opts out of the hard requirement; the
+            // Matrix provisioner falls back to a local dir in that mode.
+            if (this.allowDevFallback) {
+              return;
+            }
+            throw error;
+          }
+        },
+      },
+      { label: "install jobs dir", run: () => this.ensureInstallJobsDir() },
+      { label: "secrets dir", run: () => this.ensureSecretsDir() },
+    ];
+
+    for (const check of checks) {
+      try {
+        await check.run();
+      } catch (error) {
+        const reason = describeErrorReason(error);
+        throw {
+          code: "STATE_DIR_NOT_WRITABLE",
+          message: `Provisioning ${check.label} failed: ${reason}`,
+          retryable: false,
+          details: {
+            recommendedActions: [
+              "Ensure the Sovereign Node state and secrets directories exist and " +
+                "are writable by the service user, then re-run the install.",
+            ],
+          },
+        };
+      }
+    }
+  }
+
   private async ensureSecretsDir(): Promise<string> {
     if (this.resolvedSecretsDir !== null) {
       return this.resolvedSecretsDir;
@@ -10805,6 +10886,14 @@ export default function (api) {
       this.resolvedSecretsDir = this.paths.secretsDir;
       return this.resolvedSecretsDir;
     } catch (error) {
+      const reason = describeErrorReason(error);
+      if (!this.allowDevFallback) {
+        throw new Error(
+          `Secrets dir is not writable: ${this.paths.secretsDir} (${reason}). ` +
+            "Refusing to fall back to a local dev directory in production. Ensure the " +
+            "directory exists and is writable by the service user, then re-run the install.",
+        );
+      }
       const fallback = resolve(process.cwd(), ".sovereign-node-dev", "secrets");
       await mkdir(fallback, { recursive: true });
       await chmod(fallback, 0o700);
@@ -10812,7 +10901,7 @@ export default function (api) {
         {
           preferredSecretsDir: this.paths.secretsDir,
           fallbackSecretsDir: fallback,
-          error: error instanceof Error ? error.message : String(error),
+          error: reason,
         },
         "Secrets dir is not writable; using local fallback for scaffold/dev execution",
       );
