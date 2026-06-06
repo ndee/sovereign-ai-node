@@ -1,0 +1,98 @@
+name: Lifecycle label guard
+
+# Enforces the issue-lifecycle label state machine (see docs/ISSUE_LIFECYCLE.md).
+# Self-heals illegal combinations by removing the offending label and commenting.
+# It cannot authorize by actor: both humans and the automation act as the same
+# GitHub user, so this guards STATE, not WHO made the change.
+on:
+  issues:
+    types: [labeled, unlabeled, reopened]
+
+permissions:
+  issues: write
+  pull-requests: read
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const MARKER = '<!-- sain-lifecycle-guard -->';
+            const STAGES = [
+              'lifecycle:elaboration',
+              'lifecycle:elaboration-complete',
+              'lifecycle:dev',
+              'lifecycle:testing',
+              'lifecycle:testing-completed',
+            ];
+            const n = context.payload.issue.number;
+            const repo = context.repo;
+
+            // Current labels on the issue.
+            const issue = (await github.rest.issues.get({ ...repo, issue_number: n })).data;
+            const names = new Set((issue.labels || []).map(l => l.name || l));
+            const added = context.payload.label ? context.payload.label.name : null;
+
+            async function removeLabel(name) {
+              try {
+                await github.rest.issues.removeLabel({ ...repo, issue_number: n, name });
+                names.delete(name);
+              } catch (e) { core.warning(`remove '${name}': ${e.message}`); }
+            }
+            async function comment(body) {
+              // De-dup: skip if our last guard comment in the recent set says the same thing.
+              const recent = await github.rest.issues.listComments({ ...repo, issue_number: n, per_page: 20 });
+              const mine = recent.data.filter(c => (c.body || '').includes(MARKER));
+              const last = mine[mine.length - 1];
+              if (last && last.body.includes(body)) { core.info('Duplicate guard comment; skipping.'); return; }
+              await github.rest.issues.createComment({ ...repo, issue_number: n, body: `${MARKER}\n${body}` });
+            }
+            async function hasMergedLinkedPR() {
+              // Inspect the issue timeline for connected / cross-referenced PRs that are merged.
+              const tl = await github.paginate(github.rest.issues.listEventsForTimeline,
+                { ...repo, issue_number: n, per_page: 100 });
+              for (const ev of tl) {
+                const src = ev.source && ev.source.issue;
+                const pr = (src && src.pull_request) || (ev.subject && ev.subject.type === 'PullRequest' ? ev.subject : null);
+                if (!pr) continue;
+                const prNum = src ? src.number : null;
+                if (!prNum) continue;
+                try {
+                  const p = (await github.rest.pulls.get({ ...repo, pull_number: prNum })).data;
+                  if (p.merged) return true;
+                } catch (e) { /* not a PR in this repo */ }
+              }
+              return false;
+            }
+
+            // RULE 1 — at most one stage label. If a second stage was just added, drop the others.
+            const present = STAGES.filter(s => names.has(s));
+            if (present.length > 1) {
+              const keep = (added && STAGES.includes(added)) ? added : present[present.length - 1];
+              for (const s of present) if (s !== keep) await removeLabel(s);
+              await comment(`Removed conflicting lifecycle labels; kept \`${keep}\`. An issue can be in only one lifecycle stage at a time. See \`docs/ISSUE_LIFECYCLE.md\`.`);
+            }
+
+            // RULE 2 — lifecycle:testing requires a merged linked PR.
+            if (names.has('lifecycle:testing')) {
+              const ok = await hasMergedLinkedPR();
+              if (!ok) {
+                await removeLabel('lifecycle:testing');
+                await comment(`Removed \`lifecycle:testing\` — no **merged** linked PR found. This label is applied automatically when a referencing PR merges; there must be integrated code to test. See \`docs/ISSUE_LIFECYCLE.md\`.`);
+              }
+            }
+
+            // RULE 3 — lifecycle:testing-completed requires lifecycle:testing.
+            if (names.has('lifecycle:testing-completed') && !names.has('lifecycle:testing')) {
+              await removeLabel('lifecycle:testing-completed');
+              await comment(`Removed \`lifecycle:testing-completed\` — this issue hasn't been through \`lifecycle:testing\`. Apply (or let automation apply) \`lifecycle:testing\` first.`);
+            }
+
+            // RULE 4 — re-elaborating a later-stage issue: warn only (legit backtrack).
+            if (added === 'lifecycle:elaboration' &&
+                (names.has('lifecycle:testing') || names.has('lifecycle:testing-completed'))) {
+              await comment(`Note: \`lifecycle:elaboration\` was added to an issue already in a later stage. If this is a deliberate rework, remove the later-stage label too. (No label was changed.)`);
+            }
