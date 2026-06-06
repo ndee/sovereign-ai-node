@@ -68,17 +68,46 @@ jobs:
               return false;
             }
 
-            // RULE 1 — at most one stage label. If a second stage was just added, drop the others.
+            // A stage label is "viable" only if its own precondition holds, so Rule 1 never
+            // keeps a label that Rule 2/3 would immediately strip (which would leave the issue
+            // stage-less). lifecycle:testing needs a merged PR; testing-completed needs testing.
+            let mergedPR = null; // memoize the (network) check
+            async function viable(label, labelSet) {
+              if (label === 'lifecycle:testing') {
+                if (mergedPR === null) mergedPR = await hasMergedLinkedPR();
+                return mergedPR;
+              }
+              if (label === 'lifecycle:testing-completed') {
+                return labelSet.has('lifecycle:testing'); // and testing must itself be viable
+              }
+              return true;
+            }
+
+            // RULE 1 — at most one stage label. If more than one is present, keep a single
+            // VIABLE one (prefer the just-added label, else the latest present), drop the rest.
             const present = STAGES.filter(s => names.has(s));
             if (present.length > 1) {
-              const keep = (added && STAGES.includes(added)) ? added : present[present.length - 1];
+              // Candidate order: just-added first, then remaining by latest-in-STAGES order.
+              const candidates = [];
+              if (added && present.includes(added)) candidates.push(added);
+              for (let i = present.length - 1; i >= 0; i--) {
+                if (present[i] !== added) candidates.push(present[i]);
+              }
+              let keep = null;
+              for (const c of candidates) {
+                // For testing-completed, viability needs testing present; check against the
+                // candidate set as if only `c` (and a possibly-viable testing) survives.
+                if (await viable(c, names)) { keep = c; break; }
+              }
+              if (!keep) keep = candidates[0]; // none viable: fall back, Rule 2/3 will explain
               for (const s of present) if (s !== keep) await removeLabel(s);
               await comment(`Removed conflicting lifecycle labels; kept \`${keep}\`. An issue can be in only one lifecycle stage at a time. See \`docs/ISSUE_LIFECYCLE.md\`.`);
             }
 
             // RULE 2 — lifecycle:testing requires a merged linked PR.
             if (names.has('lifecycle:testing')) {
-              const ok = await hasMergedLinkedPR();
+              if (mergedPR === null) mergedPR = await hasMergedLinkedPR();
+              const ok = mergedPR;
               if (!ok) {
                 await removeLabel('lifecycle:testing');
                 await comment(`Removed \`lifecycle:testing\` — no **merged** linked PR found. This label is applied automatically when a referencing PR merges; there must be integrated code to test. See \`docs/ISSUE_LIFECYCLE.md\`.`);
