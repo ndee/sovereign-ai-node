@@ -3,7 +3,8 @@ name: Keep issue open until tested
 # When a PR is merged, GitHub auto-closes any issue the PR references with a
 # closing keyword (Closes/Fixes/Resolves). Policy here: a merged issue must stay
 # OPEN until a human has tested it. This workflow reopens such issues and applies
-# the `testing` label so the dispatch conductor + human know it's awaiting test.
+# the `lifecycle:testing` label so the testing stage + human know it's ready to
+# test. See docs/ISSUE_LIFECYCLE.md for the full label state machine.
 on:
   pull_request:
     types: [closed]
@@ -32,14 +33,15 @@ jobs:
               core.info('No same-repo #issue references found in PR title/body.');
               return;
             }
-            const LABEL = 'testing';
+            const LABEL = 'lifecycle:testing';
             // Ensure the label exists (no-op if present); skip silently if creation not allowed.
+            // The label is normally created/owned by sync-labels.yml; this is a fallback.
             try {
               await github.rest.issues.getLabel({ ...context.repo, name: LABEL });
             } catch (e) {
               try {
-                await github.rest.issues.createLabel({ ...context.repo, name: LABEL, color: 'fbca04',
-                  description: 'Merged; awaiting human testing before close' });
+                await github.rest.issues.createLabel({ ...context.repo, name: LABEL, color: '5319e7',
+                  description: 'Lifecycle: merged; under active e2e testing. Requires a merged linked PR.' });
                 core.info(`Created '${LABEL}' label.`);
               } catch (e2) { core.warning(`Could not ensure '${LABEL}' label: ${e2.message}`); }
             }

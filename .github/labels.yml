@@ -1,0 +1,28 @@
+# Canonical issue-lifecycle labels (source of truth).
+# Synced by .github/workflows/sync-labels.yml on every push to main that touches
+# this file. The sync is NON-DESTRUCTIVE: it creates-or-updates only these labels
+# and never prunes others, so topic/priority labels are left untouched.
+#
+# These five model the issue lifecycle state machine. See docs/ISSUE_LIFECYCLE.md.
+# Keep this file identical across sovereign-ai-node, sovereign-ai-bots, and the
+# private companion repo.
+
+- name: "lifecycle:elaboration"
+  color: "FBCA04"
+  description: "Lifecycle: being elaborated (human-managed); not yet ready to dispatch."
+
+- name: "lifecycle:elaboration-complete"
+  color: "0E8A16"
+  description: "Lifecycle: elaboration done; ready for dev. Set by a human."
+
+- name: "lifecycle:dev"
+  color: "1D76DB"
+  description: "Lifecycle: implementation in progress (a draft PR is open)."
+
+- name: "lifecycle:testing"
+  color: "5319E7"
+  description: "Lifecycle: merged; under active e2e testing (tests authored, run, recorded). Requires a merged linked PR."
+
+- name: "lifecycle:testing-completed"
+  color: "B60205"
+  description: "Lifecycle: human verified testing passed; ready to close. Set by a human."

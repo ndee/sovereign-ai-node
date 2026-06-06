@@ -1,0 +1,56 @@
+name: Sync lifecycle labels
+
+# Keeps the canonical issue-lifecycle labels (.github/labels.yml) present and
+# up to date. NON-DESTRUCTIVE: creates-or-updates only the labels in the manifest
+# and never deletes any others, so topic/priority labels are safe.
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/labels.yml
+      - .github/workflows/sync-labels.yml
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upsert lifecycle labels
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const text = fs.readFileSync('.github/labels.yml', 'utf8');
+            // Minimal YAML parse for our fixed shape: a list of {name,color,description}.
+            const labels = [];
+            let cur = null;
+            for (const raw of text.split('\n')) {
+              const line = raw.replace(/\s+$/, '');
+              if (/^\s*#/.test(line) || line.trim() === '') continue;
+              const m = line.match(/^- name:\s*"?(.*?)"?\s*$/);
+              if (m) { cur = { name: m[1] }; labels.push(cur); continue; }
+              if (!cur) continue;
+              const c = line.match(/^\s+color:\s*"?(.*?)"?\s*$/);
+              if (c) { cur.color = c[1]; continue; }
+              const d = line.match(/^\s+description:\s*"?(.*?)"?\s*$/);
+              if (d) { cur.description = d[1]; continue; }
+            }
+            core.info(`Parsed ${labels.length} lifecycle labels.`);
+            for (const l of labels) {
+              const color = (l.color || '').replace(/^#/, '');
+              try {
+                await github.rest.issues.getLabel({ ...context.repo, name: l.name });
+                await github.rest.issues.updateLabel({ ...context.repo, name: l.name,
+                  new_name: l.name, color, description: l.description || '' });
+                core.info(`Updated '${l.name}'.`);
+              } catch (e) {
+                await github.rest.issues.createLabel({ ...context.repo, name: l.name,
+                  color, description: l.description || '' });
+                core.info(`Created '${l.name}'.`);
+              }
+            }
