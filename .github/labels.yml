@@ -21,7 +21,7 @@
 
 - name: "lifecycle:testing"
   color: "5319E7"
-  description: "Lifecycle: merged; under active e2e testing (tests authored, run, recorded). Requires a merged linked PR."
+  description: "Lifecycle: merged; under active e2e testing (recorded). Requires a merged linked PR."
 
 - name: "lifecycle:testing-completed"
   color: "B60205"
