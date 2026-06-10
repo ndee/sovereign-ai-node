@@ -11740,3 +11740,190 @@ describe("RealInstallerService", () => {
     }
   });
 });
+
+describe("RealInstallerService state dir provisioning", () => {
+  type WithPrivate = {
+    provisionStateDirs: () => Promise<void>;
+    ensureInstallJobsDir: () => Promise<string>;
+    ensureSecretsDir: () => Promise<string>;
+  };
+
+  const noopMatrixProvisioner: BundledMatrixProvisioner = {
+    provision: async (req): Promise<BundledMatrixProvisionResult> => ({
+      projectDir: "/tmp/fake-matrix",
+      composeFilePath: "/tmp/fake-matrix/compose.yaml",
+      accessMode: "relay",
+      homeserverDomain: req.matrix.homeserverDomain,
+      publicBaseUrl: req.matrix.publicBaseUrl,
+      adminBaseUrl: "http://127.0.0.1:8008",
+      federationEnabled: false,
+      tlsMode: "auto",
+    }),
+    bootstrapAccounts: async () => {
+      throw new Error("not used");
+    },
+    bootstrapRoom: async () => {
+      throw new Error("not used");
+    },
+    test: async () => {
+      throw new Error("not used");
+    },
+  };
+
+  const buildService = (paths: SovereignPaths, allowDevFallback: boolean): RealInstallerService =>
+    new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: SOVEREIGN_PINNED_OPENCLAW_VERSION,
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+        }),
+      },
+      matrixProvisioner: noopMatrixProvisioner,
+      allowDevFallback,
+    });
+
+  const buildPaths = (
+    tempRoot: string,
+    overrides: Partial<SovereignPaths> = {},
+  ): SovereignPaths => ({
+    configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+    secretsDir: join(tempRoot, "etc", "secrets"),
+    stateDir: join(tempRoot, "var", "lib"),
+    logsDir: join(tempRoot, "var", "log"),
+    installJobsDir: join(tempRoot, "install-jobs"),
+    openclawServiceHome: join(tempRoot, "openclaw-home"),
+    provenancePath: join(tempRoot, "install-provenance.json"),
+    backupsDir: join(tempRoot, "backups"),
+    ...overrides,
+  });
+
+  // Make a path unwritable by making its parent a regular file, so
+  // mkdir(recursive) fails with ENOTDIR regardless of test-process uid.
+  const blockedPathUnder = async (tempRoot: string, name: string): Promise<string> => {
+    const parentFile = join(tempRoot, `${name}-blocker`);
+    await writeFile(parentFile, "blocker");
+    return join(parentFile, name);
+  };
+
+  it("provisionStateDirs fast-fails when the secrets dir is not writable", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-provision-secrets-"));
+    try {
+      const secretsDir = await blockedPathUnder(tempRoot, "secrets");
+      const service = buildService(buildPaths(tempRoot, { secretsDir }), false);
+      await expect((service as unknown as WithPrivate).provisionStateDirs()).rejects.toMatchObject({
+        code: "STATE_DIR_NOT_WRITABLE",
+        retryable: false,
+        message: expect.stringContaining(secretsDir),
+      });
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("provisionStateDirs fast-fails when the install jobs dir is not writable", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-provision-jobs-"));
+    try {
+      const installJobsDir = await blockedPathUnder(tempRoot, "install-jobs");
+      const service = buildService(buildPaths(tempRoot, { installJobsDir }), false);
+      await expect((service as unknown as WithPrivate).provisionStateDirs()).rejects.toMatchObject({
+        code: "STATE_DIR_NOT_WRITABLE",
+        message: expect.stringContaining("install jobs dir"),
+      });
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("provisionStateDirs fast-fails when the state dir is not writable", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-provision-state-"));
+    try {
+      const stateDir = await blockedPathUnder(tempRoot, "state");
+      const service = buildService(buildPaths(tempRoot, { stateDir }), false);
+      await expect((service as unknown as WithPrivate).provisionStateDirs()).rejects.toMatchObject({
+        code: "STATE_DIR_NOT_WRITABLE",
+        message: expect.stringContaining("state dir"),
+      });
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("provisionStateDirs succeeds and creates all dirs when writable", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-provision-ok-"));
+    try {
+      const paths = buildPaths(tempRoot);
+      const service = buildService(paths, false);
+      await (service as unknown as WithPrivate).provisionStateDirs();
+      expect((await stat(paths.stateDir)).isDirectory()).toBe(true);
+      expect((await stat(paths.installJobsDir)).isDirectory()).toBe(true);
+      expect((await stat(paths.secretsDir)).isDirectory()).toBe(true);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("tolerates unwritable dirs in dev mode (allowDevFallback) without throwing", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-provision-dev-"));
+    const prevCwd = process.cwd();
+    try {
+      process.chdir(tempRoot);
+      const stateDir = await blockedPathUnder(tempRoot, "state");
+      const secretsDir = await blockedPathUnder(tempRoot, "secrets");
+      const installJobsDir = await blockedPathUnder(tempRoot, "install-jobs");
+      const service = buildService(
+        buildPaths(tempRoot, { stateDir, secretsDir, installJobsDir }),
+        true,
+      );
+      await expect(
+        (service as unknown as WithPrivate).provisionStateDirs(),
+      ).resolves.toBeUndefined();
+      // ensure* fell back to local dev dirs under cwd.
+      expect(await (service as unknown as WithPrivate).ensureInstallJobsDir()).toBe(
+        join(tempRoot, ".sovereign-node-dev", "install-jobs"),
+      );
+      expect(await (service as unknown as WithPrivate).ensureSecretsDir()).toBe(
+        join(tempRoot, ".sovereign-node-dev", "secrets"),
+      );
+    } finally {
+      process.chdir(prevCwd);
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("ensureInstallJobsDir throws (prod) naming the path when not writable", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-jobs-prod-"));
+    try {
+      const installJobsDir = await blockedPathUnder(tempRoot, "install-jobs");
+      const service = buildService(buildPaths(tempRoot, { installJobsDir }), false);
+      await expect((service as unknown as WithPrivate).ensureInstallJobsDir()).rejects.toThrow(
+        installJobsDir,
+      );
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+});

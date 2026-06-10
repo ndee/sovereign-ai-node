@@ -22,6 +22,12 @@ export const createApp = () => {
     execRunner,
     logger,
     DEFAULT_PATHS,
+    // fetchImpl + lanIpProvider keep their production defaults.
+    undefined,
+    undefined,
+    // Production never falls back to a local dev state dir: fast-fail loudly if
+    // the configured state dir is not writable.
+    false,
   );
   const preflightChecker = new ShellHostPreflightChecker(execRunner, logger);
   const dockerRuntimePreparer = new ShellDockerRuntimePreparer(execRunner, logger);
@@ -42,6 +48,9 @@ export const createApp = () => {
       imapTester,
       matrixProvisioner,
       execRunner,
+      // Production never falls back to a local dev state/secrets dir: fast-fail
+      // loudly if the configured directories are not writable.
+      allowDevFallback: false,
     }),
     backupService: new RealBackupService(execRunner, logger, DEFAULT_PATHS),
   };

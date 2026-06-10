@@ -8,7 +8,7 @@ import type { SovereignPaths } from "../config/paths.js";
 import type { InstallRequest } from "../contracts/index.js";
 import { createLogger } from "../logging/logger.js";
 import type { ExecInput, ExecResult, ExecRunner } from "./exec.js";
-import { DockerComposeBundledMatrixProvisioner } from "./matrix.js";
+import { DockerComposeBundledMatrixProvisioner, describeErrorReason } from "./matrix.js";
 
 const buildInstallRequest = (): InstallRequest => ({
   mode: "bundled_matrix",
@@ -2696,5 +2696,133 @@ describe("compose ps JSON parsing", () => {
         JSON.stringify({ Service: "synapse", State: "running", Status: "Up" }),
       ].join("\n"),
     ]);
+  });
+});
+
+describe("DockerComposeBundledMatrixProvisioner.ensureBaseDir", () => {
+  type WithPrivate = {
+    ensureBaseDir: () => Promise<string>;
+  };
+
+  const noopExecRunner: ExecRunner = {
+    run: async (input): Promise<ExecResult> => ({
+      command: [input.command, ...(input.args ?? [])].join(" "),
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    }),
+  };
+
+  const buildPaths = (stateDir: string): SovereignPaths => ({
+    configPath: "/unused/config.json5",
+    secretsDir: "/unused/secrets",
+    stateDir,
+    logsDir: "/unused/logs",
+    installJobsDir: "/unused/install-jobs",
+    openclawServiceHome: "/unused/openclaw-home",
+    provenancePath: "/unused/provenance.json",
+    backupsDir: "/unused/backups",
+  });
+
+  // Force the preferred state dir to be unwritable by making its parent a
+  // regular file, so mkdir(recursive) fails with ENOTDIR. This does not depend
+  // on the test process running as a non-root user.
+  const buildUnwritableStateDir = async (tempRoot: string): Promise<string> => {
+    const parentFile = join(tempRoot, "not-a-dir");
+    await writeFile(parentFile, "blocker");
+    return join(parentFile, "state");
+  };
+
+  it("fast-fails in production (allowDevFallback off) naming the path and remedy", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-basedir-prod-"));
+    try {
+      const stateDir = await buildUnwritableStateDir(tempRoot);
+      const provisioner = new DockerComposeBundledMatrixProvisioner(
+        noopExecRunner,
+        createLogger(),
+        buildPaths(stateDir),
+        undefined,
+        undefined,
+        false,
+      );
+
+      const call = (provisioner as unknown as WithPrivate).ensureBaseDir();
+      await expect(call).rejects.toThrow(/Bundled Matrix state dir is not writable/);
+      await expect(call).rejects.toThrow(/MATRIX_LOGIN_FAILED/);
+      await expect(call).rejects.toThrow(join(stateDir, "bundled-matrix"));
+
+      // The silent dev fallback dir must NOT be created in production.
+      await expect(
+        stat(join(process.cwd(), ".sovereign-node-dev", "bundled-matrix")),
+      ).rejects.toThrow();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to a local dir only when allowDevFallback is explicitly true", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-basedir-dev-"));
+    const prevCwd = process.cwd();
+    try {
+      // Run with cwd inside the temp root so the fallback dir is created and
+      // cleaned up under the temp tree, not the repo.
+      process.chdir(tempRoot);
+      const stateDir = await buildUnwritableStateDir(tempRoot);
+      const provisioner = new DockerComposeBundledMatrixProvisioner(
+        noopExecRunner,
+        createLogger(),
+        buildPaths(stateDir),
+        undefined,
+        undefined,
+        true,
+      );
+
+      const resolved = await (provisioner as unknown as WithPrivate).ensureBaseDir();
+      expect(resolved).toBe(join(tempRoot, ".sovereign-node-dev", "bundled-matrix"));
+      const resolvedStat = await stat(resolved);
+      expect(resolvedStat.isDirectory()).toBe(true);
+
+      // Cached on a second call.
+      const second = await (provisioner as unknown as WithPrivate).ensureBaseDir();
+      expect(second).toBe(resolved);
+    } finally {
+      process.chdir(prevCwd);
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns and caches the preferred dir when the state dir is writable", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-basedir-ok-"));
+    try {
+      const stateDir = join(tempRoot, "state");
+      const provisioner = new DockerComposeBundledMatrixProvisioner(
+        noopExecRunner,
+        createLogger(),
+        buildPaths(stateDir),
+        undefined,
+        undefined,
+        false,
+      );
+
+      const resolved = await (provisioner as unknown as WithPrivate).ensureBaseDir();
+      expect(resolved).toBe(join(stateDir, "bundled-matrix"));
+      // Second call hits the cache branch.
+      const second = await (provisioner as unknown as WithPrivate).ensureBaseDir();
+      expect(second).toBe(resolved);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("describeErrorReason", () => {
+  it("returns the message for Error instances", () => {
+    expect(describeErrorReason(new Error("boom"))).toBe("boom");
+  });
+
+  it("stringifies non-Error values", () => {
+    expect(describeErrorReason("plain-string")).toBe("plain-string");
+    expect(describeErrorReason(42)).toBe("42");
+    expect(describeErrorReason({ code: "X" })).toBe("[object Object]");
   });
 });

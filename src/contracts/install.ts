@@ -27,6 +27,7 @@ export const jobStepIdSchema = z.enum([
   "openclaw_bundled_plugin_tools",
   "imap_validate",
   "relay_enroll",
+  "provision_state_dirs",
   "matrix_provision",
   "matrix_bootstrap_accounts",
   "matrix_bootstrap_room",
