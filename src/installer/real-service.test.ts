@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -11738,5 +11738,426 @@ describe("RealInstallerService", () => {
       delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
       await rm(tempRoot, { recursive: true, force: true });
     }
+  });
+});
+
+describe("ensureRelayTunnelService", () => {
+  const buildPaths = (tempRoot: string): SovereignPaths => ({
+    configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+    secretsDir: join(tempRoot, "etc", "secrets"),
+    stateDir: join(tempRoot, "var", "lib"),
+    logsDir: join(tempRoot, "var", "log"),
+    installJobsDir: join(tempRoot, "install-jobs"),
+    openclawServiceHome: join(tempRoot, "openclaw-home"),
+    provenancePath: join(tempRoot, "install-provenance.json"),
+    backupsDir: join(tempRoot, "backups"),
+  });
+
+  const unusedDeps = {
+    openclawBootstrapper: {
+      detectInstalled: async () => null,
+      ensureInstalled: async () => ({
+        binaryPath: "/usr/local/bin/openclaw",
+        version: "test",
+        installMethod: "install_sh" as const,
+      }),
+    },
+    openclawGatewayServiceManager: {
+      install: async () => {},
+      start: async () => {},
+      restart: async () => {},
+    },
+    preflightChecker: {
+      run: async () => ({
+        mode: "bundled_matrix" as const,
+        overall: "pass" as const,
+        checks: [],
+        recommendedActions: [],
+      }),
+    },
+    imapTester: {
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+    matrixProvisioner: {
+      provision: async () => {
+        throw new Error("not used");
+      },
+      bootstrapAccounts: async () => {
+        throw new Error("not used");
+      },
+      bootstrapRoom: async () => {
+        throw new Error("not used");
+      },
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+  };
+
+  const buildService = (
+    paths: SovereignPaths,
+    execRunner: { run: (input: ExecInput) => Promise<ExecResult> },
+  ): RealInstallerService =>
+    new RealInstallerService(createLogger(), paths, {
+      ...unusedDeps,
+      execRunner,
+    } as ConstructorParameters<typeof RealInstallerService>[2]);
+
+  const buildRelayRuntimeConfig = (paths: SovereignPaths): RuntimeConfig =>
+    ({
+      relay: {
+        enabled: true,
+        controlUrl: "https://relay.sovereign-ai-node.com",
+        hostname: "node.sovereign-ai-node.com",
+        publicBaseUrl: "https://node.sovereign-ai-node.com",
+        connected: false,
+        serviceName: "sovereign-matrix-relay-tunnel.service",
+        configPath: join(paths.stateDir, "relay", "frpc.toml"),
+        tunnel: {
+          serverAddr: "relay.sovereign-ai-node.com",
+          serverPort: 7000,
+          tokenSecretRef: "file:/tmp/relay-token",
+          proxyName: "relay-node",
+          type: "http",
+          localIp: "127.0.0.1",
+          localPort: 18080,
+        },
+      },
+    }) as unknown as RuntimeConfig;
+
+  const stubSecret = (service: RealInstallerService, token: string): void => {
+    (service as unknown as { resolveSecretRef(ref: string): Promise<string> }).resolveSecretRef =
+      async () => token;
+  };
+
+  const invoke = (service: RealInstallerService, config: RuntimeConfig): Promise<boolean> =>
+    (
+      service as unknown as {
+        ensureRelayTunnelService(config: RuntimeConfig): Promise<boolean>;
+      }
+    ).ensureRelayTunnelService(config);
+
+  it("writes the frpc config and unit then enables the service (happy path)", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
+    const systemdDir = join(tempRoot, "systemd");
+    await mkdir(systemdDir, { recursive: true });
+    process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
+    const execCommands: string[] = [];
+    const service = buildService(buildPaths(tempRoot), {
+      run: async ({ command, args }) => {
+        const serialized = [command, ...(args ?? [])].join(" ");
+        execCommands.push(serialized);
+        return { command: serialized, exitCode: 0, stdout: "active", stderr: "" };
+      },
+    });
+    stubSecret(service, "secret-token");
+    const paths = buildPaths(tempRoot);
+    try {
+      const result = await invoke(service, buildRelayRuntimeConfig(paths));
+      expect(result).toBe(true);
+      const unit = await readFile(
+        join(systemdDir, "sovereign-matrix-relay-tunnel.service"),
+        "utf8",
+      );
+      expect(unit).toContain("Sovereign Matrix Relay Tunnel");
+      const config = await readFile(join(paths.stateDir, "relay", "frpc.toml"), "utf8");
+      expect(config).toContain('token = "secret-token"');
+      expect(execCommands).toEqual([
+        "systemctl daemon-reload",
+        "systemctl enable --now sovereign-matrix-relay-tunnel.service",
+        "systemctl restart sovereign-matrix-relay-tunnel.service",
+        "systemctl is-active sovereign-matrix-relay-tunnel.service",
+      ]);
+    } finally {
+      delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns false when relay is not enabled", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
+    const service = buildService(buildPaths(tempRoot), {
+      run: async ({ command, args }) => ({
+        command: [command, ...(args ?? [])].join(" "),
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      }),
+    });
+    try {
+      const result = await invoke(service, {
+        relay: { enabled: false },
+      } as unknown as RuntimeConfig);
+      expect(result).toBe(false);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+
+  // Reproduces the real Pi failure: the unprivileged runtime API service cannot
+  // write to /etc/systemd/system, so writeFile throws EACCES and the helper must
+  // fall back to `sudo -n tee`. Driven by a real read-only target dir — reliable
+  // for any non-root uid (local dev and the non-root CI runner). Skipped under
+  // root, where the kernel bypasses the directory permission bits.
+  it.skipIf(isRoot)("falls back to `sudo -n tee` when the unit write hits EACCES", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
+    const systemdDir = join(tempRoot, "systemd");
+    await mkdir(systemdDir, { recursive: true });
+    process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
+    const teeInputs: string[] = [];
+    const teeTargets: Array<string | undefined> = [];
+    const execCommands: string[] = [];
+    const service = buildService(buildPaths(tempRoot), {
+      run: async (input) => {
+        const serialized = [input.command, ...(input.args ?? [])].join(" ");
+        execCommands.push(serialized);
+        if (input.command === "sudo" && input.args?.[1] === "tee") {
+          teeInputs.push(String(input.options?.input ?? ""));
+          teeTargets.push(input.args?.[2]);
+          return { command: serialized, exitCode: 0, stdout: "", stderr: "" };
+        }
+        return { command: serialized, exitCode: 0, stdout: "active", stderr: "" };
+      },
+    });
+    stubSecret(service, "secret-token");
+    // Drop write permission so the direct writeFile throws EACCES.
+    await chmod(systemdDir, 0o500);
+    try {
+      const result = await invoke(service, buildRelayRuntimeConfig(buildPaths(tempRoot)));
+      expect(result).toBe(true);
+      expect(teeInputs.length).toBe(1);
+      expect(teeInputs[0]).toContain("Sovereign Matrix Relay Tunnel");
+      expect(teeTargets[0]).toBe(join(systemdDir, "sovereign-matrix-relay-tunnel.service"));
+      expect(execCommands.some((c) => c.startsWith("sudo -n tee"))).toBe(true);
+    } finally {
+      await chmod(systemdDir, 0o700);
+      delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(isRoot)(
+    "returns false when the unit write fails with EACCES and no exec runner",
+    async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
+      const systemdDir = join(tempRoot, "systemd");
+      await mkdir(systemdDir, { recursive: true });
+      process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
+      // No execRunner -> the helper cannot fall back to sudo tee, so the EACCES
+      // propagates and ensureRelayTunnelService returns false.
+      const service = new RealInstallerService(createLogger(), buildPaths(tempRoot), {
+        ...unusedDeps,
+      } as ConstructorParameters<typeof RealInstallerService>[2]);
+      stubSecret(service, "secret-token");
+      await chmod(systemdDir, 0o500);
+      try {
+        const result = await invoke(service, buildRelayRuntimeConfig(buildPaths(tempRoot)));
+        expect(result).toBe(false);
+      } finally {
+        await chmod(systemdDir, 0o700);
+        delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("retries via `sudo -n systemctl` on polkit interactive-auth failure", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
+    const systemdDir = join(tempRoot, "systemd");
+    await mkdir(systemdDir, { recursive: true });
+    process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
+    const execCommands: string[] = [];
+    const service = buildService(buildPaths(tempRoot), {
+      run: async ({ command, args }) => {
+        const serialized = [command, ...(args ?? [])].join(" ");
+        execCommands.push(serialized);
+        if (command === "sudo") {
+          return { command: serialized, exitCode: 0, stdout: "active", stderr: "" };
+        }
+        // Direct systemctl fails with polkit auth required.
+        return {
+          command: serialized,
+          exitCode: 1,
+          stdout: "",
+          stderr: "Interactive authentication required.",
+        };
+      },
+    });
+    stubSecret(service, "secret-token");
+    try {
+      const result = await invoke(service, buildRelayRuntimeConfig(buildPaths(tempRoot)));
+      expect(result).toBe(true);
+      // Each systemctl verb retried under sudo.
+      expect(execCommands.filter((c) => c.startsWith("sudo -n systemctl")).length).toBe(4);
+    } finally {
+      delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns false and warns when a systemctl command exits non-zero", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
+    const systemdDir = join(tempRoot, "systemd");
+    await mkdir(systemdDir, { recursive: true });
+    process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
+    const service = buildService(buildPaths(tempRoot), {
+      run: async ({ command, args }) => ({
+        command: [command, ...(args ?? [])].join(" "),
+        exitCode: 1,
+        stdout: "",
+        stderr: "boom",
+      }),
+    });
+    stubSecret(service, "secret-token");
+    try {
+      const result = await invoke(service, buildRelayRuntimeConfig(buildPaths(tempRoot)));
+      expect(result).toBe(false);
+    } finally {
+      delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns false when the relay token secret cannot be resolved", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
+    const systemdDir = join(tempRoot, "systemd");
+    await mkdir(systemdDir, { recursive: true });
+    process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
+    const service = buildService(buildPaths(tempRoot), {
+      run: async ({ command, args }) => ({
+        command: [command, ...(args ?? [])].join(" "),
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      }),
+    });
+    (service as unknown as { resolveSecretRef(ref: string): Promise<string> }).resolveSecretRef =
+      async () => {
+        throw new Error("missing token");
+      };
+    try {
+      const result = await invoke(service, buildRelayRuntimeConfig(buildPaths(tempRoot)));
+      expect(result).toBe(false);
+    } finally {
+      delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(isRoot)(
+    "returns false when the privileged `sudo -n tee` write exits non-zero",
+    async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
+      const systemdDir = join(tempRoot, "systemd");
+      await mkdir(systemdDir, { recursive: true });
+      process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
+      const service = buildService(buildPaths(tempRoot), {
+        run: async (input) => {
+          const serialized = [input.command, ...(input.args ?? [])].join(" ");
+          if (input.command === "sudo" && input.args?.[1] === "tee") {
+            return { command: serialized, exitCode: 1, stdout: "", stderr: "denied" };
+          }
+          return { command: serialized, exitCode: 0, stdout: "active", stderr: "" };
+        },
+      });
+      stubSecret(service, "secret-token");
+      await chmod(systemdDir, 0o500);
+      try {
+        const result = await invoke(service, buildRelayRuntimeConfig(buildPaths(tempRoot)));
+        expect(result).toBe(false);
+      } finally {
+        await chmod(systemdDir, 0o700);
+        delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("returns false when systemctl cannot run (no exec runner)", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
+    const systemdDir = join(tempRoot, "systemd");
+    await mkdir(systemdDir, { recursive: true });
+    process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
+    // No execRunner: the unit write succeeds (writable temp dir), then the
+    // first systemctl call comes back !ok ("Exec runner is not configured").
+    const service = new RealInstallerService(createLogger(), buildPaths(tempRoot), {
+      ...unusedDeps,
+    } as ConstructorParameters<typeof RealInstallerService>[2]);
+    stubSecret(service, "secret-token");
+    try {
+      const result = await invoke(service, buildRelayRuntimeConfig(buildPaths(tempRoot)));
+      expect(result).toBe(false);
+    } finally {
+      delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  describe("installRelayTunnelServiceOrThrow", () => {
+    const invokeOrThrow = (
+      service: RealInstallerService,
+      config: RuntimeConfig,
+    ): Promise<boolean> =>
+      (
+        service as unknown as {
+          installRelayTunnelServiceOrThrow(config: RuntimeConfig): Promise<boolean>;
+        }
+      ).installRelayTunnelServiceOrThrow(config);
+
+    it("returns true when the tunnel installs successfully", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
+      const systemdDir = join(tempRoot, "systemd");
+      await mkdir(systemdDir, { recursive: true });
+      process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
+      const service = buildService(buildPaths(tempRoot), {
+        run: async ({ command, args }) => ({
+          command: [command, ...(args ?? [])].join(" "),
+          exitCode: 0,
+          stdout: "active",
+          stderr: "",
+        }),
+      });
+      stubSecret(service, "secret-token");
+      try {
+        await expect(
+          invokeOrThrow(service, buildRelayRuntimeConfig(buildPaths(tempRoot))),
+        ).resolves.toBe(true);
+      } finally {
+        delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("throws RELAY_TUNNEL_INSTALL_FAILED when the tunnel cannot start", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
+      const systemdDir = join(tempRoot, "systemd");
+      await mkdir(systemdDir, { recursive: true });
+      process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
+      const service = buildService(buildPaths(tempRoot), {
+        run: async ({ command, args }) => ({
+          command: [command, ...(args ?? [])].join(" "),
+          exitCode: 1,
+          stdout: "",
+          stderr: "boom",
+        }),
+      });
+      stubSecret(service, "secret-token");
+      try {
+        await expect(
+          invokeOrThrow(service, buildRelayRuntimeConfig(buildPaths(tempRoot))),
+        ).rejects.toMatchObject({
+          code: "RELAY_TUNNEL_INSTALL_FAILED",
+          retryable: true,
+          details: { serviceName: "sovereign-matrix-relay-tunnel.service" },
+        });
+      } finally {
+        delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
   });
 });
