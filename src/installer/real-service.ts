@@ -7521,7 +7521,7 @@ export default function (api) {
           }
           if (runtimeConfig.relay?.enabled === true) {
             stepState.relayTunnelServiceInstalled =
-              await this.ensureRelayTunnelService(runtimeConfig);
+              await this.installRelayTunnelServiceOrThrow(runtimeConfig);
           }
 
           if (stepState.gatewayServiceSkipped === true) {
@@ -7841,6 +7841,68 @@ export default function (api) {
     return join(this.paths.stateDir, "relay", "frpc.toml");
   }
 
+  /**
+   * Write a systemd unit file to a root-owned directory. Tries a direct
+   * writeFile first (fast path when running as root, e.g. the bootstrap
+   * install context, or in unit tests where the test process owns the unit
+   * dir). On EACCES/EPERM — which is what the unprivileged runtime API service
+   * hits — falls back to `sudo -n tee` against the scoped sudoers fragment
+   * dropped by configure_system_hygiene at install time. Throws on failure.
+   */
+  private async writeSystemdUnitFileElevated(
+    unitPath: string,
+    unitContents: string,
+  ): Promise<void> {
+    await mkdir(dirname(unitPath), { recursive: true });
+    try {
+      await writeFile(unitPath, unitContents, "utf8");
+    } catch (writeError) {
+      const code = (writeError as NodeJS.ErrnoException).code;
+      if ((code !== "EACCES" && code !== "EPERM") || this.execRunner === null) {
+        throw writeError;
+      }
+      const teeResult = await this.execRunner.run({
+        command: "sudo",
+        args: ["-n", "tee", unitPath],
+        options: {
+          input: unitContents,
+          stdin: "pipe",
+          timeout: 5_000,
+        },
+      });
+      if (teeResult.exitCode !== 0) {
+        throw new Error(
+          `sudo tee ${unitPath} exited ${teeResult.exitCode}: ${truncateText(
+            teeResult.stderr,
+            400,
+          )}`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Run `systemctl <args>` and, when it fails with polkit's "interactive
+   * authentication required" (the runtime API service hits this from a service
+   * context as a non-root user), retry via `sudo -n systemctl`. The bootstrap
+   * install path runs as root and never needs the fallback.
+   */
+  private async runSystemctlElevated(
+    args: string[],
+  ): Promise<Awaited<ReturnType<typeof this.safeExec>>> {
+    const direct = await this.safeExec("systemctl", args);
+    if (
+      direct.ok &&
+      direct.result.exitCode !== 0 &&
+      /interactive authentication required|polkit|must be (root|run)/i.test(
+        `${direct.result.stderr} ${direct.result.stdout}`,
+      )
+    ) {
+      return await this.safeExec("sudo", ["-n", "systemctl", ...args]);
+    }
+    return direct;
+  }
+
   private async ensureRelayTunnelService(runtimeConfig: RuntimeConfig): Promise<boolean> {
     if (runtimeConfig.relay?.enabled !== true) {
       return false;
@@ -7848,7 +7910,9 @@ export default function (api) {
 
     const relay = runtimeConfig.relay;
     const configPath = relay.configPath;
-    const unitPath = join("/etc/systemd/system", relay.serviceName);
+    const systemdUnitDir =
+      process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR?.trim() || "/etc/systemd/system";
+    const unitPath = join(systemdUnitDir, relay.serviceName);
     const containerName = relay.serviceName.replace(/\.service$/, "");
     let token: string;
 
@@ -7878,8 +7942,7 @@ export default function (api) {
     });
 
     try {
-      await mkdir(dirname(unitPath), { recursive: true });
-      await writeFile(unitPath, unitContents, "utf8");
+      await this.writeSystemdUnitFileElevated(unitPath, unitContents);
     } catch (error) {
       this.logger.warn(
         {
@@ -7898,7 +7961,7 @@ export default function (api) {
       ["is-active", relay.serviceName],
     ];
     for (const args of commands) {
-      const result = await this.safeExec("systemctl", args);
+      const result = await this.runSystemctlElevated(args);
       if (!result.ok) {
         this.logger.warn(
           {
@@ -7932,6 +7995,29 @@ export default function (api) {
       "Managed relay tunnel service started successfully",
     );
     return true;
+  }
+
+  /**
+   * Install the managed relay tunnel and require success. Relay mode cannot
+   * function without the tunnel, so a failure (e.g. EACCES writing the unit, or
+   * the frpc service not starting) must abort the configure step with an
+   * actionable error instead of being swallowed and surfacing later as a
+   * misleading "service is not running" smoke-check failure. The underlying
+   * cause is carried in the warn logs emitted by ensureRelayTunnelService.
+   */
+  private async installRelayTunnelServiceOrThrow(runtimeConfig: RuntimeConfig): Promise<boolean> {
+    const installed = await this.ensureRelayTunnelService(runtimeConfig);
+    if (!installed) {
+      throw {
+        code: "RELAY_TUNNEL_INSTALL_FAILED",
+        message: "Managed relay tunnel service could not be installed or started",
+        retryable: true,
+        details: {
+          serviceName: runtimeConfig.relay?.serviceName,
+        },
+      };
+    }
+    return installed;
   }
 
   private async persistJobSnapshot(input: {
@@ -8435,37 +8521,7 @@ export default function (api) {
       await chmod(managedTempDir, 0o700);
       await this.applyConfiguredRuntimeOwnership(this.paths.openclawServiceHome, runtimeConfig);
       await this.applyConfiguredRuntimeOwnership(managedTempDir, runtimeConfig);
-      await mkdir(dirname(unitPath), { recursive: true });
-      // Try a direct writeFile first (fast path when running as root, e.g.
-      // the bootstrap install context, or in unit tests where the test
-      // process owns the unit dir). On EACCES/EPERM, fall back to
-      // `sudo -n tee` against the scoped sudoers fragment dropped by
-      // configure_system_hygiene at install time.
-      try {
-        await writeFile(unitPath, unitContents, "utf8");
-      } catch (writeError) {
-        const code = (writeError as NodeJS.ErrnoException).code;
-        if ((code !== "EACCES" && code !== "EPERM") || this.execRunner === null) {
-          throw writeError;
-        }
-        const teeResult = await this.execRunner.run({
-          command: "sudo",
-          args: ["-n", "tee", unitPath],
-          options: {
-            input: unitContents,
-            stdin: "pipe",
-            timeout: 5_000,
-          },
-        });
-        if (teeResult.exitCode !== 0) {
-          throw new Error(
-            `sudo tee ${unitPath} exited ${teeResult.exitCode}: ${truncateText(
-              teeResult.stderr,
-              400,
-            )}`,
-          );
-        }
-      }
+      await this.writeSystemdUnitFileElevated(unitPath, unitContents);
     } catch (error) {
       this.logger.warn(
         {
@@ -8483,28 +8539,8 @@ export default function (api) {
       ["restart", unitName],
       ["is-active", unitName],
     ];
-    // Plain systemctl first; fall back to `sudo -n systemctl` when the
-    // call fails with polkit's "Interactive authentication required"
-    // (the runtime API service hits this when invoked from a service
-    // context as a non-root user). The bootstrap install path runs as
-    // root and never needs the fallback.
-    const runSystemctl = async (
-      args: string[],
-    ): Promise<Awaited<ReturnType<typeof this.safeExec>>> => {
-      const direct = await this.safeExec("systemctl", args);
-      if (
-        direct.ok &&
-        direct.result.exitCode !== 0 &&
-        /interactive authentication required|polkit|must be (root|run)/i.test(
-          `${direct.result.stderr} ${direct.result.stdout}`,
-        )
-      ) {
-        return await this.safeExec("sudo", ["-n", "systemctl", ...args]);
-      }
-      return direct;
-    };
     for (const args of commands) {
-      const result = await runSystemctl(args);
+      const result = await this.runSystemctlElevated(args);
       if (!result.ok) {
         this.logger.warn(
           {
