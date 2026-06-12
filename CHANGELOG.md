@@ -11,6 +11,14 @@ by the `.github/workflows/release.yml` workflow.
 
 ## [Unreleased]
 
+## [2.2.3] - 2026-06-12
+
+Patch fixing a relay-mode install failure where the managed relay tunnel never starts.
+
+- Fix relay-mode `SMOKE_CHECKS_FAILED` ("Managed relay tunnel service is not running"): the runtime API service runs unprivileged, but the relay tunnel installer wrote its systemd unit to root-owned `/etc/systemd/system/` with a plain write and ran `systemctl` directly — so the write failed with `EACCES`, the error was swallowed, and the install only failed later at smoke checks with a misleading message. The relay path now reuses the gateway installer's privileged pattern (`sudo -n tee` on `EACCES`/`EPERM`, `sudo -n systemctl` on polkit interactive-auth), honors `SOVEREIGN_NODE_SYSTEMD_UNIT_DIR`, and surfaces a failed install at the `openclaw_configure` step as `RELAY_TUNNEL_INSTALL_FAILED` instead of as a vague smoke-check failure. ([#191](https://github.com/ndee/sovereign-ai-node/pull/191))
+
+See the [v2.2.3 GitHub Release](https://github.com/ndee/sovereign-ai-node/releases/tag/v2.2.3) for the full commit list.
+
 ## [2.2.2] - 2026-06-04
 
 Patch fixing a bundled-Matrix install failure on hosts with leftover containers from prior install attempts.
