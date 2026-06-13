@@ -198,14 +198,21 @@ configure_system_hygiene() {
   install -d -m 0755 /etc/sudoers.d
   cat > "$sudoers_path" <<EOF
 # Managed by sovereign-ai-node installer. Scoped sudo for the runtime
-# API service to manage the OpenClaw gateway systemd unit and the
-# bundled-Matrix project directory.
+# API service to manage the OpenClaw gateway and managed relay tunnel
+# systemd units and the bundled-Matrix project directory.
 ${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/tee /etc/systemd/system/sovereign-openclaw-gateway.service
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl daemon-reload
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl restart sovereign-openclaw-gateway, /bin/systemctl restart sovereign-openclaw-gateway.service
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl enable --now sovereign-openclaw-gateway, /bin/systemctl enable --now sovereign-openclaw-gateway.service
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl is-active sovereign-openclaw-gateway, /bin/systemctl is-active sovereign-openclaw-gateway.service
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl status sovereign-openclaw-gateway, /bin/systemctl status sovereign-openclaw-gateway.service
+# Managed relay tunnel unit: the runtime API installs/starts this the same
+# way (sudo -n tee + sudo -n systemctl) when relay mode is enabled.
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/tee /etc/systemd/system/sovereign-matrix-relay-tunnel.service
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl restart sovereign-matrix-relay-tunnel, /bin/systemctl restart sovereign-matrix-relay-tunnel.service
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl enable --now sovereign-matrix-relay-tunnel, /bin/systemctl enable --now sovereign-matrix-relay-tunnel.service
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl is-active sovereign-matrix-relay-tunnel, /bin/systemctl is-active sovereign-matrix-relay-tunnel.service
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl status sovereign-matrix-relay-tunnel, /bin/systemctl status sovereign-matrix-relay-tunnel.service
 # Allow re-claiming ownership of bundled-matrix project subdirectories
 # after docker-compose has touched them as root. Restricted to that
 # path; the *:* in the chown spec keeps it bounded to numeric uid:gid.
