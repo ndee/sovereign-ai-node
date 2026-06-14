@@ -36,6 +36,16 @@ sudo bash scripts/install.sh --source-dir "$(pwd)"
 
 The local-checkout flow uses the multi-file installer under `scripts/install/`. The `scripts/install.sh` you see in this repo is the orchestrator; it sources `scripts/install/lib-*.sh` at runtime. The single-file `install.sh` shipped via the release URL is built from the same sources by `scripts/install/build.sh` during the release workflow.
 
+### Using the repo as a package
+
+Downstream consumers can also install tagged versions straight from GitHub:
+
+```bash
+npm install github:ndee/sovereign-ai-node#v2.2.1
+```
+
+That install path now builds `dist/lib/` automatically when the published tree only contains sources. The supported import surfaces are the top-level package plus `sovereign-ai-node/installer`, `sovereign-ai-node/api`, `sovereign-ai-node/app`, `sovereign-ai-node/system`, and `sovereign-ai-node/contracts`. Wizard assets remain available under `sovereign-ai-node/public/setup-ui/*`.
+
 ## Update
 
 Once installed, update to the latest release with:
@@ -45,6 +55,15 @@ sudo sovereign-node update
 ```
 
 This downloads the bundled `install.sh` from the latest release and re-runs it in update mode. Pin a specific version with `--ref vX.Y.Z`.
+
+## Setup UI and admin sign-in
+
+Current installs also ship a local browser-based setup/admin surface at `/setup-ui/` on the node.
+
+- First-run browser access uses a one-time bootstrap token.
+- Issue or rotate that token with `sudo sovereign-node setup-ui issue-bootstrap-token`.
+- After the first successful sign-in, later admin sign-in uses the operator's Matrix password.
+- Matrix client onboarding still happens separately through `/onboard` and `sudo sovereign-node onboarding issue`.
 
 ### Recovery: hosts stuck on v2.0.0
 
@@ -57,6 +76,32 @@ curl -fsSL https://github.com/ndee/sovereign-ai-node/releases/latest/download/in
 ```
 
 After this completes, future updates can use `sudo sovereign-node update`.
+
+## Using `sovereign-ai-node` as a package
+
+`sovereign-ai-node` now ships build output and public subpath exports for Node-based integrations.
+
+Install from npm or directly from GitHub:
+
+```bash
+npm install sovereign-ai-node
+```
+
+```bash
+npm install github:ndee/sovereign-ai-node
+```
+
+GitHub installs run the package `prepare` step automatically, so `dist/` is built during install when it is not already present.
+
+Current entrypoints:
+
+* `sovereign-ai-node` — combined top-level exports
+* `sovereign-ai-node/installer` — installer services and job runner types
+* `sovereign-ai-node/api` — Fastify route registration helpers and auth/session utilities
+* `sovereign-ai-node/app` — app container creation
+* `sovereign-ai-node/system` — system helpers such as LAN IPv4 detection
+* `sovereign-ai-node/contracts` — shared Zod-backed contracts and schemas
+* `sovereign-ai-node/public/setup-ui/*` — bundled setup UI assets
 
 ## Architecture
 
