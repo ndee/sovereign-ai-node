@@ -2384,16 +2384,21 @@ const renderSynapseConfig = (input: SynapseConfigInput): string => {
     "enable_registration_without_verification: false",
     "allow_public_rooms_without_auth: false",
     "allow_public_rooms_over_federation: false",
+    // Login brute-force protection. The /_matrix/client/v3/login endpoint is
+    // reverse-proxied on the public hostname / LAN and doubles as the
+    // operator's setup-UI credential, so these limits must stay conservative.
+    // Values match Synapse's own defaults (~10 attempts/min sustained, burst
+    // of 3) rather than the effectively-unlimited 1000/1000 used previously.
     "rc_login:",
     "  address:",
-    "    per_second: 1000",
-    "    burst_count: 1000",
+    "    per_second: 0.17",
+    "    burst_count: 3",
     "  account:",
-    "    per_second: 1000",
-    "    burst_count: 1000",
+    "    per_second: 0.17",
+    "    burst_count: 3",
     "  failed_attempts:",
-    "    per_second: 1000",
-    "    burst_count: 1000",
+    "    per_second: 0.17",
+    "    burst_count: 3",
     `registration_shared_secret: "${input.registrationSharedSecret}"`,
     `macaroon_secret_key: "${input.macaroonSecret}"`,
     `form_secret: "${input.formSecret}"`,

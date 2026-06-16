@@ -128,9 +128,22 @@ export const matrixInstallInputSchema = z.object({
   alertRoomName: z.string().min(1).optional(),
 });
 
+// The operator password also authenticates against Matrix /login (reverse
+// proxied on the public hostname / LAN), so it is brute-forceable. Require a
+// minimum length when one is supplied at install time. Login verification
+// (contracts/auth.ts) intentionally keeps min(1) so already-provisioned
+// operators are never locked out by a later tightening.
+export const OPERATOR_PASSWORD_MIN_LENGTH = 12;
+
 export const operatorInstallInputSchema = z.object({
   username: z.string().min(1),
-  password: z.string().min(1).optional(),
+  password: z
+    .string()
+    .min(
+      OPERATOR_PASSWORD_MIN_LENGTH,
+      `operator password must be at least ${OPERATOR_PASSWORD_MIN_LENGTH} characters`,
+    )
+    .optional(),
 });
 
 export const botConfigValueSchema = z.union([z.string(), z.number().finite(), z.boolean()]);
