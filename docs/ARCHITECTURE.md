@@ -275,6 +275,7 @@ The core repo should contain:
 - Curated skill packs
 - First-party OpenClaw plugins/tools (when needed)
 - Helper CLI/wrappers that compose OpenClaw CLI (not replace it)
+- Importable package entry-points for downstream consumers that build on the installer, API, app, system, and contract layers
 - Security and operations runbooks
 - Operator onboarding runbook (`docs/OPERATIONS_ONBOARDING.md`)
 - Bundled Matrix setup runbook (`docs/MATRIX_BUNDLED_SETUP.md`)
@@ -293,6 +294,7 @@ The following contracts should be kept stable and versioned in this repo:
 - CLI/Wizard backend reuse policy (one provisioning implementation, multiple operator surfaces)
 - Sovereign-managed OpenClaw bootstrap policy (official installer usage, pinning, `--no-onboard`)
 - Installer/CLI/API schema contracts and failure semantics (`docs/INSTALLER_CONTRACTS.md`)
+- Published package import surfaces (`.`, `./installer`, `./api`, `./app`, `./system`, `./contracts`, and `./public/setup-ui/*`) for downstream consumers
 - Bot output schemas (defined in bot-specific design docs)
 - Operational runbook commands and validation checklist
 
