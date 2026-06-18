@@ -7,16 +7,53 @@ import {
   summarizeText,
 } from "./real-service-shared.js";
 
+// Transient DNS-01 material parsed from the relay enroll response (TLS
+// passthrough). `token` (the raw per-node scoped deSEC secret) is present only
+// on first mint / rotation; it is persisted later via writeSecretFile.
+export type RelayEnrollmentDns01 = {
+  provider: "desec";
+  apiBase: string;
+  zone: string;
+  subname: string;
+  acmeEmail?: string;
+  token?: string;
+};
+
 export type RelayEnrollmentData = {
   controlUrl: string;
   hostname: string;
   publicBaseUrl: string;
   tunnel: RelayTunnelConfig;
+  dns01?: RelayEnrollmentDns01;
+};
+
+// Parse a dns01 block (response root or install-request relay block). Returns
+// undefined when absent (legacy http enrollment).
+const parseEnrollmentDns01 = (value: unknown): RelayEnrollmentDns01 | undefined => {
+  if (!isRecord(value) || value.provider !== "desec") {
+    return undefined;
+  }
+  const apiBase = typeof value.apiBase === "string" ? value.apiBase.trim() : "";
+  const zone = typeof value.zone === "string" ? value.zone.trim() : "";
+  if (apiBase.length === 0 || zone.length === 0) {
+    return undefined;
+  }
+  return {
+    provider: "desec",
+    apiBase,
+    zone,
+    subname: typeof value.subname === "string" ? value.subname : "",
+    ...(typeof value.acmeEmail === "string" && value.acmeEmail.length > 0
+      ? { acmeEmail: value.acmeEmail }
+      : {}),
+    ...(typeof value.token === "string" && value.token.length > 0 ? { token: value.token } : {}),
+  };
 };
 
 export const tryUsePreEnrolledRelay = (input: {
   relay: NonNullable<InstallRequest["relay"]>;
   localEdgePort: number;
+  localTlsPort: number;
 }): RelayEnrollmentData | null => {
   if (!input.relay.hostname || !input.relay.publicBaseUrl || !input.relay.tunnel) {
     return null;
@@ -25,6 +62,8 @@ export const tryUsePreEnrolledRelay = (input: {
   if (!tunnel.serverAddr || !tunnel.token || !tunnel.proxyName) {
     return null;
   }
+  const dns01 = parseEnrollmentDns01(input.relay.dns01);
+  const passthrough = tunnel.type === "https" || dns01 !== undefined;
   return {
     controlUrl: input.relay.controlUrl,
     hostname: input.relay.hostname,
@@ -35,10 +74,11 @@ export const tryUsePreEnrolledRelay = (input: {
       token: tunnel.token,
       proxyName: tunnel.proxyName,
       ...(tunnel.subdomain === undefined ? {} : { subdomain: tunnel.subdomain }),
-      type: "http",
+      type: passthrough ? "https" : "http",
       localIp: "127.0.0.1",
-      localPort: input.localEdgePort,
+      localPort: passthrough ? input.localTlsPort : input.localEdgePort,
     },
+    ...(dns01 === undefined ? {} : { dns01 }),
   };
 };
 
@@ -47,6 +87,7 @@ export const parseManagedRelayEnrollmentResponse = (input: {
   controlUrl: string;
   requestedSlug: string;
   localEdgePort: number;
+  localTlsPort: number;
 }): RelayEnrollmentData => {
   const parsed = parseJsonDocument(input.responseText);
   const payload =
@@ -89,6 +130,12 @@ export const parseManagedRelayEnrollmentResponse = (input: {
       ? tunnel.subdomain.trim()
       : undefined;
 
+  // Passthrough is signalled by mode/tunnel.type and carries a dns01 block.
+  const mode = payload !== null && typeof payload.mode === "string" ? payload.mode : "http";
+  const tunnelType = tunnel !== null && tunnel.type === "https" ? "https" : "http";
+  const dns01 = parseEnrollmentDns01(payload?.dns01);
+  const passthrough = mode === "https-passthrough" || tunnelType === "https";
+
   if (
     hostname.length === 0 ||
     publicBaseUrl.length === 0 ||
@@ -108,6 +155,21 @@ export const parseManagedRelayEnrollmentResponse = (input: {
     };
   }
 
+  // Fail closed: a passthrough enrollment MUST carry a usable dns01 block, else
+  // the node cannot obtain its own cert and must not silently fall back to http.
+  if (passthrough && dns01 === undefined) {
+    throw {
+      code: "RELAY_ENROLL_INVALID",
+      message: "Relay passthrough enrollment did not return a dns01 block",
+      retryable: false,
+      details: {
+        controlUrl: input.controlUrl,
+        requestedSlug: input.requestedSlug,
+        response: summarizeText(input.responseText, 1200),
+      },
+    };
+  }
+
   return {
     controlUrl: input.controlUrl,
     hostname,
@@ -118,9 +180,10 @@ export const parseManagedRelayEnrollmentResponse = (input: {
       token,
       proxyName,
       ...(subdomain === undefined ? {} : { subdomain }),
-      type: "http",
+      type: passthrough ? "https" : "http",
       localIp: "127.0.0.1",
-      localPort: input.localEdgePort,
+      localPort: passthrough ? input.localTlsPort : input.localEdgePort,
     },
+    ...(dns01 === undefined ? {} : { dns01 }),
   };
 };

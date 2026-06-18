@@ -13,6 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
+import { connect as tlsConnect } from "node:tls";
 import type {
   BotCatalog,
   BotConfigRecord,
@@ -47,6 +48,7 @@ import {
   type MatrixOnboardingPublicState,
   type PreflightResult,
   type ReconfigureResult,
+  type RelayDns01Input,
   type SetupUiBootstrapIssueResult,
   type SetupUiBootstrapPublicState,
   type SovereignStatus,
@@ -190,6 +192,7 @@ import {
   parseJsonSafely,
   parseRuntimeConfigDocument,
   RELAY_LOCAL_EDGE_PORT,
+  RELAY_LOCAL_TLS_PORT,
   RELAY_TUNNEL_DEFAULT_IMAGE,
   RELAY_TUNNEL_SYSTEMD_UNIT,
   RESERVED_AGENT_IDS,
@@ -6341,6 +6344,53 @@ export default function (api) {
     };
   }
 
+  // Fail-closed probe for relay TLS-passthrough: confirm the node's own Caddy
+  // has obtained a certificate and is terminating HTTPS on the local TLS port.
+  // Retries because DNS-01 issuance can take a few seconds after startup. A
+  // single successful TLS handshake that yields a peer certificate is enough —
+  // we do not validate the chain here (Let's Encrypt validity is the CA's job).
+  protected async probeRelayPassthroughTls(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<{ ok: boolean; message?: string }> {
+    const relay = runtimeConfig.relay;
+    if (relay?.dns01 === undefined) {
+      return { ok: true };
+    }
+    const port = relay.tunnel.localPort;
+    const servername = relay.hostname;
+    let lastError = "no attempt";
+    for (let attempt = 1; attempt <= 10; attempt += 1) {
+      const result = await new Promise<{ ok: boolean; message?: string }>((resolveProbe) => {
+        const socket = tlsConnect(
+          { host: "127.0.0.1", port, servername, rejectUnauthorized: false, timeout: 5000 },
+          () => {
+            const cert = socket.getPeerCertificate();
+            const hasCert = cert !== null && Object.keys(cert).length > 0;
+            socket.end();
+            resolveProbe(
+              hasCert ? { ok: true } : { ok: false, message: "no peer certificate presented" },
+            );
+          },
+        );
+        socket.on("timeout", () => {
+          socket.destroy();
+          resolveProbe({ ok: false, message: "tls handshake timed out" });
+        });
+        socket.on("error", (error: Error) => {
+          resolveProbe({ ok: false, message: error.message });
+        });
+      });
+      if (result.ok) {
+        return result;
+      }
+      lastError = result.message ?? "unknown";
+      if (attempt < 10) {
+        await delay(2000);
+      }
+    }
+    return { ok: false, message: lastError };
+  }
+
   private async inspectGatewayViaSystemctl(candidates: string[]): Promise<{
     installed: boolean;
     state: GatewayState;
@@ -7227,7 +7277,7 @@ export default function (api) {
           }
           stepState.relayEnrollment = await this.resolveRelayEnrollment(req, ctx.installationId);
           const previousRuntimeConfig = await this.tryReadRuntimeConfig();
-          stepState.effectiveRequest = this.buildRelayProvisionRequest(
+          stepState.effectiveRequest = await this.buildRelayProvisionRequest(
             req,
             stepState.relayEnrollment,
             previousRuntimeConfig,
@@ -7658,7 +7708,11 @@ export default function (api) {
   private tryUsePreEnrolledRelay(
     relay: NonNullable<InstallRequest["relay"]>,
   ): RelayEnrollmentResult | null {
-    return tryUsePreEnrolledRelayFile({ relay, localEdgePort: RELAY_LOCAL_EDGE_PORT });
+    return tryUsePreEnrolledRelayFile({
+      relay,
+      localEdgePort: RELAY_LOCAL_EDGE_PORT,
+      localTlsPort: RELAY_LOCAL_TLS_PORT,
+    });
   }
 
   private async resolveRelayEnrollment(
@@ -7738,6 +7792,10 @@ export default function (api) {
             ...(usesManagedPublicEnroll ? { installationId } : { enrollmentToken }),
             requestedSlug,
             version: process.env.npm_package_version ?? "2.0.0",
+            // Advertise TLS-passthrough support. The relay only acts on this
+            // when it has a deSEC owner token configured; otherwise the node is
+            // enrolled in legacy http mode (backward compatible).
+            capabilities: ["tls-passthrough"],
           }),
         });
       } catch (error) {
@@ -7790,6 +7848,7 @@ export default function (api) {
         controlUrl: relay.controlUrl,
         requestedSlug,
         localEdgePort: RELAY_LOCAL_EDGE_PORT,
+        localTlsPort: RELAY_LOCAL_TLS_PORT,
       });
 
       this.logger.info(
@@ -7824,16 +7883,46 @@ export default function (api) {
     return generateManagedRelayRequestedSlugFile();
   }
 
-  private buildRelayProvisionRequest(
+  private async buildRelayProvisionRequest(
     req: InstallRequest,
     enrollment: RelayEnrollmentResult,
     previousRuntimeConfig?: RuntimeConfig | null,
-  ): InstallRequest {
+  ): Promise<InstallRequest> {
+    // Resolve the dns01 token (passthrough only) to a CONCRETE value for the
+    // provisioner. On first mint/rotation the relay sent it inline; on an
+    // unchanged re-enroll reuse the previously persisted secret.
+    let dns01: RelayDns01Input | undefined;
+    if (enrollment.dns01 !== undefined) {
+      const token =
+        enrollment.dns01.token ??
+        (previousRuntimeConfig?.relay?.dns01?.tokenSecretRef !== undefined
+          ? await this.resolveSecretRef(previousRuntimeConfig.relay.dns01.tokenSecretRef)
+          : undefined);
+      if (token === undefined || token.length === 0) {
+        throw {
+          code: "RELAY_ENROLL_INVALID",
+          message: "Relay passthrough requires a deSEC token but none was available",
+          retryable: false,
+          details: { hostname: enrollment.hostname },
+        };
+      }
+      dns01 = {
+        provider: "desec",
+        apiBase: enrollment.dns01.apiBase,
+        zone: enrollment.dns01.zone,
+        subname: enrollment.dns01.subname,
+        ...(enrollment.dns01.acmeEmail === undefined
+          ? {}
+          : { acmeEmail: enrollment.dns01.acmeEmail }),
+        token,
+      };
+    }
     return buildRelayProvisionRequestFile({
       req,
       hostname: enrollment.hostname,
       publicBaseUrl: enrollment.publicBaseUrl,
       previousRuntimeConfig,
+      ...(dns01 === undefined ? {} : { dns01 }),
     });
   }
 
@@ -8652,6 +8741,24 @@ export default function (api) {
             message: relay.message,
           },
         };
+      }
+      // Fail closed in TLS-passthrough mode: the node must have obtained its own
+      // certificate and be terminating HTTPS on the local TLS port. If not, we
+      // do NOT silently serve plaintext — the install/upgrade fails and alerts.
+      if (matrixProvision.passthrough) {
+        const tls = await this.probeRelayPassthroughTls(runtimeConfig);
+        if (!tls.ok) {
+          throw {
+            code: "SMOKE_CHECKS_FAILED",
+            message: "Relay passthrough node did not obtain a TLS certificate",
+            retryable: true,
+            details: {
+              hostname: runtimeConfig.relay?.hostname,
+              localPort: runtimeConfig.relay?.tunnel.localPort,
+              reason: tls.message,
+            },
+          };
+        }
       }
     }
 
@@ -9651,6 +9758,17 @@ export default function (api) {
       await this.resolveRequestedBots(input.req);
     const allBotPackages = await this.listBotPackages();
     const previousRuntimeConfig = await this.tryReadRuntimeConfig();
+    // Relay TLS-passthrough dns01 token. The relay sends the scoped deSEC token
+    // only on first mint / rotation; on an unchanged re-enroll we reuse the
+    // previously persisted secret ref so the node keeps its working credential.
+    const relayDns01 = input.relayEnrollment?.dns01;
+    const previousRelayDns01TokenRef = previousRuntimeConfig?.relay?.dns01?.tokenSecretRef;
+    const relayDns01TokenSecretRef =
+      relayDns01 === undefined
+        ? undefined
+        : relayDns01.token !== undefined && relayDns01.token.length > 0
+          ? await this.writeSecretFile("relay-desec-token", relayDns01.token)
+          : previousRelayDns01TokenRef;
     const allBotTemplateRefs = new Set(allBotPackages.map((entry) => entry.templateRef));
     const allManagedBotToolIds = new Set(
       allBotPackages.flatMap((entry) =>
@@ -9803,6 +9921,20 @@ export default function (api) {
                 localIp: input.relayEnrollment.tunnel.localIp,
                 localPort: input.relayEnrollment.tunnel.localPort,
               },
+              ...(relayDns01 === undefined || relayDns01TokenSecretRef === undefined
+                ? {}
+                : {
+                    dns01: {
+                      provider: "desec" as const,
+                      apiBase: relayDns01.apiBase,
+                      zone: relayDns01.zone,
+                      subname: relayDns01.subname,
+                      ...(relayDns01.acmeEmail === undefined
+                        ? {}
+                        : { acmeEmail: relayDns01.acmeEmail }),
+                      tokenSecretRef: relayDns01TokenSecretRef,
+                    },
+                  }),
             } satisfies RelayRuntimeConfig,
           }),
     };

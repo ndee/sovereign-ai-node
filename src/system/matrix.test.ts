@@ -628,6 +628,97 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
     }
   });
 
+  it("writes a relay-passthrough TLS bundle when the relay returns a dns01 block", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-pt-"));
+    const fakeExecRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        if (input.command === "docker") {
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: "services:\n  postgres: {}\n  synapse: {}\n  reverse-proxy: {}\n",
+            stderr: "",
+          };
+        }
+        return {
+          command: [input.command, ...(input.args ?? [])].join(" "),
+          exitCode: 127,
+          stdout: "",
+          stderr: "command not found",
+        };
+      },
+    };
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "state"),
+      logsDir: join(tempRoot, "logs"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+    const provisioner = new DockerComposeBundledMatrixProvisioner(
+      fakeExecRunner,
+      createLogger(),
+      paths,
+    );
+
+    try {
+      const req = buildInstallRequest();
+      req.connectivity = { mode: "relay" };
+      req.relay = {
+        controlUrl: "https://relay.example.com",
+        enrollmentToken: "relay-token",
+        dns01: {
+          provider: "desec",
+          apiBase: "https://desec.io/api/v1",
+          zone: "_acme-challenge.relay.example.com",
+          subname: "node-abc",
+          acmeEmail: "ops@example.com",
+          token: "desec-secret-token",
+        },
+      };
+      req.matrix.homeserverDomain = "node-abc.relay.example.com";
+      req.matrix.publicBaseUrl = "https://node-abc.relay.example.com";
+      req.matrix.tlsMode = "auto";
+
+      const result = await provisioner.provision(req);
+      expect(result.accessMode).toBe("relay");
+      expect(result.passthrough).toBe(true);
+
+      const composeText = await readFile(result.composeFilePath, "utf8");
+      const caddyText = await readFile(
+        join(result.projectDir, "reverse-proxy", "Caddyfile"),
+        "utf8",
+      );
+      const envText = await readFile(join(result.projectDir, ".env"), "utf8");
+
+      // The node terminates its own TLS on the local TLS port, not the plaintext edge.
+      expect(composeText).toContain('"127.0.0.1:18443:443"');
+      expect(composeText).not.toContain('"127.0.0.1:18080:80"');
+      expect(composeText).not.toContain('"80:80"');
+      // Custom desec Caddy image + token wired via env (not inlined in compose).
+      expect(composeText).toContain("caddy-desec");
+      // The compose references the env var literally (compose interpolation),
+      // so the ${...} is intentional, not a JS template string.
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserting a literal compose env reference
+      expect(composeText).toContain("DESEC_TOKEN: ${DESEC_TOKEN}");
+      expect(envText).toContain("DESEC_TOKEN=desec-secret-token");
+
+      // Caddyfile: real HTTPS site with deSEC DNS-01, NO plaintext :80, shared handlers.
+      expect(caddyText).toContain("https://node-abc.relay.example.com {");
+      expect(caddyText).toContain("dns desec {env.DESEC_TOKEN}");
+      expect(caddyText).toContain("email ops@example.com");
+      expect(caddyText).toContain("reverse_proxy synapse:8008");
+      expect(caddyText).toContain("@onboardApi path /onboard/api /onboard/api/*");
+      expect(caddyText).not.toContain(":80 {");
+      expect(caddyText).not.toContain("tls internal");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("bootstraps operator/bot accounts, creates the alert room, and rewrites onboarding for HTTPS mode", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-test-"));
     const recordedExecCalls: ExecInput[] = [];

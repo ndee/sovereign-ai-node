@@ -13,13 +13,23 @@ import type { SovereignTemplateKind } from "./service.js";
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
+export type RelayDns01Config = {
+  provider: "desec";
+  apiBase: string;
+  zone: string;
+  subname: string;
+  acmeEmail?: string;
+  /** Reference (file:/env: form) to the per-node scoped deSEC token secret. */
+  tokenSecretRef: string;
+};
+
 export type RelayTunnelConfig = {
   serverAddr: string;
   serverPort: number;
   token: string;
   proxyName: string;
   subdomain?: string;
-  type: "http";
+  type: "http" | "https";
   localIp: string;
   localPort: number;
 };
@@ -38,10 +48,13 @@ export type RelayRuntimeConfig = {
     tokenSecretRef: string;
     proxyName: string;
     subdomain?: string;
-    type: "http";
+    type: "http" | "https";
     localIp: string;
     localPort: number;
   };
+  // Present only in TLS-passthrough mode: the node terminates its own TLS via
+  // deSEC DNS-01 and frps forwards the encrypted stream by SNI.
+  dns01?: RelayDns01Config;
 };
 
 export type CompiledHostResourceCheck =
@@ -399,7 +412,42 @@ export const DEFAULT_SERVICE_GROUP = "sovereign-node";
 export const RELAY_TUNNEL_SYSTEMD_UNIT = "sovereign-matrix-relay-tunnel.service";
 export const RELAY_TUNNEL_DEFAULT_IMAGE = "ghcr.io/fatedier/frpc:v0.61.1";
 export const RELAY_LOCAL_EDGE_PORT = 18080;
+// Local port the node's own TLS-terminating Caddy listens on in relay
+// passthrough mode (the frpc https proxy forwards the encrypted stream here).
+export const RELAY_LOCAL_TLS_PORT = 18443;
 export const RESERVED_AGENT_IDS = new Set<string>();
+
+// Parse a persisted relay dns01 block (TLS-passthrough mode). Requires the
+// deSEC provider + a token secret reference; returns undefined for legacy
+// (http) configs that have no dns01 block.
+const parseRelayDns01 = (value: unknown): RelayDns01Config | undefined => {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  if (value.provider !== "desec") {
+    return undefined;
+  }
+  if (typeof value.apiBase !== "string" || value.apiBase.length === 0) {
+    return undefined;
+  }
+  if (typeof value.zone !== "string" || value.zone.length === 0) {
+    return undefined;
+  }
+  if (typeof value.tokenSecretRef !== "string" || value.tokenSecretRef.length === 0) {
+    return undefined;
+  }
+  return {
+    provider: "desec",
+    apiBase: value.apiBase,
+    zone: value.zone,
+    subname: typeof value.subname === "string" ? value.subname : "",
+    ...(typeof value.acmeEmail === "string" && value.acmeEmail.length > 0
+      ? { acmeEmail: value.acmeEmail }
+      : {}),
+    tokenSecretRef: value.tokenSecretRef,
+  };
+};
+
 const now = () => new Date().toISOString();
 
 const defaultFetch: FetchLike = (input, init) => globalThis.fetch(input, init);
@@ -1038,6 +1086,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
     typeof imap.secretRef === "string" &&
     imap.secretRef.length > 0;
   const relayTunnel = isRecord(relay.tunnel) ? relay.tunnel : {};
+  const relayDns01 = parseRelayDns01(relay.dns01);
   const accessMode = matrix.accessMode === "relay" || relay.enabled === true ? "relay" : "direct";
   const relayConfig =
     relay.enabled === true &&
@@ -1075,7 +1124,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
             ...(typeof relayTunnel.subdomain === "string" && relayTunnel.subdomain.length > 0
               ? { subdomain: relayTunnel.subdomain }
               : {}),
-            type: "http" as const,
+            type: relayTunnel.type === "https" ? ("https" as const) : ("http" as const),
             localIp:
               typeof relayTunnel.localIp === "string" && relayTunnel.localIp.length > 0
                 ? relayTunnel.localIp
@@ -1083,8 +1132,11 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
             localPort:
               typeof relayTunnel.localPort === "number" && Number.isFinite(relayTunnel.localPort)
                 ? Math.trunc(relayTunnel.localPort)
-                : RELAY_LOCAL_EDGE_PORT,
+                : relayTunnel.type === "https"
+                  ? RELAY_LOCAL_TLS_PORT
+                  : RELAY_LOCAL_EDGE_PORT,
           },
+          ...(relayDns01 === undefined ? {} : { dns01: relayDns01 }),
         }
       : undefined;
 
