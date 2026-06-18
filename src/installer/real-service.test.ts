@@ -1085,6 +1085,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: false,
           tlsMode: "auto",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -1239,6 +1240,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: false,
           tlsMode: "auto",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -1395,6 +1397,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: false,
           tlsMode: "auto",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -2079,6 +2082,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: false,
           tlsMode: "local-dev",
+          passthrough: false,
         };
       },
       bootstrapAccounts: async () => {
@@ -2233,6 +2237,7 @@ describe("RealInstallerService", () => {
             adminBaseUrl: "http://127.0.0.1:8008",
             federationEnabled: req.matrix.federationEnabled ?? false,
             tlsMode: "local-dev",
+            passthrough: false,
           };
         },
         bootstrapAccounts: async () => {
@@ -2386,6 +2391,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -2722,6 +2728,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -3020,6 +3027,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -3182,6 +3190,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -3377,6 +3386,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -3527,6 +3537,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -3717,6 +3728,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -4020,6 +4032,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -4741,6 +4754,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -6528,6 +6542,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => {
           const operatorPasswordPath = join(paths.secretsDir, "matrix-operator.password");
@@ -10103,6 +10118,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -10346,6 +10362,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async (_req, _provision, options) => {
           bootstrapBotLocalpart = options?.botLocalpart ?? "service-bot";

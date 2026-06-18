@@ -108,6 +108,21 @@ export const relayTunnelInputSchema = z.object({
   token: z.string().min(1),
   proxyName: z.string().min(1),
   subdomain: z.string().min(1).optional(),
+  // frpc proxy type: "http" (relay terminates TLS) or "https" (relay passes the
+  // encrypted stream through by SNI; the node terminates its own TLS).
+  type: z.enum(["http", "https"]).optional(),
+});
+
+// DNS-01 material for relay TLS passthrough: the node obtains its own
+// Let's Encrypt cert via deSEC and terminates TLS itself. `token` is the
+// per-node scoped deSEC secret, present only on first mint or rotation.
+export const relayDns01InputSchema = z.object({
+  provider: z.literal("desec"),
+  apiBase: z.string().min(1),
+  zone: z.string().min(1),
+  subname: z.string(),
+  acmeEmail: z.string().min(1).optional(),
+  token: z.string().min(1).optional(),
 });
 
 export const relayInstallInputSchema = z.object({
@@ -118,6 +133,7 @@ export const relayInstallInputSchema = z.object({
   hostname: z.string().min(1).optional(),
   publicBaseUrl: z.string().min(1).optional(),
   tunnel: relayTunnelInputSchema.optional(),
+  dns01: relayDns01InputSchema.optional(),
 });
 
 export const matrixInstallInputSchema = z.object({
@@ -438,6 +454,7 @@ export const startInstallResultSchema = z.object({
 export type JobStepId = z.infer<typeof jobStepIdSchema>;
 export type JobStep = z.infer<typeof jobStepSchema>;
 export type InstallRequest = z.infer<typeof installRequestSchema>;
+export type RelayDns01Input = z.infer<typeof relayDns01InputSchema>;
 export type PreflightResult = z.infer<typeof preflightResultSchema>;
 export type InstallJobSummary = z.infer<typeof installJobSummarySchema>;
 export type InstallResult = z.infer<typeof installResultSchema>;

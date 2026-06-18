@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import type { SovereignPaths } from "../config/paths.js";
 import type { TestMatrixRequest } from "../contracts/api.js";
 import type { CheckResult } from "../contracts/common.js";
-import type { InstallRequest, TestMatrixResult } from "../contracts/index.js";
+import type { InstallRequest, RelayDns01Input, TestMatrixResult } from "../contracts/index.js";
 import type { Logger } from "../logging/logger.js";
 import type { ExecResult, ExecRunner } from "./exec.js";
 import { detectLanIPv4 } from "./lan-ips.js";
@@ -36,8 +36,15 @@ const MATRIX_COMPOSE_COMMAND_TIMEOUT_MS = resolveDurationFromEnv(
 );
 const DEFAULT_SYNAPSE_IMAGE = "matrixdotorg/synapse:v1.125.0";
 const DEFAULT_CADDY_IMAGE = "caddy:2.10.2-alpine";
+// Custom Caddy image built with the deSEC DNS-01 plugin (xcaddy). Used ONLY in
+// relay TLS-passthrough mode, where the node terminates its own TLS via
+// DNS-01. Published separately (see deploy/caddy-desec/Dockerfile); overridable
+// via SOVEREIGN_MATRIX_CADDY_DESEC_IMAGE.
+const DEFAULT_CADDY_DESEC_IMAGE = "ghcr.io/ndee/sovereign-caddy-desec:2.10.2";
 const DEFAULT_ONBOARDING_API_IMAGE = "node:22-alpine";
 const RELAY_LOCAL_EDGE_PORT = 18080;
+// Local port the node's own TLS-terminating Caddy listens on in passthrough mode.
+const RELAY_LOCAL_TLS_PORT = 18443;
 const MATRIX_ONBOARDING_DIR = "onboarding";
 const MATRIX_ONBOARDING_STATE_FILE = "state.json";
 const MATRIX_ONBOARDING_API_PORT = 8090;
@@ -59,7 +66,10 @@ type ComposeServiceState = {
 
 type BundledMatrixTlsMode = "auto" | "internal" | "local-dev";
 type BundledMatrixAccessMode = "direct" | "relay";
-type BundledMatrixOnboardingMode = Exclude<BundledMatrixTlsMode, "local-dev"> | "relay";
+type BundledMatrixOnboardingMode =
+  | Exclude<BundledMatrixTlsMode, "local-dev">
+  | "relay"
+  | "relay-passthrough";
 type RequestedBundledMatrixTlsMode = BundledMatrixTlsMode | "manual";
 
 export type BundledMatrixProvisionResult = {
@@ -71,6 +81,9 @@ export type BundledMatrixProvisionResult = {
   adminBaseUrl: string;
   federationEnabled: boolean;
   tlsMode: BundledMatrixTlsMode;
+  // Relay TLS-passthrough: the node terminates its own TLS (deSEC DNS-01) and
+  // the relay forwards the encrypted stream by SNI. false for all legacy modes.
+  passthrough: boolean;
 };
 
 type MatrixBootstrapAccount = {
@@ -166,6 +179,10 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     const requestedTlsMode: RequestedBundledMatrixTlsMode = req.matrix.tlsMode ?? "auto";
     const tlsMode = normalizeBundledTlsMode(accessMode, requestedTlsMode);
     const usesReverseProxy = shouldUseReverseProxy(accessMode, tlsMode);
+    // TLS passthrough activates only when the relay enrolled this node with a
+    // dns01 block. Otherwise every relay/direct path is byte-for-byte unchanged.
+    const dns01 = accessMode === "relay" ? req.relay?.dns01 : undefined;
+    const passthrough = dns01 !== undefined;
 
     const homeserverDomain = req.matrix.homeserverDomain;
     const publicBaseUrl = normalizePublicBaseUrl(req.matrix.publicBaseUrl);
@@ -262,12 +279,13 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
 
     const composeYaml = renderComposeYaml({
       synapseImage: resolveSynapseImage(),
-      caddyImage: DEFAULT_CADDY_IMAGE,
+      caddyImage: passthrough ? resolveCaddyDesecImage() : DEFAULT_CADDY_IMAGE,
       onboardingApiImage: DEFAULT_ONBOARDING_API_IMAGE,
       appDistDir: resolveOnboardingApiDistDir(),
       secretsDir: this.paths.secretsDir,
       accessMode,
       tlsMode,
+      passthrough,
       localSynapsePortBinding: usesReverseProxy
         ? "127.0.0.1:8008:8008"
         : resolveLocalDevSynapsePortBinding(publicBaseUrl),
@@ -275,7 +293,11 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         ? { httpsProxyPortBinding: resolveAutoHttpsProxyPortBinding(publicBaseUrl) }
         : {}),
       ...(accessMode === "relay"
-        ? { relayEdgePortBinding: `127.0.0.1:${RELAY_LOCAL_EDGE_PORT}:80` }
+        ? {
+            relayEdgePortBinding: passthrough
+              ? `127.0.0.1:${RELAY_LOCAL_TLS_PORT}:443`
+              : `127.0.0.1:${RELAY_LOCAL_EDGE_PORT}:80`,
+          }
         : {}),
     });
     const envFile = renderEnvFile({
@@ -284,6 +306,9 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       federationEnabled,
       postgresPassword: generated.postgresPassword,
       synapseConfigPath: "/data/homeserver.yaml",
+      ...(passthrough && dns01?.token !== undefined && dns01.token.length > 0
+        ? { desecToken: dns01.token }
+        : {}),
     });
     const homeserverYaml = renderSynapseConfig({
       homeserverDomain,
@@ -313,7 +338,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         homeserverDomain,
         publicBaseUrl,
       });
-      const onboardingMode = resolveOnboardingMode(accessMode, tlsMode);
+      const onboardingMode = resolveOnboardingMode(accessMode, tlsMode, passthrough);
       // For Local LAN (tls internal), include this host's LAN IPv4
       // addresses in the cert so operators can reach the homeserver via
       // https://<lan-ip>/ without needing DNS or /etc/hosts entries on
@@ -326,7 +351,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       writes.push(
         writeFile(
           join(proxyDir, "Caddyfile"),
-          `${renderCaddyfile(new URL(publicBaseUrl).hostname, onboardingMode, lanIPv4)}\n`,
+          `${renderCaddyfile(new URL(publicBaseUrl).hostname, onboardingMode, lanIPv4, dns01)}\n`,
           "utf8",
         ),
         writeFile(
@@ -358,7 +383,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         projectDir,
         publicBaseUrl,
         homeserverDomain,
-        tlsMode: resolveOnboardingMode(accessMode, tlsMode),
+        tlsMode: resolveOnboardingMode(accessMode, tlsMode, passthrough),
         ...(req.matrix.alertRoomName?.trim()
           ? { alertRoomName: req.matrix.alertRoomName.trim() }
           : {}),
@@ -415,6 +440,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       adminBaseUrl: MATRIX_INTERNAL_BASE_URL,
       federationEnabled,
       tlsMode,
+      passthrough,
     };
   }
 
@@ -707,7 +733,11 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
             projectDir: provision.projectDir,
             publicBaseUrl: provision.publicBaseUrl,
             homeserverDomain: provision.homeserverDomain,
-            tlsMode: resolveOnboardingMode(provision.accessMode, provision.tlsMode),
+            tlsMode: resolveOnboardingMode(
+              provision.accessMode,
+              provision.tlsMode,
+              provision.passthrough,
+            ),
             alertRoomName: previousRoom.roomName,
             alertRoomId: previousRoom.roomId,
           });
@@ -786,7 +816,11 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         projectDir: provision.projectDir,
         publicBaseUrl: provision.publicBaseUrl,
         homeserverDomain: provision.homeserverDomain,
-        tlsMode: resolveOnboardingMode(provision.accessMode, provision.tlsMode),
+        tlsMode: resolveOnboardingMode(
+          provision.accessMode,
+          provision.tlsMode,
+          provision.passthrough,
+        ),
         alertRoomName: roomName,
         alertRoomId: roomId,
       });
@@ -2220,7 +2254,10 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     const onboardingPage = renderOnboardingPage({
       publicBaseUrl: input.publicBaseUrl,
       homeserverDomain: input.homeserverDomain,
-      tlsMode: input.tlsMode,
+      // The onboarding page is identical for relay and relay-passthrough (same
+      // Element links, no local-CA section); the page renderer only models
+      // "auto" | "internal" | "relay", so collapse passthrough to "relay".
+      tlsMode: input.tlsMode === "relay-passthrough" ? "relay" : input.tlsMode,
       onboardingPageUrl,
       onboardingQrSvg,
       ...(input.alertRoomName === undefined ? {} : { alertRoomName: input.alertRoomName }),
@@ -2240,6 +2277,9 @@ type EnvTemplateInput = {
   federationEnabled: boolean;
   postgresPassword: string;
   synapseConfigPath: string;
+  // Per-node scoped deSEC token, injected into the reverse-proxy container for
+  // the Caddy DNS-01 challenge. Present only in relay TLS-passthrough mode.
+  desecToken?: string;
 };
 
 type ComposeTemplateInput = {
@@ -2250,6 +2290,7 @@ type ComposeTemplateInput = {
   secretsDir: string;
   accessMode: BundledMatrixAccessMode;
   tlsMode: BundledMatrixTlsMode;
+  passthrough?: boolean;
   localSynapsePortBinding: string;
   httpsProxyPortBinding?: string;
   relayEdgePortBinding?: string;
@@ -2313,7 +2354,13 @@ ${
     restart: unless-stopped
     depends_on:
       - synapse
-      - onboarding-api
+      - onboarding-api${
+        input.passthrough === true
+          ? `
+    environment:
+      DESEC_TOKEN: \${DESEC_TOKEN}`
+          : ""
+      }
     ports:
 ${
   input.accessMode === "relay"
@@ -2336,6 +2383,7 @@ const renderEnvFile = (input: EnvTemplateInput): string =>
     `MATRIX_HOMESERVER_DOMAIN=${input.homeserverDomain}`,
     `MATRIX_PUBLIC_BASE_URL=${input.publicBaseUrl}`,
     `MATRIX_FEDERATION_ENABLED=${input.federationEnabled ? "true" : "false"}`,
+    ...(input.desecToken !== undefined ? [`DESEC_TOKEN=${input.desecToken}`] : []),
   ].join("\n");
 
 type SynapseConfigInput = {
@@ -2421,6 +2469,14 @@ const resolveSynapseImage = (): string => {
   return DEFAULT_SYNAPSE_IMAGE;
 };
 
+const resolveCaddyDesecImage = (): string => {
+  const configured = process.env.SOVEREIGN_MATRIX_CADDY_DESEC_IMAGE?.trim();
+  if (configured !== undefined && configured.length > 0) {
+    return configured;
+  }
+  return DEFAULT_CADDY_DESEC_IMAGE;
+};
+
 const resolveOnboardingApiDistDir = (): string => {
   const configured = process.env.SOVEREIGN_NODE_APP_DIR?.trim();
   if (configured !== undefined && configured.length > 0) {
@@ -2470,9 +2526,10 @@ const shouldUseReverseProxy = (
 const resolveOnboardingMode = (
   accessMode: BundledMatrixAccessMode,
   tlsMode: BundledMatrixTlsMode,
+  passthrough = false,
 ): BundledMatrixOnboardingMode => {
   if (accessMode === "relay") {
-    return "relay";
+    return passthrough ? "relay-passthrough" : "relay";
   }
   if (tlsMode === "local-dev") {
     throw new Error("Onboarding mode is unavailable when tlsMode=local-dev");
@@ -2585,6 +2642,7 @@ const renderCaddyfile = (
   siteHostname: string,
   tlsMode: BundledMatrixOnboardingMode,
   extraSiteNames: ReadonlyArray<string> = [],
+  dns01?: RelayDns01Input,
 ): string => {
   // For Local LAN (tls internal), include the LAN IPs as additional site
   // names so Caddy issues a single internal cert that's valid for both
@@ -2595,15 +2653,27 @@ const renderCaddyfile = (
   const allNames = [siteHostname, ...additionalNames]
     .map((name) => name.trim())
     .filter((name) => name.length > 0);
-  const siteDirective = tlsMode === "relay" ? ":80" : allNames.join(", ");
+  const passthrough = tlsMode === "relay-passthrough";
+  // relay-passthrough: the node terminates its OWN TLS (deSEC DNS-01) and
+  // serves HTTPS only — never plaintext :80. Legacy relay stays :80 (relay
+  // terminates). Other modes terminate on the named host(s).
+  const siteDirective = passthrough
+    ? `https://${siteHostname}`
+    : tlsMode === "relay"
+      ? ":80"
+      : allNames.join(", ");
   return [
     "{",
     "  admin off",
+    ...(passthrough && dns01?.acmeEmail !== undefined ? [`  email ${dns01.acmeEmail}`] : []),
     ...(tlsMode === "internal" ? [`  default_sni ${siteHostname}`] : []),
     "}",
     "",
     `${siteDirective} {`,
     ...(tlsMode === "internal" ? ["  tls internal"] : []),
+    // deSEC DNS-01: the token is provided to the container via the DESEC_TOKEN
+    // env var (from the compose .env, 0600) and never written into this file.
+    ...(passthrough ? ["  tls {", "    dns desec {env.DESEC_TOKEN}", "  }"] : []),
     "  @wellKnown path /.well-known/matrix/client /.well-known/matrix/server",
     "  handle @wellKnown {",
     "    root * /srv",
