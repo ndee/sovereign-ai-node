@@ -1,0 +1,93 @@
+name: Caddy deSEC Image
+
+# Builds and publishes the custom Caddy image bundling the caddy-dns/desec
+# plugin (deploy/caddy-desec/Dockerfile). Nodes running in relay TLS-passthrough
+# mode pull this image to terminate their own TLS via the DNS-01 challenge.
+#
+# Published to ghcr.io/ndee/sovereign-caddy-desec. Reference it from a node via
+# SOVEREIGN_MATRIX_CADDY_DESEC_IMAGE (or update DEFAULT_CADDY_DESEC_IMAGE in
+# src/system/matrix.ts) — pin by digest for reproducibility.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "deploy/caddy-desec/**"
+      - ".github/workflows/caddy-desec-image.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "deploy/caddy-desec/**"
+      - ".github/workflows/caddy-desec-image.yml"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to publish (e.g. 2.10.2). Defaults to the Caddy version in the Dockerfile."
+        required: false
+        type: string
+
+concurrency:
+  group: caddy-desec-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/sovereign-caddy-desec
+
+jobs:
+  build:
+    name: Build${{ github.event_name != 'pull_request' && ' and Publish' || '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive Caddy version tag from Dockerfile
+        id: ver
+        run: |
+          # The runtime stage pins `FROM caddy:<version>-alpine`; use that as the
+          # image tag unless a manual workflow_dispatch tag was supplied.
+          dockerfile=deploy/caddy-desec/Dockerfile
+          caddy_version=$(grep -oE 'FROM caddy:[0-9]+\.[0-9]+\.[0-9]+-alpine' "$dockerfile" \
+            | head -1 | sed -E 's#FROM caddy:([0-9.]+)-alpine#\1#')
+          tag="${{ inputs.tag }}"
+          if [ -z "$tag" ]; then tag="$caddy_version"; fi
+          if [ -z "$tag" ]; then
+            echo "Could not determine image tag from Dockerfile" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Image tag: $tag"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        # Only authenticate on non-PR runs; PRs from forks cannot push and must
+        # not receive registry credentials.
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build (and push on non-PR)
+        uses: docker/build-push-action@v6
+        with:
+          context: deploy/caddy-desec
+          file: deploy/caddy-desec/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.ver.outputs.tag }}
+            ${{ env.IMAGE }}:latest
+          # PR builds verify the Dockerfile still builds (xcaddy + plugin) without
+          # publishing; main/dispatch builds publish the tagged + latest images.
+          provenance: false
+
+      - name: Report published digest
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "Published ${{ env.IMAGE }}:${{ steps.ver.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Pin nodes to a digest with: docker buildx imagetools inspect ${{ env.IMAGE }}:${{ steps.ver.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
