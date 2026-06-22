@@ -6353,7 +6353,25 @@ export default function (api) {
     runtimeConfig: RuntimeConfig,
   ): Promise<{ ok: boolean; message?: string }> {
     const relay = runtimeConfig.relay;
-    if (relay?.dns01 === undefined) {
+    if (relay === undefined) {
+      return { ok: true };
+    }
+    // Fail closed on a silent passthrough downgrade. A node whose tunnel is
+    // https-passthrough (tunnel.type === "https") MUST be terminating its own
+    // TLS via a dns01-backed Caddy. If the dns01 block went missing while the
+    // tunnel still advertises https — the re-enroll/upgrade reuse-path bug — the
+    // render fell back to plaintext but the tunnel still forwards encrypted
+    // bytes. Do NOT skip the probe in that case: report the mismatch so the
+    // install/upgrade fails instead of silently serving plaintext.
+    if (relay.dns01 === undefined) {
+      if (relay.tunnel.type === "https") {
+        return {
+          ok: false,
+          message:
+            "relay tunnel is https-passthrough but the persisted relay config has no dns01 block; " +
+            "the node would serve plaintext instead of terminating its own TLS",
+        };
+      }
       return { ok: true };
     }
     const port = relay.tunnel.localPort;
@@ -7677,6 +7695,26 @@ export default function (api) {
 
     try {
       const token = await this.resolveSecretRef(runtimeConfig.relay.tunnel.tokenSecretRef);
+      // Reconstruct the dns01 block (TLS passthrough) from the persisted runtime
+      // config. The raw deSEC token is NOT persisted inline (only its
+      // tokenSecretRef is), so the reconstructed block omits `token`;
+      // buildRelayProvisionRequest resolves the concrete token from
+      // previousRuntimeConfig.relay.dns01.tokenSecretRef on this re-enroll path.
+      // Dropping dns01 here would collapse `passthrough` to false downstream and
+      // silently re-render the legacy plaintext Caddyfile on every upgrade.
+      const persistedDns01 = runtimeConfig.relay.dns01;
+      const dns01: RelayEnrollmentResult["dns01"] =
+        persistedDns01 === undefined
+          ? undefined
+          : {
+              provider: "desec",
+              apiBase: persistedDns01.apiBase,
+              zone: persistedDns01.zone,
+              subname: persistedDns01.subname,
+              ...(persistedDns01.acmeEmail === undefined
+                ? {}
+                : { acmeEmail: persistedDns01.acmeEmail }),
+            };
       return {
         controlUrl: runtimeConfig.relay.controlUrl,
         hostname: runtimeConfig.relay.hostname,
@@ -7693,6 +7731,7 @@ export default function (api) {
           localIp: runtimeConfig.relay.tunnel.localIp,
           localPort: runtimeConfig.relay.tunnel.localPort,
         },
+        ...(dns01 === undefined ? {} : { dns01 }),
       };
     } catch (error) {
       this.logger.warn(
@@ -8745,7 +8784,15 @@ export default function (api) {
       // Fail closed in TLS-passthrough mode: the node must have obtained its own
       // certificate and be terminating HTTPS on the local TLS port. If not, we
       // do NOT silently serve plaintext — the install/upgrade fails and alerts.
-      if (matrixProvision.passthrough) {
+      //
+      // Gate on EITHER the freshly-computed provision flag OR the persisted
+      // tunnel type. The latter guards the re-enroll/upgrade downgrade path: if
+      // the reuse step dropped dns01 and `passthrough` collapsed to false, the
+      // render would fall back to plaintext while the relay tunnel still expects
+      // https. The persisted tunnel.type === "https" forces the probe to run,
+      // and probeRelayPassthroughTls then fails closed on the mismatch.
+      const persistedTunnelIsHttps = runtimeConfig.relay?.tunnel.type === "https";
+      if (matrixProvision.passthrough || persistedTunnelIsHttps) {
         const tls = await this.probeRelayPassthroughTls(runtimeConfig);
         if (!tls.ok) {
           throw {
