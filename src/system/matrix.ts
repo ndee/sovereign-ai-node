@@ -2673,7 +2673,18 @@ const renderCaddyfile = (
     ...(tlsMode === "internal" ? ["  tls internal"] : []),
     // deSEC DNS-01: the token is provided to the container via the DESEC_TOKEN
     // env var (from the compose .env, 0600) and never written into this file.
-    ...(passthrough ? ["  tls {", "    dns desec {env.DESEC_TOKEN}", "  }"] : []),
+    ...(passthrough
+      ? [
+          "  tls {",
+          "    dns desec {",
+          "      token {env.DESEC_TOKEN}",
+          "    }",
+          "    propagation_delay 150s",
+          "    propagation_timeout 600s",
+          "    resolvers 1.1.1.1 8.8.8.8",
+          "  }",
+        ]
+      : []),
     "  @wellKnown path /.well-known/matrix/client /.well-known/matrix/server",
     "  handle @wellKnown {",
     "    root * /srv",
