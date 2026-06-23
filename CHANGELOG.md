@@ -11,7 +11,18 @@ by the `.github/workflows/release.yml` workflow.
 
 ## [Unreleased]
 
-- Document the relay TLS-passthrough vs. legacy-http enrollment story in `docs/INSTALLER_CONTRACTS.md`, and bring the documented `InstallRequest.relay` schema in line with the real contract (`tunnel.type`, `relay.dns01`). The relay tunnel mode is decided by the relay at enrollment time, not by the node version: the installer advertises `capabilities: ["tls-passthrough"]`, but the relay only grants passthrough when it has a deSEC owner token; otherwise the node enrolls in legacy http. The kill switch for passthrough is therefore the relay's deSEC token, and mode changes apply per node on its next enroll/re-enroll — an already-installed node does not flip mode just because a newer node version exists. This corrects any impression that "existing/older nodes are legacy until re-installed": node version does not gate the mode.
+## [2.3.0] - 2026-06-24
+
+Minor release introducing **node-side TLS passthrough**: a node can terminate its own TLS (Let's Encrypt via deSEC DNS-01) so the managed relay forwards only ciphertext and can no longer read node traffic. Passthrough stays dormant until the relay grants it (the relay's deSEC owner token is the kill switch); without it, nodes continue to enroll in legacy `http` mode where the relay terminates TLS. Mode is decided per node at enroll/re-enroll time, not by node version.
+
+- **Node-side TLS passthrough.** When the relay returns a `dns01` block at enrollment, the node builds a Caddy image carrying the `caddy-dns/desec` plugin, obtains its own certificate via deSEC DNS-01, and registers a `type=https` SNI-passthrough proxy on the relay. The installer advertises `capabilities: ["tls-passthrough"]`; the relay only honors it when it holds a deSEC owner token. ([#194](https://github.com/ndee/sovereign-ai-node/pull/194))
+- CI builds and publishes the `sovereign-caddy-desec` image (the passthrough Caddy build with the deSEC DNS-01 provider). ([#195](https://github.com/ndee/sovereign-ai-node/pull/195))
+- Fix passthrough Caddy config: emit the **block form** of the deSEC `tls` directive (`tls { dns desec { token … } }`) and add DNS-01 `propagation_delay`/`propagation_timeout`/`resolvers`. The previous inline form was rejected by the caddy-dns/desec plugin (crash-looping config adaptation), and the missing propagation settings raced deSEC's TTL so the certificate never issued in the smoke window. ([#196](https://github.com/ndee/sovereign-ai-node/pull/196))
+- Fix relay **re-enroll/upgrade** dropping the `dns01` block: an already-enrolled passthrough node no longer silently re-renders to a legacy plaintext `:80` site on re-install. The reuse path now preserves `dns01`, and the post-install probe fails **closed** on a passthrough→legacy downgrade instead of skipping. ([#197](https://github.com/ndee/sovereign-ai-node/pull/197))
+- Document the relay TLS-passthrough vs. legacy-http enrollment story in `docs/INSTALLER_CONTRACTS.md`, and align the documented `InstallRequest.relay` schema with the real contract (`tunnel.type`, `relay.dns01`). Mode is gated by the relay's deSEC token and applied per node on enroll/re-enroll — node version does not gate the mode. ([#198](https://github.com/ndee/sovereign-ai-node/pull/198))
+- Widen the passthrough install smoke-check window to account for DNS-01 propagation, so a node that correctly obtains its certificate after deSEC propagation no longer fails with a spurious `SMOKE_CHECKS_FAILED`. Fail-closed semantics are unchanged. ([#199](https://github.com/ndee/sovereign-ai-node/pull/199))
+
+See the [v2.3.0 GitHub Release](https://github.com/ndee/sovereign-ai-node/releases/tag/v2.3.0) for the full commit list.
 
 ## [2.2.3] - 2026-06-12
 
