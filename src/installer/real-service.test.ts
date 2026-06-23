@@ -12626,6 +12626,63 @@ describe("probeRelayPassthroughTls (fail-closed gating)", () => {
       await rm(tempRoot, { recursive: true, force: true });
     }
   });
+
+  it("fails closed after exhausting the smoke window when no certificate ever appears", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-probe-test-"));
+    // Bind then immediately release a port so the probe target refuses every
+    // connection (no TLS listener -> no cert is ever presented). This is the
+    // "cert never materialised" case: the loop must exhaust its attempts and
+    // STILL fail closed (ok:false) rather than passing.
+    const refusedPort = await new Promise<number>((resolve) => {
+      const probe = createTlsServer({}, () => {});
+      probe.listen(0, "127.0.0.1", () => {
+        const { port } = probe.address() as AddressInfo;
+        probe.close(() => resolve(port));
+      });
+    });
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      // Shrink the poll cadence so the loop-exhaustion path runs fast in tests;
+      // this only changes timing, not the fail-closed semantics under test.
+      (
+        service as unknown as {
+          relayPassthroughTlsProbeIntervalMs: number;
+          relayPassthroughTlsProbeAttempts: number;
+        }
+      ).relayPassthroughTlsProbeIntervalMs = 1;
+      (
+        service as unknown as {
+          relayPassthroughTlsProbeIntervalMs: number;
+          relayPassthroughTlsProbeAttempts: number;
+        }
+      ).relayPassthroughTlsProbeAttempts = 2;
+      const result = await invoke(
+        service,
+        relayConfig({ tunnelType: "https", dns01: true, localPort: refusedPort }),
+      );
+      expect(result.ok).toBe(false);
+      expect(result.message).toBeDefined();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("sizes the default smoke window to outlast the DNS-01 propagation delay", () => {
+    // Regression guard for the false-negative-install finding: the cert cannot
+    // exist until Caddy has waited out propagation_delay (150s), so the smoke
+    // window must comfortably exceed that. Assert the derived defaults cover at
+    // least propagation_delay with headroom, so a future edit can't silently
+    // shrink the window back below propagation and reintroduce the bug.
+    const service = buildService(buildPaths("/nonexistent"));
+    const defaults = service as unknown as {
+      relayPassthroughTlsProbeIntervalMs: number;
+      relayPassthroughTlsProbeAttempts: number;
+    };
+    const windowMs =
+      defaults.relayPassthroughTlsProbeAttempts * defaults.relayPassthroughTlsProbeIntervalMs;
+    // propagation_delay is 150s; require the window to exceed it with margin.
+    expect(windowMs).toBeGreaterThan(150_000);
+  });
 });
 
 describe("runSmokeChecks relay passthrough gate", () => {
