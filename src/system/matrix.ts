@@ -45,6 +45,18 @@ const DEFAULT_ONBOARDING_API_IMAGE = "node:22-alpine";
 const RELAY_LOCAL_EDGE_PORT = 18080;
 // Local port the node's own TLS-terminating Caddy listens on in passthrough mode.
 const RELAY_LOCAL_TLS_PORT = 18443;
+// DNS-01 challenge timing for the node's own TLS-terminating Caddy in relay
+// TLS-passthrough mode. Exported so the post-install smoke check can size its
+// cert-poll window from the SAME numbers the Caddyfile is rendered with — the
+// two must never drift apart, or the smoke check would either give up before
+// the cert can exist (false-negative install) or wait longer than necessary.
+//
+// `propagation_delay` is how long Caddy waits after publishing the DNS-01 TXT
+// record before asking the ACME CA to validate it (gives the authoritative
+// nameserver time to serve the new record). `propagation_timeout` bounds how
+// long Caddy will keep polling for that record to propagate before failing.
+export const RELAY_PASSTHROUGH_DNS01_PROPAGATION_DELAY_SECONDS = 150;
+export const RELAY_PASSTHROUGH_DNS01_PROPAGATION_TIMEOUT_SECONDS = 600;
 const MATRIX_ONBOARDING_DIR = "onboarding";
 const MATRIX_ONBOARDING_STATE_FILE = "state.json";
 const MATRIX_ONBOARDING_API_PORT = 8090;
@@ -2679,8 +2691,8 @@ const renderCaddyfile = (
           "    dns desec {",
           "      token {env.DESEC_TOKEN}",
           "    }",
-          "    propagation_delay 150s",
-          "    propagation_timeout 600s",
+          `    propagation_delay ${RELAY_PASSTHROUGH_DNS01_PROPAGATION_DELAY_SECONDS}s`,
+          `    propagation_timeout ${RELAY_PASSTHROUGH_DNS01_PROPAGATION_TIMEOUT_SECONDS}s`,
           "    resolvers 1.1.1.1 8.8.8.8",
           "  }",
         ]
