@@ -103,6 +103,10 @@ import type {
   BundledMatrixRoomBootstrapResult,
 } from "../system/matrix.js";
 import {
+  RELAY_PASSTHROUGH_DNS01_PROPAGATION_DELAY_SECONDS,
+  RELAY_PASSTHROUGH_DNS01_PROPAGATION_TIMEOUT_SECONDS,
+} from "../system/matrix.js";
+import {
   FilesystemMatrixAvatarResolver,
   type MatrixAvatarResolver,
 } from "../system/matrix-avatars.js";
@@ -304,6 +308,34 @@ const DOCTOR_DISK_WARN_BYTES = 2 * 1024 * 1024 * 1024;
 const DOCTOR_DISK_FAIL_BYTES = 500 * 1024 * 1024;
 const LOBSTER_CLI_PROBE_TIMEOUT_MS = 20_000;
 const LOBSTER_CLI_INSTALL_TIMEOUT_MS = 5 * 60_000;
+// How often the passthrough TLS smoke check re-probes the local TLS port while
+// waiting for the node's own Caddy to obtain its DNS-01 certificate.
+const RELAY_PASSTHROUGH_TLS_PROBE_INTERVAL_MS = 5_000;
+// Total wall-clock budget for the passthrough TLS smoke check. In relay
+// TLS-passthrough mode the node terminates its own HTTPS via a DNS-01-backed
+// Caddy. Caddy intentionally waits `propagation_delay` (150s) after publishing
+// the DNS-01 TXT record before asking the ACME CA to validate it, and may keep
+// polling for propagation up to `propagation_timeout` (600s) before that. So
+// the certificate legitimately does NOT exist until ~propagation_delay plus
+// real propagation + ACME finalize have elapsed — well past the old ~20s poll
+// window, which declared SMOKE_CHECKS_FAILED on every passthrough install even
+// though the cert appeared seconds later.
+//
+// Size the smoke window from the SAME propagation constants the Caddyfile is
+// rendered with (imported, not re-hardcoded, so they can't drift) plus a small
+// finalize headroom. This only WIDENS the window; the fail-closed semantics are
+// unchanged — if no certificate is ever presented within the budget the install
+// still fails and the node never falls back to serving plaintext.
+const RELAY_PASSTHROUGH_TLS_FINALIZE_HEADROOM_MS = 60_000;
+const RELAY_PASSTHROUGH_TLS_SMOKE_WINDOW_MS =
+  (RELAY_PASSTHROUGH_DNS01_PROPAGATION_DELAY_SECONDS +
+    RELAY_PASSTHROUGH_DNS01_PROPAGATION_TIMEOUT_SECONDS) *
+    1_000 +
+  RELAY_PASSTHROUGH_TLS_FINALIZE_HEADROOM_MS;
+const RELAY_PASSTHROUGH_TLS_PROBE_ATTEMPTS = Math.max(
+  1,
+  Math.ceil(RELAY_PASSTHROUGH_TLS_SMOKE_WINDOW_MS / RELAY_PASSTHROUGH_TLS_PROBE_INTERVAL_MS),
+);
 const MAIL_SENTINEL_MIGRATION_ID = "mail-sentinel-instances";
 const MAIL_SENTINEL_IMAP_HOST_KEY = "imapHost";
 const MAIL_SENTINEL_IMAP_PORT_KEY = "imapPort";
@@ -365,6 +397,14 @@ export class RealInstallerService implements InstallerService {
   private readonly execRunner: ExecRunner | null;
 
   private readonly fetchImpl: FetchLike;
+
+  // Passthrough TLS smoke-check poll cadence. These default to the DNS-01-aware
+  // window derived from the Caddyfile propagation constants (so they never drift
+  // from the values the node is actually rendered with). They are instance
+  // fields rather than direct constant reads only so tests can shrink the cadence
+  // and exercise the loop-exhaustion (fail-closed) path without waiting minutes.
+  protected relayPassthroughTlsProbeIntervalMs = RELAY_PASSTHROUGH_TLS_PROBE_INTERVAL_MS;
+  protected relayPassthroughTlsProbeAttempts = RELAY_PASSTHROUGH_TLS_PROBE_ATTEMPTS;
 
   constructor(
     private readonly logger: Logger,
@@ -6377,7 +6417,13 @@ export default function (api) {
     const port = relay.tunnel.localPort;
     const servername = relay.hostname;
     let lastError = "no attempt";
-    for (let attempt = 1; attempt <= 10; attempt += 1) {
+    // Poll for the cert across the full DNS-01-aware smoke window. The cert
+    // cannot exist until Caddy has waited out `propagation_delay` and the ACME
+    // CA has finalized, so a short window would spuriously fail every install
+    // (see RELAY_PASSTHROUGH_TLS_SMOKE_WINDOW_MS). Still fail closed: if no cert
+    // is presented within the whole budget we return ok:false.
+    const totalAttempts = this.relayPassthroughTlsProbeAttempts;
+    for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
       const result = await new Promise<{ ok: boolean; message?: string }>((resolveProbe) => {
         const socket = tlsConnect(
           { host: "127.0.0.1", port, servername, rejectUnauthorized: false, timeout: 5000 },
@@ -6402,8 +6448,8 @@ export default function (api) {
         return result;
       }
       lastError = result.message ?? "unknown";
-      if (attempt < 10) {
-        await delay(2000);
+      if (attempt < totalAttempts) {
+        await delay(this.relayPassthroughTlsProbeIntervalMs);
       }
     }
     return { ok: false, message: lastError };
