@@ -708,7 +708,18 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
 
       // Caddyfile: real HTTPS site with deSEC DNS-01, NO plaintext :80, shared handlers.
       expect(caddyText).toContain("https://node-abc.relay.example.com {");
-      expect(caddyText).toContain("dns desec {env.DESEC_TOKEN}");
+      // deSEC DNS-01 must use the BLOCK form: caddy 2.10.2's desec module
+      // rejects the inline `dns desec {env.DESEC_TOKEN}` form during config
+      // adaptation. The token is passed via the nested `token` directive.
+      expect(caddyText).toContain("dns desec {");
+      expect(caddyText).toContain("token {env.DESEC_TOKEN}");
+      expect(caddyText).not.toContain("dns desec {env.DESEC_TOKEN}");
+      // deSEC enforces a 3600s minimum TTL; without a propagation delay LE
+      // validates before the TXT record is visible and negative-caches the
+      // NXDOMAIN, so the cert never issues within the smoke-check window.
+      expect(caddyText).toContain("propagation_delay 150s");
+      expect(caddyText).toContain("propagation_timeout 600s");
+      expect(caddyText).toContain("resolvers 1.1.1.1 8.8.8.8");
       expect(caddyText).toContain("email ops@example.com");
       expect(caddyText).toContain("reverse_proxy synapse:8008");
       expect(caddyText).toContain("@onboardApi path /onboard/api /onboard/api/*");
