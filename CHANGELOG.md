@@ -11,6 +11,8 @@ by the `.github/workflows/release.yml` workflow.
 
 ## [Unreleased]
 
+- Document the relay TLS-passthrough vs. legacy-http enrollment story in `docs/INSTALLER_CONTRACTS.md`, and bring the documented `InstallRequest.relay` schema in line with the real contract (`tunnel.type`, `relay.dns01`). The relay tunnel mode is decided by the relay at enrollment time, not by the node version: the installer advertises `capabilities: ["tls-passthrough"]`, but the relay only grants passthrough when it has a deSEC owner token; otherwise the node enrolls in legacy http. The kill switch for passthrough is therefore the relay's deSEC token, and mode changes apply per node on its next enroll/re-enroll — an already-installed node does not flip mode just because a newer node version exists. This corrects any impression that "existing/older nodes are legacy until re-installed": node version does not gate the mode.
+
 ## [2.2.3] - 2026-06-12
 
 Patch fixing a relay-mode install failure where the managed relay tunnel never starts.
