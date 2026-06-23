@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { createServer as createTlsServer } from "node:tls";
 
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -20,6 +22,7 @@ import type { ImapTester } from "../system/imap.js";
 import type { BundledMatrixProvisioner, BundledMatrixProvisionResult } from "../system/matrix.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
 import { RealInstallerService } from "./real-service.js";
+import type { RelayEnrollmentData } from "./real-service-relay-enrollment.js";
 import type { RuntimeConfig } from "./real-service-shared.js";
 import type { InstallerService } from "./service.js";
 
@@ -12176,5 +12179,677 @@ describe("ensureRelayTunnelService", () => {
         await rm(tempRoot, { recursive: true, force: true });
       }
     });
+  });
+});
+
+describe("tryReuseExistingRelayEnrollment", () => {
+  const buildPaths = (tempRoot: string): SovereignPaths => ({
+    configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+    secretsDir: join(tempRoot, "etc", "secrets"),
+    stateDir: join(tempRoot, "var", "lib"),
+    logsDir: join(tempRoot, "var", "log"),
+    installJobsDir: join(tempRoot, "install-jobs"),
+    openclawServiceHome: join(tempRoot, "openclaw-home"),
+    provenancePath: join(tempRoot, "install-provenance.json"),
+    backupsDir: join(tempRoot, "backups"),
+  });
+
+  const unusedDeps = {
+    openclawBootstrapper: {
+      detectInstalled: async () => null,
+      ensureInstalled: async () => ({
+        binaryPath: "/usr/local/bin/openclaw",
+        version: "test",
+        installMethod: "install_sh" as const,
+      }),
+    },
+    openclawGatewayServiceManager: {
+      install: async () => {},
+      start: async () => {},
+      restart: async () => {},
+    },
+    preflightChecker: {
+      run: async () => ({
+        mode: "bundled_matrix" as const,
+        overall: "pass" as const,
+        checks: [],
+        recommendedActions: [],
+      }),
+    },
+    imapTester: {
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+    matrixProvisioner: {
+      provision: async () => {
+        throw new Error("not used");
+      },
+      bootstrapAccounts: async () => {
+        throw new Error("not used");
+      },
+      bootstrapRoom: async () => {
+        throw new Error("not used");
+      },
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+    execRunner: {
+      run: async ({ command, args }: ExecInput) => ({
+        command: [command, ...(args ?? [])].join(" "),
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      }),
+    },
+  };
+
+  const buildService = (paths: SovereignPaths): RealInstallerService =>
+    new RealInstallerService(createLogger(), paths, {
+      ...unusedDeps,
+    } as ConstructorParameters<typeof RealInstallerService>[2]);
+
+  const stubRuntimeConfig = (
+    service: RealInstallerService,
+    runtimeConfig: RuntimeConfig | null,
+  ): void => {
+    (
+      service as unknown as { tryReadRuntimeConfig(): Promise<RuntimeConfig | null> }
+    ).tryReadRuntimeConfig = async () => runtimeConfig;
+  };
+
+  const stubSecret = (service: RealInstallerService, token: string): void => {
+    (service as unknown as { resolveSecretRef(ref: string): Promise<string> }).resolveSecretRef =
+      async () => token;
+  };
+
+  const invoke = (
+    service: RealInstallerService,
+    relay: NonNullable<InstallRequest["relay"]>,
+  ): Promise<RelayEnrollmentData | null> =>
+    (
+      service as unknown as {
+        tryReuseExistingRelayEnrollment(
+          relay: NonNullable<InstallRequest["relay"]>,
+        ): Promise<RelayEnrollmentData | null>;
+      }
+    ).tryReuseExistingRelayEnrollment(relay);
+
+  const passthroughRuntimeConfig = (): RuntimeConfig =>
+    ({
+      relay: {
+        enabled: true,
+        controlUrl: "https://relay.sovereign-ai-node.com",
+        hostname: "node.relay.sovereign-ai-node.com",
+        publicBaseUrl: "https://node.relay.sovereign-ai-node.com",
+        connected: false,
+        serviceName: "sovereign-matrix-relay-tunnel.service",
+        configPath: "/var/lib/relay/frpc.toml",
+        tunnel: {
+          serverAddr: "relay.sovereign-ai-node.com",
+          serverPort: 7000,
+          tokenSecretRef: "file:/tmp/relay-token",
+          proxyName: "relay-node",
+          type: "https",
+          localIp: "127.0.0.1",
+          localPort: 18443,
+        },
+        dns01: {
+          provider: "desec",
+          apiBase: "https://desec.io/api/v1",
+          zone: "relay.sovereign-ai-node.com",
+          subname: "_acme-challenge.node",
+          acmeEmail: "ops@example.org",
+          tokenSecretRef: "file:/tmp/relay-desec-token",
+        },
+      },
+    }) as unknown as RuntimeConfig;
+
+  it("preserves the persisted dns01 block on a TLS-passthrough re-enroll", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-reuse-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      stubRuntimeConfig(service, passthroughRuntimeConfig());
+      stubSecret(service, "reused-tunnel-token");
+
+      const reused = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      expect(reused).not.toBeNull();
+      // The whole point of the fix: dns01 survives reuse so `passthrough`
+      // stays true downstream and the node keeps rendering its TLS-terminating
+      // Caddyfile instead of silently downgrading to plaintext on upgrade.
+      expect(reused?.dns01).toEqual({
+        provider: "desec",
+        apiBase: "https://desec.io/api/v1",
+        zone: "relay.sovereign-ai-node.com",
+        subname: "_acme-challenge.node",
+        acmeEmail: "ops@example.org",
+      });
+      // The raw token is NOT persisted inline; the tunnel token is resolved
+      // from its secret ref. dns01's concrete token is resolved later, from
+      // the persisted dns01.tokenSecretRef, by buildRelayProvisionRequest.
+      expect(reused?.dns01?.token).toBeUndefined();
+      expect(reused?.tunnel.type).toBe("https");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves dns01 without acmeEmail when none was persisted", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-reuse-test-"));
+    try {
+      const runtimeConfig = passthroughRuntimeConfig();
+      const relay = runtimeConfig.relay as NonNullable<RuntimeConfig["relay"]>;
+      delete (relay.dns01 as { acmeEmail?: string }).acmeEmail;
+
+      const service = buildService(buildPaths(tempRoot));
+      stubRuntimeConfig(service, runtimeConfig);
+      stubSecret(service, "reused-tunnel-token");
+
+      const reused = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      expect(reused?.dns01).toEqual({
+        provider: "desec",
+        apiBase: "https://desec.io/api/v1",
+        zone: "relay.sovereign-ai-node.com",
+        subname: "_acme-challenge.node",
+      });
+      expect(reused?.dns01?.acmeEmail).toBeUndefined();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("omits dns01 (and acmeEmail) for a legacy http re-enroll", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-reuse-test-"));
+    try {
+      const runtimeConfig = passthroughRuntimeConfig();
+      const relay = runtimeConfig.relay as NonNullable<RuntimeConfig["relay"]>;
+      relay.tunnel.type = "http";
+      relay.tunnel.localPort = 18080;
+      delete (relay as { dns01?: unknown }).dns01;
+
+      const service = buildService(buildPaths(tempRoot));
+      stubRuntimeConfig(service, runtimeConfig);
+      stubSecret(service, "reused-tunnel-token");
+
+      const reused = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      expect(reused).not.toBeNull();
+      expect(reused?.dns01).toBeUndefined();
+      expect(reused?.tunnel.type).toBe("http");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null when no relay enrollment is persisted", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-reuse-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      stubRuntimeConfig(service, null);
+
+      const reused = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      expect(reused).toBeNull();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null when the persisted controlUrl differs from the request", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-reuse-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      stubRuntimeConfig(service, passthroughRuntimeConfig());
+
+      const reused = await invoke(service, {
+        controlUrl: "https://other-relay.example.org",
+      });
+
+      expect(reused).toBeNull();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null when the persisted tunnel secret cannot be resolved", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-reuse-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      stubRuntimeConfig(service, passthroughRuntimeConfig());
+      (service as unknown as { resolveSecretRef(ref: string): Promise<string> }).resolveSecretRef =
+        async () => {
+          throw new Error("secret missing");
+        };
+
+      const reused = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      expect(reused).toBeNull();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("probeRelayPassthroughTls (fail-closed gating)", () => {
+  const buildPaths = (tempRoot: string): SovereignPaths => ({
+    configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+    secretsDir: join(tempRoot, "etc", "secrets"),
+    stateDir: join(tempRoot, "var", "lib"),
+    logsDir: join(tempRoot, "var", "log"),
+    installJobsDir: join(tempRoot, "install-jobs"),
+    openclawServiceHome: join(tempRoot, "openclaw-home"),
+    provenancePath: join(tempRoot, "install-provenance.json"),
+    backupsDir: join(tempRoot, "backups"),
+  });
+
+  const unusedDeps = {
+    openclawBootstrapper: {
+      detectInstalled: async () => null,
+      ensureInstalled: async () => ({
+        binaryPath: "/usr/local/bin/openclaw",
+        version: "test",
+        installMethod: "install_sh" as const,
+      }),
+    },
+    openclawGatewayServiceManager: {
+      install: async () => {},
+      start: async () => {},
+      restart: async () => {},
+    },
+    preflightChecker: {
+      run: async () => ({
+        mode: "bundled_matrix" as const,
+        overall: "pass" as const,
+        checks: [],
+        recommendedActions: [],
+      }),
+    },
+    imapTester: {
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+    matrixProvisioner: {
+      provision: async () => {
+        throw new Error("not used");
+      },
+      bootstrapAccounts: async () => {
+        throw new Error("not used");
+      },
+      bootstrapRoom: async () => {
+        throw new Error("not used");
+      },
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+    execRunner: {
+      run: async ({ command, args }: ExecInput) => ({
+        command: [command, ...(args ?? [])].join(" "),
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      }),
+    },
+  };
+
+  const buildService = (paths: SovereignPaths): RealInstallerService =>
+    new RealInstallerService(createLogger(), paths, {
+      ...unusedDeps,
+    } as ConstructorParameters<typeof RealInstallerService>[2]);
+
+  const invoke = (
+    service: RealInstallerService,
+    runtimeConfig: RuntimeConfig,
+  ): Promise<{ ok: boolean; message?: string }> =>
+    (
+      service as unknown as {
+        probeRelayPassthroughTls(config: RuntimeConfig): Promise<{ ok: boolean; message?: string }>;
+      }
+    ).probeRelayPassthroughTls(runtimeConfig);
+
+  const relayConfig = (
+    overrides: { tunnelType?: "http" | "https"; dns01?: boolean; localPort?: number } = {},
+  ): RuntimeConfig =>
+    ({
+      relay: {
+        enabled: true,
+        controlUrl: "https://relay.sovereign-ai-node.com",
+        hostname: "node.relay.sovereign-ai-node.com",
+        publicBaseUrl: "https://node.relay.sovereign-ai-node.com",
+        connected: false,
+        serviceName: "sovereign-matrix-relay-tunnel.service",
+        configPath: "/var/lib/relay/frpc.toml",
+        tunnel: {
+          serverAddr: "relay.sovereign-ai-node.com",
+          serverPort: 7000,
+          tokenSecretRef: "file:/tmp/relay-token",
+          proxyName: "relay-node",
+          type: overrides.tunnelType ?? "http",
+          localIp: "127.0.0.1",
+          localPort: overrides.localPort ?? (overrides.tunnelType === "https" ? 18443 : 18080),
+        },
+        ...(overrides.dns01 === true
+          ? {
+              dns01: {
+                provider: "desec",
+                apiBase: "https://desec.io/api/v1",
+                zone: "relay.sovereign-ai-node.com",
+                subname: "_acme-challenge.node",
+                tokenSecretRef: "file:/tmp/relay-desec-token",
+              },
+            }
+          : {}),
+      },
+    }) as unknown as RuntimeConfig;
+
+  it("skips (ok) when there is no relay block at all", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-probe-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      const result = await invoke(service, {} as unknown as RuntimeConfig);
+      expect(result).toEqual({ ok: true });
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("skips (ok) for a legacy http relay with no dns01 block", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-probe-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      const result = await invoke(service, relayConfig({ tunnelType: "http" }));
+      expect(result).toEqual({ ok: true });
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when the tunnel is https-passthrough but dns01 is missing", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-probe-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      // This is the exact downgrade symptom: the reuse path dropped dns01,
+      // the render fell back to plaintext, but the tunnel still advertises
+      // https. The probe must NOT skip — it must fail closed.
+      const result = await invoke(service, relayConfig({ tunnelType: "https" }));
+      expect(result.ok).toBe(false);
+      expect(result.message).toMatch(/https-passthrough/);
+      expect(result.message).toMatch(/no dns01/);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("probes the local TLS port and passes when a certificate is presented", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-probe-test-"));
+    // Self-signed fixture cert + key (CN=node.relay.sovereign-ai-node.com, 10y),
+    // stored base64-of-PEM so the literal stays single-line and robust to
+    // formatter re-wrapping. Used only to make the local TLS listener present
+    // *a* certificate; the probe connects with rejectUnauthorized:false and
+    // merely asserts a cert is presented.
+    const TLS_FIXTURE_CERT_B64 =
+      "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUROekNDQWgrZ0F3SUJBZ0lVRmRaNlZ0b3dtWHAzeGNnem4wSzBWdWFVSUpjd0RRWUpLb1pJaHZjTkFRRUwKQlFBd0t6RXBNQ2NHQTFVRUF3d2dibTlrWlM1eVpXeGhlUzV6YjNabGNtVnBaMjR0WVdrdGJtOWtaUzVqYjIwdwpIaGNOTWpZd05qSXlNVGcxTURFeldoY05Nell3TmpFNU1UZzFNREV6V2pBck1Ta3dKd1lEVlFRRERDQnViMlJsCkxuSmxiR0Y1TG5OdmRtVnlaV2xuYmkxaGFTMXViMlJsTG1OdmJUQ0NBU0l3RFFZSktvWklodmNOQVFFQkJRQUQKZ2dFUEFEQ0NBUW9DZ2dFQkFNYVdNaG9rUXlsckt3QmFGaythaTJZcEtoN2dEdjdEdm1FK083dUpVTVRYcmdjVgpNa2Ntc3kxZUNTNE9uSU43aEJ0dXkyYXhvUVIxKzY5WExVcFdXY1hPWVp5ekZ5WXNkQjA0czQwRTArbVk0OUNQCmY5dTQreGxJS0VERE1Pdmhwc0pGTFZFSnMrNEFjUFVLYmFYeldCbGI2c01xTjdHQ1hSQ3hRREtPaXVkem5MSDMKeUl6cmtEbVVpSFFWRnBUeURZa0FiZGExQTFndVAzSUlKUDhBYnV3dkV4Z290alpCVXVkYjlmdmdFd3VETER5TQoxcjRubXZkejJSbnZ0NnJCUnFEWmRtdFVTbEQ0U21YUm5OUkIwZG41SFUxRm1pMjFBUWtPM204Q2xNT2xxbG9RCmUrNi8yK01Wak1FcWc2ODN0blRzbUlPbElMUXYzYTVjL2dzN3BhRUNBd0VBQWFOVE1GRXdIUVlEVlIwT0JCWUUKRk40Z3Z1NTJkMjhod1NiWE10K0FzNjAvMjNUa01COEdBMVVkSXdRWU1CYUFGTjRndnU1MmQyOGh3U2JYTXQrQQpzNjAvMjNUa01BOEdBMVVkRXdFQi93UUZNQU1CQWY4d0RRWUpLb1pJaHZjTkFRRUxCUUFEZ2dFQkFGTWRaQ21MClJ5c0dQcWZoK3pidlFaL0l1RTFvTDF5c3gxR1ZZUmVyRndJVDFvQlJ4b3Z0SHJtVmF2akwvNmFhNjFtUE8rd2MKZXcrS251aE8rNS9teDNvTWcvRzZ6TGpxMFBOUG04QlUreU8xbjJkMlRNTFpuQTVnYUhRdGtHRzlmOUpYTnZIMgp1c2N1cEhjZ0ZXeEVESVZLeFIxckoxcHRxSHdJc1RCVGRNRWRyNGs3REJ4anlSWmNyYVk3SlpIQVJ6NVo5SzNKCnduVXFwUkJsS2NQaTdmTGQ2UHZnbEgyaW5teVZueUxJZTNNKzJYZWhIdlkxU1c5KzNTSlJaaFphZGkyUWlrdXkKK2FOT1Bra01mM0RMQmdaOHN5cG1lMjdSWktSRU9zL1dxd3Q4SzlUOEtOYzRFY2owcnJYSXllelJDVFpKdFBobQpZcnowWnRlc3pLcnFwQms9Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0K";
+    const TLS_FIXTURE_KEY_B64 =
+      "LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JSUV2Z0lCQURBTkJna3Foa2lHOXcwQkFRRUZBQVNDQktnd2dnU2tBZ0VBQW9JQkFRREdsaklhSkVNcGF5c0EKV2haUG1vdG1LU29lNEE3K3c3NWhQanU3aVZERTE2NEhGVEpISnJNdFhna3VEcHlEZTRRYmJzdG1zYUVFZGZ1dgpWeTFLVmxuRnptR2NzeGNtTEhRZE9MT05CTlBwbU9QUWozL2J1UHNaU0NoQXd6RHI0YWJDUlMxUkNiUHVBSEQxCkNtMmw4MWdaVytyREtqZXhnbDBRc1VBeWpvcm5jNXl4OThpTTY1QTVsSWgwRlJhVThnMkpBRzNXdFFOWUxqOXkKQ0NUL0FHN3NMeE1ZS0xZMlFWTG5XL1g3NEJNTGd5dzhqTmErSjVyM2M5a1o3N2Vxd1VhZzJYWnJWRXBRK0VwbAowWnpVUWRIWitSMU5SWm90dFFFSkR0NXZBcFREcGFwYUVIdnV2OXZqRll6QktvT3ZON1owN0ppRHBTQzBMOTJ1ClhQNExPNldoQWdNQkFBRUNnZ0VBQ1AyaG5OMHMwejd0Si9nNDlpcXA4TTNUczl4Wk93eU5FT1ZuZ0xYSnRYRlgKaVdFbmwzcDNrQW4wandyQTZFYWJBUXdsL0xmMWNWNzFybTEwMzVIUVFVWGRiMGhBQkkyNVJoRUNuYUJUYmNvZQpJK2hzNG1IYUZ0ZHUrazdWbWthMytmU3BPTjVUZldhMHRuNlJFbnR2Q0k0VmZDcTQyQzF0M2RHQWowTUJjTG1vCmhKclQxMkQzcjRjMnpVWm5haDcxYUpzR25iTG1pVWtIQUdhV1lpeGVleHhRSTdGMUlNOUUzdElUQjRtUTdFc3kKTnpIaTdOQ1RITmhYbko2UkFEaHlpNkVtUVR2OEExbjdNZVhuY2Nuejl4VmZhdXBPMzJGNjd2MHpTRWtTdStBQwpieC96MU52cFE1WU9PL24zZyt5bm00ZzJaUjA1bGwrWTNZSVhyd1dIQ1FLQmdRRHBQSUdHVXh3azRUZ1pBZHVxCnJqZVlkcUpMNVlYT0N2MTd5UkR6ZXBXTEFKaVMwemxvTzJ0OG5Xek9BS3B1elMxbHpRZmIySHRER0s4ajZlOWYKS1FXSURQQVJuK3hlS1Jwa09oQnVEYngxWVYvbFk1TzA1S2pDZEx6N0ZrRkZCUlcrNGVaaXBnM1RiVFVhS0MrYwpBd3FwNFBCYWYvYVVYQjFiNVRidWhrZU8xUUtCZ1FEWjkvU3dVV1gyZ1h0ZlljTDhpY08wTktCWGRZMlQ1azRtCitWWC9yVTBHTjllZTJ0Wk1pSDFCYm43Z1ZYRHBFRUtZS2lpKzJ1b0gzcjhUMG53ZTM0aEY1RmVINldibWViWkkKdnovam9HbFhja3Y5VUJiWC84OG9SU2ZOcW5jMmhVMm9CWTk5VjJLYUpNZnFweHpTZVhSdkhuckFhQVh3ektlUApabkxUQUcxWm5RS0JnUURnU1MwTkxQTE5qRDdUM1hPT0NJYXgrTE5OWk9SdEpTaHBWd3NUK0hmQitjcSt0cHhuCjNXd1pvNUV6OEhQMHBSM1kzWGVITkFBa242SWNXU08xVU05ZTY0SVlrTDlPTlJ5SjhVUkhjTElmOW9tdkh6aTEKSllZYnFRTHFPWlorZHN0WWlnZHdLZHIxeS9qYXRIWkVBckRJZCtUcVFrK3VqMzQwRnBIaWdnSmlHUUtCZ0EvQQpXMjVpYzN2YzM0MkZBeEk4NG1lalpmTHNDODhrVllGN2d6dDJ5cG9vYnV5TDQvQ2o3R2xPRXQwalQ0V0lKMGZYCnhCb0d0K0xadGZVNHdMOTZaOTZsSWE0d3I3NzRETFExSGVqVkxzZWkrdHJUYnRNdEtVcy90Q0Nvc1BTL3JWejMKQ2VlRTZSczZqVGZuMjYxYUdZL3VJL0REazZwVEg4aTlIbzhnK01ZQkFvR0JBSytEdnRwNVNJdHlHM1BibDQxUApZaktWTnF2N0JKeTZUc0YxeGRGL25Md1JTcjRtRFhZbnF4WmxGREU3VnU0K011M1lUTEliWm5PQkRQUTZoSmorCktna2NSd05BY2gxa25lMHd3UktLSThSODhoNm83QW9oTU9xSGxncXRYT3AyOGNPNHNjV1hzamxaNCt1M0N6WGwKTnN1UmhhdWoxOVNyYVlTY3RpMGFnbFVXCi0tLS0tRU5EIFBSSVZBVEUgS0VZLS0tLS0K";
+    const server = createTlsServer(
+      {
+        cert: Buffer.from(TLS_FIXTURE_CERT_B64, "base64").toString("utf8"),
+        key: Buffer.from(TLS_FIXTURE_KEY_B64, "base64").toString("utf8"),
+      },
+      (socket) => socket.end(),
+    );
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      const result = await invoke(
+        service,
+        relayConfig({ tunnelType: "https", dns01: true, localPort: port }),
+      );
+      expect(result).toEqual({ ok: true });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("runSmokeChecks relay passthrough gate", () => {
+  const buildPaths = (tempRoot: string): SovereignPaths => ({
+    configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+    secretsDir: join(tempRoot, "etc", "secrets"),
+    stateDir: join(tempRoot, "var", "lib"),
+    logsDir: join(tempRoot, "var", "log"),
+    installJobsDir: join(tempRoot, "install-jobs"),
+    openclawServiceHome: join(tempRoot, "openclaw-home"),
+    provenancePath: join(tempRoot, "install-provenance.json"),
+    backupsDir: join(tempRoot, "backups"),
+  });
+
+  const unusedDeps = {
+    openclawBootstrapper: {
+      detectInstalled: async () => null,
+      ensureInstalled: async () => ({
+        binaryPath: "/usr/local/bin/openclaw",
+        version: "test",
+        installMethod: "install_sh" as const,
+      }),
+    },
+    openclawGatewayServiceManager: {
+      install: async () => {},
+      start: async () => {},
+      restart: async () => {},
+    },
+    preflightChecker: {
+      run: async () => ({
+        mode: "bundled_matrix" as const,
+        overall: "pass" as const,
+        checks: [],
+        recommendedActions: [],
+      }),
+    },
+    imapTester: {
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+    matrixProvisioner: {
+      provision: async () => {
+        throw new Error("not used");
+      },
+      bootstrapAccounts: async () => {
+        throw new Error("not used");
+      },
+      bootstrapRoom: async () => {
+        throw new Error("not used");
+      },
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+    execRunner: {
+      run: async ({ command, args }: ExecInput) => ({
+        command: [command, ...(args ?? [])].join(" "),
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      }),
+    },
+  };
+
+  const buildService = (paths: SovereignPaths): RealInstallerService =>
+    new RealInstallerService(createLogger(), paths, {
+      ...unusedDeps,
+    } as ConstructorParameters<typeof RealInstallerService>[2]);
+
+  // Stub every smoke-check helper that runs BEFORE the relay block so execution
+  // reaches the relay TLS-passthrough gate without touching the network/disk.
+  const stubPreRelayChecks = (service: RealInstallerService, relayRunning = true): void => {
+    const overrides = service as unknown as {
+      testMatrix(input: unknown): Promise<{ ok: boolean; checks: unknown[] }>;
+      safeDetectOpenClaw(): Promise<unknown>;
+      probeMatrixRoomReachable(config: RuntimeConfig): Promise<boolean>;
+      inspectRelayTunnelService(): Promise<{
+        installed: boolean;
+        state: string;
+        message?: string;
+      }>;
+    };
+    overrides.testMatrix = async () => ({ ok: true, checks: [] });
+    overrides.safeDetectOpenClaw = async () => ({ binaryPath: "/usr/local/bin/openclaw" });
+    overrides.probeMatrixRoomReachable = async () => true;
+    overrides.inspectRelayTunnelService = async () => ({
+      installed: relayRunning,
+      state: relayRunning ? "running" : "stopped",
+    });
+  };
+
+  const runtimeConfigWithRelay = (
+    paths: SovereignPaths,
+    tunnelType: "http" | "https",
+  ): RuntimeConfig =>
+    ({
+      matrix: {
+        alertRoom: { roomId: "!alerts:node.relay.sovereign-ai-node.com" },
+      },
+      relay: {
+        enabled: true,
+        controlUrl: "https://relay.sovereign-ai-node.com",
+        hostname: "node.relay.sovereign-ai-node.com",
+        publicBaseUrl: "https://node.relay.sovereign-ai-node.com",
+        connected: false,
+        serviceName: "sovereign-matrix-relay-tunnel.service",
+        configPath: join(paths.stateDir, "relay", "frpc.toml"),
+        tunnel: {
+          serverAddr: "relay.sovereign-ai-node.com",
+          serverPort: 7000,
+          tokenSecretRef: "file:/tmp/relay-token",
+          proxyName: "relay-node",
+          type: tunnelType,
+          localIp: "127.0.0.1",
+          localPort: tunnelType === "https" ? 18443 : 18080,
+        },
+      },
+    }) as unknown as RuntimeConfig;
+
+  const matrixProvision = (passthrough: boolean): BundledMatrixProvisionResult =>
+    ({
+      projectDir: "/tmp/fake-matrix",
+      composeFilePath: "/tmp/fake-matrix/compose.yaml",
+      accessMode: "relay",
+      homeserverDomain: "node.relay.sovereign-ai-node.com",
+      publicBaseUrl: "https://node.relay.sovereign-ai-node.com",
+      adminBaseUrl: "http://127.0.0.1:8008",
+      federationEnabled: false,
+      tlsMode: "auto",
+      passthrough,
+    }) as unknown as BundledMatrixProvisionResult;
+
+  const invoke = (
+    service: RealInstallerService,
+    provision: BundledMatrixProvisionResult,
+    runtimeConfig: RuntimeConfig,
+  ): Promise<void> =>
+    (
+      service as unknown as {
+        runSmokeChecks(
+          matrixProvision: BundledMatrixProvisionResult,
+          runtimeConfig: RuntimeConfig,
+          gatewayServiceSkipped: boolean,
+          relayModeEnabled: boolean,
+        ): Promise<void>;
+      }
+    ).runSmokeChecks(provision, runtimeConfig, true, true);
+
+  it("runs the TLS probe and fails closed when passthrough collapsed but the tunnel is https", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "smoke-relay-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      stubPreRelayChecks(service);
+      // Spy the probe so we can assert it was invoked despite passthrough=false.
+      let probed = false;
+      (
+        service as unknown as {
+          probeRelayPassthroughTls(
+            config: RuntimeConfig,
+          ): Promise<{ ok: boolean; message?: string }>;
+        }
+      ).probeRelayPassthroughTls = async () => {
+        probed = true;
+        return { ok: false, message: "no dns01 block; would serve plaintext" };
+      };
+
+      // passthrough=false simulates the reuse-path downgrade; the persisted
+      // tunnel type is still https, so the gate MUST still run the probe.
+      await expect(
+        invoke(
+          service,
+          matrixProvision(false),
+          runtimeConfigWithRelay(buildPaths(tempRoot), "https"),
+        ),
+      ).rejects.toMatchObject({
+        code: "SMOKE_CHECKS_FAILED",
+        message: "Relay passthrough node did not obtain a TLS certificate",
+      });
+      expect(probed).toBe(true);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("skips the TLS probe for a legacy http relay when passthrough is false", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "smoke-relay-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      stubPreRelayChecks(service);
+      let probed = false;
+      (
+        service as unknown as {
+          probeRelayPassthroughTls(
+            config: RuntimeConfig,
+          ): Promise<{ ok: boolean; message?: string }>;
+        }
+      ).probeRelayPassthroughTls = async () => {
+        probed = true;
+        return { ok: true };
+      };
+      // Short-circuit everything after the relay block so the call resolves.
+      (
+        service as unknown as {
+          inspectOpenClawRuntimeWiring(
+            config: RuntimeConfig,
+          ): Promise<{ status: string; details?: unknown }>;
+        }
+      ).inspectOpenClawRuntimeWiring = async () => ({ status: "fail", details: {} });
+
+      await expect(
+        invoke(
+          service,
+          matrixProvision(false),
+          runtimeConfigWithRelay(buildPaths(tempRoot), "http"),
+        ),
+      ).rejects.toMatchObject({
+        code: "SMOKE_CHECKS_FAILED",
+        message: "OpenClaw runtime wiring check failed",
+      });
+      // http relay + passthrough false ⇒ the gate must NOT run the probe.
+      expect(probed).toBe(false);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
   });
 });
