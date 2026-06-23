@@ -567,6 +567,15 @@ type InstallRequest = {
       token: string;
       proxyName: string;
       subdomain?: string;
+      type?: "http" | "https"; // "http": relay terminates TLS (legacy). "https": relay passes the encrypted stream through by SNI and the node terminates its own TLS (passthrough). Installer-managed; populated from the relay enroll response.
+    };
+    dns01?: { // present only for TLS-passthrough enrollments; the node obtains its own Let's Encrypt cert via deSEC DNS-01 and terminates TLS itself
+      provider: "desec";
+      apiBase: string;
+      zone: string;
+      subname: string;
+      acmeEmail?: string;
+      token?: string; // per-node scoped deSEC secret; returned only on first mint or rotation
     };
   };
   openclaw?: {
@@ -647,6 +656,29 @@ Constraints:
 - relay enrollment is skipped when `relay.hostname`, `relay.publicBaseUrl`, and `relay.tunnel` are already populated
 - relay hostname selection is installer-managed; user-provided relay slugs are not part of the public contract
 - `matrix.federationEnabled` defaults to `false`
+
+#### Relay TLS mode (legacy http vs. TLS-passthrough)
+
+The relay tunnel runs in one of two modes. The mode is **not** selected by the
+node and is **not** a function of the node version — it is decided by the relay
+at enrollment time and reflected back in the enroll response:
+
+- **Legacy http** — the relay terminates TLS at its edge and forwards plaintext
+  to the node over the tunnel. The enroll response carries `tunnel.type: "http"`
+  (or omits `type`) and no `dns01` block.
+- **TLS-passthrough** — the relay passes the encrypted stream through by SNI and
+  the node terminates its own TLS using a Let's Encrypt certificate obtained via
+  deSEC DNS-01. The enroll response carries `tunnel.type: "https"` and a `dns01`
+  block.
+
+Normative behaviour:
+
+- the installer MUST advertise `capabilities: ["tls-passthrough"]` on enroll/re-enroll; advertising the capability does NOT by itself put the node into passthrough mode
+- the relay grants passthrough ONLY when it has a deSEC owner token configured; otherwise it enrolls the node in legacy http mode, and a node advertising the capability against such a relay stays legacy
+- the **kill switch for passthrough is the relay's deSEC owner token, not the node version**: removing the token from the relay makes all subsequent enrollments fall back to legacy http
+- mode changes apply **per node on its next enroll/re-enroll**: an already-installed node keeps its current mode until it re-enrolls. After the relay gains a deSEC token, existing nodes flip to passthrough on their next re-enroll; they do not flip merely because a newer node version is released or installed
+- a passthrough enrollment (`tunnel.type: "https"` or `mode: "https-passthrough"`) MUST carry a usable `dns01` block; the installer fails closed (`RELAY_ENROLL_FAILED`) otherwise rather than silently serving plaintext
+- on re-enroll/upgrade the installer MUST preserve an existing `dns01` block; dropping it while the tunnel still advertises `https` is a fail-closed condition surfaced at the post-install passthrough probe (the node would otherwise forward plaintext under an https tunnel)
 
 ### `PreflightResult`
 
