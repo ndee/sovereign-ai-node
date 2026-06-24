@@ -298,6 +298,34 @@ Normative onboarding rules:
 - default TTL MUST be 21 minutes
 - onboarding API responses revealing the password MUST be sent with `Cache-Control: no-store`
 
+## `sovereign-node setup-ui issue-bootstrap-token`
+
+Purpose:
+
+- issue a new one-time bootstrap token for browser access to `/setup-ui/`
+
+Behavior:
+
+- writes a fresh single-use setup-UI bootstrap state file
+- invalidates any previously issued unused setup-UI token
+- returns the token, expiry, and TTL minutes
+- after the first successful bootstrap login, later browser sign-in uses the operator's Matrix password instead of another bootstrap token unless the operator rotates one explicitly
+
+Flags:
+
+- `--ttl-minutes <minutes>` default `1440`
+- `--json`
+
+`--json` result shape:
+
+```json
+{
+  "token": "setup-ui-bootstrap-token",
+  "expiresAt": "2026-05-16T14:00:00.000Z",
+  "ttlMinutes": 1440
+}
+```
+
 ## `sovereign-node update`
 
 Purpose:
@@ -448,6 +476,12 @@ This section defines the required HTTP-style API contract (or an equivalent loca
 
 ## Endpoints (Required)
 
+- `GET /`
+- `GET /setup-ui/`
+- `GET /api/auth/state`
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
+- `GET /api/setup-ui/host-info`
 - `POST /api/install/preflight`
 - `POST /api/install/test-imap`
 - `POST /api/install/test-matrix`
@@ -654,7 +688,7 @@ Constraints:
 - `relay.enrollmentToken` is optional only for the default Sovereign managed relay (`https://relay.sovereign-ai-node.com`)
 - custom relays must provide `relay.enrollmentToken`
 - relay enrollment is skipped when `relay.hostname`, `relay.publicBaseUrl`, and `relay.tunnel` are already populated
-- relay hostname selection is installer-managed; user-provided relay slugs are not part of the public contract
+- relay hostname selection is installer-managed, but request-file-driven or UI-driven installs may still provide `relay.requestedSlug` as a preferred slug that the installer normalizes and uses when available
 - `matrix.federationEnabled` defaults to `false`
 
 #### Relay TLS mode (legacy http vs. TLS-passthrough)
