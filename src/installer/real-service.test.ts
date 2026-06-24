@@ -1472,6 +1472,13 @@ describe("RealInstallerService", () => {
       req.matrix.federationEnabled = false;
       req.matrix.tlsMode = "auto";
 
+      // Public enrollment sends a STABLE machine-derived installation id (not the
+      // per-run correlation id passed below). Stub the resolver so the assertion is
+      // deterministic regardless of the host's /etc/machine-id.
+      (
+        service as unknown as { resolveStableInstallationId: () => Promise<string> }
+      ).resolveStableInstallationId = async () => "stable-machine-id";
+
       const enrollment = await (
         service as unknown as {
           resolveRelayEnrollment: (
@@ -1485,7 +1492,7 @@ describe("RealInstallerService", () => {
       ).resolveRelayEnrollment(req, "inst_public_managed_relay");
 
       expect(capturedUrl).toBe("https://relay.sovereign-ai-node.com/api/v1/enroll-public");
-      expect(capturedInstallationId).toBe("inst_public_managed_relay");
+      expect(capturedInstallationId).toBe("stable-machine-id");
       expect(capturedEnrollmentToken).toBe("");
       expect(enrollment.hostname).toBe("pilot-node.relay.sovereign-ai-node.com");
       expect(enrollment.publicBaseUrl).toBe("https://pilot-node.relay.sovereign-ai-node.com");
@@ -12905,6 +12912,756 @@ describe("runSmokeChecks relay passthrough gate", () => {
       });
       // http relay + passthrough false ⇒ the gate must NOT run the probe.
       expect(probed).toBe(false);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
+  const buildPaths = (tempRoot: string): SovereignPaths => ({
+    configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+    secretsDir: join(tempRoot, "etc", "secrets"),
+    stateDir: join(tempRoot, "var", "lib"),
+    logsDir: join(tempRoot, "var", "log"),
+    installJobsDir: join(tempRoot, "install-jobs"),
+    openclawServiceHome: join(tempRoot, "openclaw-home"),
+    provenancePath: join(tempRoot, "install-provenance.json"),
+    backupsDir: join(tempRoot, "backups"),
+  });
+
+  const unusedDeps = {
+    openclawBootstrapper: {
+      detectInstalled: async () => null,
+      ensureInstalled: async () => ({
+        binaryPath: "/usr/local/bin/openclaw",
+        version: "test",
+        installMethod: "install_sh" as const,
+      }),
+    },
+    openclawGatewayServiceManager: {
+      install: async () => {},
+      start: async () => {},
+      restart: async () => {},
+    },
+    preflightChecker: {
+      run: async () => ({
+        mode: "bundled_matrix" as const,
+        overall: "pass" as const,
+        checks: [],
+        recommendedActions: [],
+      }),
+    },
+    imapTester: {
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+    matrixProvisioner: {
+      provision: async () => {
+        throw new Error("not used");
+      },
+      bootstrapAccounts: async () => {
+        throw new Error("not used");
+      },
+      bootstrapRoom: async () => {
+        throw new Error("not used");
+      },
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+    execRunner: {
+      run: async ({ command, args }: ExecInput) => ({
+        command: [command, ...(args ?? [])].join(" "),
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      }),
+    },
+  };
+
+  type CapturedRequest = { url: string; body: Record<string, unknown> };
+
+  const buildService = (
+    paths: SovereignPaths,
+    fetchImpl: (input: string, init?: RequestInit) => Promise<Response>,
+  ): RealInstallerService =>
+    new RealInstallerService(createLogger(), paths, {
+      ...unusedDeps,
+      fetchImpl,
+    } as ConstructorParameters<typeof RealInstallerService>[2]);
+
+  const stubRuntimeConfig = (
+    service: RealInstallerService,
+    runtimeConfig: RuntimeConfig | null,
+  ): void => {
+    (
+      service as unknown as { tryReadRuntimeConfig(): Promise<RuntimeConfig | null> }
+    ).tryReadRuntimeConfig = async () => runtimeConfig;
+  };
+
+  const stubSecret = (service: RealInstallerService, token: string): void => {
+    (service as unknown as { resolveSecretRef(ref: string): Promise<string> }).resolveSecretRef =
+      async () => token;
+  };
+
+  const stubStableId = (service: RealInstallerService, id: string): void => {
+    (
+      service as unknown as { resolveStableInstallationId(): Promise<string> }
+    ).resolveStableInstallationId = async () => id;
+  };
+
+  // Legacy http enrollment for cathouse-style node (no dns01).
+  const legacyRuntimeConfig = (controlUrl = "https://relay.sovereign-ai-node.com"): RuntimeConfig =>
+    ({
+      relay: {
+        enabled: true,
+        controlUrl,
+        hostname: "cathouse.relay.sovereign-ai-node.com",
+        publicBaseUrl: "https://cathouse.relay.sovereign-ai-node.com",
+        connected: false,
+        serviceName: "sovereign-matrix-relay-tunnel.service",
+        configPath: "/var/lib/relay/frpc.toml",
+        tunnel: {
+          serverAddr: "relay.sovereign-ai-node.com",
+          serverPort: 7000,
+          tokenSecretRef: "file:/tmp/relay-token",
+          proxyName: "relay-cathouse",
+          type: "http",
+          localIp: "127.0.0.1",
+          localPort: 18080,
+        },
+      },
+    }) as unknown as RuntimeConfig;
+
+  const passthroughResponse = (hostname: string): Response =>
+    new Response(
+      JSON.stringify({
+        result: {
+          assignedHostname: hostname,
+          publicBaseUrl: `https://${hostname}`,
+          mode: "https-passthrough",
+          tunnel: {
+            serverAddr: "relay.sovereign-ai-node.com",
+            serverPort: 7000,
+            token: "refreshed-token",
+            proxyName: `relay-${hostname.split(".")[0]}`,
+            type: "https",
+          },
+          dns01: {
+            provider: "desec",
+            apiBase: "https://desec.io/api/v1",
+            zone: "relay.sovereign-ai-node.com",
+            subname: "_acme-challenge.cathouse",
+            acmeEmail: "ops@example.org",
+            token: "scoped-desec-secret",
+          },
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+
+  const httpResponse = (hostname: string): Response =>
+    new Response(
+      JSON.stringify({
+        result: {
+          assignedHostname: hostname,
+          publicBaseUrl: `https://${hostname}`,
+          tunnel: {
+            serverAddr: "relay.sovereign-ai-node.com",
+            serverPort: 7000,
+            token: "relay-token",
+            proxyName: `relay-${hostname.split(".")[0]}`,
+          },
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+
+  const invoke = (
+    service: RealInstallerService,
+    relay: NonNullable<InstallRequest["relay"]>,
+  ): Promise<RelayEnrollmentData> =>
+    (
+      service as unknown as {
+        resolveRelayEnrollment(
+          relay: { relay: NonNullable<InstallRequest["relay"]> },
+          installationId: string,
+        ): Promise<RelayEnrollmentData>;
+      }
+    ).resolveRelayEnrollment(
+      { connectivity: { mode: "relay" }, relay } as unknown as {
+        relay: NonNullable<InstallRequest["relay"]>;
+      },
+      "inst_run_correlation",
+    );
+
+  it("upgrades a legacy node to passthrough when the relay returns the same slug", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      const captured: CapturedRequest[] = [];
+      const service = buildService(buildPaths(tempRoot), async (url, init) => {
+        captured.push({
+          url,
+          body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+        });
+        return passthroughResponse("cathouse.relay.sovereign-ai-node.com");
+      });
+      stubRuntimeConfig(service, legacyRuntimeConfig());
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      expect(captured).toHaveLength(1);
+      expect(captured[0]?.url).toBe("https://relay.sovereign-ai-node.com/api/v1/enroll-public");
+      // The existing slug is sent on the PUBLIC enroll path (refresh exception).
+      expect(captured[0]?.body.requestedSlug).toBe("cathouse");
+      expect(captured[0]?.body.installationId).toBe("stable-machine-id");
+      expect(captured[0]?.body.capabilities).toEqual(["tls-passthrough"]);
+      // Result is now passthrough, hostname unchanged.
+      expect(enrollment.hostname).toBe("cathouse.relay.sovereign-ai-node.com");
+      expect(enrollment.dns01).toBeDefined();
+      expect(enrollment.tunnel.type).toBe("https");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("stays legacy when the relay returns http (no deSEC token / kill switch)", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      let calls = 0;
+      const service = buildService(buildPaths(tempRoot), async () => {
+        calls += 1;
+        return httpResponse("cathouse.relay.sovereign-ai-node.com");
+      });
+      stubRuntimeConfig(service, legacyRuntimeConfig());
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+        // Blank token on the default managed relay still uses public enroll.
+        enrollmentToken: "  ",
+      });
+
+      expect(calls).toBe(1);
+      // Refresh returned http ⇒ keep-legacy ⇒ reuse the persisted legacy block.
+      expect(enrollment.dns01).toBeUndefined();
+      expect(enrollment.tunnel.type).toBe("http");
+      expect(enrollment.hostname).toBe("cathouse.relay.sovereign-ai-node.com");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed (keeps legacy) when the relay returns a different slug", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot), async () =>
+        passthroughResponse("someone-else.relay.sovereign-ai-node.com"),
+      );
+      stubRuntimeConfig(service, legacyRuntimeConfig());
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      // Hostname would have changed ⇒ refuse the refresh, keep the legacy node.
+      expect(enrollment.hostname).toBe("cathouse.relay.sovereign-ai-node.com");
+      expect(enrollment.dns01).toBeUndefined();
+      expect(enrollment.tunnel.type).toBe("http");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps legacy when the relay refresh request fails on the network", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot), async () => {
+        throw new Error("connection refused");
+      });
+      stubRuntimeConfig(service, legacyRuntimeConfig());
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      expect(enrollment.hostname).toBe("cathouse.relay.sovereign-ai-node.com");
+      expect(enrollment.dns01).toBeUndefined();
+      expect(enrollment.tunnel.type).toBe("http");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps legacy when the relay rejects the refresh with a non-2xx status", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      const service = buildService(
+        buildPaths(tempRoot),
+        async () =>
+          new Response(JSON.stringify({ error: "slug taken" }), {
+            status: 409,
+            headers: { "Content-Type": "application/json" },
+          }),
+      );
+      stubRuntimeConfig(service, legacyRuntimeConfig());
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      expect(enrollment.hostname).toBe("cathouse.relay.sovereign-ai-node.com");
+      expect(enrollment.dns01).toBeUndefined();
+      expect(enrollment.tunnel.type).toBe("http");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("refreshes via the authenticated endpoint for a custom relay with a token", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      const captured: CapturedRequest[] = [];
+      const service = buildService(buildPaths(tempRoot), async (url, init) => {
+        captured.push({
+          url,
+          body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+        });
+        return passthroughResponse("cathouse.relay.sovereign-ai-node.com");
+      });
+      // Custom relay: persisted runtime config points at a non-default control URL.
+      stubRuntimeConfig(service, legacyRuntimeConfig("https://relay.example.com"));
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.example.com",
+        enrollmentToken: "custom-relay-token",
+      });
+
+      expect(captured).toHaveLength(1);
+      expect(captured[0]?.url).toBe("https://relay.example.com/api/v1/enroll");
+      expect(captured[0]?.body.enrollmentToken).toBe("custom-relay-token");
+      expect(captured[0]?.body.requestedSlug).toBe("cathouse");
+      expect(captured[0]?.body.installationId).toBeUndefined();
+      expect(enrollment.dns01).toBeDefined();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does not re-contact the relay when the existing enrollment is already passthrough", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      let calls = 0;
+      const service = buildService(buildPaths(tempRoot), async () => {
+        calls += 1;
+        return passthroughResponse("cathouse.relay.sovereign-ai-node.com");
+      });
+      const config = legacyRuntimeConfig();
+      (config.relay as NonNullable<RuntimeConfig["relay"]>).dns01 = {
+        provider: "desec",
+        apiBase: "https://desec.io/api/v1",
+        zone: "relay.sovereign-ai-node.com",
+        subname: "_acme-challenge.cathouse",
+        tokenSecretRef: "file:/tmp/relay-desec-token",
+      };
+      (config.relay as NonNullable<RuntimeConfig["relay"]>).tunnel.type = "https";
+      stubRuntimeConfig(service, config);
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      // Already passthrough ⇒ reuse path returns dns01, no network call.
+      expect(calls).toBe(0);
+      expect(enrollment.dns01).toBeDefined();
+      expect(enrollment.tunnel.type).toBe("https");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does not attempt a refresh when no relay enrollment is persisted (fresh install)", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      const captured: CapturedRequest[] = [];
+      const service = buildService(buildPaths(tempRoot), async (url, init) => {
+        captured.push({
+          url,
+          body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+        });
+        return passthroughResponse("freshly-allocated.relay.sovereign-ai-node.com");
+      });
+      // Disabled relay block ⇒ tryReadExistingRelayRuntimeConfig returns null.
+      const disabled = legacyRuntimeConfig();
+      (disabled.relay as NonNullable<RuntimeConfig["relay"]>).enabled = false;
+      stubRuntimeConfig(service, disabled);
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      // No existing enrollment ⇒ a normal fresh public enroll runs (one call),
+      // not a slug-preserving refresh.
+      expect(captured).toHaveLength(1);
+      expect(captured[0]?.body.requestedSlug).toMatch(/^[a-z0-9-]+$/);
+      expect(enrollment.hostname).toBe("freshly-allocated.relay.sovereign-ai-node.com");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does not refresh when the persisted enrollment is for a different control URL", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      let calls = 0;
+      const service = buildService(buildPaths(tempRoot), async () => {
+        calls += 1;
+        return passthroughResponse("other.relay.sovereign-ai-node.com");
+      });
+      // Persisted enrollment points at a DIFFERENT control URL than requested.
+      stubRuntimeConfig(service, legacyRuntimeConfig("https://relay.example.com"));
+      stubStableId(service, "stable-machine-id");
+
+      // Request the default managed relay (mismatch) ⇒ no refresh; fresh enroll.
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      // One fresh enroll call with a generated slug (not the existing one).
+      expect(calls).toBe(1);
+      expect(enrollment.hostname).toBe("other.relay.sovereign-ai-node.com");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("derives the existing slug from publicBaseUrl when the hostname is empty", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      const captured: CapturedRequest[] = [];
+      const service = buildService(buildPaths(tempRoot), async (url, init) => {
+        captured.push({
+          url,
+          body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+        });
+        return passthroughResponse("cathouse.relay.sovereign-ai-node.com");
+      });
+      const config = legacyRuntimeConfig();
+      (config.relay as NonNullable<RuntimeConfig["relay"]>).hostname = "";
+      stubRuntimeConfig(service, config);
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      // Slug came from publicBaseUrl's first label.
+      expect(captured[0]?.body.requestedSlug).toBe("cathouse");
+      expect(enrollment.dns01).toBeDefined();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps legacy when no slug can be derived from the existing enrollment", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      let calls = 0;
+      const service = buildService(buildPaths(tempRoot), async () => {
+        calls += 1;
+        return passthroughResponse("cathouse.relay.sovereign-ai-node.com");
+      });
+      const config = legacyRuntimeConfig();
+      // Neither a usable hostname nor a parseable publicBaseUrl ⇒ slug "".
+      (config.relay as NonNullable<RuntimeConfig["relay"]>).hostname = "";
+      (config.relay as NonNullable<RuntimeConfig["relay"]>).publicBaseUrl = "not a url";
+      stubRuntimeConfig(service, config);
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      // No slug ⇒ refresh aborted before any network call ⇒ keep legacy.
+      expect(calls).toBe(0);
+      expect(enrollment.dns01).toBeUndefined();
+      expect(enrollment.tunnel.type).toBe("http");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps legacy for a custom relay refresh when no enrollment token is available", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      let calls = 0;
+      const service = buildService(buildPaths(tempRoot), async () => {
+        calls += 1;
+        return passthroughResponse("cathouse.relay.sovereign-ai-node.com");
+      });
+      // Custom (non-default) relay enrollment persisted, but the request carries
+      // a blank enrollmentToken ⇒ cannot re-enroll ⇒ keep legacy without a call.
+      stubRuntimeConfig(service, legacyRuntimeConfig("https://relay.example.com"));
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.example.com",
+        enrollmentToken: "   ",
+      });
+
+      expect(calls).toBe(0);
+      expect(enrollment.dns01).toBeUndefined();
+      expect(enrollment.tunnel.type).toBe("http");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps legacy when the relay returns 200 with an unparseable refresh response", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      const service = buildService(
+        buildPaths(tempRoot),
+        async () =>
+          // 200 OK but missing the required tunnel/hostname fields ⇒ the parser
+          // throws RELAY_ENROLL_INVALID ⇒ refresh keeps legacy.
+          new Response(JSON.stringify({ result: {} }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+      );
+      stubRuntimeConfig(service, legacyRuntimeConfig());
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      expect(enrollment.dns01).toBeUndefined();
+      expect(enrollment.tunnel.type).toBe("http");
+      expect(enrollment.hostname).toBe("cathouse.relay.sovereign-ai-node.com");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns the pre-enrolled legacy block when a refresh keeps legacy", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot), async () =>
+        httpResponse("cathouse.relay.sovereign-ai-node.com"),
+      );
+      stubRuntimeConfig(service, legacyRuntimeConfig());
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      // Request file ALSO carries a legacy pre-enrolled tunnel block, so the
+      // pre-enrolled short-circuit is the fallback after the refresh declines.
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+        hostname: "cathouse.relay.sovereign-ai-node.com",
+        publicBaseUrl: "https://cathouse.relay.sovereign-ai-node.com",
+        tunnel: {
+          serverAddr: "relay.sovereign-ai-node.com",
+          serverPort: 7000,
+          token: "pre-enrolled-token",
+          proxyName: "relay-cathouse",
+        },
+      });
+
+      // Refresh returned http ⇒ keep-legacy ⇒ pre-enrolled block is used.
+      expect(enrollment.hostname).toBe("cathouse.relay.sovereign-ai-node.com");
+      expect(enrollment.dns01).toBeUndefined();
+      expect(enrollment.tunnel.type).toBe("http");
+      expect(enrollment.tunnel.token).toBe("pre-enrolled-token");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("resolveStableInstallationId", () => {
+  const buildPaths = (tempRoot: string): SovereignPaths => ({
+    configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+    secretsDir: join(tempRoot, "etc", "secrets"),
+    stateDir: join(tempRoot, "var", "lib"),
+    logsDir: join(tempRoot, "var", "log"),
+    installJobsDir: join(tempRoot, "install-jobs"),
+    openclawServiceHome: join(tempRoot, "openclaw-home"),
+    provenancePath: join(tempRoot, "install-provenance.json"),
+    backupsDir: join(tempRoot, "backups"),
+  });
+
+  const unusedDeps = {
+    openclawBootstrapper: {
+      detectInstalled: async () => null,
+      ensureInstalled: async () => ({
+        binaryPath: "/usr/local/bin/openclaw",
+        version: "test",
+        installMethod: "install_sh" as const,
+      }),
+    },
+    openclawGatewayServiceManager: {
+      install: async () => {},
+      start: async () => {},
+      restart: async () => {},
+    },
+    preflightChecker: {
+      run: async () => ({
+        mode: "bundled_matrix" as const,
+        overall: "pass" as const,
+        checks: [],
+        recommendedActions: [],
+      }),
+    },
+    imapTester: {
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+    matrixProvisioner: {
+      provision: async () => {
+        throw new Error("not used");
+      },
+      bootstrapAccounts: async () => {
+        throw new Error("not used");
+      },
+      bootstrapRoom: async () => {
+        throw new Error("not used");
+      },
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+  };
+
+  const buildService = (paths: SovereignPaths): RealInstallerService =>
+    new RealInstallerService(createLogger(), paths, {
+      ...unusedDeps,
+    } as ConstructorParameters<typeof RealInstallerService>[2]);
+
+  const call = (service: RealInstallerService): Promise<string> =>
+    (
+      service as unknown as { resolveStableInstallationId(): Promise<string> }
+    ).resolveStableInstallationId();
+
+  const setMachineIdPaths = (service: RealInstallerService, paths: readonly string[]): void => {
+    (service as unknown as { machineIdCandidatePaths: readonly string[] }).machineIdCandidatePaths =
+      paths;
+  };
+
+  it("reads /etc/machine-id when present and memoises it", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-stableid-test-"));
+    try {
+      const machineIdPath = join(tempRoot, "machine-id");
+      await writeFile(machineIdPath, "abc123def456\n", "utf8");
+      const service = buildService(buildPaths(tempRoot));
+      setMachineIdPaths(service, [machineIdPath]);
+
+      const first = await call(service);
+      expect(first).toBe("abc123def456");
+
+      // Memoised: a later read of a different file is ignored.
+      await writeFile(machineIdPath, "changed\n", "utf8");
+      const second = await call(service);
+      expect(second).toBe("abc123def456");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("skips empty machine-id files and falls through to the next candidate", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-stableid-test-"));
+    try {
+      const emptyPath = join(tempRoot, "empty-machine-id");
+      const realPath = join(tempRoot, "real-machine-id");
+      await writeFile(emptyPath, "   \n", "utf8");
+      await writeFile(realPath, "second-source-id\n", "utf8");
+      const service = buildService(buildPaths(tempRoot));
+      setMachineIdPaths(service, [emptyPath, realPath]);
+
+      expect(await call(service)).toBe("second-source-id");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("generates and persists a stable id when no machine-id is available", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-stableid-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      setMachineIdPaths(service, [join(tempRoot, "does-not-exist")]);
+
+      const first = await call(service);
+      expect(first).toMatch(/^inst_/);
+
+      // Persisted to disk under the state dir.
+      const persisted = (
+        await readFile(join(buildPaths(tempRoot).stateDir, "relay", "installation-id"), "utf8")
+      ).trim();
+      expect(persisted).toBe(first);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reuses a previously persisted generated id across fresh service instances", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-stableid-test-"));
+    try {
+      const paths = buildPaths(tempRoot);
+      const missing = [join(tempRoot, "does-not-exist")];
+
+      const first = buildService(paths);
+      setMachineIdPaths(first, missing);
+      const id = await call(first);
+
+      // A brand-new service instance (no in-memory cache) reads the persisted id.
+      const second = buildService(paths);
+      setMachineIdPaths(second, missing);
+      expect(await call(second)).toBe(id);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("still returns a generated id when it cannot be persisted", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-stableid-test-"));
+    try {
+      const paths = buildPaths(tempRoot);
+      // Pre-create state-dir/relay as a FILE so mkdir of that directory fails and
+      // the persist step throws (exercising the warn-and-continue fallback).
+      await mkdir(paths.stateDir, { recursive: true });
+      await writeFile(join(paths.stateDir, "relay"), "blocker", "utf8");
+
+      const service = buildService(paths);
+      setMachineIdPaths(service, [join(tempRoot, "does-not-exist")]);
+
+      const id = await call(service);
+      expect(id).toMatch(/^inst_/);
+      // Memoised even though persistence failed.
+      expect(await call(service)).toBe(id);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }

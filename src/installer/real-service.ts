@@ -406,6 +406,18 @@ export class RealInstallerService implements InstallerService {
   protected relayPassthroughTlsProbeIntervalMs = RELAY_PASSTHROUGH_TLS_PROBE_INTERVAL_MS;
   protected relayPassthroughTlsProbeAttempts = RELAY_PASSTHROUGH_TLS_PROBE_ATTEMPTS;
 
+  // Cached stable installation id (see resolveStableInstallationId). Memoised so
+  // every relay enroll/refresh in a single install run sends the same identity.
+  private stableInstallationId: string | null = null;
+
+  // Candidate machine-id paths for resolveStableInstallationId, in priority
+  // order. A protected field (not a direct constant read) only so tests can
+  // redirect them to point at temp files and exercise the persisted fallback.
+  protected machineIdCandidatePaths: readonly string[] = [
+    "/etc/machine-id",
+    "/var/lib/dbus/machine-id",
+  ];
+
   constructor(
     private readonly logger: Logger,
     private readonly paths: SovereignPaths,
@@ -7728,6 +7740,67 @@ export default function (api) {
     return isDefaultManagedRelayControlUrlFile(controlUrl);
   }
 
+  /**
+   * Resolve a STABLE installation identifier for managed (public) relay
+   * enrollment. The relay keys every assignment on `sha256(installationId)`, so
+   * this value MUST be identical across re-runs for the relay to recognise an
+   * already-enrolled node (and thus refresh it in place / preserve its slug)
+   * rather than minting a brand-new assignment with a new hostname.
+   *
+   * Order of preference:
+   *  1. `/etc/machine-id` (the value the pro `install.sh` enroller used on the
+   *     original fresh install, so it matches existing assignments).
+   *  2. `/var/lib/dbus/machine-id` (older / alternative location).
+   *  3. A locally generated id persisted under the state dir
+   *     (`relay/installation-id`), reused on every subsequent run.
+   *
+   * The result is memoised for the lifetime of the service so all relay calls in
+   * one install run share one identity.
+   */
+  private async resolveStableInstallationId(): Promise<string> {
+    if (this.stableInstallationId !== null) {
+      return this.stableInstallationId;
+    }
+
+    for (const path of this.machineIdCandidatePaths) {
+      try {
+        const value = (await readFile(path, "utf8")).trim();
+        if (value.length > 0) {
+          this.stableInstallationId = value;
+          return value;
+        }
+      } catch {
+        // Fall through to the next candidate / persisted fallback.
+      }
+    }
+
+    // No machine-id available (containers, minimal images). Persist a generated
+    // id once so it stays stable across re-runs on this host.
+    const persistedPath = join(this.paths.stateDir, "relay", "installation-id");
+    try {
+      const existing = (await readFile(persistedPath, "utf8")).trim();
+      if (existing.length > 0) {
+        this.stableInstallationId = existing;
+        return existing;
+      }
+    } catch {
+      // Not yet written; generate below.
+    }
+
+    const generated = `inst_${randomUUID()}`;
+    try {
+      await mkdir(dirname(persistedPath), { recursive: true });
+      await writeFile(persistedPath, `${generated}\n`, { encoding: "utf8", mode: 0o600 });
+    } catch (error) {
+      this.logger.warn(
+        { error: describeError(error), path: persistedPath },
+        "Could not persist generated relay installation id; it may not be stable across runs",
+      );
+    }
+    this.stableInstallationId = generated;
+    return generated;
+  }
+
   private async tryReuseExistingRelayEnrollment(
     relay: NonNullable<InstallRequest["relay"]>,
   ): Promise<RelayEnrollmentResult | null> {
@@ -7800,6 +7873,170 @@ export default function (api) {
     });
   }
 
+  /**
+   * Return the persisted relay runtime block when this host already has an
+   * enabled enrollment against the same control URL, else null. Used to detect
+   * an existing legacy enrollment that is a candidate for a passthrough refresh.
+   */
+  private async tryReadExistingRelayRuntimeConfig(
+    relay: NonNullable<InstallRequest["relay"]>,
+  ): Promise<RelayRuntimeConfig | null> {
+    const runtimeConfig = await this.tryReadRuntimeConfig();
+    if (runtimeConfig?.relay?.enabled !== true) {
+      return null;
+    }
+    if (runtimeConfig.relay.controlUrl !== relay.controlUrl) {
+      return null;
+    }
+    return runtimeConfig.relay;
+  }
+
+  /**
+   * Re-contact the relay for an already-enrolled, still-legacy node so a relay
+   * that now supports TLS passthrough can upgrade the existing assignment in
+   * place. Sends the node's EXISTING slug as requestedSlug (even on the public
+   * enroll path) plus the tls-passthrough capability, using the same stable
+   * identity the original enrollment used so the relay matches the existing
+   * assignment instead of minting a new one.
+   *
+   * Fail-closed / never-break-a-working-node semantics — returns "keep-legacy"
+   * (the caller then reuses the existing legacy enrollment) when:
+   *  - the relay returns a different hostname/slug (would change the public
+   *    hostname — never do that silently);
+   *  - the relay returns http / no dns01 (relay has no deSEC token = kill switch);
+   *  - the network call or response parse fails for any reason.
+   */
+  private async tryRefreshExistingEnrollmentToPassthrough(
+    relay: NonNullable<InstallRequest["relay"]>,
+    existing: RelayRuntimeConfig,
+  ): Promise<RelayEnrollmentResult | "keep-legacy"> {
+    const existingSlug = this.deriveRelaySlug(existing.hostname, existing.publicBaseUrl);
+    if (existingSlug.length === 0) {
+      this.logger.warn(
+        { hostname: existing.hostname },
+        "Cannot refresh relay enrollment to passthrough: existing slug could not be derived",
+      );
+      return "keep-legacy";
+    }
+
+    const enrollmentToken = relay.enrollmentToken?.trim();
+    const usesManagedPublicEnroll =
+      this.isDefaultManagedRelayControlUrl(relay.controlUrl) &&
+      (enrollmentToken === undefined || enrollmentToken.length === 0);
+    if (
+      !usesManagedPublicEnroll &&
+      (enrollmentToken === undefined || enrollmentToken.length === 0)
+    ) {
+      // Custom relay without a token cannot be re-enrolled; keep legacy.
+      return "keep-legacy";
+    }
+
+    const endpoint = new URL(
+      usesManagedPublicEnroll ? "/api/v1/enroll-public" : "/api/v1/enroll",
+      ensureTrailingSlash(relay.controlUrl),
+    ).toString();
+
+    let response: Response;
+    try {
+      response = await this.fetchImpl(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          ...(usesManagedPublicEnroll
+            ? { installationId: await this.resolveStableInstallationId() }
+            : { enrollmentToken }),
+          // Send the EXISTING slug so the relay refreshes this assignment in
+          // place and preserves the node's public hostname.
+          requestedSlug: existingSlug,
+          version: process.env.npm_package_version ?? "2.0.0",
+          capabilities: ["tls-passthrough"],
+        }),
+      });
+    } catch (error) {
+      this.logger.warn(
+        { error: describeError(error), controlUrl: relay.controlUrl },
+        "Relay passthrough refresh request failed; keeping existing legacy enrollment",
+      );
+      return "keep-legacy";
+    }
+
+    const responseText = await response.text();
+    if (!response.ok) {
+      this.logger.warn(
+        {
+          controlUrl: relay.controlUrl,
+          status: response.status,
+          body: summarizeText(responseText, 1200),
+        },
+        "Relay passthrough refresh was rejected; keeping existing legacy enrollment",
+      );
+      return "keep-legacy";
+    }
+
+    let enrollment: RelayEnrollmentResult;
+    try {
+      enrollment = parseManagedRelayEnrollmentResponse({
+        responseText,
+        controlUrl: relay.controlUrl,
+        requestedSlug: existingSlug,
+        localEdgePort: RELAY_LOCAL_EDGE_PORT,
+        localTlsPort: RELAY_LOCAL_TLS_PORT,
+      });
+    } catch (error) {
+      this.logger.warn(
+        { error: describeError(error), controlUrl: relay.controlUrl },
+        "Relay passthrough refresh returned an unusable response; keeping existing legacy enrollment",
+      );
+      return "keep-legacy";
+    }
+
+    // Fail closed: never change a production node's public hostname. Compare by
+    // slug (the first label that determines the hostname) so this holds even when
+    // the persisted runtime config recorded the hostname only via publicBaseUrl.
+    const returnedSlug = this.deriveRelaySlug(enrollment.hostname, enrollment.publicBaseUrl);
+    if (returnedSlug !== existingSlug) {
+      this.logger.warn(
+        { existingSlug, returnedSlug, returnedHostname: enrollment.hostname },
+        "Relay passthrough refresh would change the node hostname; keeping existing legacy enrollment",
+      );
+      return "keep-legacy";
+    }
+
+    // Relay still legacy (no deSEC token configured = kill switch). Stay legacy.
+    if (enrollment.dns01 === undefined) {
+      this.logger.info(
+        { hostname: existing.hostname },
+        "Relay does not yet support TLS passthrough for this node; keeping legacy http enrollment",
+      );
+      return "keep-legacy";
+    }
+
+    return enrollment;
+  }
+
+  /** First DNS label of a host string (the part before the first dot), trimmed. */
+  private firstDnsLabel(host: string): string {
+    const trimmed = host.trim();
+    const dot = trimmed.indexOf(".");
+    return (dot === -1 ? trimmed : trimmed.slice(0, dot)).trim();
+  }
+
+  /** Derive a relay slug (first DNS label) from a hostname, falling back to the public base URL host. */
+  private deriveRelaySlug(hostname: string, publicBaseUrl: string): string {
+    const fromHostname = this.firstDnsLabel(hostname);
+    if (fromHostname.length > 0) {
+      return fromHostname;
+    }
+    try {
+      return this.firstDnsLabel(new URL(publicBaseUrl).hostname);
+    } catch {
+      return "";
+    }
+  }
+
   private async resolveRelayEnrollment(
     req: InstallRequest,
     installationId: string,
@@ -7807,6 +8044,30 @@ export default function (api) {
     const relay = this.getRelayRequest(req);
 
     const preEnrolled = this.tryUsePreEnrolledRelay(relay);
+    const reused = await this.tryReuseExistingRelayEnrollment(relay);
+
+    // Upgrade-time passthrough refresh: an already-enrolled node whose existing
+    // enrollment is legacy http (no dns01) should re-contact the relay so a
+    // relay that now supports TLS passthrough can flip it in place — preserving
+    // the node's slug/hostname. Without this, the two reuse short-circuits below
+    // would keep the node legacy forever on every upgrade. We only attempt this
+    // when neither reusable source already carries a dns01 block (i.e. the node
+    // is genuinely still legacy), and we NEVER let it break a working node:
+    // any failure (relay still http, slug not preservable, network/parse error)
+    // falls back to the existing legacy enrollment.
+    const runtimeRelay = await this.tryReadExistingRelayRuntimeConfig(relay);
+    const existingHasDns01 = preEnrolled?.dns01 !== undefined || reused?.dns01 !== undefined;
+    if (runtimeRelay !== null && !existingHasDns01) {
+      const refreshed = await this.tryRefreshExistingEnrollmentToPassthrough(relay, runtimeRelay);
+      if (refreshed !== "keep-legacy") {
+        this.logger.info(
+          { hostname: refreshed.hostname, publicBaseUrl: refreshed.publicBaseUrl },
+          "Refreshed existing relay enrollment to TLS passthrough",
+        );
+        return refreshed;
+      }
+    }
+
     if (preEnrolled !== null) {
       this.logger.info(
         { hostname: preEnrolled.hostname, publicBaseUrl: preEnrolled.publicBaseUrl },
@@ -7815,7 +8076,6 @@ export default function (api) {
       return preEnrolled;
     }
 
-    const reused = await this.tryReuseExistingRelayEnrollment(relay);
     if (reused !== null) {
       this.logger.info(
         {
@@ -7859,6 +8119,13 @@ export default function (api) {
     const callerSlug = relay.requestedSlug?.trim();
     const callerSlugEligible =
       !usesManagedPublicEnroll && typeof callerSlug === "string" && callerSlug.length > 0;
+    // Public enrollment keys the relay assignment on the installation id, so we
+    // send a STABLE machine-derived id (not the per-run random `installationId`
+    // used for job correlation). This keeps fresh public enrolls idempotent and
+    // lets a later refresh recognise the same node. See resolveStableInstallationId.
+    const publicEnrollInstallationId = usesManagedPublicEnroll
+      ? await this.resolveStableInstallationId()
+      : installationId;
     let lastFailure: { status?: number; responseText?: string; error?: unknown } | null = null;
     for (let attempt = 1; attempt <= 6; attempt += 1) {
       const requestedSlug =
@@ -7874,7 +8141,9 @@ export default function (api) {
             Accept: "application/json",
           },
           body: JSON.stringify({
-            ...(usesManagedPublicEnroll ? { installationId } : { enrollmentToken }),
+            ...(usesManagedPublicEnroll
+              ? { installationId: publicEnrollInstallationId }
+              : { enrollmentToken }),
             requestedSlug,
             version: process.env.npm_package_version ?? "2.0.0",
             // Advertise TLS-passthrough support. The relay only acts on this
