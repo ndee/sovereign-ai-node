@@ -11,6 +11,14 @@ by the `.github/workflows/release.yml` workflow.
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-06-24
+
+Patch enabling the TLS-passthrough **upgrade flip** for nodes that are already enrolled on a managed relay. Before this, an enrolled node stuck in legacy `http` mode (e.g. one enrolled before the relay gained passthrough support) could never move to passthrough through the installer: the enrollment step reused the persisted legacy assignment and never re-contacted the relay, and a forced fresh enroll would mint a new random slug, changing the node's public hostname.
+
+- **Refresh an enrolled managed-relay node to TLS passthrough on upgrade.** When an upgrade finds an existing relay enrollment that is still legacy (`http`, no `dns01`), the installer re-contacts the relay with the node's **existing slug** plus `capabilities: ["tls-passthrough"]`, using a **stable `/etc/machine-id`-derived installation id** so the relay recognises the existing assignment and upgrades it in place. The relay only acts when it holds a deSEC owner token (the kill switch is unchanged); otherwise the node stays legacy. The refresh **fails closed** — it keeps the working legacy enrollment (never changing the public hostname, never breaking a working node) when the relay returns a different slug, returns `http`, or the request fails. Fresh installs, custom relays, already-passthrough nodes, and the deSEC kill switch are unaffected. ([#201](https://github.com/ndee/sovereign-ai-node/pull/201))
+
+See the [v2.3.1 GitHub Release](https://github.com/ndee/sovereign-ai-node/releases/tag/v2.3.1) for the full commit list.
+
 ## [2.3.0] - 2026-06-24
 
 Minor release introducing **node-side TLS passthrough**: a node can terminate its own TLS (Let's Encrypt via deSEC DNS-01) so the managed relay forwards only ciphertext and can no longer read node traffic. Passthrough stays dormant until the relay grants it (the relay's deSEC owner token is the kill switch); without it, nodes continue to enroll in legacy `http` mode where the relay terminates TLS. Mode is decided per node at enroll/re-enroll time, not by node version.
