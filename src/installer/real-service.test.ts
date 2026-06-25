@@ -13122,6 +13122,10 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
       expect(captured[0]?.body.requestedSlug).toBe("cathouse");
       expect(captured[0]?.body.installationId).toBe("stable-machine-id");
       expect(captured[0]?.body.capabilities).toEqual(["tls-passthrough"]);
+      // A legacy node refreshing to passthrough has no dns01 secret yet, so it
+      // forces the relay to (re)mint and return the token inline — otherwise a
+      // prior failed refresh's persisted desecTokenId traps it without a secret.
+      expect(captured[0]?.body.rotateDns01).toBe(true);
       // Result is now passthrough, hostname unchanged.
       expect(enrollment.hostname).toBe("cathouse.relay.sovereign-ai-node.com");
       expect(enrollment.dns01).toBeDefined();

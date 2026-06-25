@@ -7953,6 +7953,14 @@ export default function (api) {
           requestedSlug: existingSlug,
           version: process.env.npm_package_version ?? "2.0.0",
           capabilities: ["tls-passthrough"],
+          // This path only runs for a node that is still legacy (no dns01 yet),
+          // so it has no passthrough deSEC secret. Force the relay to (re)mint
+          // and return the token secret INLINE. Without this, a prior failed
+          // refresh that already persisted a `desecTokenId` on the relay
+          // assignment makes the relay reuse it WITHOUT returning the secret
+          // (needsMint=false), so the node can never obtain the token and the
+          // enroll fails closed on every retry. rotateDns01 breaks that trap.
+          rotateDns01: true,
         }),
       });
     } catch (error) {
