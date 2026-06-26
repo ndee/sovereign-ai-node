@@ -12,6 +12,8 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
+import { request as httpsRequest } from "node:https";
+import { isIPv4 } from "node:net";
 import { basename, dirname, join, resolve } from "node:path";
 import { connect as tlsConnect } from "node:tls";
 import type {
@@ -46,6 +48,7 @@ import {
   installRequestSchema,
   type MatrixOnboardingIssueResult,
   type MatrixOnboardingPublicState,
+  type MatrixOnboardingReadiness,
   type PreflightResult,
   type ReconfigureResult,
   type RelayDns01Input,
@@ -308,6 +311,48 @@ const DOCTOR_DISK_WARN_BYTES = 2 * 1024 * 1024 * 1024;
 const DOCTOR_DISK_FAIL_BYTES = 500 * 1024 * 1024;
 const LOBSTER_CLI_PROBE_TIMEOUT_MS = 20_000;
 const LOBSTER_CLI_INSTALL_TIMEOUT_MS = 5 * 60_000;
+// Per-attempt timeout for a single onboarding-page reachability GET. The
+// repeated polling (and its overall deadline) lives in the CLI/web callers; this
+// only bounds one request so a hung connection can't stall a poll tick.
+const ONBOARDING_READINESS_PROBE_TIMEOUT_MS = 4_000;
+const ONBOARDING_PRIVATE_IPV4_RANGES = [/^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./];
+// Return the lowercased hostname of a URL, or null if it does not parse — so a
+// partially-written/malformed publicBaseUrl never throws out of a readiness
+// probe (it just falls through to the public/validating path and reports
+// not-ready).
+const tryParseHostname = (url: string): string | null => {
+  try {
+    return new URL(url).hostname.trim().toLowerCase();
+  } catch {
+    return null;
+  }
+};
+// A private/loopback/.local host implies the node served a Caddy local-CA
+// ("tls internal") cert, so an onboarding-readiness GET must relax chain
+// verification. Public hostnames get a real CA cert and must validate normally.
+// Covers IPv4 RFC1918 + loopback and IPv6 loopback / ULA (fc00::/7) /
+// link-local (fe80::); anything else is treated as public.
+const isLanOrLoopbackHost = (host: string): boolean => {
+  const normalized = host
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "");
+  if (normalized === "localhost" || normalized.endsWith(".local")) {
+    return true;
+  }
+  if (isIPv4(normalized)) {
+    return (
+      normalized.startsWith("127.") ||
+      ONBOARDING_PRIVATE_IPV4_RANGES.some((re) => re.test(normalized))
+    );
+  }
+  // IPv6: loopback, IPv4-mapped loopback, ULA (fc00::/7 → fc.. / fd..), and
+  // link-local (fe80::/10 → fe8.. fe9.. fea.. feb..).
+  if (normalized === "::1" || normalized.startsWith("::ffff:127.")) {
+    return true;
+  }
+  return /^f[cd][0-9a-f]*:/.test(normalized) || /^fe[89ab][0-9a-f]*:/.test(normalized);
+};
 // How often the passthrough TLS smoke check re-probes the local TLS port while
 // waiting for the node's own Caddy to obtain its DNS-01 certificate.
 const RELAY_PASSTHROUGH_TLS_PROBE_INTERVAL_MS = 5_000;
@@ -405,6 +450,11 @@ export class RealInstallerService implements InstallerService {
   // and exercise the loop-exhaustion (fail-closed) path without waiting minutes.
   protected relayPassthroughTlsProbeIntervalMs = RELAY_PASSTHROUGH_TLS_PROBE_INTERVAL_MS;
   protected relayPassthroughTlsProbeAttempts = RELAY_PASSTHROUGH_TLS_PROBE_ATTEMPTS;
+
+  // Per-attempt timeout for a single onboarding-readiness GET. A protected field
+  // (not a direct constant read) only so tests can shrink it and exercise the
+  // not-reachable path without waiting out the real timeout.
+  protected onboardingReadinessProbeTimeoutMs = ONBOARDING_READINESS_PROBE_TIMEOUT_MS;
 
   // Cached stable installation id (see resolveStableInstallationId). Memoised so
   // every relay enroll/refresh in a single install run sends the same identity.
@@ -1922,6 +1972,147 @@ export class RealInstallerService implements InstallerService {
       username: state.username,
       homeserverUrl: state.homeserverUrl,
     };
+  }
+
+  /**
+   * One-shot reachability check of the public onboarding page. Both installers
+   * (CLI and web) poll this to decide when it is safe to reveal the onboarding
+   * URL/QR: in relay-passthrough mode the node terminates its own TLS via deSEC
+   * DNS-01, so the page is unreachable for the minutes it takes the cert to
+   * issue. This never throws — every failure path (config not written yet, page
+   * not exposed, network/TLS error) returns `ready: false` so callers can keep
+   * polling and eventually reveal-with-warning on their own timeout.
+   */
+  async getMatrixOnboardingReadiness(): Promise<MatrixOnboardingReadiness> {
+    const runtimeConfig = await this.tryReadRuntimeConfig();
+    if (runtimeConfig === null) {
+      // Config still being written by an in-flight install. Not an error —
+      // callers should keep polling.
+      return { ready: false, url: "", mode: "direct", reason: "config-not-found" };
+    }
+
+    const mode = this.resolveOnboardingReadinessMode(runtimeConfig);
+
+    let url: string;
+    try {
+      url = this.assertMatrixOnboardingAvailable(runtimeConfig);
+    } catch {
+      // local-dev / plaintext installs have no HTTPS onboarding page to reach.
+      return { ready: false, url: "", mode, reason: "onboarding-unavailable" };
+    }
+
+    const probe = await this.probeOnboardingUrlReachable(url, mode === "internal");
+    return {
+      ready: probe.ready,
+      url,
+      mode,
+      ...(probe.status === undefined ? {} : { status: probe.status }),
+      ...(probe.ready
+        ? { reason: "public-200" }
+        : probe.reason === undefined
+          ? {}
+          : { reason: probe.reason }),
+    };
+  }
+
+  private resolveOnboardingReadinessMode(
+    runtimeConfig: RuntimeConfig,
+  ): MatrixOnboardingReadiness["mode"] {
+    const relay = runtimeConfig.relay;
+    if (relay?.enabled) {
+      return relay.tunnel.type === "https" ? "relay-passthrough" : "relay";
+    }
+    if (runtimeConfig.matrix.accessMode === "relay") {
+      return "relay";
+    }
+    // Direct mode: a private/loopback/.local host means Caddy issued a local-CA
+    // ("tls internal") cert, so the readiness GET must tolerate it. A malformed
+    // publicBaseUrl (partially-written config) is treated as direct/public — the
+    // probe then fails and reports not-ready rather than throwing.
+    const host = tryParseHostname(runtimeConfig.matrix.publicBaseUrl);
+    return host !== null && isLanOrLoopbackHost(host) ? "internal" : "direct";
+  }
+
+  // A single fast GET of the public onboarding URL. Readiness is end-to-end:
+  // the page must actually answer 200 the way a client's browser/phone would.
+  // We deliberately do NOT probe a local port as a fallback — the clients poll
+  // this on an interval with their own deadline, so transient unreachability
+  // (e.g. a relay-passthrough cert still issuing) simply keeps polling and, on
+  // timeout, reveals-with-warning. Redirects are followed: a 200 after a
+  // canonical-host/slash/HTTPS-upgrade redirect still means the page serves.
+  private async probeOnboardingUrlReachable(
+    url: string,
+    allowSelfSigned: boolean,
+  ): Promise<{ ready: boolean; status?: number; reason?: string }> {
+    if (allowSelfSigned) {
+      return this.probeOnboardingUrlSelfSigned(url);
+    }
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), this.onboardingReadinessProbeTimeoutMs);
+      try {
+        const response = await this.fetchImpl(url, {
+          method: "GET",
+          headers: { Accept: "text/html" },
+          signal: controller.signal,
+        });
+        return response.status === 200
+          ? { ready: true, status: response.status }
+          : { ready: false, status: response.status, reason: `http-${response.status}` };
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch (error) {
+      return {
+        ready: false,
+        reason: error instanceof Error ? error.message : "fetch-error",
+      };
+    }
+  }
+
+  // Internal/LAN mode serves a local-CA cert that a validating fetch rejects.
+  // Issue the GET with chain verification relaxed (never globally) while still
+  // requiring a 200. Uses node:https directly because FetchLike's RequestInit
+  // has no way to pass a per-request rejectUnauthorized.
+  private probeOnboardingUrlSelfSigned(
+    url: string,
+  ): Promise<{ ready: boolean; status?: number; reason?: string }> {
+    return new Promise((resolvePromise) => {
+      let settled = false;
+      const settle = (value: { ready: boolean; status?: number; reason?: string }): void => {
+        if (settled) return;
+        settled = true;
+        resolvePromise(value);
+      };
+      const req = httpsRequest(
+        url,
+        {
+          method: "GET",
+          rejectUnauthorized: false,
+          headers: { Accept: "text/html" },
+          timeout: this.onboardingReadinessProbeTimeoutMs,
+        },
+        (res) => {
+          const status = res.statusCode ?? 0;
+          res.resume();
+          // A 3xx from the local edge still means the page serves; treat any
+          // 2xx/3xx as reachable (the validating-fetch path follows redirects
+          // and lands on 200, so keep the two paths' notion of "ready" aligned).
+          const ready = status >= 200 && status < 400;
+          settle(
+            ready ? { ready: true, status } : { ready: false, status, reason: `http-${status}` },
+          );
+        },
+      );
+      req.on("timeout", () => {
+        req.destroy();
+        settle({ ready: false, reason: "timeout" });
+      });
+      req.on("error", (error: Error) => {
+        settle({ ready: false, reason: error.message });
+      });
+      req.end();
+    });
   }
 
   private getSetupUiBootstrapStatePath(): string {

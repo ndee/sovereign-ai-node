@@ -418,6 +418,20 @@ export const matrixOnboardingPublicStateSchema = z.object({
   homeserverUrl: z.string().min(1),
 });
 
+// Reachability of the public onboarding page, used by the CLI and web
+// installers to gate the reveal of the onboarding URL/QR until the page is
+// actually serving (relevant for relay-passthrough, where the node's TLS cert
+// can take minutes to issue via DNS-01). `ready` is the only field a client
+// must act on; `mode`/`status`/`reason` are diagnostic. `url` is empty while
+// the runtime config has not been written yet.
+export const matrixOnboardingReadinessSchema = z.object({
+  ready: z.boolean(),
+  url: z.string(),
+  mode: z.enum(["internal", "relay", "relay-passthrough", "direct"]),
+  status: z.number().int().optional(),
+  reason: z.string().optional(),
+});
+
 export const testImapResultSchema = z.object({
   ok: z.boolean(),
   host: z.string().min(1),
@@ -468,3 +482,4 @@ export type TestMatrixResult = z.infer<typeof testMatrixResultSchema>;
 export type StartInstallResult = z.infer<typeof startInstallResultSchema>;
 export type MatrixOnboardingIssueResult = z.infer<typeof matrixOnboardingIssueResultSchema>;
 export type MatrixOnboardingPublicState = z.infer<typeof matrixOnboardingPublicStateSchema>;
+export type MatrixOnboardingReadiness = z.infer<typeof matrixOnboardingReadinessSchema>;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { installRequestSchema } from "./install.js";
+import { installRequestSchema, matrixOnboardingReadinessSchema } from "./install.js";
 
 describe("installRequestSchema", () => {
   it("accepts managed relay requests without an enrollment token", () => {
@@ -185,5 +185,36 @@ describe("installRequestSchema", () => {
       openrouter: { apiKey: "sk-or-test" },
     });
     expect(parsed.matrix.tlsMode).toBe("internal");
+  });
+});
+
+describe("matrixOnboardingReadinessSchema", () => {
+  it("accepts a ready reading with optional status/reason", () => {
+    const parsed = matrixOnboardingReadinessSchema.parse({
+      ready: true,
+      url: "https://node.relay.example.com/onboard",
+      mode: "relay-passthrough",
+      status: 200,
+      reason: "public-200",
+    });
+    expect(parsed.ready).toBe(true);
+    expect(parsed.mode).toBe("relay-passthrough");
+  });
+
+  it("accepts a not-ready reading with an empty url and no status", () => {
+    const parsed = matrixOnboardingReadinessSchema.parse({
+      ready: false,
+      url: "",
+      mode: "direct",
+      reason: "config-not-found",
+    });
+    expect(parsed.ready).toBe(false);
+    expect(parsed.status).toBeUndefined();
+  });
+
+  it("rejects an unknown mode", () => {
+    expect(() =>
+      matrixOnboardingReadinessSchema.parse({ ready: false, url: "", mode: "carrier-pigeon" }),
+    ).toThrow();
   });
 });
