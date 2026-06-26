@@ -11,6 +11,14 @@ by the `.github/workflows/release.yml` workflow.
 
 ## [Unreleased]
 
+## [2.3.3] - 2026-06-26
+
+Patch refining the relay-passthrough onboarding flow: the installers no longer reveal an onboarding URL/QR before the page is actually serving.
+
+- **Gate the onboarding URL/QR reveal on page readiness.** Since the relay moved to TLS passthrough (deSEC DNS-01), a relay-passthrough node terminates its own HTTPS and its onboarding page is unreachable for the minutes its Let's Encrypt certificate takes to issue. Both installers previously revealed the onboarding URL/QR immediately on install success, handing operators a link/QR that did not load yet. A new readiness gate is now polled before the reveal: a single fast GET of the public onboarding URL (`getMatrixOnboardingReadiness()` → `{ ready, url, mode, status?, reason? }`, exposed as `GET /api/onboarding/ready` and the `sovereign-node onboarding ready [--wait]` subcommand), with per-mode TLS handling and a per-mode timeout that reveals-with-warning rather than blocking. The deadline grows as the real mode is learned, so an early config-not-found reading does not cap a relay-passthrough wait at the short default; the CLI exits 0 even on timeout so `set -e` install scripts never abort. ([#205](https://github.com/ndee/sovereign-ai-node/pull/205))
+
+See the [v2.3.3 GitHub Release](https://github.com/ndee/sovereign-ai-node/releases/tag/v2.3.3) for the full commit list.
+
 ## [2.3.2] - 2026-06-25
 
 Patch fixing a deSEC-token **trap** that could leave a node fail-closed while refreshing to TLS passthrough on upgrade.
