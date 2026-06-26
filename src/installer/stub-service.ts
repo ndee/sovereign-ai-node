@@ -15,6 +15,7 @@ import type {
   InstallRequest,
   MatrixOnboardingIssueResult,
   MatrixOnboardingPublicState,
+  MatrixOnboardingReadiness,
   PreflightResult,
   ReconfigureResult,
   SetupUiBootstrapIssueResult,
@@ -297,6 +298,16 @@ export class StubInstallerService implements InstallerService {
       maxAttempts: 5,
       username: "@operator:matrix.example.org",
       homeserverUrl: "https://matrix.example.org",
+    };
+  }
+
+  async getMatrixOnboardingReadiness(): Promise<MatrixOnboardingReadiness> {
+    return {
+      ready: true,
+      url: "https://matrix.example.org/onboard",
+      mode: "relay",
+      status: 200,
+      reason: "public-200",
     };
   }
 

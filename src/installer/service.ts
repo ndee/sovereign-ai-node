@@ -13,6 +13,7 @@ import type {
   InstallRequest,
   MatrixOnboardingIssueResult,
   MatrixOnboardingPublicState,
+  MatrixOnboardingReadiness,
   PreflightResult,
   ReconfigureResult,
   SetupUiBootstrapIssueResult,
@@ -186,6 +187,7 @@ export interface InstallerService {
   reconfigureOpenrouter(req: ReconfigureOpenrouterRequest): Promise<ReconfigureResult>;
   issueMatrixOnboardingCode(req?: { ttlMinutes?: number }): Promise<MatrixOnboardingIssueResult>;
   getMatrixOnboardingState(): Promise<MatrixOnboardingPublicState | null>;
+  getMatrixOnboardingReadiness(): Promise<MatrixOnboardingReadiness>;
   getAuthStage(): Promise<{ stage: "needs-bootstrap" | "needs-password"; username?: string }>;
   issueSetupUiBootstrapToken(req?: { ttlMinutes?: number }): Promise<SetupUiBootstrapIssueResult>;
   getSetupUiBootstrapState(): Promise<SetupUiBootstrapPublicState | null>;

@@ -189,4 +189,67 @@ describe("onboarding routes", () => {
       await server.close();
     }
   });
+
+  it("returns readiness on GET /api/onboarding/ready", async () => {
+    const server = buildTestApp();
+    try {
+      const response = await server.inject({
+        method: "GET",
+        url: "/api/onboarding/ready",
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.ok).toBe(true);
+      expect(body.result).toMatchObject({
+        ready: expect.any(Boolean),
+        url: expect.any(String),
+        mode: expect.any(String),
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("reports not-ready without erroring on GET /api/onboarding/ready", async () => {
+    const server = buildTestApp({
+      getMatrixOnboardingReadiness: async () => ({
+        ready: false,
+        url: "https://node.relay.example.com/onboard",
+        mode: "relay-passthrough",
+        reason: "config-not-found",
+      }),
+    });
+    try {
+      const response = await server.inject({
+        method: "GET",
+        url: "/api/onboarding/ready",
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.ok).toBe(true);
+      expect(body.result.ready).toBe(false);
+      expect(body.result.mode).toBe("relay-passthrough");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("returns a 500 envelope when getMatrixOnboardingReadiness throws", async () => {
+    const server = buildTestApp({
+      getMatrixOnboardingReadiness: async () => {
+        throw new Error("boom");
+      },
+    });
+    try {
+      const response = await server.inject({
+        method: "GET",
+        url: "/api/onboarding/ready",
+      });
+      expect(response.statusCode).toBe(500);
+      const body = response.json();
+      expect(body.ok).toBe(false);
+    } finally {
+      await server.close();
+    }
+  });
 });
