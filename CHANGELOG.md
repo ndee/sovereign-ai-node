@@ -11,6 +11,12 @@ by the `.github/workflows/release.yml` workflow.
 
 ## [Unreleased]
 
+## [2.3.2] - 2026-06-25
+
+Patch fixing a deSEC-token **trap** that could leave a node fail-closed while refreshing to TLS passthrough on upgrade.
+
+- **Force a fresh deSEC token mint on the passthrough refresh.** When a legacy node refreshes to passthrough on upgrade, it now sends `rotateDns01: true`. This path only runs for a node that is still legacy (no `dns01` yet), so it has no deSEC token secret. Previously, if a prior refresh attempt minted a token (so the relay assignment carried a `desecTokenId`) but then failed downstream before the node persisted the secret (e.g. a bundled-Matrix `:8008` port conflict), every later refresh hit the relay's `needsMint=false` path and got the token id back **without** the secret — so the node could never obtain it and the enroll failed closed (`RELAY_ENROLL_INVALID`) on every retry. Sending `rotateDns01` makes the relay always re-mint and return the secret inline, breaking the trap. ([#203](https://github.com/ndee/sovereign-ai-node/pull/203))
+
 ## [2.3.1] - 2026-06-24
 
 Patch enabling the TLS-passthrough **upgrade flip** for nodes that are already enrolled on a managed relay. Before this, an enrolled node stuck in legacy `http` mode (e.g. one enrolled before the relay gained passthrough support) could never move to passthrough through the installer: the enrollment step reused the persisted legacy assignment and never re-contacted the relay, and a forced fresh enroll would mint a new random slug, changing the node's public hostname.
