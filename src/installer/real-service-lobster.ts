@@ -24,50 +24,25 @@ const resolveServiceHome = (serviceHome?: string): string => {
   return trimmed !== undefined && trimmed.length > 0 ? trimmed : ORIGINAL_HOME;
 };
 
+const npmGlobalPrefix = (serviceHome?: string): string =>
+  join(resolveServiceHome(serviceHome), npmGlobalSubdir);
+
+// Absolute path to the lobster binary inside the targeted npm prefix. We probe
+// this directly rather than relying on `lobster` being on PATH: the installer
+// runs as root with whatever PATH it inherited (which does not include the
+// service user's `<serviceHome>/.npm-global/bin`), so a bare-command probe
+// would not resolve. npm writes the bin as world-readable/executable (mode
+// 0755) under the prefix, so a root install into the service user's home is
+// reachable by the service user at runtime via the PATH drop-in.
+const lobsterBinaryPath = (serviceHome?: string): string =>
+  join(npmGlobalPrefix(serviceHome), "bin", "lobster");
+
 const buildNpmEnv = (serviceHome?: string): Record<string, string> => {
   const home = resolveServiceHome(serviceHome);
-  const prefix = join(home, npmGlobalSubdir);
   return {
     CI: "1",
     HOME: home,
-    npm_config_prefix: prefix,
-  };
-};
-
-// When the installer runs as root but the scan service runs as a non-root
-// service user, npm/lobster must execute *as that user* so the packages land
-// under the service user's home (and are owned by them) rather than under
-// /root — which is mode 0700 and unreachable for the service user. We mirror
-// the OpenClaw delegation pattern (sudo -u <user> --preserve-env=…).
-const shouldDelegateToServiceUser = (runAsUser?: string): runAsUser is string => {
-  const trimmed = runAsUser?.trim();
-  return (
-    trimmed !== undefined &&
-    trimmed.length > 0 &&
-    trimmed !== "root" &&
-    typeof process.getuid === "function" &&
-    process.getuid() === 0
-  );
-};
-
-const buildExecInvocation = (input: {
-  command: string;
-  args: string[];
-  runAsUser?: string | undefined;
-}): { command: string; args: string[] } => {
-  if (!shouldDelegateToServiceUser(input.runAsUser)) {
-    return { command: input.command, args: input.args };
-  }
-  return {
-    command: "sudo",
-    args: [
-      "-u",
-      input.runAsUser,
-      "--preserve-env=HOME,npm_config_prefix,CI,PATH",
-      "--",
-      input.command,
-      ...input.args,
-    ],
+    npm_config_prefix: npmGlobalPrefix(serviceHome),
   };
 };
 
@@ -76,7 +51,6 @@ export const detectInstalledLobsterCli = async (input: {
   packageName: string;
   probeTimeoutMs: number;
   serviceHome?: string | undefined;
-  runAsUser?: string | undefined;
 }): Promise<{
   binaryPath: string;
   version: string | null;
@@ -86,12 +60,10 @@ export const detectInstalledLobsterCli = async (input: {
     return null;
   }
   const env = buildNpmEnv(input.serviceHome);
+  const binaryPath = lobsterBinaryPath(input.serviceHome);
   const probe = await input.execRunner.run({
-    ...buildExecInvocation({
-      command: "lobster",
-      args: ["commands.list | json"],
-      runAsUser: input.runAsUser,
-    }),
+    command: binaryPath,
+    args: ["commands.list | json"],
     options: {
       timeout: input.probeTimeoutMs,
       env,
@@ -105,11 +77,8 @@ export const detectInstalledLobsterCli = async (input: {
     ? parsed.filter((entry): entry is string => typeof entry === "string")
     : [];
   const versionResult = await input.execRunner.run({
-    ...buildExecInvocation({
-      command: "npm",
-      args: ["list", "-g", input.packageName, "--json", "--depth=0"],
-      runAsUser: input.runAsUser,
-    }),
+    command: "npm",
+    args: ["list", "-g", input.packageName, "--json", "--depth=0"],
     options: {
       timeout: input.probeTimeoutMs,
       env,
@@ -125,7 +94,7 @@ export const detectInstalledLobsterCli = async (input: {
       ? dependencyRecord.version
       : null;
   return {
-    binaryPath: "lobster",
+    binaryPath,
     version,
     commands,
   };
@@ -140,7 +109,6 @@ export const ensureLobsterCliInstalled = async (input: {
   probeTimeoutMs: number;
   requiredCommands: string[];
   serviceHome?: string | undefined;
-  runAsUser?: string | undefined;
 }): Promise<void> => {
   if (input.execRunner === null) {
     throw {
@@ -154,7 +122,6 @@ export const ensureLobsterCliInstalled = async (input: {
     packageName: input.packageName,
     probeTimeoutMs: input.probeTimeoutMs,
     serviceHome: input.serviceHome,
-    runAsUser: input.runAsUser,
   });
   if (detected !== null) {
     const versionVerified = detected.version === input.version;
@@ -170,11 +137,8 @@ export const ensureLobsterCliInstalled = async (input: {
   }
 
   const installResult = await input.execRunner.run({
-    ...buildExecInvocation({
-      command: "npm",
-      args: ["install", "-g", `${input.packageName}@${input.version}`],
-      runAsUser: input.runAsUser,
-    }),
+    command: "npm",
+    args: ["install", "-g", `${input.packageName}@${input.version}`],
     options: {
       timeout: input.installTimeoutMs,
       env: buildNpmEnv(input.serviceHome),
@@ -199,7 +163,6 @@ export const ensureLobsterCliInstalled = async (input: {
     packageName: input.packageName,
     probeTimeoutMs: input.probeTimeoutMs,
     serviceHome: input.serviceHome,
-    runAsUser: input.runAsUser,
   });
   const verifiedByVersion = verified?.version === input.version;
   const verifiedByCommands =

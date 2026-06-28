@@ -104,7 +104,14 @@ const maybeHandleInstalledLobsterExec = (input: {
   args?: string[];
 }): ExecResult | null => {
   const serialized = [input.command, ...(input.args ?? [])].join(" ");
-  if (serialized === "lobster commands.list | json") {
+  // The probe runs the lobster binary by its absolute path
+  // (<serviceHome>/.npm-global/bin/lobster) so it does not depend on PATH.
+  // Match by basename + args rather than a fixed string.
+  const argsJoined = (input.args ?? []).join(" ");
+  const isLobsterProbe =
+    (input.command === "lobster" || input.command.endsWith("/bin/lobster")) &&
+    argsJoined === "commands.list | json";
+  if (isLobsterProbe) {
     return {
       command: serialized,
       exitCode: 0,

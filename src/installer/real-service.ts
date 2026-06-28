@@ -4703,9 +4703,16 @@ export class RealInstallerService implements InstallerService {
   private async ensureLobsterCliInstalled(runtimeConfig?: RuntimeConfig): Promise<void> {
     // The scan service runs as the configured service user with
     // PATH=<serviceUserHome>/.npm-global/bin (the 10-lobster-path.conf
-    // drop-in). Install/probe lobster against THAT home so the binary is
-    // reachable for the service user — not under the root install process's
-    // HOME (/root, mode 0700), which the service user cannot read.
+    // drop-in) and HOME=<serviceUserHome>. Install lobster into THAT home's
+    // npm prefix so the binary is reachable for the service user at runtime —
+    // not under the root install process's HOME (/root, mode 0700), which the
+    // service user cannot read. The installer can run as the service user
+    // (real node: the API systemd unit runs as sovereign-node) or as root
+    // (CI / curl installer): in the root case it can still write into the
+    // service user's home (which the install scripts create + own first), and
+    // npm writes world-readable/executable bins (0755) so the service user can
+    // run them. The helper probes the binary by its absolute path, so it does
+    // not depend on PATH resolution under either identity.
     const serviceIdentity = this.getConfiguredServiceIdentity(runtimeConfig);
     const serviceHome = await this.resolveServiceUserHome(serviceIdentity.user);
     await ensureLobsterCliInstalled({
@@ -4717,14 +4724,13 @@ export class RealInstallerService implements InstallerService {
       probeTimeoutMs: LOBSTER_CLI_PROBE_TIMEOUT_MS,
       requiredCommands: ["clawd.invoke"],
       serviceHome: serviceHome ?? undefined,
-      runAsUser: serviceIdentity.user,
     });
   }
 
   // Resolve the home directory of the configured service user from
-  // getent passwd (field 6). Returns null when the user is root (no
-  // delegation needed) or cannot be resolved, in which case the lobster
-  // helper falls back to its captured ORIGINAL_HOME (dev/root installs).
+  // getent passwd (field 6). Returns null when the user is root or cannot be
+  // resolved, in which case the lobster helper falls back to its captured
+  // ORIGINAL_HOME (dev/root installs where the service user IS the invoker).
   private async resolveServiceUserHome(serviceUser: string): Promise<string | null> {
     const user = serviceUser.trim();
     if (user.length === 0 || user === "root") {
