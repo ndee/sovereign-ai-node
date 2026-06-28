@@ -10,7 +10,10 @@ import {
   installJobStatusResponseSchema,
   installRequestSchema,
 } from "../../contracts/index.js";
-import { DEFAULT_INSTALL_REQUEST_FILE } from "../../installer/real-service-shared.js";
+import {
+  DEFAULT_INSTALL_REQUEST_FILE,
+  DEFAULT_OPENROUTER_MODEL,
+} from "../../installer/real-service-shared.js";
 import { SOVEREIGN_PINNED_OPENCLAW_VERSION } from "../../openclaw/bootstrap.js";
 import {
   applyBotCatalogSourceOptions,
@@ -62,7 +65,7 @@ const buildScaffoldInstallRequest = (opts: InstallOptions): InstallRequest => {
       runOnboard: false,
     },
     openrouter: {
-      model: "qwen/qwen3.5-9b",
+      model: DEFAULT_OPENROUTER_MODEL,
       secretRef: "env:OPENROUTER_API_KEY",
     },
     matrix: {

@@ -63,7 +63,7 @@ const buildInstallRequest = (): InstallRequest => ({
     runOnboard: false,
   },
   openrouter: {
-    model: "qwen/qwen3.5-9b",
+    model: "qwen/qwen-2.5-7b-instruct",
     apiKey: "sk-or-test",
   },
   imap: {
@@ -704,7 +704,7 @@ const writeRuntimeArtifacts = async (paths: SovereignPaths): Promise<void> => {
           gatewayEnvPath,
         },
         openrouter: {
-          model: "qwen/qwen3.5-9b",
+          model: "qwen/qwen-2.5-7b-instruct",
           apiKeySecretRef: "env:OPENROUTER_API_KEY",
         },
         openclawProfile: {
@@ -1712,7 +1712,7 @@ describe("RealInstallerService", () => {
 
       const previousRuntimeConfig: RuntimeConfig = {
         openrouter: {
-          model: "qwen/qwen3.5-9b",
+          model: "qwen/qwen-2.5-7b-instruct",
           apiKeySecretRef: "env:OPENROUTER_API_KEY",
         },
         openclaw: {
@@ -1907,7 +1907,7 @@ describe("RealInstallerService", () => {
     });
     const runtimeConfig = {
       openrouter: {
-        model: "qwen/qwen3.5-9b",
+        model: "qwen/qwen-2.5-7b-instruct",
         apiKeySecretRef: "env:OPENROUTER_API_KEY",
       },
       openclaw: {
@@ -2634,7 +2634,7 @@ describe("RealInstallerService", () => {
           }),
         ]),
       );
-      expect(openclawConfig.agents?.defaults?.model).toBe("openrouter/qwen/qwen3.5-9b");
+      expect(openclawConfig.agents?.defaults?.model).toBe("openrouter/qwen/qwen-2.5-7b-instruct");
 
       const runtimeConfigRaw = await readFile(paths.configPath, "utf8");
       const runtimeConfig = JSON.parse(runtimeConfigRaw) as {
@@ -5010,7 +5010,7 @@ describe("RealInstallerService", () => {
 
     const runtimeConfig: RuntimeConfig = {
       openrouter: {
-        model: "qwen/qwen3.5-9b",
+        model: "qwen/qwen-2.5-7b-instruct",
         apiKeySecretRef: "env:OPENROUTER_API_KEY",
       },
       openclaw: {
@@ -5256,7 +5256,7 @@ describe("RealInstallerService", () => {
     });
     const runtimeConfig: RuntimeConfig = {
       openrouter: {
-        model: "qwen/qwen3.5-9b",
+        model: "qwen/qwen-2.5-7b-instruct",
         apiKeySecretRef: "env:OPENROUTER_API_KEY",
       },
       openclaw: {
@@ -5569,7 +5569,7 @@ describe("RealInstallerService", () => {
 
       const runtimeConfig: RuntimeConfig = {
         openrouter: {
-          model: "qwen/qwen3.5-9b",
+          model: "qwen/qwen-2.5-7b-instruct",
           apiKeySecretRef: "env:OPENROUTER_API_KEY",
         },
         openclaw: {
@@ -6673,7 +6673,7 @@ describe("RealInstallerService", () => {
     try {
       const req = buildInstallRequest();
       req.openrouter = {
-        model: "qwen/qwen3.5-9b",
+        model: "qwen/qwen-2.5-7b-instruct",
         secretRef: "env:OPENROUTER_API_KEY",
       };
       req.bots = {
@@ -11185,7 +11185,7 @@ describe("RealInstallerService", () => {
       installRequestPath,
       JSON.stringify({
         mode: "bundled_matrix",
-        openrouter: { model: "qwen/qwen3.5-9b", secretRef: "env:OPENROUTER_API_KEY" },
+        openrouter: { model: "qwen/qwen-2.5-7b-instruct", secretRef: "env:OPENROUTER_API_KEY" },
         matrix: {
           homeserverDomain: "matrix.example.org",
           publicBaseUrl: "https://matrix.example.org",
@@ -13669,5 +13669,131 @@ describe("resolveStableInstallationId", () => {
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
+  });
+});
+
+describe("RealInstallerService.resolveServiceUserHome", () => {
+  const buildPaths = (): SovereignPaths => ({
+    configPath: "/etc/sovereign-node/sovereign-node.json5",
+    secretsDir: "/etc/sovereign-node/secrets",
+    stateDir: "/var/lib/sovereign-node",
+    logsDir: "/var/log/sovereign-node",
+    installJobsDir: "/var/lib/sovereign-node/install-jobs",
+    openclawServiceHome: "/var/lib/sovereign-node/openclaw-home",
+    provenancePath: "/var/lib/sovereign-node/install-provenance.json",
+    backupsDir: "/var/lib/sovereign-node/backups",
+  });
+
+  const buildService = (
+    execRun: ((input: ExecInput) => Promise<ExecResult>) | null,
+  ): RealInstallerService =>
+    new RealInstallerService(createLogger(), buildPaths(), {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async (opts): Promise<OpenClawInstallInfo> => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: opts.version,
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async (): Promise<BundledMatrixProvisionResult> => {
+          throw new Error("unexpected provision call");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("unexpected bootstrapAccounts call");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("unexpected bootstrapRoom call");
+        },
+        test: async (req) => ({ ok: true, homeserverUrl: req.publicBaseUrl, checks: [] }),
+      },
+      ...(execRun === null ? {} : { execRunner: { run: execRun } }),
+    });
+
+  const callResolve = (service: RealInstallerService, user: string): Promise<string | null> =>
+    (
+      service as unknown as {
+        resolveServiceUserHome: (serviceUser: string) => Promise<string | null>;
+      }
+    ).resolveServiceUserHome(user);
+
+  it("returns null for root or empty service users without invoking getent", async () => {
+    const calls: string[] = [];
+    const service = buildService(async (input) => {
+      calls.push([input.command, ...(input.args ?? [])].join(" "));
+      return { command: "", exitCode: 0, stdout: "", stderr: "" };
+    });
+    expect(await callResolve(service, "root")).toBeNull();
+    expect(await callResolve(service, "   ")).toBeNull();
+    expect(calls).toEqual([]);
+  });
+
+  it("returns null when no exec runner is configured", async () => {
+    const service = buildService(null);
+    expect(await callResolve(service, "sovereign-node")).toBeNull();
+  });
+
+  it("parses the home directory (field 6) from getent passwd output", async () => {
+    const service = buildService(async (input) => {
+      expect([input.command, ...(input.args ?? [])].join(" ")).toBe("getent passwd sovereign-node");
+      return {
+        command: "getent passwd sovereign-node",
+        exitCode: 0,
+        stdout: "sovereign-node:x:998:998::/var/lib/sovereign-node:/usr/sbin/nologin\n",
+        stderr: "",
+      };
+    });
+    expect(await callResolve(service, "sovereign-node")).toBe("/var/lib/sovereign-node");
+  });
+
+  it("returns null when getent exits non-zero", async () => {
+    const service = buildService(async () => ({
+      command: "getent",
+      exitCode: 2,
+      stdout: "",
+      stderr: "",
+    }));
+    expect(await callResolve(service, "sovereign-node")).toBeNull();
+  });
+
+  it("returns null when the passwd entry has no home field", async () => {
+    const service = buildService(async () => ({
+      command: "getent",
+      exitCode: 0,
+      stdout: "sovereign-node:x:998:998\n",
+      stderr: "",
+    }));
+    expect(await callResolve(service, "sovereign-node")).toBeNull();
+  });
+
+  it("returns null when the exec runner throws", async () => {
+    const service = buildService(async () => {
+      throw new Error("boom");
+    });
+    expect(await callResolve(service, "sovereign-node")).toBeNull();
   });
 });

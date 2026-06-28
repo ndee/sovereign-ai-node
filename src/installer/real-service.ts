@@ -4700,7 +4700,14 @@ export class RealInstallerService implements InstallerService {
     );
   }
 
-  private async ensureLobsterCliInstalled(): Promise<void> {
+  private async ensureLobsterCliInstalled(runtimeConfig?: RuntimeConfig): Promise<void> {
+    // The scan service runs as the configured service user with
+    // PATH=<serviceUserHome>/.npm-global/bin (the 10-lobster-path.conf
+    // drop-in). Install/probe lobster against THAT home so the binary is
+    // reachable for the service user — not under the root install process's
+    // HOME (/root, mode 0700), which the service user cannot read.
+    const serviceIdentity = this.getConfiguredServiceIdentity(runtimeConfig);
+    const serviceHome = await this.resolveServiceUserHome(serviceIdentity.user);
     await ensureLobsterCliInstalled({
       execRunner: this.execRunner,
       logger: this.logger,
@@ -4709,7 +4716,40 @@ export class RealInstallerService implements InstallerService {
       installTimeoutMs: LOBSTER_CLI_INSTALL_TIMEOUT_MS,
       probeTimeoutMs: LOBSTER_CLI_PROBE_TIMEOUT_MS,
       requiredCommands: ["clawd.invoke"],
+      serviceHome: serviceHome ?? undefined,
+      runAsUser: serviceIdentity.user,
     });
+  }
+
+  // Resolve the home directory of the configured service user from
+  // getent passwd (field 6). Returns null when the user is root (no
+  // delegation needed) or cannot be resolved, in which case the lobster
+  // helper falls back to its captured ORIGINAL_HOME (dev/root installs).
+  private async resolveServiceUserHome(serviceUser: string): Promise<string | null> {
+    const user = serviceUser.trim();
+    if (user.length === 0 || user === "root") {
+      return null;
+    }
+    if (this.execRunner === null) {
+      return null;
+    }
+    try {
+      const passwdResult = await this.execRunner.run({
+        command: "getent",
+        args: ["passwd", user],
+        options: {
+          timeout: INSTALLER_EXEC_TIMEOUT_MS,
+        },
+      });
+      if (passwdResult.exitCode !== 0) {
+        return null;
+      }
+      const passwdFields = passwdResult.stdout.trim().split(":");
+      const home = passwdFields[5]?.trim();
+      return home !== undefined && home.length > 0 ? home : null;
+    } catch {
+      return null;
+    }
   }
 
   private renderGuardedJsonStateWorkspacePluginManifest(): string {
@@ -7833,7 +7873,7 @@ export default function (api) {
                 "Exec runner unavailable; skipping Lobster CLI verification during OpenClaw configure",
               );
             } else {
-              await this.ensureLobsterCliInstalled();
+              await this.ensureLobsterCliInstalled(runtimeConfig);
             }
           }
           if (runtimeConfig.relay?.enabled === true) {

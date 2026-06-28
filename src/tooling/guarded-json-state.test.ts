@@ -21,7 +21,7 @@ const buildRuntimeConfig = (input: {
   workspace?: string;
 }): RuntimeConfig => ({
   openrouter: {
-    model: "qwen/qwen3.5-9b",
+    model: "qwen/qwen-2.5-7b-instruct",
     apiKeySecretRef: "env:OPENROUTER_API_KEY",
   },
   openclaw: {

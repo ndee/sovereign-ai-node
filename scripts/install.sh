@@ -37,8 +37,13 @@ INSTALLATION_DETECTED="0"
 CONFIGURED_INSTALLATION="0"
 EXISTING_REQUEST_VALID="0"
 LAST_REQUEST_LOAD_ERROR=""
-RECOMMENDED_OPENROUTER_MODEL="qwen/qwen3.5-9b"
-LEGACY_OPENROUTER_MODEL="openrouter/anthropic/claude-sonnet-4-5"
+RECOMMENDED_OPENROUTER_MODEL="qwen/qwen-2.5-7b-instruct"
+# Newline-separated list of OpenRouter models that must be migrated onto the
+# current RECOMMENDED model when an existing install/request is loaded:
+#   * openrouter/anthropic/claude-sonnet-4-5 — the original pre-qwen default.
+#   * qwen/qwen3.5-9b — reasoning-on model that returns content:null with
+#     finish_reason:length, degrading the mail-sentinel classifier (issue #208).
+LEGACY_OPENROUTER_MODELS=$'openrouter/anthropic/claude-sonnet-4-5\nqwen/qwen3.5-9b'
 DEFAULT_OPENROUTER_MODEL="$RECOMMENDED_OPENROUTER_MODEL"
 RECOMMENDED_MATRIX_DOMAIN="matrix.local.test"
 RECOMMENDED_MATRIX_PUBLIC_BASE_URL="http://127.0.0.1:8008"

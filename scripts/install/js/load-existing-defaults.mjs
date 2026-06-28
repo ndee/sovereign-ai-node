@@ -15,8 +15,16 @@
 
 import { readFileSync } from "node:fs";
 
-const RECOMMENDED_OPENROUTER_MODEL = "qwen/qwen3.5-9b";
-const LEGACY_OPENROUTER_MODEL = "openrouter/anthropic/claude-sonnet-4-5";
+const RECOMMENDED_OPENROUTER_MODEL = "qwen/qwen-2.5-7b-instruct";
+// OpenRouter models that must be upgraded onto the current recommended model
+// when a stale request file is reloaded:
+//   * openrouter/anthropic/claude-sonnet-4-5 — the original pre-qwen default.
+//   * qwen/qwen3.5-9b — reasoning-on model that returns content:null and
+//     degrades the mail-sentinel classifier (issue #208).
+const LEGACY_OPENROUTER_MODELS = new Set([
+  "openrouter/anthropic/claude-sonnet-4-5",
+  "qwen/qwen3.5-9b",
+]);
 const LEGACY_MATRIX_DOMAIN = "matrix.local.test";
 const LEGACY_MATRIX_PUBLIC_BASE_URLS = new Set([
   "http://127.0.0.1:8008",
@@ -88,7 +96,7 @@ export function loadExistingDefaults({ requestPath, runtimePath, env }) {
     pairs.push([key, String(value).replace(/\t/g, " ").replace(/\r?\n/g, " ").trim()]);
   };
 
-  if (openrouter.model === LEGACY_OPENROUTER_MODEL) {
+  if (LEGACY_OPENROUTER_MODELS.has(openrouter.model)) {
     emit("DEFAULT_OPENROUTER_MODEL", RECOMMENDED_OPENROUTER_MODEL);
     emit("LEGACY_OPENROUTER_MODEL_DETECTED", "1");
   } else {
@@ -180,7 +188,7 @@ export function runCli(argv = process.argv, env = process.env) {
 // the constants.
 export const _legacy = {
   RECOMMENDED_OPENROUTER_MODEL,
-  LEGACY_OPENROUTER_MODEL,
+  LEGACY_OPENROUTER_MODELS,
   LEGACY_MATRIX_DOMAIN,
   LEGACY_MATRIX_PUBLIC_BASE_URLS,
 };
