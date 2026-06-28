@@ -13804,3 +13804,508 @@ describe("RealInstallerService.resolveServiceUserHome", () => {
     expect(await callResolve(service, "sovereign-node")).toBeNull();
   });
 });
+
+describe("ensureMatrixCryptoRuntimeWritable (issue #207)", () => {
+  const buildPaths = (tempRoot: string): SovereignPaths => ({
+    configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+    secretsDir: join(tempRoot, "etc", "secrets"),
+    stateDir: join(tempRoot, "var", "lib"),
+    logsDir: join(tempRoot, "var", "log"),
+    installJobsDir: join(tempRoot, "install-jobs"),
+    openclawServiceHome: join(tempRoot, "openclaw-home"),
+    provenancePath: join(tempRoot, "install-provenance.json"),
+    backupsDir: join(tempRoot, "backups"),
+  });
+
+  const baseDeps = (
+    execRun: (input: ExecInput) => Promise<ExecResult>,
+  ): ConstructorParameters<typeof RealInstallerService>[2] =>
+    ({
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => {
+          throw new Error("not used");
+        },
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => {
+          throw new Error("not used");
+        },
+      },
+      preflightChecker: {
+        run: async () => ({
+          ok: true,
+          mode: "bundled_matrix" as const,
+          overall: "pass" as const,
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async () => {
+          throw new Error("not used");
+        },
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      execRunner: { run: execRun },
+    }) as ConstructorParameters<typeof RealInstallerService>[2];
+
+  const cryptoRelPath = join(
+    "openclaw",
+    "extensions",
+    "matrix",
+    "node_modules",
+    "@matrix-org",
+    "matrix-sdk-crypto-nodejs",
+  );
+
+  const invoke = (service: RealInstallerService, runtimeConfig?: RuntimeConfig): Promise<void> =>
+    (
+      service as unknown as {
+        ensureMatrixCryptoRuntimeWritable(config?: RuntimeConfig): Promise<void>;
+      }
+    ).ensureMatrixCryptoRuntimeWritable(runtimeConfig);
+
+  const withGlobalRoot = async (root: string, fn: () => Promise<void>): Promise<void> => {
+    const prior = process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT;
+    process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT = root;
+    try {
+      await fn();
+    } finally {
+      if (prior === undefined) {
+        delete process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT;
+      } else {
+        process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT = prior;
+      }
+    }
+  };
+
+  const spyGetuid = (value: number) =>
+    typeof process.getuid === "function"
+      ? vi
+          .spyOn(process as typeof process & { getuid: () => number }, "getuid")
+          .mockImplementation(() => value)
+      : null;
+
+  it("no-ops when the crypto dir is absent", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    const calls: string[] = [];
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      baseDeps(async ({ command, args }) => {
+        calls.push([command, ...(args ?? [])].join(" "));
+        return { command, exitCode: 0, stdout: "", stderr: "" };
+      }),
+    );
+    const getuidMock = spyGetuid(0);
+    try {
+      // No crypto dir created under the env-overridden global root.
+      await withGlobalRoot(tempRoot, async () => {
+        await expect(invoke(service)).resolves.toBeUndefined();
+      });
+      // No chown / npm root attempted.
+      expect(calls).toEqual([]);
+    } finally {
+      getuidMock?.mockRestore();
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("no-ops when process uid/gid are unavailable", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    const cryptoDir = join(tempRoot, cryptoRelPath);
+    await mkdir(cryptoDir, { recursive: true });
+    const calls: string[] = [];
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      baseDeps(async ({ command, args }) => {
+        calls.push([command, ...(args ?? [])].join(" "));
+        return { command, exitCode: 0, stdout: "", stderr: "" };
+      }),
+    );
+    // Simulate a non-POSIX platform where process.getuid is not a function.
+    const proc = process as unknown as { getuid?: unknown; getgid?: unknown };
+    const priorGetuid = proc.getuid;
+    const priorGetgid = proc.getgid;
+    proc.getuid = undefined;
+    proc.getgid = undefined;
+    try {
+      await withGlobalRoot(tempRoot, async () => {
+        await expect(invoke(service)).resolves.toBeUndefined();
+      });
+      // Bailed before resolving ownership / chowning.
+      expect(calls).toEqual([]);
+    } finally {
+      proc.getuid = priorGetuid;
+      proc.getgid = priorGetgid;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("warns and never throws when sudo cannot run because no exec runner is configured", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    const cryptoDir = join(tempRoot, cryptoRelPath);
+    await mkdir(cryptoDir, { recursive: true });
+    // Build the service WITHOUT an execRunner so the non-root sudo path hits
+    // the "exec runner unavailable" guard. The env override means no exec is
+    // needed to resolve the global root.
+    const depsNoRunner = baseDeps(async ({ command }) => ({
+      command,
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    })) as Record<string, unknown>;
+    delete depsNoRunner.execRunner;
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      depsNoRunner as ConstructorParameters<typeof RealInstallerService>[2],
+    );
+    const getuidMock = spyGetuid(1234);
+    try {
+      await withGlobalRoot(tempRoot, async () => {
+        await expect(invoke(service)).resolves.toBeUndefined();
+      });
+    } finally {
+      getuidMock?.mockRestore();
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("no-ops when the crypto path exists but is not a directory", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    const cryptoDir = join(tempRoot, cryptoRelPath);
+    await mkdir(dirname(cryptoDir), { recursive: true });
+    await writeFile(cryptoDir, "not-a-dir", "utf8");
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      baseDeps(async ({ command }) => ({ command, exitCode: 0, stdout: "", stderr: "" })),
+    );
+    const getuidMock = spyGetuid(0);
+    try {
+      await withGlobalRoot(tempRoot, async () => {
+        await expect(invoke(service)).resolves.toBeUndefined();
+      });
+    } finally {
+      getuidMock?.mockRestore();
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("warns and skips when stat fails with a non-ENOENT error", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    // Make a PARENT of the crypto dir a regular file so stat() of the crypto
+    // path raises ENOTDIR (a non-ENOENT error) -> the warn-and-skip branch.
+    const matrixExtDir = join(tempRoot, "openclaw", "extensions", "matrix");
+    await mkdir(dirname(matrixExtDir), { recursive: true });
+    await writeFile(matrixExtDir, "blocker", "utf8");
+    const calls: string[] = [];
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      baseDeps(async ({ command, args }) => {
+        calls.push([command, ...(args ?? [])].join(" "));
+        return { command, exitCode: 0, stdout: "", stderr: "" };
+      }),
+    );
+    const getuidMock = spyGetuid(0);
+    try {
+      await withGlobalRoot(tempRoot, async () => {
+        await expect(invoke(service)).resolves.toBeUndefined();
+      });
+      // Bailed before resolving ownership / chowning.
+      expect(calls).toEqual([]);
+    } finally {
+      getuidMock?.mockRestore();
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does a direct chown to the resolved service uid:gid when running as root", async () => {
+    if (typeof process.getuid !== "function" || typeof process.getgid !== "function") {
+      return; // platform without uid/gid; root branch is not exercisable here
+    }
+    // Resolve the real uid/gid of this test process BEFORE mocking getuid, so
+    // the helper's direct node:fs chown(2) actually succeeds (a no-op chown to
+    // the current owner) and we exercise the root branch end-to-end.
+    const realUid = process.getuid();
+    const realGid = process.getgid();
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    const cryptoDir = join(tempRoot, cryptoRelPath);
+    await mkdir(cryptoDir, { recursive: true });
+    const priorServiceUser = process.env.SOVEREIGN_NODE_SERVICE_USER;
+    const priorServiceGroup = process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+    process.env.SOVEREIGN_NODE_SERVICE_USER = "gateway-user";
+    process.env.SOVEREIGN_NODE_SERVICE_GROUP = "gateway-user";
+    const calls: string[] = [];
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      baseDeps(async ({ command, args }) => {
+        const serialized = [command, ...(args ?? [])].join(" ");
+        calls.push(serialized);
+        if (serialized === "getent passwd gateway-user") {
+          return {
+            command: serialized,
+            exitCode: 0,
+            stdout: `gateway-user:x:${realUid}:${realGid}::/home/gateway-user:/bin/bash\n`,
+            stderr: "",
+          };
+        }
+        return { command: serialized, exitCode: 1, stdout: "", stderr: "unexpected" };
+      }),
+    );
+    const getuidMock = spyGetuid(0);
+    try {
+      await withGlobalRoot(tempRoot, async () => {
+        await expect(invoke(service)).resolves.toBeUndefined();
+      });
+      // Resolved the service identity via getent (root branch) and used a
+      // direct fs chown -- no sudo was issued.
+      expect(calls).toEqual(["getent passwd gateway-user"]);
+      expect(calls.some((c) => c.startsWith("sudo "))).toBe(false);
+      await expect(stat(cryptoDir)).resolves.toBeDefined();
+    } finally {
+      getuidMock?.mockRestore();
+      if (priorServiceUser === undefined) delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+      else process.env.SOVEREIGN_NODE_SERVICE_USER = priorServiceUser;
+      if (priorServiceGroup === undefined) delete process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+      else process.env.SOVEREIGN_NODE_SERVICE_GROUP = priorServiceGroup;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("warns but never throws when the root direct chown fails", async () => {
+    if (typeof process.getuid !== "function") {
+      return;
+    }
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    const cryptoDir = join(tempRoot, cryptoRelPath);
+    await mkdir(cryptoDir, { recursive: true });
+    const priorServiceUser = process.env.SOVEREIGN_NODE_SERVICE_USER;
+    const priorServiceGroup = process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+    process.env.SOVEREIGN_NODE_SERVICE_USER = "gateway-user";
+    process.env.SOVEREIGN_NODE_SERVICE_GROUP = "gateway-user";
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      baseDeps(async ({ command, args }) => {
+        const serialized = [command, ...(args ?? [])].join(" ");
+        if (serialized === "getent passwd gateway-user") {
+          // A bogus high uid:gid the unprivileged test process cannot chown to
+          // -> real fs chown(2) raises EPERM, which the helper warns on.
+          return {
+            command: serialized,
+            exitCode: 0,
+            stdout: "gateway-user:x:65530:65530::/home/gateway-user:/bin/bash\n",
+            stderr: "",
+          };
+        }
+        return { command: serialized, exitCode: 1, stdout: "", stderr: "unexpected" };
+      }),
+    );
+    const getuidMock = spyGetuid(0);
+    try {
+      await withGlobalRoot(tempRoot, async () => {
+        await expect(invoke(service)).resolves.toBeUndefined();
+      });
+      await expect(stat(cryptoDir)).resolves.toBeDefined();
+    } finally {
+      getuidMock?.mockRestore();
+      if (priorServiceUser === undefined) delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+      else process.env.SOVEREIGN_NODE_SERVICE_USER = priorServiceUser;
+      if (priorServiceGroup === undefined) delete process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+      else process.env.SOVEREIGN_NODE_SERVICE_GROUP = priorServiceGroup;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves the dir untouched when running as root but service ownership cannot be resolved", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    const cryptoDir = join(tempRoot, cryptoRelPath);
+    await mkdir(cryptoDir, { recursive: true });
+    const priorServiceUser = process.env.SOVEREIGN_NODE_SERVICE_USER;
+    const priorServiceGroup = process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+    process.env.SOVEREIGN_NODE_SERVICE_USER = "ghost-user";
+    process.env.SOVEREIGN_NODE_SERVICE_GROUP = "ghost-user";
+    const calls: string[] = [];
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      baseDeps(async ({ command, args }) => {
+        const serialized = [command, ...(args ?? [])].join(" ");
+        calls.push(serialized);
+        // getent passwd fails -> ownership resolves to null.
+        return { command: serialized, exitCode: 2, stdout: "", stderr: "no such user" };
+      }),
+    );
+    const getuidMock = spyGetuid(0);
+    try {
+      await withGlobalRoot(tempRoot, async () => {
+        await expect(invoke(service)).resolves.toBeUndefined();
+      });
+      expect(calls).toContain("getent passwd ghost-user");
+    } finally {
+      getuidMock?.mockRestore();
+      if (priorServiceUser === undefined) delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+      else process.env.SOVEREIGN_NODE_SERVICE_USER = priorServiceUser;
+      if (priorServiceGroup === undefined) delete process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+      else process.env.SOVEREIGN_NODE_SERVICE_GROUP = priorServiceGroup;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("issues sudo -n chown -R uid:gid for the crypto dir when running non-root", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    const cryptoDir = join(tempRoot, cryptoRelPath);
+    await mkdir(cryptoDir, { recursive: true });
+    const calls: string[] = [];
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      baseDeps(async ({ command, args }) => {
+        const serialized = [command, ...(args ?? [])].join(" ");
+        calls.push(serialized);
+        return { command: serialized, exitCode: 0, stdout: "", stderr: "" };
+      }),
+    );
+    const getuidMock = spyGetuid(1234);
+    const getgidMock =
+      typeof process.getgid === "function"
+        ? vi
+            .spyOn(process as typeof process & { getgid: () => number }, "getgid")
+            .mockImplementation(() => 4321)
+        : null;
+    try {
+      await withGlobalRoot(tempRoot, async () => {
+        await expect(invoke(service)).resolves.toBeUndefined();
+      });
+      expect(calls).toContain(`sudo -n chown -R 1234:4321 ${cryptoDir}`);
+    } finally {
+      getuidMock?.mockRestore();
+      getgidMock?.mockRestore();
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("warns but never throws when the non-root sudo chown fails", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    const cryptoDir = join(tempRoot, cryptoRelPath);
+    await mkdir(cryptoDir, { recursive: true });
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      baseDeps(async ({ command, args }) => {
+        const serialized = [command, ...(args ?? [])].join(" ");
+        return {
+          command: serialized,
+          exitCode: 1,
+          stdout: "",
+          stderr: "sudo: a password is required",
+        };
+      }),
+    );
+    const getuidMock = spyGetuid(1234);
+    try {
+      await withGlobalRoot(tempRoot, async () => {
+        await expect(invoke(service)).resolves.toBeUndefined();
+      });
+    } finally {
+      getuidMock?.mockRestore();
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves the global root via `npm root -g` when no env override is set", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    const cryptoDir = join(tempRoot, cryptoRelPath);
+    await mkdir(cryptoDir, { recursive: true });
+    const calls: string[] = [];
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      baseDeps(async ({ command, args }) => {
+        const serialized = [command, ...(args ?? [])].join(" ");
+        calls.push(serialized);
+        if (serialized === "npm root -g") {
+          return { command: serialized, exitCode: 0, stdout: `${tempRoot}\n`, stderr: "" };
+        }
+        return { command: serialized, exitCode: 0, stdout: "", stderr: "" };
+      }),
+    );
+    const priorOverride = process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT;
+    delete process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT;
+    const getuidMock = spyGetuid(1234);
+    const getgidMock =
+      typeof process.getgid === "function"
+        ? vi
+            .spyOn(process as typeof process & { getgid: () => number }, "getgid")
+            .mockImplementation(() => 1234)
+        : null;
+    try {
+      await expect(invoke(service)).resolves.toBeUndefined();
+      expect(calls).toContain("npm root -g");
+      expect(calls).toContain(`sudo -n chown -R 1234:1234 ${cryptoDir}`);
+    } finally {
+      getuidMock?.mockRestore();
+      getgidMock?.mockRestore();
+      if (priorOverride === undefined) delete process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT;
+      else process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT = priorOverride;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to /usr/lib/node_modules when `npm root -g` yields nothing", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    const calls: string[] = [];
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      baseDeps(async ({ command, args }) => {
+        const serialized = [command, ...(args ?? [])].join(" ");
+        calls.push(serialized);
+        if (serialized === "npm root -g") {
+          return { command: serialized, exitCode: 0, stdout: "   \n", stderr: "" };
+        }
+        return { command: serialized, exitCode: 0, stdout: "", stderr: "" };
+      }),
+    );
+    const priorOverride = process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT;
+    delete process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT;
+    const getuidMock = spyGetuid(1234);
+    try {
+      // /usr/lib/node_modules/.../matrix-sdk-crypto-nodejs is absent in tests,
+      // so this resolves to the fallback root and then no-ops on the absent dir.
+      await expect(invoke(service)).resolves.toBeUndefined();
+      expect(calls).toEqual(["npm root -g"]);
+    } finally {
+      getuidMock?.mockRestore();
+      if (priorOverride === undefined) delete process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT;
+      else process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT = priorOverride;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+});

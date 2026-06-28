@@ -218,6 +218,14 @@ ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl status sovereign-matrix-rela
 # path; the *:* in the chown spec keeps it bounded to numeric uid:gid.
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/chown -R [0-9]*\:[0-9]* /var/lib/sovereign-node/bundled-matrix/*
 ${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/chown -R [0-9]*\:[0-9]* /var/lib/sovereign-node/bundled-matrix/*
+# Allow handing the OpenClaw matrix extension's E2EE crypto runtime package
+# dir to the SERVICE_USER so the gateway can download matrix-sdk-crypto on
+# first start (issue #207). The dir lives under the root-owned npm global
+# prefix; cover both global prefixes. Bounded to numeric uid:gid + that path.
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/chown -R [0-9]*\:[0-9]* /usr/lib/node_modules/openclaw/extensions/matrix/node_modules/@matrix-org/matrix-sdk-crypto-nodejs
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/chown -R [0-9]*\:[0-9]* /usr/lib/node_modules/openclaw/extensions/matrix/node_modules/@matrix-org/matrix-sdk-crypto-nodejs
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/chown -R [0-9]*\:[0-9]* /usr/local/lib/node_modules/openclaw/extensions/matrix/node_modules/@matrix-org/matrix-sdk-crypto-nodejs
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/chown -R [0-9]*\:[0-9]* /usr/local/lib/node_modules/openclaw/extensions/matrix/node_modules/@matrix-org/matrix-sdk-crypto-nodejs
 # Allow re-claiming ownership of /etc/sovereign-node/secrets and its
 # entries when a previous run left them root-owned.
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets, /bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets/*

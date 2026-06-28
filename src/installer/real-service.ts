@@ -7769,6 +7769,10 @@ export default function (api) {
               force: req.openclaw?.forceReinstall ?? false,
             });
             await this.openclawGatewayServiceManager.start();
+            // The matrix extension downloads its E2EE crypto runtime into its
+            // own (root-owned) package dir on first gateway startup; hand that
+            // dir to the service user so the download can succeed (issue #207).
+            await this.ensureMatrixCryptoRuntimeWritable(stepState.runtimeConfig);
           } catch (error) {
             if (!isGatewayUserSystemdUnavailableError(error)) {
               throw error;
@@ -7891,6 +7895,9 @@ export default function (api) {
             const fallbackStarted = await this.ensureSystemGatewayServiceFallback(runtimeConfig);
             if (fallbackStarted) {
               stepState.gatewayServiceSkipped = false;
+              // System-level gateway flow starts the gateway here rather than in
+              // the user-service step, so fix the crypto runtime dir now (#207).
+              await this.ensureMatrixCryptoRuntimeWritable(runtimeConfig);
               return;
             }
             this.logger.warn(
@@ -7914,6 +7921,7 @@ export default function (api) {
             }
             throw error;
           }
+          await this.ensureMatrixCryptoRuntimeWritable(runtimeConfig);
         },
       },
       {
@@ -11543,6 +11551,162 @@ export default function (api) {
       return false;
     }
     return true;
+  }
+
+  /**
+   * Resolve the npm global node_modules root that holds the OpenClaw
+   * installation. Honors SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT (used by tests to
+   * point at a tmp dir, mirroring SOVEREIGN_NODE_SYSTEMD_UNIT_DIR), then asks
+   * `npm root -g`, and finally falls back to the canonical global prefixes.
+   */
+  private async resolveOpenClawGlobalRoot(): Promise<string> {
+    const override = process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT?.trim();
+    if (override !== undefined && override.length > 0) {
+      return override;
+    }
+    const npmRoot = await this.safeExec("npm", ["root", "-g"]);
+    if (npmRoot.ok && npmRoot.result.exitCode === 0) {
+      const resolved = npmRoot.result.stdout.trim();
+      if (resolved.length > 0) {
+        return resolved;
+      }
+    }
+    return "/usr/lib/node_modules";
+  }
+
+  /**
+   * Reclaim ownership of a path for the configured SERVICE identity via the
+   * scoped sudoers fragment. Unlike sudoReclaimOwnership (which targets the
+   * current runtime uid), this targets the service uid:gid so a non-root
+   * runtime API re-install can hand a root-owned dir to the gateway user.
+   * No-op/false when sudo is unavailable or the runner is missing.
+   */
+  private async sudoChownToService(
+    path: string,
+    ownership: { uid: number; gid: number },
+  ): Promise<boolean> {
+    if (this.execRunner === null) return false;
+    const result = await this.execRunner.run({
+      command: "sudo",
+      args: ["-n", "chown", "-R", `${ownership.uid}:${ownership.gid}`, path],
+      options: { timeout: 30_000 },
+    });
+    if (result.exitCode !== 0) {
+      this.logger.warn(
+        {
+          path,
+          exitCode: result.exitCode,
+          stderr: truncateText(result.stderr, 400),
+        },
+        "sudo chown to service identity failed",
+      );
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Make the OpenClaw matrix extension's E2EE crypto runtime package dir
+   * writable to the configured service user. The matrix extension downloads
+   * its platform-native crypto binary (matrix-sdk-crypto.linux-x64-gnu.node)
+   * on demand at gateway startup, writing into its own package dir under the
+   * root-owned npm global prefix. The gateway runs as the service user, so that
+   * download fails ("Destination Folder must be writable") and managed Matrix
+   * bots crash-loop without ever logging in. Chowning the dir to the service
+   * identity after the gateway install lets the runtime download succeed.
+   *
+   * Best-effort: a missing dir is a no-op, and a failed chown only warns so a
+   * transient ownership issue never hard-fails the install.
+   */
+  private async ensureMatrixCryptoRuntimeWritable(runtimeConfig?: RuntimeConfig): Promise<void> {
+    const globalRoot = await this.resolveOpenClawGlobalRoot();
+    const cryptoDir = join(
+      globalRoot,
+      "openclaw",
+      "extensions",
+      "matrix",
+      "node_modules",
+      "@matrix-org",
+      "matrix-sdk-crypto-nodejs",
+    );
+
+    try {
+      const dirStat = await stat(cryptoDir);
+      if (!dirStat.isDirectory()) {
+        this.logger.debug(
+          { cryptoDir },
+          "Matrix crypto runtime path is not a directory; skipping ownership fix",
+        );
+        return;
+      }
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        this.logger.debug(
+          { cryptoDir },
+          "Matrix crypto runtime dir absent; skipping ownership fix",
+        );
+        return;
+      }
+      this.logger.warn(
+        { cryptoDir, error: describeError(error) },
+        "Failed to stat matrix crypto runtime dir; skipping ownership fix",
+      );
+      return;
+    }
+
+    // The installer/runtime API only runs on POSIX nodes, where getuid/getgid
+    // are always available; resolveServiceOwnership already guards the root vs
+    // non-root distinction the same way.
+    if (typeof process.getuid !== "function" || typeof process.getgid !== "function") {
+      this.logger.debug(
+        { cryptoDir },
+        "Process uid/gid unavailable; leaving matrix crypto runtime dir untouched",
+      );
+      return;
+    }
+
+    const ownership = await this.resolveServiceOwnership(runtimeConfig);
+    const runningAsRoot = process.getuid() === 0;
+
+    if (runningAsRoot) {
+      if (ownership === null) {
+        this.logger.debug(
+          { cryptoDir },
+          "Could not resolve service ownership; leaving matrix crypto runtime dir untouched",
+        );
+        return;
+      }
+      try {
+        await chown(cryptoDir, ownership.uid, ownership.gid);
+        this.logger.info(
+          { cryptoDir, uid: ownership.uid, gid: ownership.gid },
+          "Made matrix crypto runtime dir writable for the service user",
+        );
+      } catch (error) {
+        this.logger.warn(
+          { cryptoDir, error: describeError(error) },
+          "Failed to chown matrix crypto runtime dir; matrix E2EE may not bootstrap",
+        );
+      }
+      return;
+    }
+
+    // Non-root runtime API re-install: resolveServiceOwnership only resolves
+    // when running as root (it returned null above), so reclaim the (root-owned)
+    // dir for the runtime API user itself, which is the gateway service user.
+    const targetOwnership = { uid: process.getuid(), gid: process.getgid() };
+    const reclaimed = await this.sudoChownToService(cryptoDir, targetOwnership);
+    if (reclaimed) {
+      this.logger.info(
+        { cryptoDir, uid: targetOwnership.uid, gid: targetOwnership.gid },
+        "Made matrix crypto runtime dir writable for the service user via sudo",
+      );
+    } else {
+      this.logger.warn(
+        { cryptoDir },
+        "Could not make matrix crypto runtime dir writable; matrix E2EE may not bootstrap",
+      );
+    }
   }
 
   private async ensureSecretsDir(): Promise<string> {
