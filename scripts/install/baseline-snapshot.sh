@@ -69,7 +69,7 @@ render_fixture() {
 # feature PR.
 render_fixture "fresh-direct-node-operator" \
   SN_CONNECTIVITY_MODE="direct" \
-  SN_OPENROUTER_MODEL="qwen/qwen3.5-9b" \
+  SN_OPENROUTER_MODEL="qwen/qwen-2.5-7b-instruct" \
   SN_OPENROUTER_SECRET_REF="file:/etc/sovereign-node/secrets/openrouter-api-key" \
   SN_MATRIX_DOMAIN="matrix.example.com" \
   SN_MATRIX_PUBLIC_BASE_URL="https://matrix.example.com" \
@@ -85,7 +85,7 @@ render_fixture "fresh-direct-node-operator" \
 # openrouter + matrix + imap + bots.config paths together.
 render_fixture "mail-sentinel-imap" \
   SN_CONNECTIVITY_MODE="direct" \
-  SN_OPENROUTER_MODEL="qwen/qwen3.5-9b" \
+  SN_OPENROUTER_MODEL="qwen/qwen-2.5-7b-instruct" \
   SN_OPENROUTER_SECRET_REF="file:/etc/sovereign-node/secrets/openrouter-api-key" \
   SN_MATRIX_DOMAIN="matrix.example.com" \
   SN_MATRIX_PUBLIC_BASE_URL="https://matrix.example.com" \
@@ -108,7 +108,7 @@ render_fixture "mail-sentinel-imap" \
 # inference path (local-dev).
 render_fixture "lan-only" \
   SN_CONNECTIVITY_MODE="direct" \
-  SN_OPENROUTER_MODEL="qwen/qwen3.5-9b" \
+  SN_OPENROUTER_MODEL="qwen/qwen-2.5-7b-instruct" \
   SN_OPENROUTER_SECRET_REF="file:/etc/sovereign-node/secrets/openrouter-api-key" \
   SN_MATRIX_DOMAIN="matrix.local.test" \
   SN_MATRIX_PUBLIC_BASE_URL="http://127.0.0.1:8008" \
@@ -122,7 +122,7 @@ render_fixture "lan-only" \
 # Fixture D: relay connectivity. Exercises the relay block.
 render_fixture "relay" \
   SN_CONNECTIVITY_MODE="relay" \
-  SN_OPENROUTER_MODEL="qwen/qwen3.5-9b" \
+  SN_OPENROUTER_MODEL="qwen/qwen-2.5-7b-instruct" \
   SN_OPENROUTER_SECRET_REF="file:/etc/sovereign-node/secrets/openrouter-api-key" \
   SN_MATRIX_DOMAIN="relay-pending.invalid" \
   SN_MATRIX_PUBLIC_BASE_URL="https://relay-pending.invalid" \

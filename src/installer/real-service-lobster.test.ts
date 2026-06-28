@@ -62,15 +62,52 @@ describe("real-service-lobster", () => {
     expect(result?.version).toBe("2026.1.24");
     expect(result?.commands).toContain("clawd.invoke");
 
-    // Both calls must carry HOME and npm_config_prefix so npm uses the
-    // service user's npm-global prefix even after OpenClaw mutates
-    // process.env.HOME during install.
+    // With no serviceHome supplied, the helper falls back to the captured
+    // ORIGINAL_HOME (= process.env.HOME at module load). Both calls carry
+    // HOME + npm_config_prefix; the lobster probe targets the binary by its
+    // absolute path under that prefix so it does not depend on PATH.
     const expectedPrefix = join(process.env.HOME ?? "", ".npm-global");
+    const expectedBinary = join(expectedPrefix, "bin", "lobster");
+    expect(result?.binaryPath).toBe(expectedBinary);
+    expect(calls[0]?.command).toBe(expectedBinary);
+    expect(calls[1]?.command).toBe("npm");
     for (const call of calls) {
       const env = call.options?.env as Record<string, string> | undefined;
       expect(env?.CI).toBe("1");
       expect(env?.HOME).toBe(process.env.HOME);
       expect(env?.npm_config_prefix).toBe(expectedPrefix);
+    }
+  });
+
+  it("targets the service user's HOME, npm prefix, and absolute binary when serviceHome is supplied", async () => {
+    const { runner, calls } = buildExecRunner([
+      successResult({ stdout: '["clawd.invoke"]' }),
+      successResult({
+        stdout: JSON.stringify({
+          dependencies: { "@clawdbot/lobster": { version: "2026.1.24" } },
+        }),
+      }),
+    ]);
+
+    const serviceHome = "/var/lib/sovereign-node";
+    const result = await detectInstalledLobsterCli({
+      execRunner: runner,
+      packageName: "@clawdbot/lobster",
+      probeTimeoutMs: 5_000,
+      serviceHome,
+    });
+
+    expect(result).not.toBeNull();
+    const expectedBinary = join(serviceHome, ".npm-global", "bin", "lobster");
+    expect(result?.binaryPath).toBe(expectedBinary);
+    // The lobster probe runs the absolute binary path (PATH-independent); the
+    // npm list call runs `npm` from the inherited PATH.
+    expect(calls[0]?.command).toBe(expectedBinary);
+    expect(calls[1]?.command).toBe("npm");
+    for (const call of calls) {
+      const env = call.options?.env as Record<string, string> | undefined;
+      expect(env?.HOME).toBe(serviceHome);
+      expect(env?.npm_config_prefix).toBe(join(serviceHome, ".npm-global"));
     }
   });
 

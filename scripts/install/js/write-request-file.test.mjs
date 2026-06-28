@@ -4,7 +4,7 @@ import { buildRequest, inferMatrixTlsMode } from "./write-request-file.mjs";
 
 const baseEnv = {
   SN_REQUEST_FILE: "/tmp/test-req.json",
-  SN_OPENROUTER_MODEL: "qwen/qwen3.5-9b",
+  SN_OPENROUTER_MODEL: "qwen/qwen-2.5-7b-instruct",
   SN_OPENROUTER_SECRET_REF: "file:/etc/sovereign-node/secrets/openrouter-api-key",
   SN_MATRIX_DOMAIN: "matrix.example.com",
   SN_MATRIX_PUBLIC_BASE_URL: "https://matrix.example.com",
@@ -66,7 +66,7 @@ describe("buildRequest", () => {
         runOnboard: false,
       },
       openrouter: {
-        model: "qwen/qwen3.5-9b",
+        model: "qwen/qwen-2.5-7b-instruct",
         secretRef: "file:/etc/sovereign-node/secrets/openrouter-api-key",
       },
       matrix: {

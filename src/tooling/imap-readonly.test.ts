@@ -13,7 +13,7 @@ const TEST_SECRET_ENV = "SOVEREIGN_TEST_IMAP_PASSWORD";
 
 const buildRuntimeConfig = (secretRef: string): RuntimeConfig => ({
   openrouter: {
-    model: "qwen/qwen3.5-9b",
+    model: "qwen/qwen-2.5-7b-instruct",
     apiKeySecretRef: "env:OPENROUTER_API_KEY",
   },
   openclaw: {

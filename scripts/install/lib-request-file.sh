@@ -39,10 +39,14 @@ migrate_legacy_openrouter_model_request() {
   [[ -r "$REQUEST_FILE" ]] || return 0
 
   if ! status="$(
-    node - "$REQUEST_FILE" "$LEGACY_OPENROUTER_MODEL" "$RECOMMENDED_OPENROUTER_MODEL" <<'NODE'
+    node - "$REQUEST_FILE" "$LEGACY_OPENROUTER_MODELS" "$RECOMMENDED_OPENROUTER_MODEL" <<'NODE'
 const fs = require("node:fs");
 const requestPath = process.argv[2];
-const legacyModel = process.argv[3];
+// argv[3] is a newline-separated list of legacy models to migrate away from.
+const legacyModels = String(process.argv[3] || "")
+  .split("\n")
+  .map((entry) => entry.trim())
+  .filter((entry) => entry.length > 0);
 const nextModel = process.argv[4];
 
 const raw = fs.readFileSync(requestPath, "utf8");
@@ -58,7 +62,7 @@ if (!openrouter || typeof openrouter !== "object" || Array.isArray(openrouter)) 
   process.exit(0);
 }
 
-if (openrouter.model !== legacyModel) {
+if (!legacyModels.includes(openrouter.model)) {
   process.stdout.write("0");
   process.exit(0);
 }
