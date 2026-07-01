@@ -60,6 +60,13 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "Image tag: $tag"
 
+      - name: Set up QEMU
+        # Enables cross-building the linux/arm64 image on the amd64 runner so
+        # ARM nodes (e.g. Raspberry Pi) can run the passthrough Caddy. Without a
+        # multi-arch manifest, ARM nodes pull the amd64 image and the caddy
+        # binary crash-loops with "exec format error", so TLS is never obtained.
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -78,6 +85,10 @@ jobs:
         with:
           context: deploy/caddy-desec
           file: deploy/caddy-desec/Dockerfile
+          # Publish a multi-arch manifest. Passthrough nodes terminate their own
+          # TLS with this image; both amd64 (VPS) and arm64 (Raspberry Pi) nodes
+          # must be able to run it.
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: |
             ${{ env.IMAGE }}:${{ steps.ver.outputs.tag }}
