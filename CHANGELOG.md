@@ -11,6 +11,16 @@ by the `.github/workflows/release.yml` workflow.
 
 ## [Unreleased]
 
+## [2.3.4] - 2026-07-01
+
+Patch release fixing ARM (aarch64) relay-passthrough installs, Mail Sentinel's semantic reviewer, and managed Matrix bots crash-looping over E2EE on fresh installs.
+
+- **Publish the passthrough Caddy image as a multi-arch manifest (add `linux/arm64`).** `ghcr.io/ndee/sovereign-caddy-desec` was published amd64-only, so on ARM nodes (e.g. Raspberry Pi) the reverse-proxy container crash-looped with `exec format error` — the passthrough node never obtained its own TLS cert and the install failed at smoke checks. CI now builds with QEMU + `platforms: linux/amd64,linux/arm64`. ([#211](https://github.com/ndee/sovereign-ai-node/pull/211))
+- **Reach the lobster CLI as the service user and drop the reasoning-on default model.** Fixes Mail Sentinel's "semantic reviewer unavailable" (#208): the lobster CLI was installed under the wrong `HOME` (root's npm prefix, mode 0700) so the scan service running as the service user could not find it. The installer now resolves the configured service user's home via `getent passwd` and probes lobster by absolute path (no sudo delegation, which had broken under a cleaned sudo `PATH`). ([#209](https://github.com/ndee/sovereign-ai-node/pull/209), [#210](https://github.com/ndee/sovereign-ai-node/pull/210))
+- **Make the Matrix crypto runtime dir writable for the service user.** On a fresh install the OpenClaw Matrix extension downloads its E2EE crypto runtime binary on demand at gateway startup into a root-owned package dir; the gateway runs as the service user and could not write there, so E2EE never bootstrapped and managed Matrix bots crash-looped (scanning IMAP but never replying in Matrix, while status still reported them healthy). ([#209](https://github.com/ndee/sovereign-ai-node/pull/209))
+
+See the [v2.3.4 GitHub Release](https://github.com/ndee/sovereign-ai-node/releases/tag/v2.3.4) for the full commit list.
+
 ## [2.3.3] - 2026-06-26
 
 Patch refining the relay-passthrough onboarding flow: the installers no longer reveal an onboarding URL/QR before the page is actually serving.
