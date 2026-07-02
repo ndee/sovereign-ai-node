@@ -700,6 +700,12 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(composeText).not.toContain('"80:80"');
       // Custom desec Caddy image + token wired via env (not inlined in compose).
       expect(composeText).toContain("caddy-desec");
+      // Pinned by the multi-arch INDEX digest so `docker compose up` cannot reuse
+      // a stale cached tag (which broke ARM nodes: cached amd64 image → caddy
+      // "exec format error" → no cert).
+      expect(composeText).toContain(
+        "@sha256:370cd93ff12d1c3c691a5eaf64c06458b2c33100c481e0c6e56c0e91fd622bf6",
+      );
       // The compose references the env var literally (compose interpolation),
       // so the ${...} is intentional, not a JS template string.
       // biome-ignore lint/suspicious/noTemplateCurlyInString: asserting a literal compose env reference
@@ -2333,6 +2339,10 @@ describe("DockerComposeBundledMatrixProvisioner cross-project conflict handling"
     psThrows?: boolean;
     upStderr?: string;
     upExitCode?: number;
+    // Simulate a failing (`pullExitCode`) or unavailable (`pullThrows`) image
+    // pull to assert the pull step is best-effort and never blocks `up`.
+    pullExitCode?: number;
+    pullThrows?: boolean;
     portOwnerStdout?: string;
     portOwnerExitCode?: number;
     // `docker inspect --format '{{.State.Error}}' <name>` output (the port-bind
@@ -2354,6 +2364,13 @@ describe("DockerComposeBundledMatrixProvisioner cross-project conflict handling"
         // MATRIX_COMPOSE_UNAVAILABLE and inspectComposeServiceStates hits its catch.
         if (input.psThrows && args.includes("ps") && args.includes("--format")) {
           throw new Error("docker compose ps unavailable");
+        }
+        // Both the `docker compose pull` and legacy `docker-compose pull` fallback
+        // must throw so runComposeCommand surfaces MATRIX_COMPOSE_UNAVAILABLE and
+        // ensureStackRunning's best-effort pull catch is exercised.
+        if (input.pullThrows && args.includes("pull")) {
+          composeSubcommands.push("pull");
+          throw new Error("docker compose pull unavailable");
         }
         if (execInput.command !== "docker") {
           return { command, exitCode: 127, stdout: "", stderr: "command not found" };
@@ -2378,6 +2395,10 @@ describe("DockerComposeBundledMatrixProvisioner cross-project conflict handling"
         }
         if (args.includes("config")) {
           return { command, exitCode: 0, stdout: "services:\n  synapse: {}\n", stderr: "" };
+        }
+        if (args.includes("pull")) {
+          composeSubcommands.push("pull");
+          return { command, exitCode: input.pullExitCode ?? 0, stdout: "", stderr: "" };
         }
         if (args.includes("up")) {
           composeSubcommands.push("up");
@@ -2447,6 +2468,51 @@ describe("DockerComposeBundledMatrixProvisioner cross-project conflict handling"
       expect(harness.composeSubcommands).toContain("down");
     } finally {
       await harness.cleanup();
+    }
+  });
+
+  it("pulls images before `up`, and a failing/unavailable pull never blocks the start", async () => {
+    // All services report running so the start path succeeds on the first `up`.
+    const runningPs = [
+      JSON.stringify({ Service: "postgres", State: "running", Status: "Up" }),
+      JSON.stringify({ Service: "synapse", State: "running", Status: "Up (healthy)" }),
+      JSON.stringify({ Service: "reverse-proxy", State: "running", Status: "Up" }),
+    ].join("\n");
+
+    // Happy path: pull is issued, and it happens before `up`.
+    const ok = await buildHarness({ psStdout: runningPs });
+    try {
+      const req = buildInstallRequest();
+      const provision = await ok.provisioner.provision(req);
+      await ok.provisioner.bootstrapAccounts(req, provision);
+      expect(ok.composeSubcommands).toContain("pull");
+      expect(ok.composeSubcommands.indexOf("pull")).toBeLessThan(
+        ok.composeSubcommands.indexOf("up"),
+      );
+    } finally {
+      await ok.cleanup();
+    }
+
+    // A non-zero pull exit must be swallowed — the stack still comes up.
+    const pullFails = await buildHarness({ psStdout: runningPs, pullExitCode: 1 });
+    try {
+      const req = buildInstallRequest();
+      const provision = await pullFails.provisioner.provision(req);
+      await pullFails.provisioner.bootstrapAccounts(req, provision);
+      expect(pullFails.composeSubcommands).toContain("up");
+    } finally {
+      await pullFails.cleanup();
+    }
+
+    // A pull that throws (e.g. registry/binary unavailable) must be swallowed too.
+    const pullThrows = await buildHarness({ psStdout: runningPs, pullThrows: true });
+    try {
+      const req = buildInstallRequest();
+      const provision = await pullThrows.provisioner.provision(req);
+      await pullThrows.provisioner.bootstrapAccounts(req, provision);
+      expect(pullThrows.composeSubcommands).toContain("up");
+    } finally {
+      await pullThrows.cleanup();
     }
   });
 

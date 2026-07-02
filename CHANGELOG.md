@@ -11,6 +11,14 @@ by the `.github/workflows/release.yml` workflow.
 
 ## [Unreleased]
 
+## [2.3.5] - 2026-07-02
+
+Patch hardening ARM (aarch64) relay-passthrough installs so they succeed without manual intervention.
+
+- **Pin the passthrough Caddy image by digest and pull images before starting the stack.** v2.3.4 published the `sovereign-caddy-desec` image as multi-arch, but the image was still referenced by tag and the installer's `docker compose up` never re-pulls a cached tag — so an ARM node that had cached the old amd64-only image kept crash-looping the reverse-proxy (`exec format error`) and never obtained its TLS cert. `DEFAULT_CADDY_DESEC_IMAGE` is now pinned to the multi-arch index digest (a digest reference cannot be satisfied by a stale cached tag), and `ensureStackRunning` now runs a best-effort `docker compose pull` before `up` (non-fatal: an offline/registry hiccup never blocks a node that already has its images). ([#213](https://github.com/ndee/sovereign-ai-node/pull/213))
+
+See the [v2.3.5 GitHub Release](https://github.com/ndee/sovereign-ai-node/releases/tag/v2.3.5) for the full commit list.
+
 ## [2.3.4] - 2026-07-01
 
 Patch release fixing ARM (aarch64) relay-passthrough installs, Mail Sentinel's semantic reviewer, and managed Matrix bots crash-looping over E2EE on fresh installs.
