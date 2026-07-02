@@ -40,7 +40,17 @@ const DEFAULT_CADDY_IMAGE = "caddy:2.10.2-alpine";
 // relay TLS-passthrough mode, where the node terminates its own TLS via
 // DNS-01. Published separately (see deploy/caddy-desec/Dockerfile); overridable
 // via SOVEREIGN_MATRIX_CADDY_DESEC_IMAGE.
-const DEFAULT_CADDY_DESEC_IMAGE = "ghcr.io/ndee/sovereign-caddy-desec:2.10.2";
+//
+// Pinned by digest, not tag alone: `docker compose up` reuses a locally cached
+// tag without re-pulling, so an ARM node that once cached the amd64-only build
+// keeps running it (caddy crash-loops "exec format error", no cert). A digest
+// reference cannot be satisfied by a stale cached tag, forcing the correct
+// image to be fetched. This is the multi-arch INDEX (manifest-list) digest, so
+// per-arch selection is preserved. To refresh after republishing the image, use
+// the CI "Report published digest" step or:
+//   docker buildx imagetools inspect ghcr.io/ndee/sovereign-caddy-desec:2.10.2
+const DEFAULT_CADDY_DESEC_IMAGE =
+  "ghcr.io/ndee/sovereign-caddy-desec:2.10.2@sha256:370cd93ff12d1c3c691a5eaf64c06458b2c33100c481e0c6e56c0e91fd622bf6";
 const DEFAULT_ONBOARDING_API_IMAGE = "node:22-alpine";
 const RELAY_LOCAL_EDGE_PORT = 18080;
 // Local port the node's own TLS-terminating Caddy listens on in passthrough mode.
@@ -1052,6 +1062,32 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     if (provision.accessMode === "relay" || provision.tlsMode !== "local-dev") {
       services.push("reverse-proxy");
     }
+    // Refresh images before starting. The digest-pinned passthrough Caddy image
+    // is already correctness-safe on its own, but pulling here also keeps
+    // tag-referenced images (synapse, postgres, legacy caddy) fresh and repairs
+    // a node that cached an image whose tag was later re-published. Best-effort:
+    // a pull failure (offline, registry hiccup, missing compose binary) must NOT
+    // block a node that already has the images locally — log and continue to up.
+    await emitProgress(onProgress, "Pulling latest bundled Matrix images (docker compose pull)");
+    try {
+      const composePull = await this.runComposeCommand(
+        provision.projectDir,
+        provision.composeFilePath,
+        ["pull", ...services],
+      );
+      if (composePull.exitCode !== 0) {
+        this.logger.warn(
+          { projectDir: provision.projectDir, exitCode: composePull.exitCode },
+          "docker compose pull did not succeed; continuing with locally available images",
+        );
+      }
+    } catch (error) {
+      this.logger.warn(
+        { projectDir: provision.projectDir, error: describeError(error) },
+        "docker compose pull failed; continuing with locally available images",
+      );
+    }
+
     const upArgs = ["up", "-d", "--remove-orphans", "--force-recreate", ...services];
     await emitProgress(onProgress, "Starting bundled Matrix containers (docker compose up)");
     const composeUp = await this.runComposeCommand(
