@@ -28,6 +28,7 @@ import type {
   SovereignBotHostResource,
   SovereignBotHostStateCheck,
 } from "../bots/host-resources.js";
+import { getNodeBuildInfo } from "../build-info.js";
 import type { SovereignPaths } from "../config/paths.js";
 import type {
   PreflightRequest,
@@ -1409,7 +1410,13 @@ export class RealInstallerService implements InstallerService {
           : { mailbox: runtimeConfig.imap.mailbox }),
       },
       version: {
-        sovereignNode: process.env.npm_package_version ?? "2.0.0",
+        // Build identity, not `process.env.npm_package_version`. That variable is
+        // only set when a process is launched *by npm*, so every systemd-launched
+        // node reported the old `?? "2.0.0"` fallback regardless of what it was
+        // actually running — a confidently wrong version that sent support down
+        // the wrong path. `getNodeBuildInfo()` reports "unknown" when it cannot
+        // tell, which is honest and actionable.
+        sovereignNode: getNodeBuildInfo().version,
         contractVersion: CONTRACT_VERSION,
         ...(detectedOpenClaw?.version === undefined ? {} : { openclaw: detectedOpenClaw.version }),
         ...(pluginIds === undefined

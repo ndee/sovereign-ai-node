@@ -1,6 +1,7 @@
 import { Command } from "commander";
 
 import type { AppContainer } from "../app/create-app.js";
+import { getNodeBuildInfo } from "../build-info.js";
 import { registerAgentsCommand } from "./commands/agents.js";
 import { registerBackupCommand } from "./commands/backup.js";
 import { registerBotsCommand } from "./commands/bots.js";
@@ -13,6 +14,7 @@ import { registerOnboardingCommand } from "./commands/onboarding.js";
 import { registerReconfigureCommand } from "./commands/reconfigure.js";
 import { registerSetupUiCommand } from "./commands/setup-ui.js";
 import { registerStatusCommand } from "./commands/status.js";
+import { registerSupportBundleCommand } from "./commands/support-bundle.js";
 import { registerTemplatesCommand } from "./commands/templates.js";
 import { registerTestAlertCommand } from "./commands/test-alert.js";
 import { registerToolsCommand } from "./commands/tools.js";
@@ -25,7 +27,11 @@ export const createCliProgram = (app: AppContainer): Command => {
   program
     .name("sovereign-node")
     .description("Sovereign Node operator CLI (TypeScript scaffold)")
-    .version("2.0.0")
+    // Resolved from build identity, not hardcoded: this string was previously
+    // pinned at "2.0.0" and had drifted three minor versions behind the actual
+    // package, so `sovereign-node --version` confidently reported the wrong
+    // answer to anyone diagnosing a node.
+    .version(getNodeBuildInfo().version)
     .option("--config <path>", "Path to sovereign-node config")
     .option("--verbose", "Enable verbose output");
 
@@ -46,6 +52,7 @@ export const createCliProgram = (app: AppContainer): Command => {
   registerReconfigureCommand(program, app);
   registerSetupUiCommand(program, app);
   registerUpdateCommand(program, app);
+  registerSupportBundleCommand(program, app);
 
   return program;
 };

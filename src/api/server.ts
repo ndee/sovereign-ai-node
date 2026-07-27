@@ -8,6 +8,7 @@ import { createSessionStore } from "./auth/sessions.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerInstallRoutes } from "./routes/install.js";
 import { registerOnboardingRoutes } from "./routes/onboarding.js";
+import { registerReadyzRoutes } from "./routes/readyz.js";
 import { registerReconfigureRoutes } from "./routes/reconfigure.js";
 import { registerSetupUiRoutes } from "./routes/setup-ui.js";
 import { registerStatusRoutes } from "./routes/status.js";
@@ -38,7 +39,11 @@ export const buildApiServer = async (app: AppContainer): Promise<FastifyInstance
   registerOnboardingRoutes(server, app);
   await registerSetupUiRoutes(server);
 
+  // FROZEN: unconditional liveness. install-web.sh's wait_for_healthz polls
+  // this during every install — the shape and status must not change. Real
+  // readiness lives at /readyz.
   server.get("/healthz", async () => ({ ok: true }));
+  registerReadyzRoutes(server, app);
 
   return server;
 };
