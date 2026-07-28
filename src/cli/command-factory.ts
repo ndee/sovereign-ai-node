@@ -11,6 +11,7 @@ import { registerLogsCommand } from "./commands/logs.js";
 import { registerMailSentinelsCommand } from "./commands/mail-sentinels.js";
 import { registerMigrateCommand } from "./commands/migrate.js";
 import { registerOnboardingCommand } from "./commands/onboarding.js";
+import { registerReconcileCommand } from "./commands/reconcile.js";
 import { registerReconfigureCommand } from "./commands/reconfigure.js";
 import { registerSetupUiCommand } from "./commands/setup-ui.js";
 import { registerStatusCommand } from "./commands/status.js";
@@ -37,6 +38,7 @@ export const createCliProgram = (app: AppContainer): Command => {
 
   registerInstallCommand(program, app);
   registerStatusCommand(program, app);
+  registerReconcileCommand(program, app);
   registerOnboardingCommand(program, app);
   registerBackupCommand(program, app);
   registerBotsCommand(program, app);

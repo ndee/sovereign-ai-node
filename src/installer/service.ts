@@ -271,6 +271,12 @@ export interface InstallerService {
     toolInstanceIds?: string[];
   }): Promise<ManagedAgentUpsertResult>;
   deleteManagedAgent(req: { id: string }): Promise<ManagedAgentDeleteResult>;
+  /**
+   * Re-apply every managed agent's workspace files from the installed bot
+   * catalog. Used after an update replaces the catalog, so the code systemd
+   * runs matches the code that was installed. Does not restart the gateway.
+   */
+  reconcileAgentWorkspaces(): Promise<{ reconciled: string[] }>;
   listSovereignBots(): Promise<SovereignBotListResult>;
   instantiateSovereignBot(req: {
     id: string;

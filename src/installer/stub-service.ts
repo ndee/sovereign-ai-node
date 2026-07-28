@@ -523,6 +523,10 @@ export class StubInstallerService implements InstallerService {
     };
   }
 
+  async reconcileAgentWorkspaces(): Promise<{ reconciled: string[] }> {
+    return { reconciled: ["mail-sentinel"] };
+  }
+
   async listSovereignBots(): Promise<SovereignBotListResult> {
     return {
       bots: [
