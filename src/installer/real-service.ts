@@ -2638,6 +2638,61 @@ export class RealInstallerService implements InstallerService {
     };
   }
 
+  /**
+   * Re-materialise every managed agent's workspace from the CURRENTLY INSTALLED
+   * bot catalog.
+   *
+   * Why this exists: a bot lives on a device twice — the catalog under
+   * `<botsDir>/bots/<id>/`, and the agent workspace at
+   * `<workspace>/bin/<id>.js` that systemd actually executes. A Pro update
+   * replaces the catalog wholesale but nothing re-applied the workspace, so the
+   * running bot stayed at the previously installed build indefinitely. The
+   * installer's own `verify_bot_pins` could not see it: it reads the catalog's
+   * sovereign-bot.json, which was correctly updated.
+   *
+   * Deliberately NARROWER than persistManagedAgentTopology: it recompiles the
+   * host-resource plan and rewrites workspace files, but does NOT restart the
+   * OpenClaw gateway, reset agent sessions, or touch Matrix. An updater must be
+   * able to call this without causing side effects it did not ask for — and
+   * refreshGatewayAfterRuntimeConfig throws when the gateway cannot restart,
+   * which would abort an otherwise healthy update.
+   *
+   * Honours writePolicy: `always` files are overwritten from the catalog,
+   * `ifMissing` files (operator state such as user-policy.json) are left alone.
+   * Idempotent — re-running it on an up-to-date device rewrites identical bytes.
+   */
+  async reconcileAgentWorkspaces(): Promise<{
+    reconciled: string[];
+  }> {
+    let runtimeConfig: RuntimeConfig;
+    try {
+      runtimeConfig = await this.readRuntimeConfig();
+    } catch (error) {
+      // No core config yet (fresh host, pre-wizard). Nothing to reconcile; the
+      // install job materialises the workspaces when it runs. Any OTHER failure
+      // is a real problem and must surface.
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        (error as { code?: unknown }).code === "CONFIG_NOT_FOUND"
+      ) {
+        return { reconciled: [] };
+      }
+      throw error;
+    }
+    await this.refreshRuntimeHostResources(runtimeConfig);
+    const reconciled: string[] = [];
+    for (const agent of runtimeConfig.openclawProfile.agents) {
+      await this.ensureManagedAgentWorkspace({
+        id: agent.id,
+        workspace: agent.workspace,
+        runtimeConfig,
+      });
+      reconciled.push(agent.id);
+    }
+    return { reconciled };
+  }
+
   async listSovereignBots(): Promise<SovereignBotListResult> {
     const runtimeConfig = await this.tryReadRuntimeConfig();
     const installedTemplateRefs = new Set(

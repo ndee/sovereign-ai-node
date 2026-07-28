@@ -9988,6 +9988,23 @@ describe("RealInstallerService", () => {
       expect(agentsDoc).toContain("Operator: @operator:matrix.example.org");
       expect(gatewayRestartCalls).toBe(1);
 
+      // Regression: an update replaces the bot CATALOG but nothing re-applied
+      // the agent WORKSPACE, so the code systemd runs stayed at the previously
+      // installed build. Simulate that drift and prove reconcile repairs it.
+      const workspaceToolsPath = join(paths.stateDir, "node-operator", "workspace", "TOOLS.md");
+      await writeFile(workspaceToolsPath, "STALE — left over from an older release\n", "utf8");
+
+      const reconciled = await service.reconcileAgentWorkspaces();
+      expect(reconciled.reconciled).toContain("node-operator");
+
+      const repaired = await readFile(workspaceToolsPath, "utf8");
+      expect(repaired).not.toContain("STALE");
+      expect(repaired).toContain("sovereign-node users remove <username> --json");
+
+      // Reconcile must NOT restart the gateway: an updater has to be able to
+      // call it without side effects it did not ask for.
+      expect(gatewayRestartCalls).toBe(1);
+
       const configRaw = await readFile(paths.configPath, "utf8");
       const config = JSON.parse(configRaw) as {
         templates?: {
