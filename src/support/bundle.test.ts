@@ -494,10 +494,23 @@ describe("generateSupportBundle — staging cleanup", () => {
    * MAX_VALUE_LENGTH (8 000), so the oversize has to come from many distinct
    * keys rather than one long value.
    */
+  /**
+   * A payload that exceeds a SMALL injected cap.
+   *
+   * The three size-cap tests below pass `maxBundleBytes` rather than building a
+   * real 8 MiB payload. Redaction is linear in bytes (~160 ms/MiB measured), so
+   * an 8 MiB fixture costs ~1.3 s of genuine work per test no matter how the
+   * fields are shaped — that is the redactor doing its job, not a slow test.
+   * Three of them together tipped past vitest's 5 s default on a CI runner.
+   *
+   * What is under test is the CAP LOGIC, which is identical at any threshold.
+   */
+  const TEST_SIZE_CAP = 32 * 1024;
+
   const oversizePayload = (): Record<string, string> => {
     const chunk = "x".repeat(4_000);
     const payload: Record<string, string> = {};
-    for (let index = 0; index < Math.ceil(MAX_BUNDLE_BYTES / 4_000) + 50; index += 1) {
+    for (let index = 0; index < Math.ceil(TEST_SIZE_CAP / 4_000) + 2; index += 1) {
       payload[`field${index}`] = chunk;
     }
     return payload;
@@ -516,6 +529,7 @@ describe("generateSupportBundle — staging cleanup", () => {
       generateSupportBundle(workDir, {
         inventory,
         doctorReport: oversizePayload(),
+        maxBundleBytes: TEST_SIZE_CAP,
         run: healthyRun,
         now: () => FIXED_NOW,
         createArchive,
@@ -536,6 +550,7 @@ describe("generateSupportBundle — staging cleanup", () => {
       generateSupportBundle(workDir, {
         inventory,
         doctorReport: oversizePayload(),
+        maxBundleBytes: TEST_SIZE_CAP,
         run: healthyRun,
         now: () => FIXED_NOW,
         createArchive: async () => undefined,
@@ -548,6 +563,7 @@ describe("generateSupportBundle — staging cleanup", () => {
       generateSupportBundle(workDir, {
         inventory,
         doctorReport: oversizePayload(),
+        maxBundleBytes: TEST_SIZE_CAP,
         run: healthyRun,
         now: () => FIXED_NOW,
         createArchive: async () => undefined,
@@ -853,6 +869,27 @@ describe("module constants", () => {
   it("caps the total bundle at 8 MiB", () => {
     expect(MAX_BUNDLE_BYTES).toBe(8 * 1024 * 1024);
   });
+
+  it("uses MAX_BUNDLE_BYTES when no override is supplied", async () => {
+    // The cap is injectable so the abort path can be tested cheaply. That
+    // injection point is only safe if production still defaults to the real
+    // ceiling — otherwise a bundle could grow unbounded and nothing would
+    // notice. Asserted via the error message, which names the cap in force.
+    const justOverDefault: Record<string, string> = {};
+    const chunk = "x".repeat(7_000);
+    for (let index = 0; index < Math.ceil(MAX_BUNDLE_BYTES / 7_000) + 2; index += 1) {
+      justOverDefault[`field${index}`] = chunk;
+    }
+    await expect(
+      generateSupportBundle(workDir, {
+        inventory,
+        doctorReport: justOverDefault,
+        run: healthyRun,
+        now: () => FIXED_NOW,
+        createArchive: async () => undefined,
+      }),
+    ).rejects.toThrow(new RegExp(`exceeded ${MAX_BUNDLE_BYTES} bytes`, "u"));
+  }, 15_000);
 
   it("retains bundles for 14 days", () => {
     expect(BUNDLE_RETENTION_DAYS).toBe(14);

@@ -102,6 +102,14 @@ export interface BundleDependencies {
   /** Durable update status record, if present. */
   readonly updateStatus?: unknown;
   readonly run?: RunCommand;
+  /**
+   * Override the total-size ceiling. Production always uses the default; this
+   * exists so the abort path can be tested without building an 8 MiB payload,
+   * which costs ~1.3s of genuine redaction work per test (the redactor is
+   * linear in bytes, so no fixture shape avoids it) and tipped past vitest's
+   * default timeout on a slower CI runner.
+   */
+  readonly maxBundleBytes?: number;
   readonly now?: () => Date;
   /** Overrides the archive creation step; used to test without tar. */
   readonly createArchive?: (stagingDir: string, outputPath: string) => Promise<void>;
@@ -253,6 +261,7 @@ export const generateSupportBundle = async (
 ): Promise<BundleResult> => {
   const now = (deps.now ?? (() => new Date()))();
   const run = deps.run ?? defaultRunCommand;
+  const sizeCap = deps.maxBundleBytes ?? MAX_BUNDLE_BYTES;
   const fileName = bundleFileName(now, generateBundleId());
   const outputPath = await validateOutputPath(join(outputDirectory, fileName));
 
@@ -357,9 +366,9 @@ export const generateSupportBundle = async (
           : `${JSON.stringify(result.content, null, 2)}\n`;
       const buffer = Buffer.from(serialized, "utf8");
       totalBytes += buffer.byteLength;
-      if (totalBytes > MAX_BUNDLE_BYTES) {
+      if (totalBytes > sizeCap) {
         throw new Error(
-          `support bundle exceeded ${MAX_BUNDLE_BYTES} bytes; aborting rather than truncating`,
+          `support bundle exceeded ${sizeCap} bytes; aborting rather than truncating`,
         );
       }
       await writeFile(join(stagingDir, result.name), buffer, { mode: 0o600 });

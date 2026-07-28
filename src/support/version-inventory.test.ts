@@ -347,10 +347,25 @@ describe("scrubRepoUrl", () => {
 
 describe("summarizeInventory", () => {
   it("renders known versions", () => {
-    const summary = summarizeInventory(
-      buildVersionInventory(inputs({ provenance: fullProvenance, openclawVersion: "0.9.1" })),
+    const inventory = buildVersionInventory(
+      inputs({ provenance: fullProvenance, openclawVersion: "0.9.1" }),
     );
-    expect(summary).toContain("node 2.3.5");
+    const summary = summarizeInventory(inventory);
+
+    // The node version is asserted against the inventory's own resolved value,
+    // NOT against a hardcoded string. Under vitest the build-time define is
+    // absent, so `sovereign-node` falls back to reading the adjacent
+    // package.json — which means a literal here silently encodes the repo's
+    // current version and breaks on the next release bump. (It did: this
+    // assertion was written as "2.3.5" and failed the moment main became
+    // 2.3.6.) What the test actually needs to prove is that summarizeInventory
+    // renders whatever the inventory resolved, which is version-agnostic.
+    const nodeVersion = componentOf(inventory, "sovereign-node")?.version;
+    expect(nodeVersion).toBeDefined();
+    expect(summary).toContain(`node ${nodeVersion}`);
+
+    // bots and openclaw have no build-time source, so these DO come from the
+    // injected fixture and are safe to assert literally.
     expect(summary).toContain("bots 2.0.4");
     expect(summary).toContain("openclaw 0.9.1");
   });
