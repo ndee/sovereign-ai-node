@@ -4,7 +4,10 @@ import { sendApiError } from "../response.js";
 import type { Session, SessionStore } from "./sessions.js";
 
 const ALLOW_PREFIXES = ["/setup-ui/"];
-const ALLOW_GET_EXACT = new Set<string>(["/", "/healthz", "/api/auth/state"]);
+// `/readyz` joins `/healthz` here: monitoring, the updater and firstboot poll
+// readiness with no session to present. Its body is reduced to check ids and
+// statuses precisely because it is unauthenticated (see routes/readyz.ts).
+const ALLOW_GET_EXACT = new Set<string>(["/", "/healthz", "/readyz", "/api/auth/state"]);
 const ALLOW_POST_EXACT = new Set<string>(["/api/auth/login"]);
 const STATE_CHANGING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
