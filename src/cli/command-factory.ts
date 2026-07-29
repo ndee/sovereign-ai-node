@@ -5,6 +5,7 @@ import { getNodeBuildInfo } from "../build-info.js";
 import { registerAgentsCommand } from "./commands/agents.js";
 import { registerBackupCommand } from "./commands/backup.js";
 import { registerBotsCommand } from "./commands/bots.js";
+import { registerDiagnosticsCommand } from "./commands/diagnostics.js";
 import { registerDoctorCommand } from "./commands/doctor.js";
 import { registerInstallCommand } from "./commands/install.js";
 import { registerLogsCommand } from "./commands/logs.js";
@@ -49,6 +50,7 @@ export const createCliProgram = (app: AppContainer): Command => {
   registerTemplatesCommand(program, app);
   registerToolsCommand(program, app);
   registerDoctorCommand(program, app);
+  registerDiagnosticsCommand(program, app);
   registerLogsCommand(program);
   registerTestAlertCommand(program, app);
   registerReconfigureCommand(program, app);

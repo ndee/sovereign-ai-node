@@ -14326,3 +14326,298 @@ describe("ensureMatrixCryptoRuntimeWritable (issue #207)", () => {
     }
   });
 });
+
+describe("RealInstallerService.verifyManagedBotResponds", () => {
+  const buildVerifyPaths = (tempRoot: string): SovereignPaths => ({
+    configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+    secretsDir: join(tempRoot, "etc", "secrets"),
+    stateDir: join(tempRoot, "var", "lib"),
+    logsDir: join(tempRoot, "var", "log"),
+    installJobsDir: join(tempRoot, "install-jobs"),
+    openclawServiceHome: join(tempRoot, "openclaw-home"),
+    provenancePath: join(tempRoot, "install-provenance.json"),
+    backupsDir: join(tempRoot, "backups"),
+  });
+
+  const verifyDeps = {
+    openclawBootstrapper: {
+      detectInstalled: async () => null,
+      ensureInstalled: async () => ({
+        binaryPath: "/usr/local/bin/openclaw",
+        version: "pinned-by-sovereign",
+        installMethod: "install_sh" as const,
+      }),
+    },
+    openclawGatewayServiceManager: {
+      install: async () => {},
+      start: async () => {},
+      restart: async () => {},
+    },
+    preflightChecker: {
+      run: async () => ({
+        mode: "bundled_matrix" as const,
+        overall: "pass" as const,
+        checks: [],
+        recommendedActions: [],
+      }),
+    },
+    imapTester: {
+      test: async () => ({
+        ok: true,
+        host: "imap.example.org",
+        port: 993,
+        tls: true,
+        auth: "ok" as const,
+      }),
+    },
+    matrixProvisioner: {
+      provision: async () => {
+        throw new Error("not used");
+      },
+      bootstrapAccounts: async () => {
+        throw new Error("not used");
+      },
+      bootstrapRoom: async () => {
+        throw new Error("not used");
+      },
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+  } as unknown as ConstructorParameters<typeof RealInstallerService>[2];
+
+  const setupVerifyHost = async (): Promise<{ tempRoot: string; paths: SovereignPaths }> => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-verify-bot-test-"));
+    const paths = buildVerifyPaths(tempRoot);
+    await writeRuntimeArtifacts(paths);
+    await writeDedicatedBotRuntimeArtifacts(paths);
+    return { tempRoot, paths };
+  };
+
+  const buildVerifyService = (
+    paths: SovereignPaths,
+    fetchImpl: (url: string, init?: RequestInit) => Promise<Response>,
+  ): RealInstallerService =>
+    new RealInstallerService(createLogger(), paths, {
+      ...(verifyDeps as Record<string, unknown>),
+      fetchImpl,
+    } as ConstructorParameters<typeof RealInstallerService>[2]);
+
+  it("returns ok when the bot replies after the probe message", async () => {
+    const { tempRoot, paths } = await setupVerifyHost();
+    try {
+      let messagesCalls = 0;
+      const sentBodies: string[] = [];
+      const service = buildVerifyService(paths, async (url, init) => {
+        if (url.includes("/send/m.room.message/")) {
+          sentBodies.push(String(init?.body ?? ""));
+          return new Response(JSON.stringify({ event_id: "$probe-1" }), { status: 200 });
+        }
+        if (url.includes("/messages")) {
+          messagesCalls += 1;
+          const chunk =
+            messagesCalls === 1
+              ? [
+                  {
+                    type: "m.room.message",
+                    sender: "@operator:matrix.example.org",
+                    event_id: "$probe-1",
+                  },
+                ]
+              : [
+                  {
+                    type: "m.room.message",
+                    sender: "@node-operator:matrix.example.org",
+                    event_id: "$reply-1",
+                  },
+                  {
+                    type: "m.room.message",
+                    sender: "@operator:matrix.example.org",
+                    event_id: "$probe-1",
+                  },
+                ];
+          return new Response(JSON.stringify({ chunk }), { status: 200 });
+        }
+        return new Response("{}", { status: 200 });
+      });
+
+      const result = await service.verifyManagedBotResponds({
+        botId: "node-operator",
+        timeoutMs: 5_000,
+        pollIntervalMs: 30,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.botUserId).toBe("@node-operator:matrix.example.org");
+      expect(result.sentEventId).toBe("$probe-1");
+      expect(result.replyEventId).toBe("$reply-1");
+      expect(result.failure).toBeUndefined();
+      // The probe both mentions the bot in plain text and sets m.mentions so
+      // either gateway mention-detection style routes it.
+      expect(sentBodies[0]).toContain("@node-operator:matrix.example.org");
+      expect(sentBodies[0]).toContain("m.mentions");
+      // No secret material may appear in the message body.
+      expect(sentBodies[0]).not.toContain("operator-token");
+      expect(sentBodies[0]).not.toContain("node-operator-token");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a reply even when the probe event scrolled out of the poll window", async () => {
+    const { tempRoot, paths } = await setupVerifyHost();
+    try {
+      const service = buildVerifyService(paths, async (url) => {
+        if (url.includes("/send/m.room.message/")) {
+          return new Response(JSON.stringify({ event_id: "$probe-2" }), { status: 200 });
+        }
+        if (url.includes("/messages")) {
+          return new Response(
+            JSON.stringify({
+              chunk: [
+                {
+                  type: "m.room.message",
+                  sender: "@node-operator:matrix.example.org",
+                  event_id: "$reply-2",
+                },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("{}", { status: 200 });
+      });
+
+      const result = await service.verifyManagedBotResponds({
+        botId: "node-operator",
+        timeoutMs: 5_000,
+        pollIntervalMs: 30,
+      });
+      expect(result.ok).toBe(true);
+      expect(result.replyEventId).toBe("$reply-2");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reports timeout when the bot never replies, ignoring older bot chatter", async () => {
+    const { tempRoot, paths } = await setupVerifyHost();
+    try {
+      const service = buildVerifyService(paths, async (url) => {
+        if (url.includes("/send/m.room.message/")) {
+          return new Response(JSON.stringify({ event_id: "$probe-3" }), { status: 200 });
+        }
+        if (url.includes("/messages")) {
+          // The bot spoke BEFORE the probe: dir=b puts the probe first, so the
+          // old message must not satisfy the check.
+          return new Response(
+            JSON.stringify({
+              chunk: [
+                {
+                  type: "m.room.message",
+                  sender: "@operator:matrix.example.org",
+                  event_id: "$probe-3",
+                },
+                {
+                  type: "m.room.message",
+                  sender: "@node-operator:matrix.example.org",
+                  event_id: "$stale-reply",
+                },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("{}", { status: 200 });
+      });
+
+      const result = await service.verifyManagedBotResponds({
+        botId: "node-operator",
+        timeoutMs: 200,
+        pollIntervalMs: 30,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.failure).toBe("timeout");
+      expect(result.sentEventId).toBe("$probe-3");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("distinguishes a bot that is not instantiated from one that cannot be reached", async () => {
+    const { tempRoot, paths } = await setupVerifyHost();
+    try {
+      const service = buildVerifyService(paths, async () => new Response("{}", { status: 200 }));
+      const result = await service.verifyManagedBotResponds({ botId: "does-not-exist" });
+      expect(result.ok).toBe(false);
+      expect(result.failure).toBe("not-instantiated");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reports send-failed when the homeserver rejects the probe message", async () => {
+    const { tempRoot, paths } = await setupVerifyHost();
+    try {
+      const service = buildVerifyService(paths, async (url) => {
+        if (url.includes("/send/m.room.message/")) {
+          return new Response(JSON.stringify({ errcode: "M_FORBIDDEN" }), { status: 403 });
+        }
+        return new Response("{}", { status: 200 });
+      });
+      const result = await service.verifyManagedBotResponds({
+        botId: "node-operator",
+        timeoutMs: 500,
+        pollIntervalMs: 30,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.failure).toBe("send-failed");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps polling through transient poll errors instead of failing", async () => {
+    const { tempRoot, paths } = await setupVerifyHost();
+    try {
+      let messagesCalls = 0;
+      const service = buildVerifyService(paths, async (url) => {
+        if (url.includes("/send/m.room.message/")) {
+          return new Response(JSON.stringify({ event_id: "$probe-4" }), { status: 200 });
+        }
+        if (url.includes("/messages")) {
+          messagesCalls += 1;
+          if (messagesCalls === 1) {
+            return new Response("upstream error", { status: 502 });
+          }
+          if (messagesCalls === 2) {
+            throw new Error("connection reset");
+          }
+          return new Response(
+            JSON.stringify({
+              chunk: [
+                {
+                  type: "m.room.message",
+                  sender: "@node-operator:matrix.example.org",
+                  event_id: "$reply-4",
+                },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("{}", { status: 200 });
+      });
+
+      const result = await service.verifyManagedBotResponds({
+        botId: "node-operator",
+        timeoutMs: 5_000,
+        pollIntervalMs: 30,
+      });
+      expect(result.ok).toBe(true);
+      expect(messagesCalls).toBeGreaterThanOrEqual(3);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+});

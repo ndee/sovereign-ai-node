@@ -97,6 +97,35 @@ export type SovereignBotInstantiateResult = {
   restartRequiredServices: string[];
 };
 
+/**
+ * Result of a Matrix command→response round trip against a managed bot.
+ *
+ * `ok: false` carries a machine-readable `failure` so installers can tell
+ * "the bot is not set up" apart from "the bot is set up but silent" — the
+ * latter is the single most common incident on this system and must never be
+ * reported as a successful installation.
+ */
+export type BotRoundTripResult = {
+  ok: boolean;
+  botId: string;
+  botUserId?: string;
+  roomId?: string;
+  sentEventId?: string;
+  replyEventId?: string;
+  elapsedMs: number;
+  failure?: "not-instantiated" | "no-matrix-identity" | "send-failed" | "timeout";
+};
+
+export type BotRoundTripRequest = {
+  botId: string;
+  /** Overall wait for a reply; capped at 300s, default 120s. */
+  timeoutMs?: number;
+  /** Delay between reply polls; capped at 30s, default 3s. */
+  pollIntervalMs?: number;
+  /** Command text sent after the bot mention, default "status". */
+  probeText?: string;
+};
+
 export type SovereignToolInstance = {
   id: string;
   templateRef: string;
@@ -278,6 +307,7 @@ export interface InstallerService {
    */
   reconcileAgentWorkspaces(): Promise<{ reconciled: string[] }>;
   listSovereignBots(): Promise<SovereignBotListResult>;
+  verifyManagedBotResponds(req: BotRoundTripRequest): Promise<BotRoundTripResult>;
   instantiateSovereignBot(req: {
     id: string;
     workspace?: string;

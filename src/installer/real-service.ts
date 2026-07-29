@@ -242,6 +242,8 @@ import {
   toSystemdDuration,
 } from "./real-service-utils.js";
 import type {
+  BotRoundTripRequest,
+  BotRoundTripResult,
   InstallerService,
   MailSentinelApplyResult,
   MailSentinelDeleteResult,
@@ -9216,6 +9218,155 @@ export default function (api) {
         },
       };
     }
+  }
+
+  /**
+   * Prove a managed bot can actually answer in Matrix: send it a mention in
+   * the alert room as the operator, then wait for any message from the bot's
+   * account that is newer than what we sent.
+   *
+   * Never throws for operational outcomes — installers branch on `failure`
+   * rather than exception shapes, and a verification helper that crashes on a
+   * silent bot would defeat its own purpose. Freshness is decided by event
+   * ordering in the room timeline (dir=b puts newer events first), not by
+   * clocks: the sent event is the reference point, so a bot that spoke an
+   * hour ago can never satisfy the check.
+   */
+  async verifyManagedBotResponds(req: BotRoundTripRequest): Promise<BotRoundTripResult> {
+    const startedAt = Date.now();
+    const timeoutMs = Math.min(Math.max(req.timeoutMs ?? 120_000, 100), 300_000);
+    const pollIntervalMs = Math.min(Math.max(req.pollIntervalMs ?? 3_000, 25), 30_000);
+    const probeText = (req.probeText ?? "status").trim() || "status";
+
+    const fail = (
+      failure: NonNullable<BotRoundTripResult["failure"]>,
+      extra: Partial<BotRoundTripResult> = {},
+    ): BotRoundTripResult => ({
+      ok: false,
+      botId: req.botId,
+      elapsedMs: Date.now() - startedAt,
+      failure,
+      ...extra,
+    });
+
+    const runtimeConfig = await this.readRuntimeConfig();
+    const agent = runtimeConfig.openclawProfile.agents.find((entry) => entry.id === req.botId);
+    if (agent === undefined) {
+      return fail("not-instantiated");
+    }
+    const botUserId = agent.matrix?.userId;
+    if (botUserId === undefined || botUserId.length === 0) {
+      return fail("no-matrix-identity");
+    }
+    const roomId = runtimeConfig.matrix.alertRoom.roomId;
+    const operatorTokenSecretRef = runtimeConfig.matrix.operator.accessTokenSecretRef;
+    if (operatorTokenSecretRef === undefined || operatorTokenSecretRef.length === 0) {
+      return fail("send-failed", { botUserId, roomId });
+    }
+
+    let operatorAccessToken: string;
+    try {
+      operatorAccessToken = await this.resolveSecretRef(operatorTokenSecretRef);
+    } catch {
+      return fail("send-failed", { botUserId, roomId });
+    }
+
+    const baseUrl = ensureTrailingSlash(runtimeConfig.matrix.adminBaseUrl);
+    const authHeaders = {
+      Authorization: `Bearer ${operatorAccessToken}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    };
+
+    let sentEventId: string | undefined;
+    try {
+      const txnId = randomUUID();
+      const sendEndpoint = new URL(
+        `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(txnId)}`,
+        baseUrl,
+      ).toString();
+      const response = await this.fetchImpl(sendEndpoint, {
+        method: "PUT",
+        headers: authHeaders,
+        body: JSON.stringify({
+          msgtype: "m.text",
+          // Both the plain-text mention and m.mentions are set because the
+          // gateway's mention detection is an external implementation detail.
+          body: `${botUserId}: ${probeText}`,
+          "m.mentions": { user_ids: [botUserId] },
+        }),
+      });
+      const bodyText = await response.text();
+      if (!response.ok) {
+        return fail("send-failed", { botUserId, roomId });
+      }
+      const parsed: unknown = JSON.parse(bodyText);
+      sentEventId =
+        typeof parsed === "object" && parsed !== null
+          ? (parsed as { event_id?: string }).event_id
+          : undefined;
+    } catch {
+      return fail("send-failed", { botUserId, roomId });
+    }
+    if (sentEventId === undefined || sentEventId.length === 0) {
+      return fail("send-failed", { botUserId, roomId });
+    }
+
+    const messagesEndpoint = new URL(
+      `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages`,
+      baseUrl,
+    );
+    messagesEndpoint.searchParams.set("dir", "b");
+    messagesEndpoint.searchParams.set("limit", "30");
+
+    while (Date.now() - startedAt < timeoutMs) {
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      let chunk: Array<{ type?: string; sender?: string; event_id?: string }> = [];
+      try {
+        const response = await this.fetchImpl(messagesEndpoint.toString(), {
+          method: "GET",
+          headers: authHeaders,
+        });
+        if (!response.ok) {
+          continue;
+        }
+        const parsed: unknown = JSON.parse(await response.text());
+        const rawChunk =
+          typeof parsed === "object" && parsed !== null
+            ? (parsed as { chunk?: unknown }).chunk
+            : undefined;
+        chunk = Array.isArray(rawChunk)
+          ? rawChunk.filter(
+              (entry): entry is { type?: string; sender?: string; event_id?: string } =>
+                typeof entry === "object" && entry !== null,
+            )
+          : [];
+      } catch {
+        continue;
+      }
+
+      // dir=b: index 0 is newest. Everything before our sent event is newer
+      // than it; if the sent event has scrolled out of the window, the whole
+      // window is newer.
+      const sentIndex = chunk.findIndex((event) => event.event_id === sentEventId);
+      const newerEvents = sentIndex === -1 ? chunk : chunk.slice(0, sentIndex);
+      const reply = newerEvents.find(
+        (event) => event.type === "m.room.message" && event.sender === botUserId,
+      );
+      if (reply !== undefined) {
+        return {
+          ok: true,
+          botId: req.botId,
+          botUserId,
+          roomId,
+          sentEventId,
+          ...(reply.event_id === undefined ? {} : { replyEventId: reply.event_id }),
+          elapsedMs: Date.now() - startedAt,
+        };
+      }
+    }
+
+    return fail("timeout", { botUserId, roomId, sentEventId });
   }
 
   private async ensureSystemGatewayServiceFallback(runtimeConfig: RuntimeConfig): Promise<boolean> {
