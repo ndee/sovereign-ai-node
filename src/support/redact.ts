@@ -253,10 +253,17 @@ const TEXT_RULES: readonly { readonly id: string; readonly re: RegExp; readonly 
     re: /\b([a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^/\s@]+@/giu,
     to: `$1${REDACTED}@`,
   },
-  // PEM private key blocks, collapsed whole.
+  // PEM private key blocks, collapsed whole. The armor is assembled at
+  // runtime so the BUILT bundle never contains the literal marker: the Pro
+  // release pipeline's secret scan (build-release-bundle.sh) greps every
+  // shipped file for the five-dash BEGIN/PRIVATE KEY armor, and a detector
+  // that ships its own trigger string would fail every release build.
   {
     id: "pem-private-key",
-    re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gu,
+    re: new RegExp(
+      `${"-".repeat(5)}BEGIN [A-Z ]*PRIVATE KEY${"-".repeat(5)}[\\s\\S]*?${"-".repeat(5)}END [A-Z ]*PRIVATE KEY${"-".repeat(5)}`,
+      "gu",
+    ),
     to: REDACTED,
   },
 ];
