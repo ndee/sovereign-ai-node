@@ -5724,10 +5724,11 @@ export default function (api) {
   }
 
   private async applyCompiledSystemdResources(runtimeConfig: RuntimeConfig): Promise<void> {
-    if (typeof process.getuid !== "function" || process.getuid() !== 0) {
-      return;
-    }
-
+    // No root guard: root-run CLI installs write directly, and on web
+    // installs (runtime API as the service user) the unit writes and
+    // systemctl calls below go through the elevated path — scoped sudoers
+    // entries name each permitted unit. Hosts without a grant fail soft
+    // per-unit with a warning, exactly like before.
     const systemdResources = (runtimeConfig.hostResources?.resources ?? []).filter(
       (
         resource,
