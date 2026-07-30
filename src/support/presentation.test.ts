@@ -477,3 +477,66 @@ describe("contract version and freshness", () => {
     expect(sentinel?.code).toBe("SAN-MAIL-001");
   });
 });
+
+describe("clock skew handling", () => {
+  it("degrades a healthy component whose last success is in the future", () => {
+    const futureAt = new Date(NOW.getTime() + 30 * 60 * 1000).toISOString();
+    const presentation = buildDiagnosticsPresentation({
+      now: NOW,
+      status: baseStatus(),
+      doctorReport: baseDoctor(),
+      mailSentinelState: { degradationState: "healthy", lastScanAt: futureAt },
+    });
+    const sentinel = presentation.components.find((c) => c.id === "mail-sentinel");
+    expect(sentinel?.status).toBe("degraded");
+    expect(sentinel?.code).toBe("SAN-SYSTEM-002");
+    expect(sentinel?.summary).toBe(
+      "This component reported a time in the future — the node's clock may be wrong.",
+    );
+    expect(presentation.overall).toBe("degraded");
+  });
+
+  it("tolerates small forward skew without degrading", () => {
+    const slightlyAhead = new Date(NOW.getTime() + 2 * 60 * 1000).toISOString();
+    const presentation = buildDiagnosticsPresentation({
+      now: NOW,
+      status: baseStatus(),
+      doctorReport: baseDoctor(),
+      mailSentinelState: { degradationState: "healthy", lastScanAt: slightlyAhead },
+    });
+    expect(presentation.components.find((c) => c.id === "mail-sentinel")?.status).toBe("healthy");
+  });
+
+  it("applies the future check to non-policied components too", () => {
+    const futureAt = new Date(NOW.getTime() + 30 * 60 * 1000).toISOString();
+    const presentation = buildDiagnosticsPresentation({
+      now: NOW,
+      status: baseStatus({
+        imap: {
+          authStatus: "ok",
+          host: "imap.example.org",
+          mailbox: "INBOX",
+          lastCredentialTestAt: futureAt,
+        },
+      } as Partial<SovereignStatus>),
+      doctorReport: baseDoctor(),
+      mailSentinelState: healthyMailState,
+    });
+    const mailbox = presentation.components.find((c) => c.id === "mailbox");
+    expect(mailbox?.status).toBe("degraded");
+    expect(mailbox?.code).toBe("SAN-SYSTEM-002");
+  });
+
+  it("never lets a future timestamp mask a harder failure", () => {
+    const futureAt = new Date(NOW.getTime() + 30 * 60 * 1000).toISOString();
+    const presentation = buildDiagnosticsPresentation({
+      now: NOW,
+      status: baseStatus(),
+      doctorReport: baseDoctor(),
+      mailSentinelState: { degradationState: "scans-failing", lastScanAt: futureAt },
+    });
+    const sentinel = presentation.components.find((c) => c.id === "mail-sentinel");
+    expect(sentinel?.status).toBe("failed");
+    expect(sentinel?.code).toBe("SAN-MAIL-001");
+  });
+});

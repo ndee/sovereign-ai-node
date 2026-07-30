@@ -47,6 +47,15 @@ const matrixRoutingSchema = z.object({
    * "operator" so mail alerts and control commands never share a room.
    */
   room: z.enum(["alert", "operator"]).optional(),
+  /**
+   * How incoming Matrix messages become commands. "llm" (default) binds the
+   * bot's account to the OpenClaw gateway agent. "deterministic" means the
+   * bot runs its OWN Matrix client (typically a systemd service declared in
+   * hostResources) with in-code parsing and authorization — the gateway
+   * gets NO account or binding for it, so no LLM ever participates in
+   * command selection or argument construction.
+   */
+  dispatch: z.enum(["llm", "deterministic"]).optional(),
   dm: z
     .object({
       enabled: z.boolean().optional(),

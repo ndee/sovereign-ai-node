@@ -14418,7 +14418,18 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
     return match[1];
   };
 
-  it("accepts only a nonce-correlated reply from the bot account", async () => {
+  /** A deterministic responder's reply: exact body + reply relation. */
+  const verifyOkReply = (nonce: string, challengeEventId: string, eventId: string) => ({
+    type: "m.room.message",
+    sender: "@node-operator:matrix.example.org",
+    event_id: eventId,
+    content: {
+      body: `VERIFY_OK ${nonce}`,
+      "m.relates_to": { "m.in_reply_to": { event_id: challengeEventId } },
+    },
+  });
+
+  it("accepts only the exact VERIFY_OK reply-relation response", async () => {
     const { tempRoot, paths } = await setupVerifyHost();
     try {
       let sentNonce = "";
@@ -14434,17 +14445,13 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
           return new Response(
             JSON.stringify({
               chunk: [
+                verifyOkReply(sentNonce, "$probe-1", "$reply-correlated"),
                 {
-                  type: "m.room.message",
-                  sender: "@node-operator:matrix.example.org",
-                  event_id: "$reply-correlated",
-                  content: { body: `Verified ${sentNonce}. Command execution confirmed.` },
-                },
-                {
+                  // Unrelated newer chatter from the bot: ignored, not fatal.
                   type: "m.room.message",
                   sender: "@node-operator:matrix.example.org",
                   event_id: "$reply-chatter",
-                  content: { body: "Unrelated bot chatter" },
+                  content: { body: `mentions the nonce ${sentNonce} but is not a reply` },
                 },
                 {
                   type: "m.room.message",
@@ -14468,11 +14475,8 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
 
       expect(result.ok).toBe(true);
       expect(result.replyEventId).toBe("$reply-correlated");
-      // The probe mentions the bot, carries a 32-hex-char random nonce, and
-      // leaks no secret material.
       expect(sentBodies[0]).toContain("@node-operator:matrix.example.org");
       expect(sentBodies[0]).toMatch(/verify [a-f0-9]{32}/u);
-      expect(sentBodies[0]).toContain("m.mentions");
       expect(sentBodies[0]).not.toContain("operator-token");
       expect(sentBodies[0]).not.toContain("node-operator-token");
     } finally {
@@ -14508,11 +14512,13 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
     }
   });
 
-  it("rejects an uncorrelated newer bot reply as mismatched-response", async () => {
+  it("waits through unrelated bot chatter and times out without a correlated reply", async () => {
     const { tempRoot, paths } = await setupVerifyHost();
     try {
-      const service = buildVerifyService(paths, async (url) => {
+      let sentNonce = "";
+      const service = buildVerifyService(paths, async (url, init) => {
         if (url.includes("/send/m.room.message/")) {
+          sentNonce = nonceFrom(String(init?.body ?? ""));
           return new Response(JSON.stringify({ event_id: "$probe-2" }), { status: 200 });
         }
         if (url.includes("/messages")) {
@@ -14520,60 +14526,18 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
             JSON.stringify({
               chunk: [
                 {
+                  // Newer bot message that even contains the nonce — but it
+                  // is NOT a reply to the challenge, so it must neither
+                  // verify nor fail the check.
                   type: "m.room.message",
                   sender: "@node-operator:matrix.example.org",
-                  event_id: "$reply-unrelated",
-                  content: { body: "I am alive but this is not the nonce" },
+                  event_id: "$chatter",
+                  content: { body: `VERIFY_OK ${sentNonce}` },
                 },
                 {
                   type: "m.room.message",
                   sender: "@operator:matrix.example.org",
                   event_id: "$probe-2",
-                },
-              ],
-            }),
-            { status: 200 },
-          );
-        }
-        return new Response("{}", { status: 200 });
-      });
-      const result = await service.verifyManagedBotResponds({
-        botId: "node-operator",
-        timeoutMs: 200,
-        pollIntervalMs: 30,
-      });
-      expect(result.ok).toBe(false);
-      expect(result.failure).toBe("mismatched-response");
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
-  it("ignores a nonce echoed by the wrong sender", async () => {
-    const { tempRoot, paths } = await setupVerifyHost();
-    try {
-      let sentNonce = "";
-      const service = buildVerifyService(paths, async (url, init) => {
-        if (url.includes("/send/m.room.message/")) {
-          sentNonce = nonceFrom(String(init?.body ?? ""));
-          return new Response(JSON.stringify({ event_id: "$probe-3" }), { status: 200 });
-        }
-        if (url.includes("/messages")) {
-          return new Response(
-            JSON.stringify({
-              chunk: [
-                {
-                  type: "m.room.message",
-                  // An attacker (or another bot) echoing the nonce is not the
-                  // expected bot account and must not verify the control plane.
-                  sender: "@bitcoin-skill-match:matrix.example.org",
-                  event_id: "$forged",
-                  content: { body: `Verified ${sentNonce}` },
-                },
-                {
-                  type: "m.room.message",
-                  sender: "@operator:matrix.example.org",
-                  event_id: "$probe-3",
                 },
               ],
             }),
@@ -14594,7 +14558,53 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
     }
   });
 
-  it("ignores older bot messages even when they echo nothing newer arrives", async () => {
+  it("fails fast with mismatched-response on a malformed reply to the challenge", async () => {
+    const { tempRoot, paths } = await setupVerifyHost();
+    try {
+      const service = buildVerifyService(paths, async (url) => {
+        if (url.includes("/send/m.room.message/")) {
+          return new Response(JSON.stringify({ event_id: "$probe-3" }), { status: 200 });
+        }
+        if (url.includes("/messages")) {
+          return new Response(
+            JSON.stringify({
+              chunk: [
+                {
+                  type: "m.room.message",
+                  sender: "@node-operator:matrix.example.org",
+                  event_id: "$bad-reply",
+                  content: {
+                    body: "VERIFY_OK wrong-nonce",
+                    "m.relates_to": { "m.in_reply_to": { event_id: "$probe-3" } },
+                  },
+                },
+                {
+                  type: "m.room.message",
+                  sender: "@operator:matrix.example.org",
+                  event_id: "$probe-3",
+                },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("{}", { status: 200 });
+      });
+      const result = await service.verifyManagedBotResponds({
+        botId: "node-operator",
+        timeoutMs: 5_000,
+        pollIntervalMs: 30,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.failure).toBe("mismatched-response");
+      // Fails fast: well under the timeout.
+      expect(result.elapsedMs).toBeLessThan(2_000);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores a correct reply from the wrong sender", async () => {
     const { tempRoot, paths } = await setupVerifyHost();
     try {
       let sentNonce = "";
@@ -14604,22 +14614,63 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
           return new Response(JSON.stringify({ event_id: "$probe-4" }), { status: 200 });
         }
         if (url.includes("/messages")) {
-          // dir=b: the probe is FIRST (newest); the bot message below it is
-          // OLDER than the challenge and must not count, nonce or not.
+          return new Response(
+            JSON.stringify({
+              chunk: [
+                {
+                  type: "m.room.message",
+                  sender: "@bitcoin-skill-match:matrix.example.org",
+                  event_id: "$forged",
+                  content: {
+                    body: `VERIFY_OK ${sentNonce}`,
+                    "m.relates_to": { "m.in_reply_to": { event_id: "$probe-4" } },
+                  },
+                },
+                {
+                  type: "m.room.message",
+                  sender: "@operator:matrix.example.org",
+                  event_id: "$probe-4",
+                },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("{}", { status: 200 });
+      });
+      const result = await service.verifyManagedBotResponds({
+        botId: "node-operator",
+        timeoutMs: 200,
+        pollIntervalMs: 30,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.failure).toBe("timeout");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores replies older than the challenge", async () => {
+    const { tempRoot, paths } = await setupVerifyHost();
+    try {
+      let sentNonce = "";
+      const service = buildVerifyService(paths, async (url, init) => {
+        if (url.includes("/send/m.room.message/")) {
+          sentNonce = nonceFrom(String(init?.body ?? ""));
+          return new Response(JSON.stringify({ event_id: "$probe-5" }), { status: 200 });
+        }
+        if (url.includes("/messages")) {
+          // dir=b: the probe is FIRST (newest); the reply below it is OLDER
+          // than the challenge and must not count.
           return new Response(
             JSON.stringify({
               chunk: [
                 {
                   type: "m.room.message",
                   sender: "@operator:matrix.example.org",
-                  event_id: "$probe-4",
+                  event_id: "$probe-5",
                 },
-                {
-                  type: "m.room.message",
-                  sender: "@node-operator:matrix.example.org",
-                  event_id: "$stale",
-                  content: { body: `Verified ${sentNonce}` },
-                },
+                verifyOkReply(sentNonce, "$probe-5", "$stale"),
               ],
             }),
             { status: 200 },
@@ -14648,7 +14699,7 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
             manifest: {
               id: "node-operator",
               matrixIdentity: { mode: "dedicated-account", localpartPrefix: "node-operator" },
-              matrixRouting: { room: "operator" },
+              matrixRouting: { room: "operator", dispatch: "deterministic" },
             },
           }),
         },
@@ -14668,8 +14719,6 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
   it("verifies an operator-routed bot in the operator room when configured", async () => {
     const { tempRoot, paths } = await setupVerifyHost();
     try {
-      // Wire the operator room + instance override the provisioning hook
-      // would create.
       const raw = await readFile(paths.configPath, "utf8");
       const parsed = JSON.parse(raw) as Record<string, never> & {
         matrix?: Record<string, unknown>;
@@ -14689,6 +14738,7 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
         secretRefs: {},
         matrix: {
           alertRoom: { roomId: "!operator-room:matrix.example.org", roomName: "Sovereign Node" },
+          allowedUsers: ["@operator:matrix.example.org"],
         },
       });
       const agent = parsed.openclawProfile?.agents?.find((entry) => entry.id === "node-operator");
@@ -14705,22 +14755,17 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
           if (url.includes("/send/m.room.message/")) {
             roomsSeen.push(decodeURIComponent(url.split("/rooms/")[1]?.split("/")[0] ?? ""));
             sentNonce = nonceFrom(String(init?.body ?? ""));
-            return new Response(JSON.stringify({ event_id: "$probe-5" }), { status: 200 });
+            return new Response(JSON.stringify({ event_id: "$probe-6" }), { status: 200 });
           }
           if (url.includes("/messages")) {
             return new Response(
               JSON.stringify({
                 chunk: [
-                  {
-                    type: "m.room.message",
-                    sender: "@node-operator:matrix.example.org",
-                    event_id: "$reply-5",
-                    content: { body: `Verified ${sentNonce}` },
-                  },
+                  verifyOkReply(sentNonce, "$probe-6", "$reply-6"),
                   {
                     type: "m.room.message",
                     sender: "@operator:matrix.example.org",
-                    event_id: "$probe-5",
+                    event_id: "$probe-6",
                   },
                 ],
               }),
@@ -14735,7 +14780,7 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
               manifest: {
                 id: "node-operator",
                 matrixIdentity: { mode: "dedicated-account", localpartPrefix: "node-operator" },
-                matrixRouting: { room: "operator" },
+                matrixRouting: { room: "operator", dispatch: "deterministic" },
               },
             }),
           },
@@ -14785,7 +14830,7 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
       const service = buildVerifyService(paths, async (url, init) => {
         if (url.includes("/send/m.room.message/")) {
           sentNonce = nonceFrom(String(init?.body ?? ""));
-          return new Response(JSON.stringify({ event_id: "$probe-6" }), { status: 200 });
+          return new Response(JSON.stringify({ event_id: "$probe-7" }), { status: 200 });
         }
         if (url.includes("/messages")) {
           messagesCalls += 1;
@@ -14796,16 +14841,7 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
             throw new Error("connection reset");
           }
           return new Response(
-            JSON.stringify({
-              chunk: [
-                {
-                  type: "m.room.message",
-                  sender: "@node-operator:matrix.example.org",
-                  event_id: "$reply-6",
-                  content: { body: `Verified ${sentNonce}` },
-                },
-              ],
-            }),
+            JSON.stringify({ chunk: [verifyOkReply(sentNonce, "$probe-7", "$reply-7")] }),
             { status: 200 },
           );
         }
@@ -14891,6 +14927,7 @@ describe("RealInstallerService operator control surface", () => {
     try {
       const created: string[] = [];
       const spaceChildren: string[] = [];
+      const createPayloads: Array<Record<string, unknown>> = [];
       const service = new RealInstallerService(createLogger(), paths, {
         ...(surfaceDeps as Record<string, unknown>),
         fetchImpl: async (url: string, init?: RequestInit) => {
@@ -14899,6 +14936,7 @@ describe("RealInstallerService operator control surface", () => {
               name?: string;
               creation_content?: { type?: string };
             };
+            createPayloads.push(body as Record<string, unknown>);
             created.push(body.creation_content?.type === "m.space" ? "space" : String(body.name));
             return new Response(
               JSON.stringify({
@@ -14937,6 +14975,47 @@ describe("RealInstallerService operator control surface", () => {
       expect(spaceChildren).toContain("!sovereign-node:matrix.example.org");
       expect(spaceChildren).toHaveLength(2);
       expect(created).toEqual(["Sovereign Node", "space"]);
+
+      // Room security: invite-only private room, no guests, invited-only
+      // history, no federation, least-privilege power levels (operator
+      // admin; everyone else message-only — no state, invite, kick, or
+      // redact rights), and E2EE not enabled.
+      const roomPayload = createPayloads[0] as {
+        preset?: string;
+        visibility?: string;
+        creation_content?: Record<string, unknown>;
+        power_level_content_override?: {
+          users?: Record<string, number>;
+          users_default?: number;
+          events_default?: number;
+          state_default?: number;
+          invite?: number;
+          kick?: number;
+          redact?: number;
+          events?: Record<string, number>;
+        };
+        initial_state?: Array<{ type: string; content: Record<string, unknown> }>;
+      };
+      expect(roomPayload.preset).toBe("private_chat");
+      expect(roomPayload.visibility).toBe("private");
+      expect(roomPayload.creation_content?.["m.federate"]).toBe(false);
+      const powerLevels = roomPayload.power_level_content_override;
+      expect(powerLevels?.users).toEqual({ "@operator:matrix.example.org": 100 });
+      expect(powerLevels?.users_default).toBe(0);
+      expect(powerLevels?.events_default).toBe(0);
+      expect(powerLevels?.state_default).toBe(100);
+      expect(powerLevels?.invite).toBe(100);
+      expect(powerLevels?.kick).toBe(100);
+      expect(powerLevels?.redact).toBe(100);
+      expect(powerLevels?.events?.["m.room.encryption"]).toBe(100);
+      const stateTypes = Object.fromEntries(
+        (roomPayload.initial_state ?? []).map((entry) => [entry.type, entry.content]),
+      );
+      expect(stateTypes["m.room.guest_access"]).toEqual({ guest_access: "forbidden" });
+      expect(stateTypes["m.room.history_visibility"]).toEqual({ history_visibility: "invited" });
+      // E2EE is NOT part of the created state — no crypto stack exists in
+      // this system, so enabling it would break every bot.
+      expect(stateTypes["m.room.encryption"]).toBeUndefined();
 
       // Idempotent: a second call creates nothing new.
       const second = await service.ensureOperatorControlSurface(runtimeConfig);
@@ -14979,8 +15058,11 @@ describe("RealInstallerService operator control surface", () => {
       expect(entry.botInstanceId).toBe(`${entry.id}-operator-room`);
       const instance = runtimeConfig.bots.instances.find(
         (candidate) => candidate.id === entry.botInstanceId,
-      ) as { matrix?: { alertRoom?: { roomId: string } } } | undefined;
+      ) as { matrix?: { alertRoom?: { roomId: string }; allowedUsers?: string[] } } | undefined;
       expect(instance?.matrix?.alertRoom?.roomId).toBe("!operator:matrix.example.org");
+      // The EXPLICIT operator authorization list is seeded with the human
+      // operator — room membership alone never authorizes commands.
+      expect(instance?.matrix?.allowedUsers).toEqual(["@operator:matrix.example.org"]);
 
       // Second call: already bound, nothing changes.
       expect(service.ensureAgentOperatorRoomBinding(runtimeConfig, entry, "node-operator")).toBe(

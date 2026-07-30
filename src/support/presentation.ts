@@ -210,6 +210,17 @@ const STALE_SUMMARIES: Partial<Record<DiagnosticsComponentId, string>> = {
   "mail-sentinel": "Mail Sentinel has not completed a scan recently.",
 };
 
+/**
+ * Tolerated forward clock skew before a "last success in the future" stops
+ * counting as evidence of health. A future timestamp beyond this means the
+ * node's clock (or the recorded state) cannot be trusted — that maps to the
+ * existing clock SAN code, never to "healthy".
+ */
+const FUTURE_SKEW_TOLERANCE_MS = 5 * 60 * 1000;
+
+const CLOCK_SKEW_SUMMARY =
+  "This component reported a time in the future — the node's clock may be wrong.";
+
 /** Re-serialise a timestamp through Date so only real ISO strings pass. */
 const safeTimestamp = (value: unknown): string | undefined => {
   if (typeof value !== "string" || value.length === 0 || value.length > 64) {
@@ -439,16 +450,30 @@ export const buildDiagnosticsPresentation = (
   // component makes the node degraded.
   const nowMs = inputs.now.getTime();
   const freshened = components.map((component) => {
-    const policy = STALE_AFTER_MS[component.id];
-    if (
-      policy === undefined ||
-      component.status !== "healthy" ||
-      component.lastSuccessAt === undefined
-    ) {
+    if (component.lastSuccessAt === undefined) {
       return component;
     }
     const lastSuccessMs = Date.parse(component.lastSuccessAt);
-    if (Number.isNaN(lastSuccessMs) || nowMs - lastSuccessMs <= policy) {
+    if (Number.isNaN(lastSuccessMs)) {
+      // safeTimestamp already drops unparseable values; belt to that
+      // suspenders — an invalid timestamp is never evidence of health.
+      const { lastSuccessAt: _dropped, ...rest } = component;
+      return rest;
+    }
+    // A "last success" in the future (beyond tolerated skew) means the clock
+    // or the recorded state is wrong. That is a degraded state with the
+    // clock SAN code — never healthy.
+    if (lastSuccessMs - nowMs > FUTURE_SKEW_TOLERANCE_MS && component.status === "healthy") {
+      return {
+        ...component,
+        status: "degraded" as const,
+        code: knownCode("SAN-SYSTEM-002") ?? component.code,
+        summary: CLOCK_SKEW_SUMMARY,
+        action: GENERIC_ACTION,
+      };
+    }
+    const policy = STALE_AFTER_MS[component.id];
+    if (policy === undefined || component.status !== "healthy" || nowMs - lastSuccessMs <= policy) {
       return component;
     }
     return {

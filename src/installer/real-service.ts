@@ -5887,6 +5887,34 @@ export default function (api) {
    * Create a room (or Space, via creationContent) as the operator and return
    * its room id. Tolerates nothing: callers decide whether a failure is fatal.
    */
+  /**
+   * Least-privilege power levels for node rooms. The human operator keeps
+   * administrative control; everyone else (including bot accounts) may only
+   * send messages: no invites, no kicks, no state changes, no redactions.
+   * Command authorization is separately enforced by the explicit operator
+   * allowlist — power levels only bound what accounts can do to the ROOM.
+   */
+  private buildNodeRoomPowerLevels(operatorUserId: string): Record<string, unknown> {
+    return {
+      users: { [operatorUserId]: 100 },
+      users_default: 0,
+      events_default: 0,
+      state_default: 100,
+      invite: 100,
+      kick: 100,
+      ban: 100,
+      redact: 100,
+      events: {
+        "m.room.name": 100,
+        "m.room.topic": 100,
+        "m.room.avatar": 100,
+        "m.room.power_levels": 100,
+        "m.room.history_visibility": 100,
+        "m.room.encryption": 100,
+      },
+    };
+  }
+
   private async createMatrixRoomAsOperator(input: {
     runtimeConfig: RuntimeConfig;
     operatorAccessToken: string;
@@ -5908,9 +5936,32 @@ export default function (api) {
       body: JSON.stringify({
         name: input.name,
         topic: input.topic,
+        // private_chat = invite-only join rule + private visibility. The
+        // explicit state below pins the rest: no guests, history visible
+        // only from a member's invite, and no federation on the supported
+        // bundled deployment. E2EE is deliberately NOT enabled: no component
+        // of this system ships a Matrix crypto stack (every send is a plain
+        // client-server API call), so an encrypted room would silently break
+        // all bots — isolation comes from invite-only, non-federated,
+        // local-homeserver rooms. Do not flip m.room.encryption on without
+        // a full crypto implementation and tests.
         preset: "private_chat",
         visibility: "private",
-        ...(input.creationContent === undefined ? {} : { creation_content: input.creationContent }),
+        creation_content: {
+          ...(input.runtimeConfig.matrix.federationEnabled ? {} : { "m.federate": false }),
+          ...(input.creationContent ?? {}),
+        },
+        power_level_content_override: this.buildNodeRoomPowerLevels(
+          input.runtimeConfig.matrix.operator.userId,
+        ),
+        initial_state: [
+          { type: "m.room.guest_access", state_key: "", content: { guest_access: "forbidden" } },
+          {
+            type: "m.room.history_visibility",
+            state_key: "",
+            content: { history_visibility: "invited" },
+          },
+        ],
       }),
     });
     const text = await response.text();
@@ -6054,14 +6105,23 @@ export default function (api) {
     if (operatorRoom === undefined) {
       return false;
     }
+    // The EXPLICIT operator authorization list. Room membership never grants
+    // command authorization: an invited observer can read the control room,
+    // but only these Matrix ids may execute commands. Seeded with the
+    // installation's human operator; extended deliberately, never implicitly.
+    const initialAuthorizedOperators =
+      runtimeConfig.matrix.operator.userId.length > 0 ? [runtimeConfig.matrix.operator.userId] : [];
     const existing = this.getRuntimeBotInstanceForAgent(runtimeConfig, entry);
     if (existing !== undefined) {
-      if (existing.matrix?.alertRoom?.roomId === operatorRoom.roomId) {
+      const roomBound = existing.matrix?.alertRoom?.roomId === operatorRoom.roomId;
+      const hasAllowlist = (existing.matrix?.allowedUsers?.length ?? 0) > 0;
+      if (roomBound && hasAllowlist) {
         return false;
       }
       existing.matrix = {
         ...(existing.matrix ?? {}),
         alertRoom: { roomId: operatorRoom.roomId, roomName: operatorRoom.roomName },
+        ...(hasAllowlist ? {} : { allowedUsers: initialAuthorizedOperators }),
       };
       return true;
     }
@@ -6074,6 +6134,7 @@ export default function (api) {
       secretRefs: {},
       matrix: {
         alertRoom: { roomId: operatorRoom.roomId, roomName: operatorRoom.roomName },
+        allowedUsers: initialAuthorizedOperators,
       },
     });
     entry.botInstanceId = instanceId;
@@ -9274,6 +9335,12 @@ export default function (api) {
         botPackage?.manifest.matrixIdentity.mode === "service-account";
       const usesPrimaryDedicatedIdentity =
         !usesSharedServiceIdentity && agent.matrix.userId === runtimeConfig.matrix.bot.userId;
+      // Deterministic-dispatch bots have no gateway account, so a matrix
+      // bind or exec approval would reference nothing. Their systemd service
+      // is provisioned via hostResources instead.
+      if (botPackage?.manifest.matrixRouting?.dispatch === "deterministic") {
+        continue;
+      }
       await this.runOpenClawCommandAlternatives({
         label: `${agent.id}-agent`,
         commands: [
@@ -9562,10 +9629,17 @@ export default function (api) {
       type?: string;
       sender?: string;
       event_id?: string;
-      content?: { body?: unknown };
+      content?: {
+        body?: unknown;
+        "m.relates_to"?: { "m.in_reply_to"?: { event_id?: unknown } };
+      };
     };
 
-    let sawUncorrelatedBotReply = false;
+    // The one exact response the deterministic responder produces. Anything
+    // else — even a chatty message containing the nonce — is not a verified
+    // control plane.
+    const expectedBody = `VERIFY_OK ${nonce}`;
+
     while (Date.now() - startedAt < timeoutMs) {
       await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
       let chunk: TimelineEvent[] = [];
@@ -9596,14 +9670,21 @@ export default function (api) {
       // window is newer.
       const sentIndex = chunk.findIndex((event) => event.event_id === sentEventId);
       const newerEvents = sentIndex === -1 ? chunk : chunk.slice(0, sentIndex);
-      const botReplies = newerEvents.filter(
-        (event) => event.type === "m.room.message" && event.sender === botUserId,
+      // Only messages from the expected bot account that carry a REPLY
+      // RELATION to our challenge event participate at all. Reply relations
+      // are reliable here because the deterministic responder constructs
+      // them itself — this is not delegated to any client's rich-reply
+      // heuristics. Unrelated bot traffic (alerts, chatter, replies to other
+      // events) is ignored and the wait continues.
+      const repliesToChallenge = newerEvents.filter(
+        (event) =>
+          event.type === "m.room.message" &&
+          event.sender === botUserId &&
+          event.content?.["m.relates_to"]?.["m.in_reply_to"]?.event_id === sentEventId,
       );
-      // Only a reply that echoes the exact challenge nonce counts — a bot
-      // that is chatting about something else is NOT a verified control
-      // plane.
-      const correlated = botReplies.find(
-        (event) => typeof event.content?.body === "string" && event.content.body.includes(nonce),
+      const correlated = repliesToChallenge.find(
+        (event) =>
+          typeof event.content?.body === "string" && event.content.body.trim() === expectedBody,
       );
       if (correlated !== undefined) {
         return {
@@ -9616,16 +9697,15 @@ export default function (api) {
           elapsedMs: Date.now() - startedAt,
         };
       }
-      if (botReplies.length > 0) {
-        sawUncorrelatedBotReply = true;
+      if (repliesToChallenge.length > 0) {
+        // The bot explicitly answered THIS challenge with something other
+        // than the exact expected response — a hard, immediate failure with
+        // its own name, never conflated with silence.
+        return fail("mismatched-response", { botUserId, roomId, sentEventId });
       }
     }
 
-    return fail(sawUncorrelatedBotReply ? "mismatched-response" : "timeout", {
-      botUserId,
-      roomId,
-      sentEventId,
-    });
+    return fail("timeout", { botUserId, roomId, sentEventId });
   }
 
   private async ensureSystemGatewayServiceFallback(runtimeConfig: RuntimeConfig): Promise<boolean> {
@@ -11516,6 +11596,14 @@ export default function (api) {
         continue;
       }
       const botPackage = managedAgentPackages.get(agent.id);
+      // Deterministic-dispatch bots run their OWN Matrix client (a systemd
+      // service from their hostResources) with in-code parsing and operator
+      // authorization. The gateway gets NO account and NO binding for them:
+      // structurally, no LLM can ever see their room or choose their
+      // commands.
+      if (botPackage?.manifest.matrixRouting?.dispatch === "deterministic") {
+        continue;
+      }
       const usesSharedServiceIdentity =
         agent.matrix.userId === runtimeConfig.matrix.bot.userId &&
         botPackage?.manifest.matrixIdentity.mode === "service-account";
