@@ -28,6 +28,8 @@ import type {
 } from "../contracts/index.js";
 import type { Logger } from "../logging/logger.js";
 import type {
+  BotRoundTripRequest,
+  BotRoundTripResult,
   InstallerService,
   MailSentinelApplyResult,
   MailSentinelDeleteResult,
@@ -553,6 +555,18 @@ export class StubInstallerService implements InstallerService {
           instantiated: false,
         },
       ],
+    };
+  }
+
+  async verifyManagedBotResponds(req: BotRoundTripRequest): Promise<BotRoundTripResult> {
+    return {
+      ok: true,
+      botId: req.botId,
+      botUserId: `@${req.botId}:stub.local`,
+      roomId: "!stub-room:stub.local",
+      sentEventId: "$stub-sent",
+      replyEventId: "$stub-reply",
+      elapsedMs: 0,
     };
   }
 

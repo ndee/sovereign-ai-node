@@ -780,8 +780,43 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       accessToken: accounts.operator.accessToken,
       body: {
         name: roomName,
+        // Invite-only + private, with explicit hardening: no guests, history
+        // visible only from a member's invite, no federation on the bundled
+        // deployment, and least-privilege power levels — the human operator
+        // administers the room, everyone else (bots included) can only send
+        // messages. E2EE stays OFF: no component ships a Matrix crypto
+        // stack, so an encrypted room would silently break every bot.
         preset: "private_chat",
         visibility: "private",
+        creation_content: {
+          ...(provision.federationEnabled ? {} : { "m.federate": false }),
+        },
+        power_level_content_override: {
+          users: { [accounts.operator.userId]: 100 },
+          users_default: 0,
+          events_default: 0,
+          state_default: 100,
+          invite: 100,
+          kick: 100,
+          ban: 100,
+          redact: 100,
+          events: {
+            "m.room.name": 100,
+            "m.room.topic": 100,
+            "m.room.avatar": 100,
+            "m.room.power_levels": 100,
+            "m.room.history_visibility": 100,
+            "m.room.encryption": 100,
+          },
+        },
+        initial_state: [
+          { type: "m.room.guest_access", state_key: "", content: { guest_access: "forbidden" } },
+          {
+            type: "m.room.history_visibility",
+            state_key: "",
+            content: { history_visibility: "invited" },
+          },
+        ],
       },
       errorCode: "MATRIX_ROOM_CREATE_FAILED",
       errorMessage: "Failed to create the Matrix alert room",

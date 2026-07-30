@@ -14326,3 +14326,750 @@ describe("ensureMatrixCryptoRuntimeWritable (issue #207)", () => {
     }
   });
 });
+
+describe("RealInstallerService.verifyManagedBotResponds", () => {
+  const buildVerifyPaths = (tempRoot: string): SovereignPaths => ({
+    configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+    secretsDir: join(tempRoot, "etc", "secrets"),
+    stateDir: join(tempRoot, "var", "lib"),
+    logsDir: join(tempRoot, "var", "log"),
+    installJobsDir: join(tempRoot, "install-jobs"),
+    openclawServiceHome: join(tempRoot, "openclaw-home"),
+    provenancePath: join(tempRoot, "install-provenance.json"),
+    backupsDir: join(tempRoot, "backups"),
+  });
+
+  const verifyDeps = {
+    openclawBootstrapper: {
+      detectInstalled: async () => null,
+      ensureInstalled: async () => ({
+        binaryPath: "/usr/local/bin/openclaw",
+        version: "pinned-by-sovereign",
+        installMethod: "install_sh" as const,
+      }),
+    },
+    openclawGatewayServiceManager: {
+      install: async () => {},
+      start: async () => {},
+      restart: async () => {},
+    },
+    // The verify path must never fall back to the real filesystem catalog
+    // (it would scan a sibling checkout); tests inject routing explicitly.
+    botCatalog: {
+      findPackageByTemplateRef: async () => null,
+    },
+    preflightChecker: {
+      run: async () => ({
+        mode: "bundled_matrix" as const,
+        overall: "pass" as const,
+        checks: [],
+        recommendedActions: [],
+      }),
+    },
+    imapTester: {
+      test: async () => ({
+        ok: true,
+        host: "imap.example.org",
+        port: 993,
+        tls: true,
+        auth: "ok" as const,
+      }),
+    },
+    matrixProvisioner: {
+      provision: async () => {
+        throw new Error("not used");
+      },
+      bootstrapAccounts: async () => {
+        throw new Error("not used");
+      },
+      bootstrapRoom: async () => {
+        throw new Error("not used");
+      },
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+  } as unknown as ConstructorParameters<typeof RealInstallerService>[2];
+
+  const setupVerifyHost = async (): Promise<{ tempRoot: string; paths: SovereignPaths }> => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-verify-bot-test-"));
+    const paths = buildVerifyPaths(tempRoot);
+    await writeRuntimeArtifacts(paths);
+    await writeDedicatedBotRuntimeArtifacts(paths);
+    return { tempRoot, paths };
+  };
+
+  const buildVerifyService = (
+    paths: SovereignPaths,
+    fetchImpl: (url: string, init?: RequestInit) => Promise<Response>,
+    depsOverride: Record<string, unknown> = {},
+  ): RealInstallerService =>
+    new RealInstallerService(createLogger(), paths, {
+      ...(verifyDeps as Record<string, unknown>),
+      ...depsOverride,
+      fetchImpl,
+    } as ConstructorParameters<typeof RealInstallerService>[2]);
+
+  const nonceFrom = (body: string): string => {
+    const match = /verify ([a-f0-9]{32})/u.exec(body);
+    if (match?.[1] === undefined) {
+      throw new Error(`probe body carries no nonce: ${body}`);
+    }
+    return match[1];
+  };
+
+  /** A deterministic responder's reply: exact body + reply relation. */
+  const verifyOkReply = (nonce: string, challengeEventId: string, eventId: string) => ({
+    type: "m.room.message",
+    sender: "@node-operator:matrix.example.org",
+    event_id: eventId,
+    content: {
+      body: `VERIFY_OK ${nonce}`,
+      "m.relates_to": { "m.in_reply_to": { event_id: challengeEventId } },
+    },
+  });
+
+  it("accepts only the exact VERIFY_OK reply-relation response", async () => {
+    const { tempRoot, paths } = await setupVerifyHost();
+    try {
+      let sentNonce = "";
+      const sentBodies: string[] = [];
+      const service = buildVerifyService(paths, async (url, init) => {
+        if (url.includes("/send/m.room.message/")) {
+          const body = String(init?.body ?? "");
+          sentBodies.push(body);
+          sentNonce = nonceFrom(body);
+          return new Response(JSON.stringify({ event_id: "$probe-1" }), { status: 200 });
+        }
+        if (url.includes("/messages")) {
+          return new Response(
+            JSON.stringify({
+              chunk: [
+                verifyOkReply(sentNonce, "$probe-1", "$reply-correlated"),
+                {
+                  // Unrelated newer chatter from the bot: ignored, not fatal.
+                  type: "m.room.message",
+                  sender: "@node-operator:matrix.example.org",
+                  event_id: "$reply-chatter",
+                  content: { body: `mentions the nonce ${sentNonce} but is not a reply` },
+                },
+                {
+                  type: "m.room.message",
+                  sender: "@operator:matrix.example.org",
+                  event_id: "$probe-1",
+                  content: { body: `@node-operator: verify ${sentNonce}` },
+                },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("{}", { status: 200 });
+      });
+
+      const result = await service.verifyManagedBotResponds({
+        botId: "node-operator",
+        timeoutMs: 5_000,
+        pollIntervalMs: 30,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.replyEventId).toBe("$reply-correlated");
+      expect(sentBodies[0]).toContain("@node-operator:matrix.example.org");
+      expect(sentBodies[0]).toMatch(/verify [a-f0-9]{32}/u);
+      expect(sentBodies[0]).not.toContain("operator-token");
+      expect(sentBodies[0]).not.toContain("node-operator-token");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("issues a fresh nonce per invocation", async () => {
+    const { tempRoot, paths } = await setupVerifyHost();
+    try {
+      const nonces: string[] = [];
+      const service = buildVerifyService(paths, async (url, init) => {
+        if (url.includes("/send/m.room.message/")) {
+          nonces.push(nonceFrom(String(init?.body ?? "")));
+          return new Response(JSON.stringify({ event_id: "$probe" }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ chunk: [] }), { status: 200 });
+      });
+      await service.verifyManagedBotResponds({
+        botId: "node-operator",
+        timeoutMs: 100,
+        pollIntervalMs: 30,
+      });
+      await service.verifyManagedBotResponds({
+        botId: "node-operator",
+        timeoutMs: 100,
+        pollIntervalMs: 30,
+      });
+      expect(nonces).toHaveLength(2);
+      expect(nonces[0]).not.toBe(nonces[1]);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("waits through unrelated bot chatter and times out without a correlated reply", async () => {
+    const { tempRoot, paths } = await setupVerifyHost();
+    try {
+      let sentNonce = "";
+      const service = buildVerifyService(paths, async (url, init) => {
+        if (url.includes("/send/m.room.message/")) {
+          sentNonce = nonceFrom(String(init?.body ?? ""));
+          return new Response(JSON.stringify({ event_id: "$probe-2" }), { status: 200 });
+        }
+        if (url.includes("/messages")) {
+          return new Response(
+            JSON.stringify({
+              chunk: [
+                {
+                  // Newer bot message that even contains the nonce — but it
+                  // is NOT a reply to the challenge, so it must neither
+                  // verify nor fail the check.
+                  type: "m.room.message",
+                  sender: "@node-operator:matrix.example.org",
+                  event_id: "$chatter",
+                  content: { body: `VERIFY_OK ${sentNonce}` },
+                },
+                {
+                  type: "m.room.message",
+                  sender: "@operator:matrix.example.org",
+                  event_id: "$probe-2",
+                },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("{}", { status: 200 });
+      });
+      const result = await service.verifyManagedBotResponds({
+        botId: "node-operator",
+        timeoutMs: 200,
+        pollIntervalMs: 30,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.failure).toBe("timeout");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails fast with mismatched-response on a malformed reply to the challenge", async () => {
+    const { tempRoot, paths } = await setupVerifyHost();
+    try {
+      const service = buildVerifyService(paths, async (url) => {
+        if (url.includes("/send/m.room.message/")) {
+          return new Response(JSON.stringify({ event_id: "$probe-3" }), { status: 200 });
+        }
+        if (url.includes("/messages")) {
+          return new Response(
+            JSON.stringify({
+              chunk: [
+                {
+                  type: "m.room.message",
+                  sender: "@node-operator:matrix.example.org",
+                  event_id: "$bad-reply",
+                  content: {
+                    body: "VERIFY_OK wrong-nonce",
+                    "m.relates_to": { "m.in_reply_to": { event_id: "$probe-3" } },
+                  },
+                },
+                {
+                  type: "m.room.message",
+                  sender: "@operator:matrix.example.org",
+                  event_id: "$probe-3",
+                },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("{}", { status: 200 });
+      });
+      const result = await service.verifyManagedBotResponds({
+        botId: "node-operator",
+        timeoutMs: 5_000,
+        pollIntervalMs: 30,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.failure).toBe("mismatched-response");
+      // Fails fast: well under the timeout.
+      expect(result.elapsedMs).toBeLessThan(2_000);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores a correct reply from the wrong sender", async () => {
+    const { tempRoot, paths } = await setupVerifyHost();
+    try {
+      let sentNonce = "";
+      const service = buildVerifyService(paths, async (url, init) => {
+        if (url.includes("/send/m.room.message/")) {
+          sentNonce = nonceFrom(String(init?.body ?? ""));
+          return new Response(JSON.stringify({ event_id: "$probe-4" }), { status: 200 });
+        }
+        if (url.includes("/messages")) {
+          return new Response(
+            JSON.stringify({
+              chunk: [
+                {
+                  type: "m.room.message",
+                  sender: "@bitcoin-skill-match:matrix.example.org",
+                  event_id: "$forged",
+                  content: {
+                    body: `VERIFY_OK ${sentNonce}`,
+                    "m.relates_to": { "m.in_reply_to": { event_id: "$probe-4" } },
+                  },
+                },
+                {
+                  type: "m.room.message",
+                  sender: "@operator:matrix.example.org",
+                  event_id: "$probe-4",
+                },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("{}", { status: 200 });
+      });
+      const result = await service.verifyManagedBotResponds({
+        botId: "node-operator",
+        timeoutMs: 200,
+        pollIntervalMs: 30,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.failure).toBe("timeout");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores replies older than the challenge", async () => {
+    const { tempRoot, paths } = await setupVerifyHost();
+    try {
+      let sentNonce = "";
+      const service = buildVerifyService(paths, async (url, init) => {
+        if (url.includes("/send/m.room.message/")) {
+          sentNonce = nonceFrom(String(init?.body ?? ""));
+          return new Response(JSON.stringify({ event_id: "$probe-5" }), { status: 200 });
+        }
+        if (url.includes("/messages")) {
+          // dir=b: the probe is FIRST (newest); the reply below it is OLDER
+          // than the challenge and must not count.
+          return new Response(
+            JSON.stringify({
+              chunk: [
+                {
+                  type: "m.room.message",
+                  sender: "@operator:matrix.example.org",
+                  event_id: "$probe-5",
+                },
+                verifyOkReply(sentNonce, "$probe-5", "$stale"),
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("{}", { status: 200 });
+      });
+      const result = await service.verifyManagedBotResponds({
+        botId: "node-operator",
+        timeoutMs: 200,
+        pollIntervalMs: 30,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.failure).toBe("timeout");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails with no-operator-room when an operator-routed bot has no control room", async () => {
+    const { tempRoot, paths } = await setupVerifyHost();
+    try {
+      const service = buildVerifyService(paths, async () => new Response("{}", { status: 200 }), {
+        botCatalog: {
+          findPackageByTemplateRef: async () => ({
+            manifest: {
+              id: "node-operator",
+              matrixIdentity: { mode: "dedicated-account", localpartPrefix: "node-operator" },
+              matrixRouting: { room: "operator", dispatch: "deterministic" },
+            },
+          }),
+        },
+      });
+      const result = await service.verifyManagedBotResponds({
+        botId: "node-operator",
+        timeoutMs: 200,
+        pollIntervalMs: 30,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.failure).toBe("no-operator-room");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("verifies an operator-routed bot in the operator room when configured", async () => {
+    const { tempRoot, paths } = await setupVerifyHost();
+    try {
+      const raw = await readFile(paths.configPath, "utf8");
+      const parsed = JSON.parse(raw) as Record<string, never> & {
+        matrix?: Record<string, unknown>;
+        bots?: { config: Record<string, unknown>; instances: unknown[] };
+        openclawProfile?: { agents?: Array<Record<string, unknown>> };
+      };
+      (parsed.matrix as Record<string, unknown>).operatorRoom = {
+        roomId: "!operator-room:matrix.example.org",
+        roomName: "Sovereign Node",
+      };
+      parsed.bots = parsed.bots ?? { config: {}, instances: [] };
+      parsed.bots.instances.push({
+        id: "node-operator-operator-room",
+        packageId: "node-operator",
+        workspace: join(paths.stateDir, "node-operator", "workspace"),
+        config: {},
+        secretRefs: {},
+        matrix: {
+          alertRoom: { roomId: "!operator-room:matrix.example.org", roomName: "Sovereign Node" },
+          allowedUsers: ["@operator:matrix.example.org"],
+        },
+      });
+      const agent = parsed.openclawProfile?.agents?.find((entry) => entry.id === "node-operator");
+      if (agent !== undefined) {
+        (agent as Record<string, unknown>).botInstanceId = "node-operator-operator-room";
+      }
+      await writeFile(paths.configPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+
+      let sentNonce = "";
+      const roomsSeen: string[] = [];
+      const service = buildVerifyService(
+        paths,
+        async (url, init) => {
+          if (url.includes("/send/m.room.message/")) {
+            roomsSeen.push(decodeURIComponent(url.split("/rooms/")[1]?.split("/")[0] ?? ""));
+            sentNonce = nonceFrom(String(init?.body ?? ""));
+            return new Response(JSON.stringify({ event_id: "$probe-6" }), { status: 200 });
+          }
+          if (url.includes("/messages")) {
+            return new Response(
+              JSON.stringify({
+                chunk: [
+                  verifyOkReply(sentNonce, "$probe-6", "$reply-6"),
+                  {
+                    type: "m.room.message",
+                    sender: "@operator:matrix.example.org",
+                    event_id: "$probe-6",
+                  },
+                ],
+              }),
+              { status: 200 },
+            );
+          }
+          return new Response("{}", { status: 200 });
+        },
+        {
+          botCatalog: {
+            findPackageByTemplateRef: async () => ({
+              manifest: {
+                id: "node-operator",
+                matrixIdentity: { mode: "dedicated-account", localpartPrefix: "node-operator" },
+                matrixRouting: { room: "operator", dispatch: "deterministic" },
+              },
+            }),
+          },
+        },
+      );
+      const result = await service.verifyManagedBotResponds({
+        botId: "node-operator",
+        timeoutMs: 5_000,
+        pollIntervalMs: 30,
+      });
+      expect(result.ok).toBe(true);
+      expect(result.roomId).toBe("!operator-room:matrix.example.org");
+      expect(roomsSeen[0]).toBe("!operator-room:matrix.example.org");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("distinguishes a bot that is not instantiated and a rejected send", async () => {
+    const { tempRoot, paths } = await setupVerifyHost();
+    try {
+      const service = buildVerifyService(paths, async (url) => {
+        if (url.includes("/send/m.room.message/")) {
+          return new Response(JSON.stringify({ errcode: "M_FORBIDDEN" }), { status: 403 });
+        }
+        return new Response("{}", { status: 200 });
+      });
+      expect((await service.verifyManagedBotResponds({ botId: "does-not-exist" })).failure).toBe(
+        "not-instantiated",
+      );
+      const send = await service.verifyManagedBotResponds({
+        botId: "node-operator",
+        timeoutMs: 500,
+        pollIntervalMs: 30,
+      });
+      expect(send.failure).toBe("send-failed");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps polling through transient poll errors", async () => {
+    const { tempRoot, paths } = await setupVerifyHost();
+    try {
+      let sentNonce = "";
+      let messagesCalls = 0;
+      const service = buildVerifyService(paths, async (url, init) => {
+        if (url.includes("/send/m.room.message/")) {
+          sentNonce = nonceFrom(String(init?.body ?? ""));
+          return new Response(JSON.stringify({ event_id: "$probe-7" }), { status: 200 });
+        }
+        if (url.includes("/messages")) {
+          messagesCalls += 1;
+          if (messagesCalls === 1) {
+            return new Response("upstream error", { status: 502 });
+          }
+          if (messagesCalls === 2) {
+            throw new Error("connection reset");
+          }
+          return new Response(
+            JSON.stringify({ chunk: [verifyOkReply(sentNonce, "$probe-7", "$reply-7")] }),
+            { status: 200 },
+          );
+        }
+        return new Response("{}", { status: 200 });
+      });
+      const result = await service.verifyManagedBotResponds({
+        botId: "node-operator",
+        timeoutMs: 5_000,
+        pollIntervalMs: 30,
+      });
+      expect(result.ok).toBe(true);
+      expect(messagesCalls).toBeGreaterThanOrEqual(3);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("RealInstallerService operator control surface", () => {
+  const buildPathsFor = (tempRoot: string): SovereignPaths => ({
+    configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+    secretsDir: join(tempRoot, "etc", "secrets"),
+    stateDir: join(tempRoot, "var", "lib"),
+    logsDir: join(tempRoot, "var", "log"),
+    installJobsDir: join(tempRoot, "install-jobs"),
+    openclawServiceHome: join(tempRoot, "openclaw-home"),
+    provenancePath: join(tempRoot, "install-provenance.json"),
+    backupsDir: join(tempRoot, "backups"),
+  });
+
+  const surfaceDeps = {
+    openclawBootstrapper: {
+      detectInstalled: async () => null,
+      ensureInstalled: async () => ({
+        binaryPath: "/usr/local/bin/openclaw",
+        version: "pinned-by-sovereign",
+        installMethod: "install_sh" as const,
+      }),
+    },
+    openclawGatewayServiceManager: {
+      install: async () => {},
+      start: async () => {},
+      restart: async () => {},
+    },
+    botCatalog: { findPackageByTemplateRef: async () => null },
+    preflightChecker: {
+      run: async () => ({
+        mode: "bundled_matrix" as const,
+        overall: "pass" as const,
+        checks: [],
+        recommendedActions: [],
+      }),
+    },
+    imapTester: {
+      test: async () => ({ ok: true, host: "h", port: 993, tls: true, auth: "ok" as const }),
+    },
+    matrixProvisioner: {
+      provision: async () => {
+        throw new Error("not used");
+      },
+      bootstrapAccounts: async () => {
+        throw new Error("not used");
+      },
+      bootstrapRoom: async () => {
+        throw new Error("not used");
+      },
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+  } as unknown as ConstructorParameters<typeof RealInstallerService>[2];
+
+  type SurfaceService = {
+    ensureOperatorControlSurface(config: unknown): Promise<boolean>;
+    ensureAgentOperatorRoomBinding(config: unknown, entry: unknown, packageId: string): boolean;
+    readRuntimeConfig(): Promise<Record<string, never>>;
+  };
+
+  it("creates the operator room and space once and reuses them afterwards", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-operator-surface-test-"));
+    const paths = buildPathsFor(tempRoot);
+    await writeRuntimeArtifacts(paths);
+    try {
+      const created: string[] = [];
+      const spaceChildren: string[] = [];
+      const createPayloads: Array<Record<string, unknown>> = [];
+      const service = new RealInstallerService(createLogger(), paths, {
+        ...(surfaceDeps as Record<string, unknown>),
+        fetchImpl: async (url: string, init?: RequestInit) => {
+          if (url.includes("/createRoom")) {
+            const body = JSON.parse(String(init?.body ?? "{}")) as {
+              name?: string;
+              creation_content?: { type?: string };
+            };
+            createPayloads.push(body as Record<string, unknown>);
+            created.push(body.creation_content?.type === "m.space" ? "space" : String(body.name));
+            return new Response(
+              JSON.stringify({
+                room_id:
+                  body.creation_content?.type === "m.space"
+                    ? "!space:matrix.example.org"
+                    : "!sovereign-node:matrix.example.org",
+              }),
+              { status: 200 },
+            );
+          }
+          if (url.includes("/state/m.space.child/")) {
+            spaceChildren.push(decodeURIComponent(url.split("/state/m.space.child/")[1] ?? ""));
+            return new Response("{}", { status: 200 });
+          }
+          return new Response("{}", { status: 200 });
+        },
+      } as ConstructorParameters<typeof RealInstallerService>[2]) as unknown as SurfaceService;
+
+      const runtimeConfig = await (
+        service as unknown as { readRuntimeConfig(): Promise<Record<string, unknown>> }
+      ).readRuntimeConfig();
+      const first = await service.ensureOperatorControlSurface(runtimeConfig);
+      expect(first).toBe(true);
+      const matrix = (runtimeConfig as { matrix: Record<string, unknown> }).matrix;
+      expect(matrix.operatorRoom).toEqual({
+        roomId: "!sovereign-node:matrix.example.org",
+        roomName: "Sovereign Node",
+      });
+      expect(matrix.space).toEqual({
+        spaceId: "!space:matrix.example.org",
+        name: "Sovereign AI Node",
+      });
+      // Both rooms became space children: the alert room and the new
+      // operator room.
+      expect(spaceChildren).toContain("!sovereign-node:matrix.example.org");
+      expect(spaceChildren).toHaveLength(2);
+      expect(created).toEqual(["Sovereign Node", "space"]);
+
+      // Room security: invite-only private room, no guests, invited-only
+      // history, no federation, least-privilege power levels (operator
+      // admin; everyone else message-only — no state, invite, kick, or
+      // redact rights), and E2EE not enabled.
+      const roomPayload = createPayloads[0] as {
+        preset?: string;
+        visibility?: string;
+        creation_content?: Record<string, unknown>;
+        power_level_content_override?: {
+          users?: Record<string, number>;
+          users_default?: number;
+          events_default?: number;
+          state_default?: number;
+          invite?: number;
+          kick?: number;
+          redact?: number;
+          events?: Record<string, number>;
+        };
+        initial_state?: Array<{ type: string; content: Record<string, unknown> }>;
+      };
+      expect(roomPayload.preset).toBe("private_chat");
+      expect(roomPayload.visibility).toBe("private");
+      expect(roomPayload.creation_content?.["m.federate"]).toBe(false);
+      const powerLevels = roomPayload.power_level_content_override;
+      expect(powerLevels?.users).toEqual({ "@operator:matrix.example.org": 100 });
+      expect(powerLevels?.users_default).toBe(0);
+      expect(powerLevels?.events_default).toBe(0);
+      expect(powerLevels?.state_default).toBe(100);
+      expect(powerLevels?.invite).toBe(100);
+      expect(powerLevels?.kick).toBe(100);
+      expect(powerLevels?.redact).toBe(100);
+      expect(powerLevels?.events?.["m.room.encryption"]).toBe(100);
+      const stateTypes = Object.fromEntries(
+        (roomPayload.initial_state ?? []).map((entry) => [entry.type, entry.content]),
+      );
+      expect(stateTypes["m.room.guest_access"]).toEqual({ guest_access: "forbidden" });
+      expect(stateTypes["m.room.history_visibility"]).toEqual({ history_visibility: "invited" });
+      // E2EE is NOT part of the created state — no crypto stack exists in
+      // this system, so enabling it would break every bot.
+      expect(stateTypes["m.room.encryption"]).toBeUndefined();
+
+      // Idempotent: a second call creates nothing new.
+      const second = await service.ensureOperatorControlSurface(runtimeConfig);
+      expect(second).toBe(false);
+      expect(created).toHaveLength(2);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("binds an agent to the operator room via a bot-instance override", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-operator-binding-test-"));
+    const paths = buildPathsFor(tempRoot);
+    await writeRuntimeArtifacts(paths);
+    try {
+      const service = new RealInstallerService(createLogger(), paths, {
+        ...(surfaceDeps as Record<string, unknown>),
+        fetchImpl: async () => new Response("{}", { status: 200 }),
+      } as unknown as ConstructorParameters<
+        typeof RealInstallerService
+      >[2]) as unknown as SurfaceService;
+      const runtimeConfig = (await (
+        service as unknown as { readRuntimeConfig(): Promise<Record<string, unknown>> }
+      ).readRuntimeConfig()) as {
+        matrix: { operatorRoom?: { roomId: string; roomName: string } };
+        bots: { instances: Array<Record<string, unknown>> };
+        openclawProfile: { agents: Array<Record<string, unknown>> };
+      };
+      runtimeConfig.matrix.operatorRoom = {
+        roomId: "!operator:matrix.example.org",
+        roomName: "Sovereign Node",
+      };
+      const entry = runtimeConfig.openclawProfile.agents[0] as {
+        id: string;
+        botInstanceId?: string;
+      };
+
+      const changed = service.ensureAgentOperatorRoomBinding(runtimeConfig, entry, "node-operator");
+      expect(changed).toBe(true);
+      expect(entry.botInstanceId).toBe(`${entry.id}-operator-room`);
+      const instance = runtimeConfig.bots.instances.find(
+        (candidate) => candidate.id === entry.botInstanceId,
+      ) as { matrix?: { alertRoom?: { roomId: string }; allowedUsers?: string[] } } | undefined;
+      expect(instance?.matrix?.alertRoom?.roomId).toBe("!operator:matrix.example.org");
+      // The EXPLICIT operator authorization list is seeded with the human
+      // operator — room membership alone never authorizes commands.
+      expect(instance?.matrix?.allowedUsers).toEqual(["@operator:matrix.example.org"]);
+
+      // Second call: already bound, nothing changes.
+      expect(service.ensureAgentOperatorRoomBinding(runtimeConfig, entry, "node-operator")).toBe(
+        false,
+      );
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+});

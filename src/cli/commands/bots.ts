@@ -86,7 +86,54 @@ export const registerBotsCommand = (program: Command, app: AppContainer): void =
       }
     },
   );
+  bots
+    .command("verify")
+    .description("Verify a managed bot answers a Matrix command in the alert room")
+    .argument("<id>", "Bot package ID")
+    .option("--timeout-seconds <seconds>", "How long to wait for a reply (default 120)")
+    .option("--json", "Emit JSON output")
+    .action(async (id: string, opts: { timeoutSeconds?: string; json?: boolean }) => {
+      const command = "bots verify";
+      try {
+        const timeoutSeconds = Number.parseInt(opts.timeoutSeconds ?? "", 10);
+        const result = await app.installerService.verifyManagedBotResponds({
+          botId: id,
+          ...(Number.isFinite(timeoutSeconds) && timeoutSeconds > 0
+            ? { timeoutMs: timeoutSeconds * 1_000 }
+            : {}),
+        });
+        writeCliSuccess(command, result, botRoundTripResultSchema, Boolean(opts.json));
+        if (!result.ok) {
+          // A silent bot is a failed verification, not a crashed command; the
+          // distinct exit code lets shell callers branch without JSON parsing.
+          process.exitCode = 2;
+        }
+      } catch (error) {
+        writeCliError(command, error, Boolean(opts.json));
+        process.exitCode = 1;
+      }
+    });
 };
+
+const botRoundTripResultSchema = z.object({
+  ok: z.boolean(),
+  botId: z.string().min(1),
+  botUserId: z.string().min(1).optional(),
+  roomId: z.string().min(1).optional(),
+  sentEventId: z.string().min(1).optional(),
+  replyEventId: z.string().min(1).optional(),
+  elapsedMs: z.number(),
+  failure: z
+    .enum([
+      "not-instantiated",
+      "no-matrix-identity",
+      "no-operator-room",
+      "send-failed",
+      "mismatched-response",
+      "timeout",
+    ])
+    .optional(),
+});
 
 const addBotCatalogSourceOptions = <T extends Command>(command: T): T =>
   command

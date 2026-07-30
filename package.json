@@ -43,6 +43,10 @@
       "types": "./dist/lib/contracts.d.ts",
       "import": "./dist/lib/contracts.js"
     },
+    "./support": {
+      "types": "./dist/lib/support.d.ts",
+      "import": "./dist/lib/support.js"
+    },
     "./package.json": "./package.json",
     "./public/setup-ui/*": "./public/setup-ui/*"
   },
