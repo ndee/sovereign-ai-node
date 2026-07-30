@@ -14353,6 +14353,11 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
       start: async () => {},
       restart: async () => {},
     },
+    // The verify path must never fall back to the real filesystem catalog
+    // (it would scan a sibling checkout); tests inject routing explicitly.
+    botCatalog: {
+      findPackageByTemplateRef: async () => null,
+    },
     preflightChecker: {
       run: async () => ({
         mode: "bundled_matrix" as const,
@@ -14397,46 +14402,60 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
   const buildVerifyService = (
     paths: SovereignPaths,
     fetchImpl: (url: string, init?: RequestInit) => Promise<Response>,
+    depsOverride: Record<string, unknown> = {},
   ): RealInstallerService =>
     new RealInstallerService(createLogger(), paths, {
       ...(verifyDeps as Record<string, unknown>),
+      ...depsOverride,
       fetchImpl,
     } as ConstructorParameters<typeof RealInstallerService>[2]);
 
-  it("returns ok when the bot replies after the probe message", async () => {
+  const nonceFrom = (body: string): string => {
+    const match = /verify ([a-f0-9]{32})/u.exec(body);
+    if (match?.[1] === undefined) {
+      throw new Error(`probe body carries no nonce: ${body}`);
+    }
+    return match[1];
+  };
+
+  it("accepts only a nonce-correlated reply from the bot account", async () => {
     const { tempRoot, paths } = await setupVerifyHost();
     try {
-      let messagesCalls = 0;
+      let sentNonce = "";
       const sentBodies: string[] = [];
       const service = buildVerifyService(paths, async (url, init) => {
         if (url.includes("/send/m.room.message/")) {
-          sentBodies.push(String(init?.body ?? ""));
+          const body = String(init?.body ?? "");
+          sentBodies.push(body);
+          sentNonce = nonceFrom(body);
           return new Response(JSON.stringify({ event_id: "$probe-1" }), { status: 200 });
         }
         if (url.includes("/messages")) {
-          messagesCalls += 1;
-          const chunk =
-            messagesCalls === 1
-              ? [
-                  {
-                    type: "m.room.message",
-                    sender: "@operator:matrix.example.org",
-                    event_id: "$probe-1",
-                  },
-                ]
-              : [
-                  {
-                    type: "m.room.message",
-                    sender: "@node-operator:matrix.example.org",
-                    event_id: "$reply-1",
-                  },
-                  {
-                    type: "m.room.message",
-                    sender: "@operator:matrix.example.org",
-                    event_id: "$probe-1",
-                  },
-                ];
-          return new Response(JSON.stringify({ chunk }), { status: 200 });
+          return new Response(
+            JSON.stringify({
+              chunk: [
+                {
+                  type: "m.room.message",
+                  sender: "@node-operator:matrix.example.org",
+                  event_id: "$reply-correlated",
+                  content: { body: `Verified ${sentNonce}. Command execution confirmed.` },
+                },
+                {
+                  type: "m.room.message",
+                  sender: "@node-operator:matrix.example.org",
+                  event_id: "$reply-chatter",
+                  content: { body: "Unrelated bot chatter" },
+                },
+                {
+                  type: "m.room.message",
+                  sender: "@operator:matrix.example.org",
+                  event_id: "$probe-1",
+                  content: { body: `@node-operator: verify ${sentNonce}` },
+                },
+              ],
+            }),
+            { status: 200 },
+          );
         }
         return new Response("{}", { status: 200 });
       });
@@ -14448,15 +14467,12 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
       });
 
       expect(result.ok).toBe(true);
-      expect(result.botUserId).toBe("@node-operator:matrix.example.org");
-      expect(result.sentEventId).toBe("$probe-1");
-      expect(result.replyEventId).toBe("$reply-1");
-      expect(result.failure).toBeUndefined();
-      // The probe both mentions the bot in plain text and sets m.mentions so
-      // either gateway mention-detection style routes it.
+      expect(result.replyEventId).toBe("$reply-correlated");
+      // The probe mentions the bot, carries a 32-hex-char random nonce, and
+      // leaks no secret material.
       expect(sentBodies[0]).toContain("@node-operator:matrix.example.org");
+      expect(sentBodies[0]).toMatch(/verify [a-f0-9]{32}/u);
       expect(sentBodies[0]).toContain("m.mentions");
-      // No secret material may appear in the message body.
       expect(sentBodies[0]).not.toContain("operator-token");
       expect(sentBodies[0]).not.toContain("node-operator-token");
     } finally {
@@ -14464,7 +14480,35 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
     }
   });
 
-  it("accepts a reply even when the probe event scrolled out of the poll window", async () => {
+  it("issues a fresh nonce per invocation", async () => {
+    const { tempRoot, paths } = await setupVerifyHost();
+    try {
+      const nonces: string[] = [];
+      const service = buildVerifyService(paths, async (url, init) => {
+        if (url.includes("/send/m.room.message/")) {
+          nonces.push(nonceFrom(String(init?.body ?? "")));
+          return new Response(JSON.stringify({ event_id: "$probe" }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ chunk: [] }), { status: 200 });
+      });
+      await service.verifyManagedBotResponds({
+        botId: "node-operator",
+        timeoutMs: 100,
+        pollIntervalMs: 30,
+      });
+      await service.verifyManagedBotResponds({
+        botId: "node-operator",
+        timeoutMs: 100,
+        pollIntervalMs: 30,
+      });
+      expect(nonces).toHaveLength(2);
+      expect(nonces[0]).not.toBe(nonces[1]);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an uncorrelated newer bot reply as mismatched-response", async () => {
     const { tempRoot, paths } = await setupVerifyHost();
     try {
       const service = buildVerifyService(paths, async (url) => {
@@ -14478,7 +14522,13 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
                 {
                   type: "m.room.message",
                   sender: "@node-operator:matrix.example.org",
-                  event_id: "$reply-2",
+                  event_id: "$reply-unrelated",
+                  content: { body: "I am alive but this is not the nonce" },
+                },
+                {
+                  type: "m.room.message",
+                  sender: "@operator:matrix.example.org",
+                  event_id: "$probe-2",
                 },
               ],
             }),
@@ -14487,41 +14537,43 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
         }
         return new Response("{}", { status: 200 });
       });
-
       const result = await service.verifyManagedBotResponds({
         botId: "node-operator",
-        timeoutMs: 5_000,
+        timeoutMs: 200,
         pollIntervalMs: 30,
       });
-      expect(result.ok).toBe(true);
-      expect(result.replyEventId).toBe("$reply-2");
+      expect(result.ok).toBe(false);
+      expect(result.failure).toBe("mismatched-response");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
   });
 
-  it("reports timeout when the bot never replies, ignoring older bot chatter", async () => {
+  it("ignores a nonce echoed by the wrong sender", async () => {
     const { tempRoot, paths } = await setupVerifyHost();
     try {
-      const service = buildVerifyService(paths, async (url) => {
+      let sentNonce = "";
+      const service = buildVerifyService(paths, async (url, init) => {
         if (url.includes("/send/m.room.message/")) {
+          sentNonce = nonceFrom(String(init?.body ?? ""));
           return new Response(JSON.stringify({ event_id: "$probe-3" }), { status: 200 });
         }
         if (url.includes("/messages")) {
-          // The bot spoke BEFORE the probe: dir=b puts the probe first, so the
-          // old message must not satisfy the check.
           return new Response(
             JSON.stringify({
               chunk: [
                 {
                   type: "m.room.message",
-                  sender: "@operator:matrix.example.org",
-                  event_id: "$probe-3",
+                  // An attacker (or another bot) echoing the nonce is not the
+                  // expected bot account and must not verify the control plane.
+                  sender: "@bitcoin-skill-match:matrix.example.org",
+                  event_id: "$forged",
+                  content: { body: `Verified ${sentNonce}` },
                 },
                 {
                   type: "m.room.message",
-                  sender: "@node-operator:matrix.example.org",
-                  event_id: "$stale-reply",
+                  sender: "@operator:matrix.example.org",
+                  event_id: "$probe-3",
                 },
               ],
             }),
@@ -14530,7 +14582,6 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
         }
         return new Response("{}", { status: 200 });
       });
-
       const result = await service.verifyManagedBotResponds({
         botId: "node-operator",
         timeoutMs: 200,
@@ -14538,25 +14589,172 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
       });
       expect(result.ok).toBe(false);
       expect(result.failure).toBe("timeout");
-      expect(result.sentEventId).toBe("$probe-3");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
   });
 
-  it("distinguishes a bot that is not instantiated from one that cannot be reached", async () => {
+  it("ignores older bot messages even when they echo nothing newer arrives", async () => {
     const { tempRoot, paths } = await setupVerifyHost();
     try {
-      const service = buildVerifyService(paths, async () => new Response("{}", { status: 200 }));
-      const result = await service.verifyManagedBotResponds({ botId: "does-not-exist" });
+      let sentNonce = "";
+      const service = buildVerifyService(paths, async (url, init) => {
+        if (url.includes("/send/m.room.message/")) {
+          sentNonce = nonceFrom(String(init?.body ?? ""));
+          return new Response(JSON.stringify({ event_id: "$probe-4" }), { status: 200 });
+        }
+        if (url.includes("/messages")) {
+          // dir=b: the probe is FIRST (newest); the bot message below it is
+          // OLDER than the challenge and must not count, nonce or not.
+          return new Response(
+            JSON.stringify({
+              chunk: [
+                {
+                  type: "m.room.message",
+                  sender: "@operator:matrix.example.org",
+                  event_id: "$probe-4",
+                },
+                {
+                  type: "m.room.message",
+                  sender: "@node-operator:matrix.example.org",
+                  event_id: "$stale",
+                  content: { body: `Verified ${sentNonce}` },
+                },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("{}", { status: 200 });
+      });
+      const result = await service.verifyManagedBotResponds({
+        botId: "node-operator",
+        timeoutMs: 200,
+        pollIntervalMs: 30,
+      });
       expect(result.ok).toBe(false);
-      expect(result.failure).toBe("not-instantiated");
+      expect(result.failure).toBe("timeout");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
   });
 
-  it("reports send-failed when the homeserver rejects the probe message", async () => {
+  it("fails with no-operator-room when an operator-routed bot has no control room", async () => {
+    const { tempRoot, paths } = await setupVerifyHost();
+    try {
+      const service = buildVerifyService(paths, async () => new Response("{}", { status: 200 }), {
+        botCatalog: {
+          findPackageByTemplateRef: async () => ({
+            manifest: {
+              id: "node-operator",
+              matrixIdentity: { mode: "dedicated-account", localpartPrefix: "node-operator" },
+              matrixRouting: { room: "operator" },
+            },
+          }),
+        },
+      });
+      const result = await service.verifyManagedBotResponds({
+        botId: "node-operator",
+        timeoutMs: 200,
+        pollIntervalMs: 30,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.failure).toBe("no-operator-room");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("verifies an operator-routed bot in the operator room when configured", async () => {
+    const { tempRoot, paths } = await setupVerifyHost();
+    try {
+      // Wire the operator room + instance override the provisioning hook
+      // would create.
+      const raw = await readFile(paths.configPath, "utf8");
+      const parsed = JSON.parse(raw) as Record<string, never> & {
+        matrix?: Record<string, unknown>;
+        bots?: { config: Record<string, unknown>; instances: unknown[] };
+        openclawProfile?: { agents?: Array<Record<string, unknown>> };
+      };
+      (parsed.matrix as Record<string, unknown>).operatorRoom = {
+        roomId: "!operator-room:matrix.example.org",
+        roomName: "Sovereign Node",
+      };
+      parsed.bots = parsed.bots ?? { config: {}, instances: [] };
+      parsed.bots.instances.push({
+        id: "node-operator-operator-room",
+        packageId: "node-operator",
+        workspace: join(paths.stateDir, "node-operator", "workspace"),
+        config: {},
+        secretRefs: {},
+        matrix: {
+          alertRoom: { roomId: "!operator-room:matrix.example.org", roomName: "Sovereign Node" },
+        },
+      });
+      const agent = parsed.openclawProfile?.agents?.find((entry) => entry.id === "node-operator");
+      if (agent !== undefined) {
+        (agent as Record<string, unknown>).botInstanceId = "node-operator-operator-room";
+      }
+      await writeFile(paths.configPath, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+
+      let sentNonce = "";
+      const roomsSeen: string[] = [];
+      const service = buildVerifyService(
+        paths,
+        async (url, init) => {
+          if (url.includes("/send/m.room.message/")) {
+            roomsSeen.push(decodeURIComponent(url.split("/rooms/")[1]?.split("/")[0] ?? ""));
+            sentNonce = nonceFrom(String(init?.body ?? ""));
+            return new Response(JSON.stringify({ event_id: "$probe-5" }), { status: 200 });
+          }
+          if (url.includes("/messages")) {
+            return new Response(
+              JSON.stringify({
+                chunk: [
+                  {
+                    type: "m.room.message",
+                    sender: "@node-operator:matrix.example.org",
+                    event_id: "$reply-5",
+                    content: { body: `Verified ${sentNonce}` },
+                  },
+                  {
+                    type: "m.room.message",
+                    sender: "@operator:matrix.example.org",
+                    event_id: "$probe-5",
+                  },
+                ],
+              }),
+              { status: 200 },
+            );
+          }
+          return new Response("{}", { status: 200 });
+        },
+        {
+          botCatalog: {
+            findPackageByTemplateRef: async () => ({
+              manifest: {
+                id: "node-operator",
+                matrixIdentity: { mode: "dedicated-account", localpartPrefix: "node-operator" },
+                matrixRouting: { room: "operator" },
+              },
+            }),
+          },
+        },
+      );
+      const result = await service.verifyManagedBotResponds({
+        botId: "node-operator",
+        timeoutMs: 5_000,
+        pollIntervalMs: 30,
+      });
+      expect(result.ok).toBe(true);
+      expect(result.roomId).toBe("!operator-room:matrix.example.org");
+      expect(roomsSeen[0]).toBe("!operator-room:matrix.example.org");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("distinguishes a bot that is not instantiated and a rejected send", async () => {
     const { tempRoot, paths } = await setupVerifyHost();
     try {
       const service = buildVerifyService(paths, async (url) => {
@@ -14565,25 +14763,29 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
         }
         return new Response("{}", { status: 200 });
       });
-      const result = await service.verifyManagedBotResponds({
+      expect((await service.verifyManagedBotResponds({ botId: "does-not-exist" })).failure).toBe(
+        "not-instantiated",
+      );
+      const send = await service.verifyManagedBotResponds({
         botId: "node-operator",
         timeoutMs: 500,
         pollIntervalMs: 30,
       });
-      expect(result.ok).toBe(false);
-      expect(result.failure).toBe("send-failed");
+      expect(send.failure).toBe("send-failed");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
   });
 
-  it("keeps polling through transient poll errors instead of failing", async () => {
+  it("keeps polling through transient poll errors", async () => {
     const { tempRoot, paths } = await setupVerifyHost();
     try {
+      let sentNonce = "";
       let messagesCalls = 0;
-      const service = buildVerifyService(paths, async (url) => {
+      const service = buildVerifyService(paths, async (url, init) => {
         if (url.includes("/send/m.room.message/")) {
-          return new Response(JSON.stringify({ event_id: "$probe-4" }), { status: 200 });
+          sentNonce = nonceFrom(String(init?.body ?? ""));
+          return new Response(JSON.stringify({ event_id: "$probe-6" }), { status: 200 });
         }
         if (url.includes("/messages")) {
           messagesCalls += 1;
@@ -14599,7 +14801,8 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
                 {
                   type: "m.room.message",
                   sender: "@node-operator:matrix.example.org",
-                  event_id: "$reply-4",
+                  event_id: "$reply-6",
+                  content: { body: `Verified ${sentNonce}` },
                 },
               ],
             }),
@@ -14608,7 +14811,6 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
         }
         return new Response("{}", { status: 200 });
       });
-
       const result = await service.verifyManagedBotResponds({
         botId: "node-operator",
         timeoutMs: 5_000,
@@ -14616,6 +14818,174 @@ describe("RealInstallerService.verifyManagedBotResponds", () => {
       });
       expect(result.ok).toBe(true);
       expect(messagesCalls).toBeGreaterThanOrEqual(3);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("RealInstallerService operator control surface", () => {
+  const buildPathsFor = (tempRoot: string): SovereignPaths => ({
+    configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+    secretsDir: join(tempRoot, "etc", "secrets"),
+    stateDir: join(tempRoot, "var", "lib"),
+    logsDir: join(tempRoot, "var", "log"),
+    installJobsDir: join(tempRoot, "install-jobs"),
+    openclawServiceHome: join(tempRoot, "openclaw-home"),
+    provenancePath: join(tempRoot, "install-provenance.json"),
+    backupsDir: join(tempRoot, "backups"),
+  });
+
+  const surfaceDeps = {
+    openclawBootstrapper: {
+      detectInstalled: async () => null,
+      ensureInstalled: async () => ({
+        binaryPath: "/usr/local/bin/openclaw",
+        version: "pinned-by-sovereign",
+        installMethod: "install_sh" as const,
+      }),
+    },
+    openclawGatewayServiceManager: {
+      install: async () => {},
+      start: async () => {},
+      restart: async () => {},
+    },
+    botCatalog: { findPackageByTemplateRef: async () => null },
+    preflightChecker: {
+      run: async () => ({
+        mode: "bundled_matrix" as const,
+        overall: "pass" as const,
+        checks: [],
+        recommendedActions: [],
+      }),
+    },
+    imapTester: {
+      test: async () => ({ ok: true, host: "h", port: 993, tls: true, auth: "ok" as const }),
+    },
+    matrixProvisioner: {
+      provision: async () => {
+        throw new Error("not used");
+      },
+      bootstrapAccounts: async () => {
+        throw new Error("not used");
+      },
+      bootstrapRoom: async () => {
+        throw new Error("not used");
+      },
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+  } as unknown as ConstructorParameters<typeof RealInstallerService>[2];
+
+  type SurfaceService = {
+    ensureOperatorControlSurface(config: unknown): Promise<boolean>;
+    ensureAgentOperatorRoomBinding(config: unknown, entry: unknown, packageId: string): boolean;
+    readRuntimeConfig(): Promise<Record<string, never>>;
+  };
+
+  it("creates the operator room and space once and reuses them afterwards", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-operator-surface-test-"));
+    const paths = buildPathsFor(tempRoot);
+    await writeRuntimeArtifacts(paths);
+    try {
+      const created: string[] = [];
+      const spaceChildren: string[] = [];
+      const service = new RealInstallerService(createLogger(), paths, {
+        ...(surfaceDeps as Record<string, unknown>),
+        fetchImpl: async (url: string, init?: RequestInit) => {
+          if (url.includes("/createRoom")) {
+            const body = JSON.parse(String(init?.body ?? "{}")) as {
+              name?: string;
+              creation_content?: { type?: string };
+            };
+            created.push(body.creation_content?.type === "m.space" ? "space" : String(body.name));
+            return new Response(
+              JSON.stringify({
+                room_id:
+                  body.creation_content?.type === "m.space"
+                    ? "!space:matrix.example.org"
+                    : "!sovereign-node:matrix.example.org",
+              }),
+              { status: 200 },
+            );
+          }
+          if (url.includes("/state/m.space.child/")) {
+            spaceChildren.push(decodeURIComponent(url.split("/state/m.space.child/")[1] ?? ""));
+            return new Response("{}", { status: 200 });
+          }
+          return new Response("{}", { status: 200 });
+        },
+      } as ConstructorParameters<typeof RealInstallerService>[2]) as unknown as SurfaceService;
+
+      const runtimeConfig = await (
+        service as unknown as { readRuntimeConfig(): Promise<Record<string, unknown>> }
+      ).readRuntimeConfig();
+      const first = await service.ensureOperatorControlSurface(runtimeConfig);
+      expect(first).toBe(true);
+      const matrix = (runtimeConfig as { matrix: Record<string, unknown> }).matrix;
+      expect(matrix.operatorRoom).toEqual({
+        roomId: "!sovereign-node:matrix.example.org",
+        roomName: "Sovereign Node",
+      });
+      expect(matrix.space).toEqual({
+        spaceId: "!space:matrix.example.org",
+        name: "Sovereign AI Node",
+      });
+      // Both rooms became space children: the alert room and the new
+      // operator room.
+      expect(spaceChildren).toContain("!sovereign-node:matrix.example.org");
+      expect(spaceChildren).toHaveLength(2);
+      expect(created).toEqual(["Sovereign Node", "space"]);
+
+      // Idempotent: a second call creates nothing new.
+      const second = await service.ensureOperatorControlSurface(runtimeConfig);
+      expect(second).toBe(false);
+      expect(created).toHaveLength(2);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("binds an agent to the operator room via a bot-instance override", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-operator-binding-test-"));
+    const paths = buildPathsFor(tempRoot);
+    await writeRuntimeArtifacts(paths);
+    try {
+      const service = new RealInstallerService(createLogger(), paths, {
+        ...(surfaceDeps as Record<string, unknown>),
+        fetchImpl: async () => new Response("{}", { status: 200 }),
+      } as unknown as ConstructorParameters<
+        typeof RealInstallerService
+      >[2]) as unknown as SurfaceService;
+      const runtimeConfig = (await (
+        service as unknown as { readRuntimeConfig(): Promise<Record<string, unknown>> }
+      ).readRuntimeConfig()) as {
+        matrix: { operatorRoom?: { roomId: string; roomName: string } };
+        bots: { instances: Array<Record<string, unknown>> };
+        openclawProfile: { agents: Array<Record<string, unknown>> };
+      };
+      runtimeConfig.matrix.operatorRoom = {
+        roomId: "!operator:matrix.example.org",
+        roomName: "Sovereign Node",
+      };
+      const entry = runtimeConfig.openclawProfile.agents[0] as {
+        id: string;
+        botInstanceId?: string;
+      };
+
+      const changed = service.ensureAgentOperatorRoomBinding(runtimeConfig, entry, "node-operator");
+      expect(changed).toBe(true);
+      expect(entry.botInstanceId).toBe(`${entry.id}-operator-room`);
+      const instance = runtimeConfig.bots.instances.find(
+        (candidate) => candidate.id === entry.botInstanceId,
+      ) as { matrix?: { alertRoom?: { roomId: string } } } | undefined;
+      expect(instance?.matrix?.alertRoom?.roomId).toBe("!operator:matrix.example.org");
+
+      // Second call: already bound, nothing changes.
+      expect(service.ensureAgentOperatorRoomBinding(runtimeConfig, entry, "node-operator")).toBe(
+        false,
+      );
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }

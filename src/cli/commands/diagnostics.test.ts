@@ -117,6 +117,7 @@ describe("sovereign-node diagnostics", () => {
 describe("renderDiagnosticsText", () => {
   it("matches the partner-facing layout with codes on a dedicated line", () => {
     const presentation: DiagnosticsPresentation = {
+      contractVersion: "1.0.0",
       overall: "degraded",
       checkedAt: "2026-07-29T12:00:00.000Z",
       headline:
@@ -156,6 +157,7 @@ describe("renderDiagnosticsText", () => {
 
   it("deduplicates repeated codes and omits the code line when none exist", () => {
     const base: DiagnosticsPresentation = {
+      contractVersion: "1.0.0",
       overall: "healthy",
       checkedAt: "2026-07-29T12:00:00.000Z",
       headline: "All components are working normally.",

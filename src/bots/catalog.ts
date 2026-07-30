@@ -40,6 +40,13 @@ const toolInstanceSchema = z.object({
 
 const matrixRoutingSchema = z.object({
   defaultAccount: z.boolean().optional(),
+  /**
+   * Which node room the bot lives in. "alert" (default) is the Sovereign
+   * Alerts room shared with the operator; "operator" is the dedicated
+   * Sovereign Node control room, created on demand. Operational bots use
+   * "operator" so mail alerts and control commands never share a room.
+   */
+  room: z.enum(["alert", "operator"]).optional(),
   dm: z
     .object({
       enabled: z.boolean().optional(),

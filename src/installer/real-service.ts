@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { type Dirent, constants as fsConstants } from "node:fs";
 import {
   access,
@@ -5651,6 +5651,10 @@ export default function (api) {
           : { avatarSha256: runtimeConfig.matrix.bot.avatarSha256 }),
       },
       alertRoom: runtimeConfig.matrix.alertRoom,
+      ...(runtimeConfig.matrix.operatorRoom === undefined
+        ? {}
+        : { operatorRoom: runtimeConfig.matrix.operatorRoom }),
+      ...(runtimeConfig.matrix.space === undefined ? {} : { space: runtimeConfig.matrix.space }),
     };
 
     await this.writeInstallerJsonFile(this.paths.configPath, parsed, 0o644);
@@ -5875,6 +5879,207 @@ export default function (api) {
     }
   }
 
+  /** Default names for the operator control surface. */
+  private static readonly OPERATOR_ROOM_NAME = "Sovereign Node";
+  private static readonly OPERATOR_SPACE_NAME = "Sovereign AI Node";
+
+  /**
+   * Create a room (or Space, via creationContent) as the operator and return
+   * its room id. Tolerates nothing: callers decide whether a failure is fatal.
+   */
+  private async createMatrixRoomAsOperator(input: {
+    runtimeConfig: RuntimeConfig;
+    operatorAccessToken: string;
+    name: string;
+    topic: string;
+    creationContent?: Record<string, unknown>;
+  }): Promise<string> {
+    const endpoint = new URL(
+      "/_matrix/client/v3/createRoom",
+      ensureTrailingSlash(input.runtimeConfig.matrix.adminBaseUrl),
+    ).toString();
+    const response = await this.fetchImpl(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${input.operatorAccessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        name: input.name,
+        topic: input.topic,
+        preset: "private_chat",
+        visibility: "private",
+        ...(input.creationContent === undefined ? {} : { creation_content: input.creationContent }),
+      }),
+    });
+    const text = await response.text();
+    const parsed = parseJsonSafely(text);
+    const roomId =
+      isRecord(parsed) && typeof parsed.room_id === "string" ? parsed.room_id : undefined;
+    if (!response.ok || roomId === undefined || roomId.length === 0) {
+      throw {
+        code: "MATRIX_OPERATOR_ROOM_FAILED",
+        message: `Failed to create Matrix room '${input.name}'`,
+        retryable: true,
+        details: {
+          endpoint,
+          status: response.status,
+          body: summarizeUnknown(parsed),
+        },
+      };
+    }
+    return roomId;
+  }
+
+  /** Add a room as a child of the Space. Best-effort by contract of callers. */
+  private async addRoomToSpace(input: {
+    runtimeConfig: RuntimeConfig;
+    operatorAccessToken: string;
+    spaceId: string;
+    roomId: string;
+  }): Promise<void> {
+    const endpoint = new URL(
+      `/_matrix/client/v3/rooms/${encodeURIComponent(input.spaceId)}/state/m.space.child/${encodeURIComponent(input.roomId)}`,
+      ensureTrailingSlash(input.runtimeConfig.matrix.adminBaseUrl),
+    ).toString();
+    const response = await this.fetchImpl(endpoint, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${input.operatorAccessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        via: [input.runtimeConfig.matrix.homeserverDomain],
+        suggested: true,
+      }),
+    });
+    if (!response.ok) {
+      throw {
+        code: "MATRIX_SPACE_CHILD_FAILED",
+        message: "Failed to add room to the Sovereign AI Node space",
+        retryable: true,
+        details: { endpoint, status: response.status },
+      };
+    }
+  }
+
+  /**
+   * Ensure the dedicated operator control surface exists: the "Sovereign
+   * Node" room and, best-effort, the "Sovereign AI Node" Space grouping it
+   * with Sovereign Alerts.
+   *
+   * Idempotent: room ids persisted in the runtime config are reused; nothing
+   * is created twice on reinstalls or updates. The Space is deliberately
+   * SOFT-fail (an old Synapse or a permission oddity must not block the
+   * control room the product depends on), while the room itself is hard-fail.
+   *
+   * Mutates runtimeConfig in place; callers persist via
+   * persistManagedAgentTopologyDocument, the same contract as agent identity.
+   */
+  private async ensureOperatorControlSurface(runtimeConfig: RuntimeConfig): Promise<boolean> {
+    let changed = false;
+    const operatorTokenSecretRef = runtimeConfig.matrix.operator.accessTokenSecretRef;
+    if (operatorTokenSecretRef === undefined || operatorTokenSecretRef.length === 0) {
+      throw {
+        code: "MATRIX_OPERATOR_ROOM_FAILED",
+        message: "Operator Matrix access token is required to provision the operator room",
+        retryable: false,
+      };
+    }
+    const operatorAccessToken = await this.resolveSecretRef(operatorTokenSecretRef);
+
+    if (runtimeConfig.matrix.operatorRoom === undefined) {
+      const roomId = await this.createMatrixRoomAsOperator({
+        runtimeConfig,
+        operatorAccessToken,
+        name: RealInstallerService.OPERATOR_ROOM_NAME,
+        topic: "Operate your Sovereign AI Node: status, health, and guided support.",
+      });
+      runtimeConfig.matrix.operatorRoom = {
+        roomId,
+        roomName: RealInstallerService.OPERATOR_ROOM_NAME,
+      };
+      changed = true;
+    }
+
+    if (runtimeConfig.matrix.space === undefined) {
+      try {
+        const spaceId = await this.createMatrixRoomAsOperator({
+          runtimeConfig,
+          operatorAccessToken,
+          name: RealInstallerService.OPERATOR_SPACE_NAME,
+          topic: "Your Sovereign AI Node rooms.",
+          creationContent: { type: "m.space" },
+        });
+        runtimeConfig.matrix.space = {
+          spaceId,
+          name: RealInstallerService.OPERATOR_SPACE_NAME,
+        };
+        changed = true;
+        for (const childRoomId of [
+          runtimeConfig.matrix.alertRoom.roomId,
+          runtimeConfig.matrix.operatorRoom.roomId,
+        ]) {
+          await this.addRoomToSpace({
+            runtimeConfig,
+            operatorAccessToken,
+            spaceId,
+            roomId: childRoomId,
+          });
+        }
+      } catch (error) {
+        this.logger.warn(
+          { error: describeError(error) },
+          "Matrix Space provisioning failed; the operator room works without it",
+        );
+      }
+    }
+
+    return changed;
+  }
+
+  /**
+   * Bind an agent to the operator room by giving its bot instance a room
+   * override — the same mechanism per-instance rooms already use, so the
+   * join flow, gateway routing, and hello messages all follow automatically.
+   */
+  private ensureAgentOperatorRoomBinding(
+    runtimeConfig: RuntimeConfig,
+    entry: RuntimeAgentEntry,
+    packageId: string,
+  ): boolean {
+    const operatorRoom = runtimeConfig.matrix.operatorRoom;
+    if (operatorRoom === undefined) {
+      return false;
+    }
+    const existing = this.getRuntimeBotInstanceForAgent(runtimeConfig, entry);
+    if (existing !== undefined) {
+      if (existing.matrix?.alertRoom?.roomId === operatorRoom.roomId) {
+        return false;
+      }
+      existing.matrix = {
+        ...(existing.matrix ?? {}),
+        alertRoom: { roomId: operatorRoom.roomId, roomName: operatorRoom.roomName },
+      };
+      return true;
+    }
+    const instanceId = `${entry.id}-operator-room`;
+    runtimeConfig.bots.instances.push({
+      id: instanceId,
+      packageId,
+      workspace: entry.workspace,
+      config: {},
+      secretRefs: {},
+      matrix: {
+        alertRoom: { roomId: operatorRoom.roomId, roomName: operatorRoom.roomName },
+      },
+    });
+    entry.botInstanceId = instanceId;
+    return true;
+  }
+
   private async ensureManagedAgentMatrixIdentity(
     runtimeConfig: RuntimeConfig,
     agentId: string,
@@ -5907,6 +6112,18 @@ export default function (api) {
         entry.matrix = mappedIdentity;
       }
       return { runtimeConfig, changed };
+    }
+
+    // Operational bots live in the dedicated control room, never the mail
+    // alert room: the room is created on demand here so fresh installs,
+    // keep-mode activation on update, and identity repair all converge on
+    // the same idempotent path.
+    let operatorSurfaceChanged = false;
+    if (botPackage?.manifest.matrixRouting?.room === "operator") {
+      operatorSurfaceChanged = await this.ensureOperatorControlSurface(runtimeConfig);
+      operatorSurfaceChanged =
+        this.ensureAgentOperatorRoomBinding(runtimeConfig, entry, botPackage.manifest.id) ||
+        operatorSurfaceChanged;
     }
 
     const fallbackLocalpart = await this.resolveManagedAgentMatrixLocalpartFallback(
@@ -6020,7 +6237,7 @@ export default function (api) {
 
     return {
       runtimeConfig,
-      changed: changed || primaryBotChanged,
+      changed: changed || primaryBotChanged || operatorSurfaceChanged,
     };
   }
 
@@ -9165,9 +9382,12 @@ export default function (api) {
         continue;
       }
       const accessToken = await this.resolveSecretRef(agent.matrix.accessTokenSecretRef);
+      // Each bot says hello in ITS room — an operator-room bot must not
+      // announce itself in the mail alert room.
+      const helloRoom = this.resolveManagedAgentAlertRoom(runtimeConfig, agent);
       await this.sendMatrixRoomMessage({
         adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
-        roomId: runtimeConfig.matrix.alertRoom.roomId,
+        roomId: helloRoom.roomId,
         accessToken,
         text: botPackage.manifest.helloMessage,
       });
@@ -9221,22 +9441,28 @@ export default function (api) {
   }
 
   /**
-   * Prove a managed bot can actually answer in Matrix: send it a mention in
-   * the alert room as the operator, then wait for any message from the bot's
-   * account that is newer than what we sent.
+   * Prove a managed bot can actually answer in Matrix with a correlated
+   * challenge: send `verify <nonce>` as the operator in the bot's OWN room
+   * (the operator control room for operator-routed bots), then require a
+   * message from the bot's account, in that room, newer than the challenge,
+   * that echoes the exact nonce.
+   *
+   * The nonce is cryptographically random, so pre-existing traffic, another
+   * bot, another room, or an unrelated reply can never satisfy the check —
+   * only a live command→execute→respond round trip can.
    *
    * Never throws for operational outcomes — installers branch on `failure`
    * rather than exception shapes, and a verification helper that crashes on a
    * silent bot would defeat its own purpose. Freshness is decided by event
    * ordering in the room timeline (dir=b puts newer events first), not by
-   * clocks: the sent event is the reference point, so a bot that spoke an
-   * hour ago can never satisfy the check.
+   * clocks.
    */
   async verifyManagedBotResponds(req: BotRoundTripRequest): Promise<BotRoundTripResult> {
     const startedAt = Date.now();
     const timeoutMs = Math.min(Math.max(req.timeoutMs ?? 120_000, 100), 300_000);
     const pollIntervalMs = Math.min(Math.max(req.pollIntervalMs ?? 3_000, 25), 30_000);
-    const probeText = (req.probeText ?? "status").trim() || "status";
+    const nonce = randomBytes(16).toString("hex");
+    const probeText = `verify ${nonce}`;
 
     const fail = (
       failure: NonNullable<BotRoundTripResult["failure"]>,
@@ -9258,7 +9484,20 @@ export default function (api) {
     if (botUserId === undefined || botUserId.length === 0) {
       return fail("no-matrix-identity");
     }
-    const roomId = runtimeConfig.matrix.alertRoom.roomId;
+    // The round trip runs in the bot's OWN room. For an operator-routed bot
+    // that room must be the operator control room — verifying it in the mail
+    // alert room would prove the wrong surface.
+    const botPackage = await this.findBotPackageByTemplateRef(agent.templateRef);
+    const routesToOperatorRoom = botPackage?.manifest.matrixRouting?.room === "operator";
+    const resolvedRoom = this.resolveManagedAgentAlertRoom(runtimeConfig, agent);
+    if (
+      routesToOperatorRoom &&
+      (runtimeConfig.matrix.operatorRoom === undefined ||
+        resolvedRoom.roomId !== runtimeConfig.matrix.operatorRoom.roomId)
+    ) {
+      return fail("no-operator-room", { botUserId });
+    }
+    const roomId = resolvedRoom.roomId;
     const operatorTokenSecretRef = runtimeConfig.matrix.operator.accessTokenSecretRef;
     if (operatorTokenSecretRef === undefined || operatorTokenSecretRef.length === 0) {
       return fail("send-failed", { botUserId, roomId });
@@ -9319,9 +9558,17 @@ export default function (api) {
     messagesEndpoint.searchParams.set("dir", "b");
     messagesEndpoint.searchParams.set("limit", "30");
 
+    type TimelineEvent = {
+      type?: string;
+      sender?: string;
+      event_id?: string;
+      content?: { body?: unknown };
+    };
+
+    let sawUncorrelatedBotReply = false;
     while (Date.now() - startedAt < timeoutMs) {
       await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-      let chunk: Array<{ type?: string; sender?: string; event_id?: string }> = [];
+      let chunk: TimelineEvent[] = [];
       try {
         const response = await this.fetchImpl(messagesEndpoint.toString(), {
           method: "GET",
@@ -9337,8 +9584,7 @@ export default function (api) {
             : undefined;
         chunk = Array.isArray(rawChunk)
           ? rawChunk.filter(
-              (entry): entry is { type?: string; sender?: string; event_id?: string } =>
-                typeof entry === "object" && entry !== null,
+              (entry): entry is TimelineEvent => typeof entry === "object" && entry !== null,
             )
           : [];
       } catch {
@@ -9350,23 +9596,36 @@ export default function (api) {
       // window is newer.
       const sentIndex = chunk.findIndex((event) => event.event_id === sentEventId);
       const newerEvents = sentIndex === -1 ? chunk : chunk.slice(0, sentIndex);
-      const reply = newerEvents.find(
+      const botReplies = newerEvents.filter(
         (event) => event.type === "m.room.message" && event.sender === botUserId,
       );
-      if (reply !== undefined) {
+      // Only a reply that echoes the exact challenge nonce counts — a bot
+      // that is chatting about something else is NOT a verified control
+      // plane.
+      const correlated = botReplies.find(
+        (event) => typeof event.content?.body === "string" && event.content.body.includes(nonce),
+      );
+      if (correlated !== undefined) {
         return {
           ok: true,
           botId: req.botId,
           botUserId,
           roomId,
           sentEventId,
-          ...(reply.event_id === undefined ? {} : { replyEventId: reply.event_id }),
+          ...(correlated.event_id === undefined ? {} : { replyEventId: correlated.event_id }),
           elapsedMs: Date.now() - startedAt,
         };
       }
+      if (botReplies.length > 0) {
+        sawUncorrelatedBotReply = true;
+      }
     }
 
-    return fail("timeout", { botUserId, roomId, sentEventId });
+    return fail(sawUncorrelatedBotReply ? "mismatched-response" : "timeout", {
+      botUserId,
+      roomId,
+      sentEventId,
+    });
   }
 
   private async ensureSystemGatewayServiceFallback(runtimeConfig: RuntimeConfig): Promise<boolean> {

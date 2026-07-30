@@ -123,7 +123,16 @@ const botRoundTripResultSchema = z.object({
   sentEventId: z.string().min(1).optional(),
   replyEventId: z.string().min(1).optional(),
   elapsedMs: z.number(),
-  failure: z.enum(["not-instantiated", "no-matrix-identity", "send-failed", "timeout"]).optional(),
+  failure: z
+    .enum([
+      "not-instantiated",
+      "no-matrix-identity",
+      "no-operator-room",
+      "send-failed",
+      "mismatched-response",
+      "timeout",
+    ])
+    .optional(),
 });
 
 const addBotCatalogSourceOptions = <T extends Command>(command: T): T =>

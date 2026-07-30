@@ -98,12 +98,18 @@ export type SovereignBotInstantiateResult = {
 };
 
 /**
- * Result of a Matrix command→response round trip against a managed bot.
+ * Result of a nonce-correlated Matrix challenge→response round trip against
+ * a managed bot.
+ *
+ * The check sends `verify <nonce>` (a cryptographically random challenge) as
+ * the operator in the bot's own room and succeeds only when a NEWER message
+ * from the bot's Matrix account in THAT room echoes the exact nonce. An
+ * unrelated bot message, a stale message, a different room, or a different
+ * sender can never satisfy it.
  *
  * `ok: false` carries a machine-readable `failure` so installers can tell
- * "the bot is not set up" apart from "the bot is set up but silent" — the
- * latter is the single most common incident on this system and must never be
- * reported as a successful installation.
+ * "the bot is not set up" apart from "the bot is set up but silent" apart
+ * from "something replied, but not to our challenge".
  */
 export type BotRoundTripResult = {
   ok: boolean;
@@ -113,7 +119,13 @@ export type BotRoundTripResult = {
   sentEventId?: string;
   replyEventId?: string;
   elapsedMs: number;
-  failure?: "not-instantiated" | "no-matrix-identity" | "send-failed" | "timeout";
+  failure?:
+    | "not-instantiated"
+    | "no-matrix-identity"
+    | "no-operator-room"
+    | "send-failed"
+    | "mismatched-response"
+    | "timeout";
 };
 
 export type BotRoundTripRequest = {
@@ -122,8 +134,6 @@ export type BotRoundTripRequest = {
   timeoutMs?: number;
   /** Delay between reply polls; capped at 30s, default 3s. */
   pollIntervalMs?: number;
-  /** Command text sent after the bot mention, default "status". */
-  probeText?: string;
 };
 
 export type SovereignToolInstance = {

@@ -259,6 +259,20 @@ export type RuntimeConfig = {
       roomName: string;
       avatarSha256?: string;
     };
+    /**
+     * The dedicated operator control room ("Sovereign Node"). Created on
+     * demand when a bot package routes to the operator room; absent on nodes
+     * that predate it until the first such bot is instantiated.
+     */
+    operatorRoom?: {
+      roomId: string;
+      roomName: string;
+    };
+    /** The Matrix Space grouping the node's rooms ("Sovereign AI Node"). */
+    space?: {
+      spaceId: string;
+      name: string;
+    };
   };
   templates: {
     installed: Array<{
@@ -1258,6 +1272,33 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
           ? { avatarSha256: alertRoom.avatarSha256 }
           : {}),
       },
+      ...(isRecord(matrix.operatorRoom) &&
+      typeof matrix.operatorRoom.roomId === "string" &&
+      matrix.operatorRoom.roomId.length > 0
+        ? {
+            operatorRoom: {
+              roomId: matrix.operatorRoom.roomId,
+              roomName:
+                typeof matrix.operatorRoom.roomName === "string" &&
+                matrix.operatorRoom.roomName.length > 0
+                  ? matrix.operatorRoom.roomName
+                  : "Sovereign Node",
+            },
+          }
+        : {}),
+      ...(isRecord(matrix.space) &&
+      typeof matrix.space.spaceId === "string" &&
+      matrix.space.spaceId.length > 0
+        ? {
+            space: {
+              spaceId: matrix.space.spaceId,
+              name:
+                typeof matrix.space.name === "string" && matrix.space.name.length > 0
+                  ? matrix.space.name
+                  : "Sovereign AI Node",
+            },
+          }
+        : {}),
     },
     ...(relayConfig === undefined ? {} : { relay: relayConfig }),
     bots: {

@@ -18,6 +18,7 @@
 
 import { z } from "zod";
 
+import { CONTRACT_VERSION } from "../contracts/common.js";
 import type { DoctorReport, SovereignStatus } from "../contracts/index.js";
 import { lookupSanError } from "./codes.js";
 
@@ -62,6 +63,8 @@ export const diagnosticsComponentSchema = z.object({
 export type DiagnosticsComponent = z.infer<typeof diagnosticsComponentSchema>;
 
 export const diagnosticsPresentationSchema = z.object({
+  /** Contract version of the producing node, so consumers can detect drift. */
+  contractVersion: z.string().min(1),
   overall: diagnosticsOverallSchema,
   checkedAt: z.string().min(1),
   headline: z.string().min(1),
@@ -188,6 +191,25 @@ const OVERALL_HEADLINES: Record<DiagnosticsOverall, string> = {
   unavailable: "The node's health could not be determined.",
 };
 
+/**
+ * Freshness policies: a component whose last success is older than its
+ * policy window must not keep reporting healthy indefinitely — silence is a
+ * failure mode (audit F-01), not health.
+ *
+ * Policies exist only for components whose timestamp is EXPECTED to refresh
+ * continuously. The mailbox card's `lastCredentialTestAt`, for example, is a
+ * point-in-time credential test, so no policy applies there.
+ */
+const STALE_AFTER_MS: Partial<Record<DiagnosticsComponentId, number>> = {
+  // The scan timer fires every 30 minutes; two hours of silence means scans
+  // have stopped even if nothing reported an error.
+  "mail-sentinel": 2 * 60 * 60 * 1000,
+};
+
+const STALE_SUMMARIES: Partial<Record<DiagnosticsComponentId, string>> = {
+  "mail-sentinel": "Mail Sentinel has not completed a scan recently.",
+};
+
 /** Re-serialise a timestamp through Date so only real ISO strings pass. */
 const safeTimestamp = (value: unknown): string | undefined => {
   if (typeof value !== "string" || value.length === 0 || value.length > 64) {
@@ -272,6 +294,7 @@ export const buildDiagnosticsPresentation = (
 
   if (status === undefined && doctorReport === undefined) {
     return {
+      contractVersion: CONTRACT_VERSION,
       overall: "unavailable",
       checkedAt,
       headline: OVERALL_HEADLINES.unavailable,
@@ -411,8 +434,34 @@ export const buildDiagnosticsPresentation = (
     components.push(finishComponent(draft));
   }
 
-  const anyFailed = components.some((c) => c.status === "failed");
-  const anyDegraded = components.some((c) => c.status === "degraded");
+  // Freshness: a healthy card with an expired last-success window degrades
+  // to a fixed stale summary. Applied before the overall verdict so a stale
+  // component makes the node degraded.
+  const nowMs = inputs.now.getTime();
+  const freshened = components.map((component) => {
+    const policy = STALE_AFTER_MS[component.id];
+    if (
+      policy === undefined ||
+      component.status !== "healthy" ||
+      component.lastSuccessAt === undefined
+    ) {
+      return component;
+    }
+    const lastSuccessMs = Date.parse(component.lastSuccessAt);
+    if (Number.isNaN(lastSuccessMs) || nowMs - lastSuccessMs <= policy) {
+      return component;
+    }
+    return {
+      ...component,
+      status: "degraded" as const,
+      summary:
+        STALE_SUMMARIES[component.id] ?? SUMMARIES[component.id].degraded ?? component.summary,
+      action: GENERIC_ACTION,
+    };
+  });
+
+  const anyFailed = freshened.some((c) => c.status === "failed");
+  const anyDegraded = freshened.some((c) => c.status === "degraded");
   const overall: DiagnosticsOverall = anyFailed
     ? "action_required"
     : anyDegraded
@@ -420,11 +469,17 @@ export const buildDiagnosticsPresentation = (
       : "healthy";
 
   const leadCode =
-    components.find((c) => c.status === "failed")?.code ??
-    components.find((c) => c.status === "degraded")?.code;
+    freshened.find((c) => c.status === "failed")?.code ??
+    freshened.find((c) => c.status === "degraded")?.code;
   const headline =
     (leadCode !== undefined ? HEADLINES_BY_CODE[leadCode] : undefined) ??
     OVERALL_HEADLINES[overall];
 
-  return { overall, checkedAt, headline, components };
+  return {
+    contractVersion: CONTRACT_VERSION,
+    overall,
+    checkedAt,
+    headline,
+    components: freshened,
+  };
 };

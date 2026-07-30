@@ -413,3 +413,67 @@ describe("buildDiagnosticsPresentation", () => {
     }
   });
 });
+
+describe("contract version and freshness", () => {
+  it("stamps every presentation with the producing contract version", () => {
+    const healthy = buildDiagnosticsPresentation({
+      now: NOW,
+      status: baseStatus(),
+      doctorReport: baseDoctor(),
+      mailSentinelState: healthyMailState,
+    });
+    expect(healthy.contractVersion.length).toBeGreaterThan(0);
+
+    const unavailable = buildDiagnosticsPresentation({ now: NOW });
+    expect(unavailable.contractVersion).toBe(healthy.contractVersion);
+  });
+
+  it("degrades a silent Mail Sentinel whose last scan exceeded the freshness window", () => {
+    const staleScanAt = new Date(NOW.getTime() - 3 * 60 * 60 * 1000).toISOString();
+    const presentation = buildDiagnosticsPresentation({
+      now: NOW,
+      status: baseStatus(),
+      doctorReport: baseDoctor(),
+      mailSentinelState: { degradationState: "healthy", lastScanAt: staleScanAt },
+    });
+    const sentinel = presentation.components.find((c) => c.id === "mail-sentinel");
+    expect(sentinel?.status).toBe("degraded");
+    expect(sentinel?.summary).toBe("Mail Sentinel has not completed a scan recently.");
+    expect(sentinel?.action).toBe("Open Node Status for details.");
+    expect(presentation.overall).toBe("degraded");
+  });
+
+  it("keeps a fresh scan healthy and never marks staleness without a timestamp", () => {
+    const freshScanAt = new Date(NOW.getTime() - 30 * 60 * 1000).toISOString();
+    const fresh = buildDiagnosticsPresentation({
+      now: NOW,
+      status: baseStatus(),
+      doctorReport: baseDoctor(),
+      mailSentinelState: { degradationState: "healthy", lastScanAt: freshScanAt },
+    });
+    expect(fresh.components.find((c) => c.id === "mail-sentinel")?.status).toBe("healthy");
+
+    const noTimestamp = buildDiagnosticsPresentation({
+      now: NOW,
+      status: baseStatus(),
+      doctorReport: baseDoctor(),
+      mailSentinelState: { degradationState: "healthy" },
+    });
+    expect(noTimestamp.components.find((c) => c.id === "mail-sentinel")?.status).toBe("healthy");
+  });
+
+  it("does not let staleness mask a harder failure state", () => {
+    const staleScanAt = new Date(NOW.getTime() - 3 * 60 * 60 * 1000).toISOString();
+    const presentation = buildDiagnosticsPresentation({
+      now: NOW,
+      status: baseStatus(),
+      doctorReport: baseDoctor(),
+      mailSentinelState: { degradationState: "scans-failing", lastScanAt: staleScanAt },
+    });
+    const sentinel = presentation.components.find((c) => c.id === "mail-sentinel");
+    // scans-failing is a FAILED state with a SAN code; staleness only applies
+    // to healthy cards and must not soften it to degraded.
+    expect(sentinel?.status).toBe("failed");
+    expect(sentinel?.code).toBe("SAN-MAIL-001");
+  });
+});
