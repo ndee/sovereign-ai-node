@@ -5764,7 +5764,11 @@ export default function (api) {
         continue;
       }
       try {
-        await writeFile(unitPath, resource.content, "utf8");
+        // Elevated: on web installs the runtime API runs as the service
+        // user, and /etc/systemd/system is root-owned — the scoped sudoers
+        // entry for the specific unit makes `sudo -n tee` work while a
+        // root-run CLI install writes directly.
+        await this.writeSystemdUnitFileElevated(unitPath, resource.content);
       } catch (error) {
         this.logger.warn(
           {
@@ -5789,7 +5793,7 @@ export default function (api) {
       return;
     }
 
-    const reloadResult = await this.safeExec("systemctl", ["daemon-reload"]);
+    const reloadResult = await this.runSystemctlElevated(["daemon-reload"]);
     if (!reloadResult.ok || reloadResult.result.exitCode !== 0) {
       this.logger.warn("systemctl daemon-reload failed after writing bot systemd units");
       return;
@@ -5797,10 +5801,10 @@ export default function (api) {
 
     for (const unit of changedUnits) {
       if (unit.desiredState.enabled) {
-        await this.safeExec("systemctl", ["enable", unit.name]);
+        await this.runSystemctlElevated(["enable", unit.name]);
       }
       if (unit.desiredState.active) {
-        await this.safeExec("systemctl", ["restart", unit.name]);
+        await this.runSystemctlElevated(["restart", unit.name]);
       }
     }
   }
