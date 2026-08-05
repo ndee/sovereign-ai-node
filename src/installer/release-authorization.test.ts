@@ -1,4 +1,4 @@
-import { mkdtemp, chmod, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -82,9 +82,7 @@ describe("loadReleaseAuthorization", () => {
   it("rejects a group- or world-writable file", async () => {
     for (const mode of [0o660, 0o642]) {
       const path = await writeAuthorization(validDocument(), mode);
-      expect(() =>
-        loadReleaseAuthorization(path, { allowedOwnerUids: [currentUid] }),
-      ).toThrowError(
+      expect(() => loadReleaseAuthorization(path, { allowedOwnerUids: [currentUid] })).toThrowError(
         expect.objectContaining({
           code: "RELEASE_AUTHORIZATION_INVALID",
           details: expect.objectContaining({ reason: "unsafe-mode" }),
@@ -127,9 +125,7 @@ describe("loadReleaseAuthorization", () => {
     })();
     for (const document of [withUnknownKey, withBadDigest, withoutKind]) {
       const path = await writeAuthorization(document);
-      expect(() =>
-        loadReleaseAuthorization(path, { allowedOwnerUids: [currentUid] }),
-      ).toThrowError(
+      expect(() => loadReleaseAuthorization(path, { allowedOwnerUids: [currentUid] })).toThrowError(
         expect.objectContaining({
           code: "RELEASE_AUTHORIZATION_INVALID",
           details: expect.objectContaining({ reason: "schema-invalid" }),

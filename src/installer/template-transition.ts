@@ -226,7 +226,10 @@ export const diffBotPackageSurfaces = (input: {
     }
     if (stableSerialize(previous) !== stableSerialize(next)) {
       resourcesChanged.push(id);
-      if (stableSerialize(resourceWritePolicy(previous)) !== stableSerialize(resourceWritePolicy(next))) {
+      if (
+        stableSerialize(resourceWritePolicy(previous)) !==
+        stableSerialize(resourceWritePolicy(next))
+      ) {
         writePolicyChanged = true;
       }
     }

@@ -39,7 +39,12 @@ const noopDeps = {
     restart: async () => {},
   },
   preflightChecker: {
-    run: async () => ({ mode: "bundled_matrix", overall: "pass", checks: [], recommendedActions: [] }),
+    run: async () => ({
+      mode: "bundled_matrix",
+      overall: "pass",
+      checks: [],
+      recommendedActions: [],
+    }),
   } as unknown as HostPreflightChecker,
   imapTester: {
     test: async () => ({ ok: true, host: "h", port: 993, tls: true, auth: "ok" as const }),
