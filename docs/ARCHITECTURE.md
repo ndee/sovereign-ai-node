@@ -52,16 +52,37 @@ Core capabilities reused directly from OpenClaw:
 
 ### Sovereign Template and Instance Model
 
-Sovereign Node introduces a signed, pinned catalog on top of OpenClaw runtime primitives.
+Sovereign Node introduces a pinned catalog on top of OpenClaw runtime primitives.
+
+Two trust models coexist and are NOT equivalent:
+
+- **Core templates** (compiled into the binary: `node-cli-ops`,
+  `imap-readonly`) carry real Ed25519 signatures verified against the
+  hardcoded trusted keys (`src/templates/catalog.ts`).
+- **Bot-repo templates** (from `sovereign-bot.json` in the bots catalog)
+  are **unsigned**: their `keyId` is the constant `repo:sovereign-ai-bots`
+  and `manifestSha256` is a canonical-JSON sha256 the node computes from
+  the file. Their trust derives from the *installed pin*: the digest
+  recorded at operator-approved install time. `reconcile` refuses any
+  template whose digest no longer matches its pin
+  (`TEMPLATE_PIN_MISMATCH`); the only authorized transition is a
+  **verified-release authorization** — a root-owned attestation the Pro
+  updater writes after release-signature and artifact-digest verification,
+  binding the raw manifest bytes the release shipped
+  (`sovereign-node reconcile --release-authorization <path>`,
+  `src/installer/release-authorization.ts`). The service user cannot mint
+  it, and a mutable checkout can never be trusted directly.
 
 Core entities:
 
 - `Sovereign Agent Template` (`kind: sovereign-agent-template`)
-  - Signed manifest.
+  - Manifest pinned by digest (signed only for core templates — see above).
   - Defines agent workspace files, Matrix localpart prefix policy, and tool-template requirements.
 - `Sovereign Tool Template` (`kind: sovereign-tool-template`)
-  - Signed manifest.
+  - Manifest pinned by digest (signed only for core templates — see above).
   - Defines capability contract, required config keys, required secret refs, and allowed command surface.
+  - The capability + allowed-command surface is an authorization boundary:
+    widening it requires a verified-release-authorized pin transition.
 - `Sovereign Tool Instance`
   - Installation-local instance of a tool template with concrete config and secret references.
   - Supports multiple instances per template for multi-account/service scenarios.
