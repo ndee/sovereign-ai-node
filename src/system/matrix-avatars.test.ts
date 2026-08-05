@@ -40,6 +40,7 @@ const createRepoWith = async (
     templateRef: "test-bot@0.0.0",
     keyId: "repo:test",
     manifestSha256: "0",
+    manifestFileSha256: "0",
     rootDir: join(repoDir, "bots", "test-bot"),
   };
   const catalog: BotCatalog = {

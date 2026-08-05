@@ -116,6 +116,20 @@ const botPackageSchema = z.object({
 
 export type SovereignBotPackageManifest = z.infer<typeof botPackageSchema>;
 
+/**
+ * Parse a raw sovereign-bot.json document without throwing. Used for
+ * informational rendering of a PREVIOUS manifest (e.g. the pre-update catalog
+ * content embedded in a release authorization) — never for trust decisions.
+ */
+export const tryParseBotPackageManifest = (raw: string): SovereignBotPackageManifest | null => {
+  try {
+    const result = botPackageSchema.safeParse(JSON.parse(raw) as unknown);
+    return result.success ? result.data : null;
+  } catch {
+    return null;
+  }
+};
+
 export type LoadedBotPackage = {
   manifest: SovereignBotPackageManifest;
   template: AgentTemplateManifest;
@@ -128,6 +142,13 @@ export type LoadedBotPackage = {
   templateRef: string;
   keyId: string;
   manifestSha256: string;
+  /**
+   * sha256 over the RAW BYTES of the package's sovereign-bot.json. This is
+   * the digest a verified-release authorization binds to: the updater hashes
+   * the same file inside the signature-verified bundle, so byte-identity here
+   * proves the installed catalog content is exactly what the release shipped.
+   */
+  manifestFileSha256: string;
   rootDir: string;
 };
 
@@ -284,6 +305,7 @@ export class FilesystemBotCatalog implements BotCatalog {
       templateRef: formatTemplateRef(template.id, template.version),
       keyId: BOT_PACKAGE_KEY_ID,
       manifestSha256,
+      manifestFileSha256: createHash("sha256").update(raw, "utf8").digest("hex"),
       rootDir: packageDir,
     };
   }

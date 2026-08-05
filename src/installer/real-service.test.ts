@@ -640,6 +640,7 @@ const buildTestLoadedBotPackage = (input: {
   templateRef: `${input.id}@1.0.0`,
   keyId: "repo:sovereign-ai-bots",
   manifestSha256: `test-sha-${input.id}`,
+  manifestFileSha256: `test-file-sha-${input.id}`,
   rootDir: join("/tmp", "sovereign-bot-tests", input.id),
 });
 

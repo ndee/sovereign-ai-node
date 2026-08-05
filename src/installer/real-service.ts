@@ -10,6 +10,7 @@ import {
   rename,
   rm,
   stat,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { request as httpsRequest } from "node:https";
@@ -21,8 +22,9 @@ import type {
   BotConfigRecord,
   BotConfigValue,
   LoadedBotPackage,
+  SovereignBotPackageManifest,
 } from "../bots/catalog.js";
-import { FilesystemBotCatalog } from "../bots/catalog.js";
+import { FilesystemBotCatalog, tryParseBotPackageManifest } from "../bots/catalog.js";
 import type {
   HostResourceValueExpr,
   SovereignBotHostResource,
@@ -241,6 +243,12 @@ import {
   sortToolInstances,
   toSystemdDuration,
 } from "./real-service-utils.js";
+import {
+  type AuthorizedReleaseBot,
+  findAuthorizedReleaseBot,
+  loadReleaseAuthorization,
+  type ReleaseAuthorization,
+} from "./release-authorization.js";
 import type {
   InstallerService,
   MailSentinelApplyResult,
@@ -255,6 +263,9 @@ import type {
   MatrixUserRemoveResult,
   MigrationStatusResult,
   PendingMigration,
+  ReconcileAgentWorkspacesOptions,
+  ReconcileAgentWorkspacesResult,
+  ReconcileTemplateTransitionReport,
   SovereignBotInstantiateResult,
   SovereignBotListResult,
   SovereignTemplateInstallResult,
@@ -264,6 +275,11 @@ import type {
   SovereignToolInstanceUpsertResult,
 } from "./service.js";
 import { StubInstallerService } from "./stub-service.js";
+import {
+  diffBotPackageSurfaces,
+  diffToolTemplateSurfaces,
+  type TemplateTransitionDiff,
+} from "./template-transition.js";
 import { renderTemplateWorkspaceContent } from "./workspace-documents.js";
 
 type PersistedInstallJobRecord = {
@@ -412,6 +428,30 @@ type RealInstallerServiceDeps = {
   matrixProvisioner: BundledMatrixProvisioner;
   execRunner?: ExecRunner;
   fetchImpl?: FetchLike;
+  /**
+   * Uids allowed to own a release-authorization attestation (default: root
+   * only). Injectable exclusively for tests, which cannot create root-owned
+   * files; production wiring never sets it.
+   */
+  releaseAuthorizationOwnerUids?: readonly number[];
+};
+
+type RuntimeConfigTemplatesInstalledEntry = RuntimeConfig["templates"]["installed"][number];
+
+/** A pin transition staged during an authorized reconcile, keyed by ref. */
+type StagedTemplatePinTransition = {
+  botId: string;
+  templateRef: string;
+  kind: "tool" | "agent";
+  previous: { manifestSha256: string; keyId: string };
+  next: { manifestSha256: string; keyId: string };
+  entry: RuntimeConfigTemplatesInstalledEntry;
+  diff: TemplateTransitionDiff;
+};
+
+type ReconcileTransitionContext = {
+  authorization: ReleaseAuthorization;
+  transitions: Map<string, StagedTemplatePinTransition>;
 };
 
 export class RealInstallerService implements InstallerService {
@@ -461,6 +501,15 @@ export class RealInstallerService implements InstallerService {
   // every relay enroll/refresh in a single install run sends the same identity.
   private stableInstallationId: string | null = null;
 
+  // Active verified-release transition context. Non-null ONLY while
+  // reconcileAgentWorkspaces runs with a valid release authorization; the
+  // resolveInstalled*Template pin checks consult it to stage an authorized
+  // transition instead of throwing TEMPLATE_PIN_MISMATCH. Never set by any
+  // other entry point, so every other caller keeps the hard refusal.
+  private reconcileTransitionContext: ReconcileTransitionContext | null = null;
+
+  private readonly releaseAuthorizationOwnerUids: readonly number[];
+
   // Candidate machine-id paths for resolveStableInstallationId, in priority
   // order. A protected field (not a direct constant read) only so tests can
   // redirect them to point at temp files and exercise the persisted fallback.
@@ -500,6 +549,7 @@ export class RealInstallerService implements InstallerService {
     this.matrixProvisioner = deps.matrixProvisioner;
     this.execRunner = deps.execRunner ?? null;
     this.fetchImpl = deps.fetchImpl ?? defaultFetch;
+    this.releaseAuthorizationOwnerUids = deps.releaseAuthorizationOwnerUids ?? [0];
   }
 
   private async listBotPackages(): Promise<LoadedBotPackage[]> {
@@ -2661,9 +2711,9 @@ export class RealInstallerService implements InstallerService {
    * `ifMissing` files (operator state such as user-policy.json) are left alone.
    * Idempotent — re-running it on an up-to-date device rewrites identical bytes.
    */
-  async reconcileAgentWorkspaces(): Promise<{
-    reconciled: string[];
-  }> {
+  async reconcileAgentWorkspaces(
+    options?: ReconcileAgentWorkspacesOptions,
+  ): Promise<ReconcileAgentWorkspacesResult> {
     let runtimeConfig: RuntimeConfig;
     try {
       runtimeConfig = await this.readRuntimeConfig();
@@ -2676,21 +2726,329 @@ export class RealInstallerService implements InstallerService {
         error !== null &&
         (error as { code?: unknown }).code === "CONFIG_NOT_FOUND"
       ) {
-        return { reconciled: [] };
+        return { reconciled: [], templateTransitions: [], releaseAuthorization: null };
       }
       throw error;
     }
-    await this.refreshRuntimeHostResources(runtimeConfig);
-    const reconciled: string[] = [];
-    for (const agent of runtimeConfig.openclawProfile.agents) {
-      await this.ensureManagedAgentWorkspace({
-        id: agent.id,
-        workspace: agent.workspace,
-        runtimeConfig,
-      });
-      reconciled.push(agent.id);
+
+    // A release authorization is loaded and validated up front; ANY problem
+    // with it is a hard failure — an invalid attestation must never degrade
+    // into an unauthorized transition or a silent normal reconcile.
+    const authorization =
+      options?.releaseAuthorizationPath === undefined
+        ? null
+        : loadReleaseAuthorization(options.releaseAuthorizationPath, {
+            allowedOwnerUids: this.releaseAuthorizationOwnerUids,
+          });
+    this.reconcileTransitionContext =
+      authorization === null ? null : { authorization, transitions: new Map() };
+
+    try {
+      // Compilation resolves every pinned template. With a transition context,
+      // a pin mismatch that the authorization exactly binds is STAGED (the
+      // target template is used in-memory; the pin on disk is untouched).
+      // Every other mismatch still throws here, before any file is written.
+      await this.refreshRuntimeHostResources(runtimeConfig);
+
+      const transitions = Array.from(this.reconcileTransitionContext?.transitions.values() ?? []);
+      if (transitions.length > 0 && authorization !== null) {
+        // Journal first: a crash between the workspace writes and the pin
+        // commit leaves a diagnosable marker. The journal never authorizes
+        // anything — a retry must present the (still root-owned) attestation
+        // again and re-derives every digest from scratch.
+        await this.writeTemplateTransitionJournal(authorization, transitions);
+      } else {
+        await this.clearTemplateTransitionJournal();
+      }
+
+      const reconciled: string[] = [];
+      for (const agent of runtimeConfig.openclawProfile.agents) {
+        await this.ensureManagedAgentWorkspace({
+          id: agent.id,
+          workspace: agent.workspace,
+          runtimeConfig,
+        });
+        reconciled.push(agent.id);
+      }
+
+      let committed = false;
+      if (transitions.length > 0) {
+        // Workspaces now reflect the release-authorized templates; commit the
+        // pins in one atomic config write, then verify pin ↔ catalog agreement.
+        await this.persistTemplatePinTransitions(runtimeConfig, transitions);
+        await this.verifyTemplatePinTransitions(transitions);
+        await this.clearTemplateTransitionJournal();
+        committed = true;
+      }
+
+      return {
+        reconciled,
+        templateTransitions: transitions.map((transition) =>
+          renderTemplateTransitionReport(transition, committed),
+        ),
+        releaseAuthorization:
+          authorization === null
+            ? null
+            : {
+                releaseId: authorization.releaseId,
+                artifactSha256: authorization.artifactSha256,
+                runId: authorization.runId,
+              },
+      };
+    } finally {
+      this.reconcileTransitionContext = null;
     }
-    return { reconciled };
+  }
+
+  /**
+   * Attempt to authorize a pin transition for `ref` under the active
+   * verified-release context. Returns true only when the attestation binds
+   * the EXACT installed catalog content: bot id, bot version, and the raw
+   * byte digest of the catalog's sovereign-bot.json must all match what the
+   * root updater captured from the signature-verified bundle. On success the
+   * transition (with its structural diff) is staged; nothing touches disk.
+   */
+  private tryStageTemplatePinTransition(input: {
+    kind: "tool" | "agent";
+    ref: string;
+    installed: RuntimeConfigTemplatesInstalledEntry;
+    botPackage: LoadedBotPackage;
+    next: { manifestSha256: string; keyId: string };
+    entry: RuntimeConfigTemplatesInstalledEntry;
+    targetToolTemplate?: ToolTemplateDefinition;
+  }): boolean {
+    const context = this.reconcileTransitionContext;
+    if (context === null) {
+      return false;
+    }
+    const authorizedBot = findAuthorizedReleaseBot(context.authorization, {
+      botId: input.botPackage.manifest.id,
+      botVersion: input.botPackage.manifest.version,
+      manifestFileSha256: input.botPackage.manifestFileSha256,
+    });
+    if (authorizedBot === null) {
+      return false;
+    }
+
+    const existing = context.transitions.get(input.ref);
+    if (existing !== undefined) {
+      // Already staged during this compilation pass (the same ref resolves
+      // repeatedly). Accept only the identical target.
+      return (
+        existing.next.manifestSha256 === input.next.manifestSha256 &&
+        existing.next.keyId === input.next.keyId
+      );
+    }
+
+    context.transitions.set(input.ref, {
+      botId: input.botPackage.manifest.id,
+      templateRef: input.ref,
+      kind: input.kind,
+      previous: {
+        manifestSha256: input.installed.manifestSha256,
+        keyId: input.installed.keyId,
+      },
+      next: input.next,
+      entry: input.entry,
+      diff: this.buildTemplateTransitionDiff(input, authorizedBot),
+    });
+    this.logger.info(
+      {
+        templateRef: input.ref,
+        botId: input.botPackage.manifest.id,
+        previousManifestSha256: input.installed.manifestSha256,
+        newManifestSha256: input.next.manifestSha256,
+        releaseId: context.authorization.releaseId,
+        runId: context.authorization.runId,
+      },
+      "Template pin transition authorized by verified release",
+    );
+    return true;
+  }
+
+  private buildTemplateTransitionDiff(
+    input: {
+      kind: "tool" | "agent";
+      ref: string;
+      installed: RuntimeConfigTemplatesInstalledEntry;
+      botPackage: LoadedBotPackage;
+      next: { manifestSha256: string; keyId: string };
+      targetToolTemplate?: ToolTemplateDefinition;
+    },
+    authorizedBot: AuthorizedReleaseBot,
+  ): TemplateTransitionDiff {
+    // The previous manifest content is informational (it came from the
+    // service-user-writable pre-update catalog): it feeds the operator-visible
+    // diff only, never the authorization decision. We additionally verify it
+    // actually matches the OLD pin before presenting a detailed diff, so a
+    // fabricated "previous" cannot make a transition look smaller than it is.
+    const previousManifest =
+      authorizedBot.previousManifest === undefined
+        ? null
+        : tryParseBotPackageManifest(authorizedBot.previousManifest);
+
+    if (input.kind === "tool" && input.targetToolTemplate !== undefined) {
+      const parsedRef = parseTemplateRef(input.ref);
+      const previousEntry =
+        previousManifest?.toolTemplates.find(
+          (entry) => entry.id === parsedRef.id && entry.version === parsedRef.version,
+        ) ?? null;
+      return diffToolTemplateSurfaces({
+        previous:
+          previousEntry === null
+            ? null
+            : {
+                kind: "sovereign-tool-template",
+                id: previousEntry.id,
+                version: previousEntry.version,
+                description: previousEntry.description,
+                capabilities: [...previousEntry.capabilities],
+                requiredSecretRefs: [...previousEntry.requiredSecretRefs],
+                requiredConfigKeys: [...previousEntry.requiredConfigKeys],
+                allowedCommands: [...previousEntry.allowedCommands],
+                openclawPlugins: [...previousEntry.openclawPlugins],
+                openclawBundledPlugins: [...previousEntry.openclawBundledPlugins],
+                openclawToolNames: [...previousEntry.openclawToolNames],
+              },
+        next: input.targetToolTemplate,
+        previousKeyId: input.installed.keyId,
+        nextKeyId: input.next.keyId,
+      });
+    }
+
+    return diffBotPackageSurfaces({
+      previous: previousManifest,
+      next: input.botPackage.manifest,
+      previousKeyId: input.installed.keyId,
+      nextKeyId: input.next.keyId,
+    });
+  }
+
+  private templateTransitionJournalPath(): string {
+    return join(dirname(this.paths.configPath), "template-transition-journal.json");
+  }
+
+  private async writeTemplateTransitionJournal(
+    authorization: ReleaseAuthorization,
+    transitions: StagedTemplatePinTransition[],
+  ): Promise<void> {
+    await this.writeInstallerJsonFile(
+      this.templateTransitionJournalPath(),
+      {
+        schemaVersion: 1,
+        state: "prepared",
+        createdAt: now(),
+        releaseId: authorization.releaseId,
+        artifactSha256: authorization.artifactSha256,
+        runId: authorization.runId,
+        transitions: transitions.map((transition) => ({
+          templateRef: transition.templateRef,
+          botId: transition.botId,
+          previousManifestSha256: transition.previous.manifestSha256,
+          newManifestSha256: transition.next.manifestSha256,
+        })),
+      },
+      0o600,
+    );
+  }
+
+  private async clearTemplateTransitionJournal(): Promise<void> {
+    try {
+      await unlink(this.templateTransitionJournalPath());
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
+
+  /**
+   * Commit staged pin transitions in ONE atomic config write. Operates on the
+   * raw on-disk document (read-modify-write of `templates.installed` only) so
+   * concurrent unrelated keys are preserved.
+   */
+  private async persistTemplatePinTransitions(
+    runtimeConfig: RuntimeConfig,
+    transitions: StagedTemplatePinTransition[],
+  ): Promise<void> {
+    const raw = await readFile(this.paths.configPath, "utf8");
+    const parsed = parseJsonDocument(raw);
+    if (!isRecord(parsed) || !isRecord(parsed.templates)) {
+      throw {
+        code: "CONFIG_INVALID",
+        message: "Sovereign runtime config does not match expected shape",
+        retryable: false,
+        details: { configPath: this.paths.configPath },
+      };
+    }
+    const templates = parsed.templates as Record<string, unknown>;
+    const installedRaw = Array.isArray(templates.installed) ? [...templates.installed] : [];
+    const remaining = new Map(
+      transitions.map((transition) => [transition.templateRef, transition] as const),
+    );
+    const nextInstalled = installedRaw.map((item) => {
+      if (!isRecord(item) || typeof item.id !== "string" || typeof item.version !== "string") {
+        return item;
+      }
+      const ref = formatTemplateRef(item.id, item.version);
+      const transition = remaining.get(ref);
+      if (transition === undefined) {
+        return item;
+      }
+      remaining.delete(ref);
+      return {
+        ...item,
+        ...transition.entry,
+        installedAt:
+          typeof item.installedAt === "string" ? item.installedAt : transition.entry.installedAt,
+      };
+    });
+    for (const transition of remaining.values()) {
+      nextInstalled.push(transition.entry);
+    }
+    templates.installed = nextInstalled;
+    await this.writeInstallerJsonFile(this.paths.configPath, parsed, 0o644);
+
+    // Keep the in-memory view coherent for the verification step and for any
+    // later use of this runtimeConfig object.
+    for (const transition of transitions) {
+      const updated = this.upsertInstalledTemplateEntry(
+        runtimeConfig.templates.installed,
+        transition.templateRef,
+        transition.entry,
+      );
+      runtimeConfig.templates.installed = updated.installed;
+    }
+  }
+
+  /**
+   * Post-commit verification: re-read the persisted config and require that
+   * every transitioned pin now equals its release-authorized target. Fails
+   * hard — an update must never report success with a pin/workspace split.
+   */
+  private async verifyTemplatePinTransitions(
+    transitions: StagedTemplatePinTransition[],
+  ): Promise<void> {
+    const persisted = await this.readRuntimeConfig();
+    for (const transition of transitions) {
+      const parsedRef = parseTemplateRef(transition.templateRef);
+      const entry = persisted.templates.installed.find(
+        (candidate) => candidate.id === parsedRef.id && candidate.version === parsedRef.version,
+      );
+      if (
+        entry === undefined ||
+        entry.manifestSha256 !== transition.next.manifestSha256 ||
+        entry.keyId !== transition.next.keyId ||
+        !entry.pinned
+      ) {
+        throw {
+          code: "TEMPLATE_TRANSITION_VERIFY_FAILED",
+          message: `Template pin for '${transition.templateRef}' does not match the release-authorized target after commit`,
+          retryable: true,
+          details: { templateRef: transition.templateRef },
+        };
+      }
+    }
   }
 
   async listSovereignBots(): Promise<SovereignBotListResult> {
@@ -3148,10 +3506,20 @@ export class RealInstallerService implements InstallerService {
     botPackages: LoadedBotPackage[],
     ref: string,
   ): LoadedBotPackage["toolTemplates"][number] | null {
+    return this.findBotToolTemplateWithPackage(botPackages, ref)?.toolTemplate ?? null;
+  }
+
+  private findBotToolTemplateWithPackage(
+    botPackages: LoadedBotPackage[],
+    ref: string,
+  ): {
+    botPackage: LoadedBotPackage;
+    toolTemplate: LoadedBotPackage["toolTemplates"][number];
+  } | null {
     for (const botPackage of botPackages) {
       const matched = botPackage.toolTemplates.find((entry) => entry.templateRef === ref);
       if (matched !== undefined) {
-        return matched;
+        return { botPackage, toolTemplate: matched };
       }
     }
     return null;
@@ -4481,23 +4849,39 @@ export class RealInstallerService implements InstallerService {
       return coreManifest;
     }
 
-    const botTemplate = this.findBotToolTemplate(await this.listBotPackages(), ref);
-    if (botTemplate === null) {
+    const located = this.findBotToolTemplateWithPackage(await this.listBotPackages(), ref);
+    if (located === null) {
       throw {
         code: "TEMPLATE_MANIFEST_UNAVAILABLE",
         message: `Trusted manifest for '${ref}' is unavailable`,
         retryable: false,
       };
     }
+    const botTemplate = located.toolTemplate;
     if (
       botTemplate.manifestSha256 !== installed.manifestSha256 ||
       botTemplate.keyId !== installed.keyId
     ) {
-      throw {
-        code: "TEMPLATE_PIN_MISMATCH",
-        message: `Pinned metadata does not match trusted manifest for '${ref}'`,
-        retryable: false,
-      };
+      // The trusted manifest changed relative to the pin. This stays a hard
+      // refusal UNLESS an active verified-release authorization binds the
+      // exact installed catalog bytes for this bot — in that case the
+      // transition is staged and the release-authorized template is used.
+      const authorized = this.tryStageTemplatePinTransition({
+        kind: "tool",
+        ref,
+        installed,
+        botPackage: located.botPackage,
+        next: { manifestSha256: botTemplate.manifestSha256, keyId: botTemplate.keyId },
+        entry: this.buildInstalledToolTemplateEntryFromBot(botTemplate),
+        targetToolTemplate: botTemplate.manifest,
+      });
+      if (!authorized) {
+        throw {
+          code: "TEMPLATE_PIN_MISMATCH",
+          message: `Pinned metadata does not match trusted manifest for '${ref}'`,
+          retryable: false,
+        };
+      }
     }
     return botTemplate.manifest;
   }
@@ -4543,11 +4927,24 @@ export class RealInstallerService implements InstallerService {
       botPackage.manifestSha256 !== installed.manifestSha256 ||
       botPackage.keyId !== installed.keyId
     ) {
-      throw {
-        code: "TEMPLATE_PIN_MISMATCH",
-        message: `Pinned metadata does not match trusted manifest for '${ref}'`,
-        retryable: false,
-      };
+      // Same rule as the tool branch: only an active verified-release
+      // authorization that binds this exact catalog content may transition
+      // the pin; everything else remains a hard refusal.
+      const authorized = this.tryStageTemplatePinTransition({
+        kind: "agent",
+        ref,
+        installed,
+        botPackage,
+        next: { manifestSha256: botPackage.manifestSha256, keyId: botPackage.keyId },
+        entry: this.buildInstalledTemplateEntryFromBot(botPackage),
+      });
+      if (!authorized) {
+        throw {
+          code: "TEMPLATE_PIN_MISMATCH",
+          message: `Pinned metadata does not match trusted manifest for '${ref}'`,
+          retryable: false,
+        };
+      }
     }
     return botPackage.template;
   }
@@ -5709,9 +6106,19 @@ export default function (api) {
           }
         }
       }
-      await writeFile(resource.path, resource.content, "utf8");
-      if (resource.mode !== undefined) {
-        await chmod(resource.path, Number.parseInt(resource.mode, 8));
+      // Stage-then-rename: a crash mid-write must never leave a truncated
+      // managed file at the final path (the workspace entry point is what
+      // systemd executes). rename(2) within the same directory is atomic.
+      const stagedPath = `${resource.path}.staged-${randomUUID()}`;
+      try {
+        await writeFile(stagedPath, resource.content, "utf8");
+        if (resource.mode !== undefined) {
+          await chmod(stagedPath, Number.parseInt(resource.mode, 8));
+        }
+        await rename(stagedPath, resource.path);
+      } catch (error) {
+        await rm(stagedPath, { force: true });
+        throw error;
       }
       await this.applyRuntimeOwnership(resource.path);
     }
@@ -12096,3 +12503,25 @@ export default function (api) {
     }
   }
 }
+
+const renderTemplateTransitionReport = (
+  transition: StagedTemplatePinTransition,
+  committed: boolean,
+): ReconcileTemplateTransitionReport => ({
+  botId: transition.botId,
+  templateRef: transition.templateRef,
+  kind: transition.kind,
+  previousManifestSha256: transition.previous.manifestSha256,
+  newManifestSha256: transition.next.manifestSha256,
+  previousKeyId: transition.previous.keyId,
+  newKeyId: transition.next.keyId,
+  classifications: [...transition.diff.classifications],
+  capabilitiesAdded: [...transition.diff.capabilitiesAdded],
+  capabilitiesRemoved: [...transition.diff.capabilitiesRemoved],
+  commandsAdded: [...transition.diff.commandsAdded],
+  commandsRemoved: [...transition.diff.commandsRemoved],
+  resourcesAdded: [...transition.diff.resourcesAdded],
+  resourcesRemoved: [...transition.diff.resourcesRemoved],
+  resourcesChanged: [...transition.diff.resourcesChanged],
+  committed,
+});
