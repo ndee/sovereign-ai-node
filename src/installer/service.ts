@@ -34,6 +34,41 @@ export type ManagedAgent = {
   model?: string;
 };
 
+export type ReconcileAgentWorkspacesOptions = {
+  /** Path to a root-owned verified-release authorization attestation. */
+  releaseAuthorizationPath?: string;
+};
+
+/** One template pin transitioned under verified-release authorization. */
+export type ReconcileTemplateTransitionReport = {
+  botId: string;
+  templateRef: string;
+  kind: "tool" | "agent";
+  previousManifestSha256: string;
+  newManifestSha256: string;
+  previousKeyId: string;
+  newKeyId: string;
+  classifications: string[];
+  capabilitiesAdded: string[];
+  capabilitiesRemoved: string[];
+  commandsAdded: string[];
+  commandsRemoved: string[];
+  resourcesAdded: string[];
+  resourcesRemoved: string[];
+  resourcesChanged: string[];
+  committed: boolean;
+};
+
+export type ReconcileAgentWorkspacesResult = {
+  reconciled: string[];
+  templateTransitions: ReconcileTemplateTransitionReport[];
+  releaseAuthorization: {
+    releaseId: string;
+    artifactSha256: string;
+    runId: string;
+  } | null;
+};
+
 export type ManagedAgentListResult = {
   agents: ManagedAgent[];
 };
@@ -275,8 +310,15 @@ export interface InstallerService {
    * Re-apply every managed agent's workspace files from the installed bot
    * catalog. Used after an update replaces the catalog, so the code systemd
    * runs matches the code that was installed. Does not restart the gateway.
+   *
+   * With `releaseAuthorizationPath` set (root-owned attestation written by
+   * the verified updater), a template pin whose trusted manifest changed as
+   * part of that exact verified release is transitioned; without it, any pin
+   * mismatch stays a hard TEMPLATE_PIN_MISMATCH failure.
    */
-  reconcileAgentWorkspaces(): Promise<{ reconciled: string[] }>;
+  reconcileAgentWorkspaces(
+    options?: ReconcileAgentWorkspacesOptions,
+  ): Promise<ReconcileAgentWorkspacesResult>;
   listSovereignBots(): Promise<SovereignBotListResult>;
   instantiateSovereignBot(req: {
     id: string;
