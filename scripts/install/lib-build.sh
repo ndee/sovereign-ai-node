@@ -213,6 +213,18 @@ ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl restart sovereign-matrix-rel
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl enable --now sovereign-matrix-relay-tunnel, /bin/systemctl enable --now sovereign-matrix-relay-tunnel.service
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl is-active sovereign-matrix-relay-tunnel, /bin/systemctl is-active sovereign-matrix-relay-tunnel.service
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl status sovereign-matrix-relay-tunnel, /bin/systemctl status sovereign-matrix-relay-tunnel.service
+# Mail Sentinel scan schedule units: the runtime API's configure step
+# compiles these from the bot manifest and installs them the same elevated
+# way (sudo -n tee + sudo -n systemctl). Without these rules the wizard's
+# unprivileged install could never schedule the bot, leaving a device that
+# looks healthy and never scans mail (issue #224). Exact unit names only —
+# no wildcards, so no path-traversal surface.
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/tee /etc/systemd/system/sovereign-mail-sentinel-scan.service
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/tee /etc/systemd/system/sovereign-mail-sentinel-scan.timer
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl enable sovereign-mail-sentinel-scan.service, /bin/systemctl enable sovereign-mail-sentinel-scan.timer
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl restart sovereign-mail-sentinel-scan.service, /bin/systemctl restart sovereign-mail-sentinel-scan.timer
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl is-active sovereign-mail-sentinel-scan.service, /bin/systemctl is-active sovereign-mail-sentinel-scan.timer
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl is-enabled sovereign-mail-sentinel-scan.service, /bin/systemctl is-enabled sovereign-mail-sentinel-scan.timer
 # Allow re-claiming ownership of bundled-matrix project subdirectories
 # after docker-compose has touched them as root. Restricted to that
 # path; the *:* in the chown spec keeps it bounded to numeric uid:gid.

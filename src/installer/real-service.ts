@@ -2726,7 +2726,12 @@ export class RealInstallerService implements InstallerService {
         error !== null &&
         (error as { code?: unknown }).code === "CONFIG_NOT_FOUND"
       ) {
-        return { reconciled: [], templateTransitions: [], releaseAuthorization: null };
+        return {
+          reconciled: [],
+          templateTransitions: [],
+          releaseAuthorization: null,
+          systemdUnits: { applied: [] },
+        };
       }
       throw error;
     }
@@ -2781,8 +2786,19 @@ export class RealInstallerService implements InstallerService {
         committed = true;
       }
 
+      // Converge the compiled bot systemd units (scan service/timer). The
+      // workspace loop above only writes workspace-local files; without this,
+      // a device whose units were never created (issue #224: the wizard's
+      // unprivileged configure step silently skipped them) stays unscheduled
+      // through every update while reporting healthy. Reconcile runs as root
+      // on the update path, so this is also the fleet-wide repair. A unit
+      // that cannot be converged fails the reconcile — and thereby the
+      // update — rather than leaving a bot installed but never scheduled.
+      const systemdUnits = await this.applyCompiledSystemdResourcesOrThrow(runtimeConfig);
+
       return {
         reconciled,
+        systemdUnits,
         templateTransitions: transitions.map((transition) =>
           renderTemplateTransitionReport(transition, committed),
         ),
@@ -6124,10 +6140,31 @@ export default function (api) {
     }
   }
 
-  private async applyCompiledSystemdResources(runtimeConfig: RuntimeConfig): Promise<void> {
-    if (typeof process.getuid !== "function" || process.getuid() !== 0) {
-      return;
-    }
+  /**
+   * Write and enable the compiled bot systemd units (e.g. Mail Sentinel's
+   * scan service + timer).
+   *
+   * This must work from BOTH privilege contexts that create or update bots:
+   * the root updater (reconcile during a verified update) and the
+   * unprivileged Pro API service (the install wizard's configure step, bot
+   * reconfiguration at runtime). The unprivileged path elevates through the
+   * scoped sudoers fragment exactly like the gateway and relay-tunnel units
+   * do — an earlier revision instead silently returned when not running as
+   * root, which is how a wizard-installed device ended up with a fully
+   * installed, correctly pinned Mail Sentinel that was never scheduled
+   * (issue #224).
+   *
+   * Never throws: every unit that could not be converged is reported in
+   * `failed` so callers decide whether that is fatal (reconcile and the
+   * install step treat it as a hard error via
+   * applyCompiledSystemdResourcesOrThrow).
+   */
+  private async applyCompiledSystemdResources(runtimeConfig: RuntimeConfig): Promise<{
+    applied: string[];
+    failed: Array<{ name: string; reason: string }>;
+  }> {
+    const applied: string[] = [];
+    const failed: Array<{ name: string; reason: string }> = [];
 
     const systemdResources = (runtimeConfig.hostResources?.resources ?? []).filter(
       (
@@ -6136,7 +6173,7 @@ export default function (api) {
         resource.kind === "systemdService" || resource.kind === "systemdTimer",
     );
     if (systemdResources.length === 0) {
-      return;
+      return { applied, failed };
     }
 
     const changedUnits: Array<{
@@ -6165,7 +6202,7 @@ export default function (api) {
         continue;
       }
       try {
-        await writeFile(unitPath, resource.content, "utf8");
+        await this.writeSystemdUnitFileElevated(unitPath, resource.content);
       } catch (error) {
         this.logger.warn(
           {
@@ -6174,6 +6211,7 @@ export default function (api) {
           },
           "Failed to write bot systemd unit",
         );
+        failed.push({ name: resource.name, reason: describeError(error) });
         continue;
       }
       changedUnits.push({
@@ -6187,23 +6225,64 @@ export default function (api) {
     }
 
     if (changedUnits.length === 0) {
-      return;
+      return { applied, failed };
     }
 
-    const reloadResult = await this.safeExec("systemctl", ["daemon-reload"]);
+    const reloadResult = await this.runSystemctlElevated(["daemon-reload"]);
     if (!reloadResult.ok || reloadResult.result.exitCode !== 0) {
       this.logger.warn("systemctl daemon-reload failed after writing bot systemd units");
-      return;
+      for (const unit of changedUnits) {
+        failed.push({ name: unit.name, reason: "systemctl daemon-reload failed" });
+      }
+      return { applied, failed };
     }
 
     for (const unit of changedUnits) {
+      let unitOk = true;
       if (unit.desiredState.enabled) {
-        await this.safeExec("systemctl", ["enable", unit.name]);
+        const enableResult = await this.runSystemctlElevated(["enable", unit.name]);
+        if (!enableResult.ok || enableResult.result.exitCode !== 0) {
+          unitOk = false;
+          failed.push({ name: unit.name, reason: `systemctl enable ${unit.name} failed` });
+        }
       }
-      if (unit.desiredState.active) {
-        await this.safeExec("systemctl", ["restart", unit.name]);
+      if (unitOk && unit.desiredState.active) {
+        const restartResult = await this.runSystemctlElevated(["restart", unit.name]);
+        if (!restartResult.ok || restartResult.result.exitCode !== 0) {
+          unitOk = false;
+          failed.push({ name: unit.name, reason: `systemctl restart ${unit.name} failed` });
+        }
+      }
+      if (unitOk) {
+        applied.push(unit.name);
       }
     }
+    return { applied, failed };
+  }
+
+  /**
+   * Like applyCompiledSystemdResources, but any unit that could not be
+   * converged is a hard, structured failure. Used where a missing bot
+   * schedule must never pass silently: the install configure step and the
+   * update-path reconcile. A bot whose manifest declares a scan timer and
+   * whose host cannot realize it is not a working install (issue #224 — a
+   * device passed every check and never scanned mail).
+   */
+  private async applyCompiledSystemdResourcesOrThrow(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<{ applied: string[] }> {
+    const report = await this.applyCompiledSystemdResources(runtimeConfig);
+    if (report.failed.length > 0) {
+      throw {
+        code: "BOT_SYSTEMD_APPLY_FAILED",
+        message: `bot systemd units could not be applied: ${report.failed
+          .map((entry) => `${entry.name} (${entry.reason})`)
+          .join(", ")}`,
+        retryable: true,
+        details: { failed: report.failed, applied: report.applied },
+      };
+    }
+    return { applied: report.applied };
   }
 
   private resolveManagedAgentSessionsDir(runtimeConfig: RuntimeConfig, agentId: string): string {
@@ -8342,7 +8421,11 @@ export default function (api) {
           if (topologyChanged) {
             await this.persistManagedAgentTopologyDocument(runtimeConfig);
           }
-          await this.applyCompiledSystemdResources(runtimeConfig);
+          // Hard failure by design: the install wizard runs unprivileged, and
+          // a bot whose declared scan schedule cannot be written/enabled here
+          // would otherwise complete as a healthy-looking node that never
+          // scans mail (issue #224).
+          await this.applyCompiledSystemdResourcesOrThrow(runtimeConfig);
           await this.writeOpenClawRuntimeArtifacts(runtimeConfig);
           stepState.runtimeConfig = runtimeConfig;
           this.setManagedOpenClawEnv(runtimeConfig);
