@@ -28,6 +28,7 @@ const templateTransitionSchema = z
 const reconcileResultSchema = z
   .object({
     reconciled: z.array(z.string()),
+    systemdUnits: z.object({ applied: z.array(z.string()) }).strict(),
     templateTransitions: z.array(templateTransitionSchema),
     releaseAuthorization: z
       .object({

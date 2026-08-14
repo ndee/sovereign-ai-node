@@ -525,10 +525,16 @@ export class StubInstallerService implements InstallerService {
 
   async reconcileAgentWorkspaces(): Promise<{
     reconciled: string[];
+    systemdUnits: { applied: string[] };
     templateTransitions: never[];
     releaseAuthorization: null;
   }> {
-    return { reconciled: ["mail-sentinel"], templateTransitions: [], releaseAuthorization: null };
+    return {
+      reconciled: ["mail-sentinel"],
+      systemdUnits: { applied: [] },
+      templateTransitions: [],
+      releaseAuthorization: null,
+    };
   }
 
   async listSovereignBots(): Promise<SovereignBotListResult> {

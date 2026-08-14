@@ -61,6 +61,14 @@ export type ReconcileTemplateTransitionReport = {
 
 export type ReconcileAgentWorkspacesResult = {
   reconciled: string[];
+  /**
+   * Compiled bot systemd units (scan service/timer) that were written and
+   * enabled by this reconcile. Empty when every unit already matched. A unit
+   * that cannot be converged makes the reconcile throw
+   * BOT_SYSTEMD_APPLY_FAILED — a bot that is installed but never scheduled
+   * must not pass as reconciled (issue #224).
+   */
+  systemdUnits: { applied: string[] };
   templateTransitions: ReconcileTemplateTransitionReport[];
   releaseAuthorization: {
     releaseId: string;
