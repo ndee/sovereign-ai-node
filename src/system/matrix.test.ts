@@ -281,6 +281,8 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(caddyText).toContain("@onboardApi path /onboard/api /onboard/api/*");
       expect(caddyText).toContain("reverse_proxy onboarding-api:8090");
       expect(caddyText).toContain("reverse_proxy synapse:8008");
+      // Synapse admin API blocked at the edge (kept off the public surface).
+      expect(caddyText).toContain("@synapseAdmin path /_synapse/admin /_synapse/admin/*");
 
       const wellKnownClient = await readFile(
         join(result.projectDir, "well-known", ".well-known", "matrix", "client"),
@@ -609,6 +611,13 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(caddyText).not.toContain("tls internal");
       expect(caddyText).not.toContain("/downloads/caddy-root-ca.crt");
       expect(caddyText).toContain("@onboardApi path /onboard/api /onboard/api/*");
+      // The relay edge is internet-reachable via the tunnel; the Synapse
+      // admin API must be blocked at the edge and never reach Synapse.
+      expect(caddyText).toContain("@synapseAdmin path /_synapse/admin /_synapse/admin/*");
+      expect(caddyText).toContain("respond 403");
+      expect(caddyText.indexOf("@synapseAdmin")).toBeLessThan(
+        caddyText.indexOf("reverse_proxy synapse:8008"),
+      );
       expect(envText).toContain("MATRIX_FEDERATION_ENABLED=true");
       expect(homeserverYaml).not.toContain("federation_domain_whitelist: []");
       expect(wellKnownServer).toContain('"m.server": "node-abc.relay.example.com:443"');
