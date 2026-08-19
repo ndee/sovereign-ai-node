@@ -11,6 +11,8 @@ by the `.github/workflows/release.yml` workflow.
 
 ## [Unreleased]
 
+- **Put the service user's npm prefix on every bot unit's `PATH`.** `ensureLobsterCliInstalled` installs the lobster CLI into `<service home>/.npm-global/bin` and relied on a `10-lobster-path.conf` drop-in that never existed, while bot units (mail-sentinel's scan unit) render the manifest's literal system `PATH` — so on every install where lobster lived only in that prefix (Pro web installer, Pi image) the semantic reviewer failed with `spawn lobster ENOENT` on every candidate. The host-resource renderer now prepends the resolved `<getent passwd home>/.npm-global/bin` (same resolution and fallback as the install/probe) to any `PATH` a bot-declared systemd unit sets, once, so the unit can reach what the installer installed. ([#232](https://github.com/ndee/sovereign-ai-node/issues/232))
+
 ## [2.3.5] - 2026-07-02
 
 Patch hardening ARM (aarch64) relay-passthrough installs so they succeed without manual intervention.

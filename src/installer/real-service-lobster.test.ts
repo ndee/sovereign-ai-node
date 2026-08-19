@@ -1,9 +1,14 @@
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
 import type { ExecResult, ExecRunner } from "../system/exec.js";
-import { detectInstalledLobsterCli, ensureLobsterCliInstalled } from "./real-service-lobster.js";
+import {
+  detectInstalledLobsterCli,
+  ensureLobsterCliInstalled,
+  resolveServiceNpmBinDir,
+} from "./real-service-lobster.js";
 
 const buildExecRunner = (
   responses: ExecResult[],
@@ -266,6 +271,22 @@ describe("real-service-lobster", () => {
     ).rejects.toMatchObject({
       code: "LOBSTER_INSTALL_FAILED",
       message: "Lobster CLI installed but required workflow commands are unavailable",
+    });
+  });
+
+  // #232: the unit PATH must point at the same prefix the install/probe uses.
+  describe("resolveServiceNpmBinDir", () => {
+    it("returns the service home's npm prefix bin dir", () => {
+      expect(resolveServiceNpmBinDir("/var/lib/sovereign-node")).toBe(
+        "/var/lib/sovereign-node/.npm-global/bin",
+      );
+      expect(resolveServiceNpmBinDir("  /srv/svc  ")).toBe("/srv/svc/.npm-global/bin");
+    });
+
+    it("falls back to the captured original HOME like the install path does", () => {
+      const expectedHome = process.env.HOME ?? homedir();
+      expect(resolveServiceNpmBinDir(undefined)).toBe(join(expectedHome, ".npm-global", "bin"));
+      expect(resolveServiceNpmBinDir("   ")).toBe(join(expectedHome, ".npm-global", "bin"));
     });
   });
 });
