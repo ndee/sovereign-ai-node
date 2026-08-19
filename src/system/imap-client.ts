@@ -5,6 +5,13 @@ import { ImapFlow, type ImapFlowOptions } from "imapflow";
 import type { Logger } from "../logging/logger.js";
 
 const DEFAULT_IMAP_CONNECTION_TIMEOUT_MS = 10_000;
+// Floor for imapflow's *idle* socket timeout (no bytes in either direction).
+// It used to be a flat 3x the connect timeout (30 s), which undercut the
+// per-call budget callers run a whole search or read under (mail-sentinel:
+// 60 s), and a remote provider (Gmail, #231) was observed taking 3–59 s for a
+// small SINCE search — so a 30 s silence is not abnormal there. The connect
+// and greeting timeouts stay at `timeoutMs`; only the idle timeout is floored.
+const MIN_IMAP_SOCKET_IDLE_TIMEOUT_MS = 60_000;
 
 export type ImapAccountCredentials = {
   host: string;
@@ -32,7 +39,10 @@ export type ImapClientLike = Pick<
   | "mailbox"
   | "mailboxOpen"
   | "search"
->;
+> &
+  // Optional so the many test doubles that are plain objects keep type-checking;
+  // the real ImapFlow is an EventEmitter and always has both.
+  Partial<Pick<ImapFlow, "on" | "off">>;
 
 export type ImapClientFactory = (options: ImapFlowOptions) => ImapClientLike;
 
@@ -97,7 +107,7 @@ const buildBaseOptions = (input: {
     disableAutoIdle: true,
     connectionTimeout: input.timeoutMs,
     greetingTimeout: input.timeoutMs,
-    socketTimeout: input.timeoutMs * 3,
+    socketTimeout: Math.max(input.timeoutMs * 3, MIN_IMAP_SOCKET_IDLE_TIMEOUT_MS),
   };
 
   if (allowSelfSignedTls) {
@@ -208,10 +218,23 @@ export const runWithImapClient = async <T>(
 
   for (const attempt of attempts) {
     const client = clientFactory(attempt.options);
+    // imapflow reports a socket timeout / reset that lands mid-command by
+    // emitting 'error' on the client (and tearing the connection down, which
+    // rejects the in-flight command with a generic "connection closed"). With
+    // no listener Node throws that emit as an uncaught exception and the
+    // whole tool process dies with a stack trace instead of a structured
+    // error (#231). Capture it here so the handler's rejection can carry the
+    // real cause ("Socket timeout", ETIMEOUT) and the process exits cleanly.
+    let emittedError: unknown;
+    const onClientError = (error: unknown): void => {
+      emittedError ??= error;
+    };
+    client.on?.("error", onClientError);
 
     try {
       await client.connect();
     } catch (error) {
+      client.off?.("error", onClientError);
       failures.push({
         strategy: attempt.label,
         reason: describeUnknownError(error),
@@ -236,7 +259,30 @@ export const runWithImapClient = async <T>(
 
     try {
       return await handler(client, attempt);
+    } catch (error) {
+      if (emittedError === undefined || error instanceof ImapConnectionError) {
+        throw error;
+      }
+      const reason = describeUnknownError(emittedError);
+      throw new ImapConnectionError(
+        "IMAP_CONNECTION_LOST",
+        `IMAP connection lost during ${attempt.label} session: ${reason}`,
+        true,
+        {
+          strategy: attempt.label,
+          reason,
+          ...(typeof emittedError === "object" &&
+          emittedError !== null &&
+          "code" in emittedError &&
+          typeof emittedError.code === "string"
+            ? { code: emittedError.code }
+            : {}),
+          handlerError: describeUnknownError(error),
+        },
+        { cause: emittedError instanceof Error ? emittedError : undefined },
+      );
     } finally {
+      client.off?.("error", onClientError);
       await closeClientQuietly(client);
     }
   }

@@ -11,6 +11,8 @@ by the `.github/workflows/release.yml` workflow.
 
 ## [Unreleased]
 
+- **Turn an IMAP socket timeout into a structured error instead of a crash, and stop the idle timeout undercutting the caller's budget.** `runWithImapClient` never listened for the client's `'error'` event, so imapflow's idle `Socket timeout` (`ETIMEOUT`) mid-search/read was thrown as an uncaught exception: `sovereign-tool imap-search-mail` died with a Node stack trace instead of the `{ ok:false, error }` envelope, and the bot/journal saw a crash dump. The client error is now captured and surfaced as `IMAP_CONNECTION_LOST` (retryable, with the strategy, reason and code), and the idle socket timeout is floored at 60 s (connect/greeting stay at the call timeout) so a remote provider that answers late (Gmail, 3–59 s observed for a small `SINCE` search) is not cut off at 30 s while the caller still has 60 s. ([#231](https://github.com/ndee/sovereign-ai-node/issues/231))
+
 ## [2.3.5] - 2026-07-02
 
 Patch hardening ARM (aarch64) relay-passthrough installs so they succeed without manual intervention.
