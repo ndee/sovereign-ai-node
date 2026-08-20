@@ -13823,6 +13823,174 @@ describe("RealInstallerService.resolveServiceUserHome", () => {
   });
 });
 
+// #232: bot-declared units get the service user's npm prefix bin dir on PATH
+// — the directory ensureLobsterCliInstalled installs into — so they can exec
+// `lobster` by bare name. Before this nothing bridged the manifest's literal
+// PATH and the install location, and mail-sentinel's semantic review failed
+// with `spawn lobster ENOENT` wherever lobster lived only in that prefix.
+describe("RealInstallerService bot unit PATH carries the service npm prefix (#232)", () => {
+  const buildPaths = (): SovereignPaths => ({
+    configPath: "/etc/sovereign-node/sovereign-node.json5",
+    secretsDir: "/etc/sovereign-node/secrets",
+    stateDir: "/var/lib/sovereign-node",
+    logsDir: "/var/log/sovereign-node",
+    installJobsDir: "/var/lib/sovereign-node/install-jobs",
+    openclawServiceHome: "/var/lib/sovereign-node/openclaw-home",
+    provenancePath: "/var/lib/sovereign-node/install-provenance.json",
+    backupsDir: "/var/lib/sovereign-node/backups",
+  });
+
+  const buildService = (
+    execRun: ((input: ExecInput) => Promise<ExecResult>) | null,
+  ): RealInstallerService =>
+    new RealInstallerService(createLogger(), buildPaths(), {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async (opts): Promise<OpenClawInstallInfo> => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: opts.version,
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async (): Promise<BundledMatrixProvisionResult> => {
+          throw new Error("unexpected provision call");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("unexpected bootstrapAccounts call");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("unexpected bootstrapRoom call");
+        },
+        test: async (req) => ({ ok: true, homeserverUrl: req.publicBaseUrl, checks: [] }),
+      },
+      ...(execRun === null ? {} : { execRunner: { run: execRun } }),
+    });
+
+  type Internals = {
+    resolveHostResourceEnvironmentValue: (
+      context: { serviceNpmBinDir?: string },
+      key: string,
+      value: string,
+    ) => string;
+    resolveServiceNpmBinDir: (runtimeConfig: RuntimeConfig) => Promise<string | undefined>;
+    renderSystemdServiceResource: (
+      context: { serviceNpmBinDir?: string },
+      resource: Record<string, unknown>,
+    ) => string;
+  };
+  const internalsOf = (service: RealInstallerService): Internals => service as unknown as Internals;
+
+  const systemPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+  const npmBin = "/var/lib/sovereign-node/.npm-global/bin";
+
+  it("prepends the service npm bin dir to a declared PATH, once", () => {
+    const { resolveHostResourceEnvironmentValue } = internalsOf(buildService(null));
+    const context = { serviceNpmBinDir: npmBin };
+    // Pure function of (context, key, value); no `this` involved.
+    expect(resolveHostResourceEnvironmentValue(context, "PATH", systemPath)).toBe(
+      `${npmBin}:${systemPath}`,
+    );
+    // Already present (anywhere) → unchanged, no duplicate.
+    expect(
+      resolveHostResourceEnvironmentValue(context, "PATH", `/opt/bin:${npmBin}:/usr/bin`),
+    ).toBe(`/opt/bin:${npmBin}:/usr/bin`);
+    // Empty segments are dropped rather than turned into ".".
+    expect(resolveHostResourceEnvironmentValue(context, "PATH", "/usr/bin::/bin")).toBe(
+      `${npmBin}:/usr/bin:/bin`,
+    );
+  });
+
+  it("leaves non-PATH variables and contexts without a resolved dir alone", () => {
+    const { resolveHostResourceEnvironmentValue } = internalsOf(buildService(null));
+    expect(
+      resolveHostResourceEnvironmentValue({ serviceNpmBinDir: npmBin }, "HOME", "/srv/home"),
+    ).toBe("/srv/home");
+    expect(resolveHostResourceEnvironmentValue({}, "PATH", systemPath)).toBe(systemPath);
+  });
+
+  it("resolves the dir from the configured service user's passwd home", async () => {
+    const service = buildService(async (input) => {
+      expect([input.command, ...(input.args ?? [])].join(" ")).toBe("getent passwd sovereign-node");
+      return {
+        command: "getent passwd sovereign-node",
+        exitCode: 0,
+        stdout: "sovereign-node:x:998:998::/var/lib/sovereign-node:/usr/sbin/nologin\n",
+        stderr: "",
+      };
+    });
+    const runtimeConfig = {
+      openclaw: { serviceUser: "sovereign-node", serviceGroup: "sovereign-node" },
+    } as unknown as RuntimeConfig;
+    const previousUser = process.env.SOVEREIGN_NODE_SERVICE_USER;
+    const previousGroup = process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+    delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+    delete process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+    try {
+      expect(await internalsOf(service).resolveServiceNpmBinDir(runtimeConfig)).toBe(npmBin);
+    } finally {
+      if (previousUser !== undefined) process.env.SOVEREIGN_NODE_SERVICE_USER = previousUser;
+      if (previousGroup !== undefined) process.env.SOVEREIGN_NODE_SERVICE_GROUP = previousGroup;
+    }
+  });
+
+  it("renders the mail-sentinel scan unit with the npm bin dir ahead of the declared PATH", () => {
+    const internals = internalsOf(buildService(null));
+    const resource = {
+      id: "scan-service",
+      kind: "systemdService",
+      spec: {
+        name: "sovereign-mail-sentinel-scan.service",
+        description: "Sovereign Mail Sentinel Scan mail-sentinel",
+        after: ["network-online.target"],
+        wants: ["network-online.target"],
+        type: "oneshot",
+        user: "sovereign-node",
+        group: "sovereign-node",
+        workingDirectory: "/var/lib/sovereign-node/mail-sentinel/workspace",
+        environment: {
+          HOME: "/var/lib/sovereign-node/openclaw-home",
+          PATH: systemPath,
+        },
+        execStart: ["/usr/bin/env", "node", "bin/mail-sentinel.js", "scan"],
+        timeoutStartSec: 300,
+        wantedBy: [],
+        desiredState: { enabled: false, active: false },
+      },
+    };
+    const rendered = internals.renderSystemdServiceResource({ serviceNpmBinDir: npmBin }, resource);
+    expect(rendered).toContain(`Environment=PATH=${npmBin}:${systemPath}\n`);
+    expect(rendered).toContain("Environment=HOME=/var/lib/sovereign-node/openclaw-home\n");
+    // Without a resolved dir the manifest's literal PATH is rendered verbatim.
+    expect(internals.renderSystemdServiceResource({}, resource)).toContain(
+      `Environment=PATH=${systemPath}\n`,
+    );
+  });
+});
+
 describe("ensureMatrixCryptoRuntimeWritable (issue #207)", () => {
   const buildPaths = (tempRoot: string): SovereignPaths => ({
     configPath: join(tempRoot, "etc", "sovereign-node.json5"),
