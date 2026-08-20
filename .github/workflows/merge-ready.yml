@@ -1,0 +1,93 @@
+# Merge Ready — the merge gate, as a check instead of prose.
+#
+# A pull request is merge-ready only when a human can merge it without
+# re-deriving anything. This job refuses the three things that used to be
+# caught (or missed) by hand:
+#   1. closing keywords ("Closes #N", "Fixes #N", …) — issues must stay open
+#      through the testing stage; use "Refs #N" / "Part of #N".
+#   2. a missing "## Validation" (or "## Evidence") section in the PR body.
+#   3. installer-affecting changes without named evidence in that section:
+#      a dev-VM fresh install + upgrade, a Pi / @web run, an e2e run — or an
+#      explicit "CI-only" statement when nothing outside CI is affected.
+# It re-runs when the body is edited, so fixing the description re-checks
+# without a push. Drafts are checked too, so "ready" is visible early.
+name: Merge Ready
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  merge_ready:
+    name: Merge Ready
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          # Paths whose change means "this can break an installed node".
+          # Glob-ish prefixes/patterns, one per line.
+          INSTALLER_PATHS: |
+            scripts/install*
+            scripts/install/**
+            src/installer/**
+            src/system/**
+            deploy/**
+            package.json
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const title = pr.title || '';
+            const body = pr.body || '';
+            const problems = [];
+            const notes = [];
+
+            // 1. closing keywords that reference an issue in this repo
+            const closing = /\b(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)\b\s*:?\s*#\d+/i;
+            const m = (title + '\n' + body).match(closing);
+            if (m) problems.push(`closing keyword "${m[0]}" — use "Refs #N" / "Part of #N"; issues stay open until tested (see docs/ISSUE_LIFECYCLE.md)`);
+
+            // 2. validation / evidence section (heading "Validation" or "Evidence", any level)
+            const bl = body.split('\n');
+            let start = -1, level = 0;
+            for (let i = 0; i < bl.length; i++) {
+              const h = bl[i].match(/^(#{1,6})\s*(validation|evidence)\b/i);
+              if (h) { start = i; level = h[1].length; break; }
+            }
+            let evidence = '';
+            if (start < 0) {
+              problems.push('no "## Validation" (or "## Evidence") section in the PR body');
+            } else {
+              let end = bl.length;
+              for (let j = start + 1; j < bl.length; j++) {
+                const h = bl[j].match(/^(#{1,6})\s/);
+                if (h && h[1].length <= level) { end = j; break; }
+              }
+              evidence = bl.slice(start + 1, end).join('\n');
+              if (!evidence.trim()) problems.push('the Validation section is empty');
+            }
+
+            // 3. installer-affecting change ⇒ evidence must be named
+            const patterns = process.env.INSTALLER_PATHS.split('\n').map(s => s.trim()).filter(Boolean);
+            const toRe = p => new RegExp('^' + p.split('**').map(x => x.split('*').map(y => y.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*')).join('.*') + '$');
+            const res = patterns.map(toRe);
+            const files = await github.paginate(github.rest.pulls.listFiles, { owner: context.repo.owner, repo: context.repo.repo, pull_number: pr.number, per_page: 100 });
+            const touched = files.map(f => f.filename).filter(f => res.some(r => r.test(f)));
+            if (touched.length) {
+              notes.push(`installer-affecting files: ${touched.slice(0, 8).join(', ')}${touched.length > 8 ? ` (+${touched.length - 8})` : ''}`);
+              const ok = /(dev[- ]vm|proxmox|fresh install|upgrade|raspberry|\bpi\b|@web|e2e|readiness|ci[- ]only)/i.test(evidence);
+              if (!ok) problems.push('installer-affecting change but the Validation section names no evidence — state the dev-VM fresh install + upgrade / Pi / e2e run, or write "CI-only" and why');
+            } else {
+              notes.push('no installer-affecting files changed');
+            }
+
+            const lines = [];
+            lines.push(`### Merge Ready — ${problems.length ? 'NOT ready' : 'ready'}`);
+            for (const n of notes) lines.push(`- ${n}`);
+            for (const p of problems) lines.push(`- ❌ ${p}`);
+            await core.summary.addRaw(lines.join('\n')).write();
+            if (problems.length) core.setFailed(problems.join(' | '));
+            else core.info('merge-ready');
