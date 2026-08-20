@@ -139,7 +139,7 @@ import {
   renderGuardedJsonStateWorkspacePluginConfig as renderGuardedJsonStateWorkspacePluginConfigFile,
   renderGuardedJsonStateWorkspacePluginManifest as renderGuardedJsonStateWorkspacePluginManifestFile,
 } from "./real-service-guarded-json-state-plugin.js";
-import { ensureLobsterCliInstalled } from "./real-service-lobster.js";
+import { ensureLobsterCliInstalled, resolveServiceNpmBinDir } from "./real-service-lobster.js";
 import {
   buildRelayProvisionRequest as buildRelayProvisionRequestFile,
   generateManagedRelayRequestedSlug as generateManagedRelayRequestedSlugFile,
@@ -304,6 +304,13 @@ type HostResourceContext = {
   botInstance?: RuntimeBotInstance;
   toolInstanceIds: string[];
   toolInstanceIdMap: Record<string, string>;
+  /**
+   * `<service user home>/.npm-global/bin` — where the installer puts the
+   * lobster (and openclaw) CLIs for the service user. Prepended to any PATH a
+   * bot-declared systemd unit sets, so the unit can exec those CLIs by bare
+   * name (#232). Absent when it could not be resolved (no exec runner).
+   */
+  serviceNpmBinDir?: string;
 };
 
 type MaterializedBotToolInstance = RuntimeConfig["sovereignTools"]["instances"][number] & {
@@ -3844,6 +3851,7 @@ export class RealInstallerService implements InstallerService {
   ): Promise<CompiledHostPlan> {
     const resources: CompiledHostResource[] = [];
     const botStatus: CompiledBotStatus[] = [];
+    const serviceNpmBinDir = await this.resolveServiceNpmBinDir(runtimeConfig);
 
     for (const botPackage of botPackages) {
       const agents = runtimeConfig.openclawProfile.agents.filter(
@@ -3864,6 +3872,7 @@ export class RealInstallerService implements InstallerService {
             botPackage,
             botInstance?.id ?? agent.id,
           ),
+          ...(serviceNpmBinDir === undefined ? {} : { serviceNpmBinDir }),
         };
         for (const resource of botPackage.manifest.hostResources) {
           if (!this.isBotHostResourceEnabled(context, resource.enabledWhen)) {
@@ -4339,7 +4348,12 @@ export class RealInstallerService implements InstallerService {
             `WorkingDirectory=${this.resolveHostResourceString(context, resource.spec.workingDirectory)}`,
           ]),
       ...Object.entries(resource.spec.environment).map(
-        ([key, value]) => `Environment=${key}=${this.resolveHostResourceString(context, value)}`,
+        ([key, value]) =>
+          `Environment=${key}=${this.resolveHostResourceEnvironmentValue(
+            context,
+            key,
+            this.resolveHostResourceString(context, value),
+          )}`,
       ),
       `ExecStart=${resource.spec.execStart.map((entry) => this.resolveHostResourceString(context, entry)).join(" ")}`,
       ...(resource.spec.timeoutStartSec === undefined
@@ -4357,6 +4371,36 @@ export class RealInstallerService implements InstallerService {
       "",
     ];
     return lines.join("\n");
+  }
+
+  // A bot manifest declares its unit PATH as a literal (mail-sentinel's scan
+  // unit: the fixed system default), while the installer puts the lobster and
+  // openclaw CLIs into the *service user's* npm prefix. Nothing else bridged
+  // the two, so the unit could not exec `lobster` by bare name — mail-sentinel
+  // lost its semantic reviewer on every install where lobster existed only
+  // there (#232). Prepend the prefix's bin dir to every declared PATH, once.
+  private resolveHostResourceEnvironmentValue(
+    context: HostResourceContext,
+    key: string,
+    value: string,
+  ): string {
+    if (key !== "PATH" || context.serviceNpmBinDir === undefined) {
+      return value;
+    }
+    const entries = value.split(":").filter((entry) => entry.length > 0);
+    if (entries.includes(context.serviceNpmBinDir)) {
+      return value;
+    }
+    return [context.serviceNpmBinDir, ...entries].join(":");
+  }
+
+  // The service user's npm prefix bin dir — resolved from `getent passwd`
+  // like the lobster install/probe, with the same original-HOME fallback for
+  // root/dev installs, so the unit PATH and the install location cannot drift.
+  private async resolveServiceNpmBinDir(runtimeConfig: RuntimeConfig): Promise<string | undefined> {
+    const serviceIdentity = this.getConfiguredServiceIdentity(runtimeConfig);
+    const serviceHome = await this.resolveServiceUserHome(serviceIdentity.user);
+    return resolveServiceNpmBinDir(serviceHome ?? undefined);
   }
 
   private renderSystemdTimerResource(
