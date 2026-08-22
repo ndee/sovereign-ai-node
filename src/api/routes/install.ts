@@ -6,6 +6,7 @@ import {
   testAlertRequestSchema,
   testImapRequestSchema,
   testMatrixRequestSchema,
+  testOpenrouterRequestSchema,
 } from "../../contracts/api.js";
 import {
   installJobStatusResponseSchema,
@@ -15,6 +16,7 @@ import {
   testAlertResultSchema,
   testImapResultSchema,
   testMatrixResultSchema,
+  testOpenrouterResultSchema,
 } from "../../contracts/index.js";
 import { sendApiError, sendApiSuccess } from "../response.js";
 
@@ -35,6 +37,20 @@ export const registerInstallRoutes = (server: FastifyInstance, app: AppContainer
       const body = testImapRequestSchema.parse(request.body);
       const result = await app.installerService.testImap(body);
       return sendApiSuccess(reply, result, testImapResultSchema);
+    } catch (error) {
+      return sendApiError(reply, 400, error);
+    }
+  });
+
+  // Key-only check against OpenRouter's auth/key endpoint. The key is read
+  // from the JSON body, forwarded once in an Authorization header, and never
+  // logged or echoed; the response carries at most OpenRouter's key label.
+  server.post("/api/install/test-openrouter", async (request, reply) => {
+    try {
+      const body = testOpenrouterRequestSchema.parse(request.body);
+      const result = await app.installerService.testOpenrouter(body);
+      reply.header("Cache-Control", "no-store");
+      return sendApiSuccess(reply, result, testOpenrouterResultSchema);
     } catch (error) {
       return sendApiError(reply, 400, error);
     }

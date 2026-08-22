@@ -9,6 +9,7 @@ import type {
 import PostalMime from "postal-mime";
 
 import { DEFAULT_PATHS } from "../config/paths.js";
+import type { MailProtocol } from "../contracts/install.js";
 import type { ImapReadMailResult, ImapSearchMailResult } from "../contracts/tool.js";
 import type { RuntimeConfig } from "../installer/real-service-shared.js";
 import { parseRuntimeConfigDocument } from "../installer/real-service-shared.js";
@@ -18,6 +19,19 @@ import {
   runWithImapClient,
 } from "../system/imap-client.js";
 import { parseTemplateRef } from "../templates/catalog.js";
+import {
+  normalizeParsedHeaders,
+  parseBooleanString,
+  parsePort,
+  resolveSecretRefValue,
+  SovereignToolError,
+  stripHtmlTags,
+  truncateText,
+} from "./mail-shared.js";
+
+import { Pop3ReadonlyToolService } from "./pop3-readonly.js";
+
+export { SovereignToolError } from "./mail-shared.js";
 
 const DEFAULT_MAX_SEARCH_RESULTS = 10;
 const MAX_SEARCH_RESULTS = 50;
@@ -33,23 +47,11 @@ type RuntimeConfigLoader = (configPath: string) => Promise<RuntimeConfig>;
 
 type ResolvedImapToolInstance = {
   instanceId: string;
+  protocol: MailProtocol;
   account: ImapAccountCredentials & {
     mailbox: string;
   };
 };
-
-export class SovereignToolError extends Error {
-  constructor(
-    readonly code: string,
-    message: string,
-    readonly retryable: boolean,
-    readonly details?: Record<string, unknown>,
-    options?: ErrorOptions,
-  ) {
-    super(message, options);
-    this.name = "SovereignToolError";
-  }
-}
 
 const defaultRuntimeConfigLoader: RuntimeConfigLoader = async (configPath) => {
   let raw: string;
@@ -89,96 +91,17 @@ const defaultRunner: ToolRunner = async (account, handler) =>
 const defaultConfigPath = (): string =>
   process.env.SOVEREIGN_NODE_CONFIG ?? DEFAULT_PATHS.configPath;
 
-const resolveSecretRefValue = async (secretRef: string): Promise<string> => {
-  if (secretRef.startsWith("file:")) {
-    const filePath = secretRef.slice("file:".length);
-    try {
-      const raw = await readFile(filePath, "utf8");
-      const value = stripSingleTrailingNewline(raw);
-      if (value.length > 0) {
-        return value;
-      }
-      throw new SovereignToolError("SECRET_READ_FAILED", "Secret file is empty", false, {
-        secretRef,
-      });
-    } catch (error) {
-      if (error instanceof SovereignToolError) {
-        throw error;
-      }
-      throw new SovereignToolError(
-        "SECRET_READ_FAILED",
-        `Failed to read secret file for ${secretRef}`,
-        false,
-        {
-          secretRef,
-          error: error instanceof Error ? error.message : String(error),
-        },
-        { cause: error instanceof Error ? error : undefined },
-      );
-    }
-  }
-
-  if (secretRef.startsWith("env:")) {
-    const key = secretRef.slice("env:".length);
-    const value = process.env[key];
-    if (value !== undefined && value.length > 0) {
-      return value;
-    }
-    throw new SovereignToolError(
-      "SECRET_READ_FAILED",
-      `Environment variable ${key} referenced by ${secretRef} is not set`,
-      false,
-      {
-        secretRef,
-      },
-    );
-  }
-
-  throw new SovereignToolError(
-    "SECRET_REF_UNSUPPORTED",
-    `Unsupported secretRef format for ${secretRef}`,
-    false,
-    {
-      secretRef,
-    },
-  );
-};
-
-const stripSingleTrailingNewline = (value: string): string => value.replace(/\r?\n$/, "");
-
-const parseBooleanString = (value: string, key: string, instanceId: string): boolean => {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "true") {
-    return true;
-  }
-  if (normalized === "false") {
-    return false;
+// Older tool instances have no `protocol` binding at all: they are IMAP.
+const parseMailProtocol = (value: string | undefined, instanceId: string): MailProtocol => {
+  const normalized = (value ?? "imap").trim().toLowerCase();
+  if (normalized === "imap" || normalized === "pop3") {
+    return normalized;
   }
   throw new SovereignToolError(
     "TOOL_INSTANCE_INVALID",
-    `Tool instance '${instanceId}' has an invalid boolean value for '${key}'`,
+    `Tool instance '${instanceId}' has an unsupported mail protocol '${value ?? ""}'`,
     false,
-    {
-      instanceId,
-      key,
-      value,
-    },
-  );
-};
-
-const parsePort = (value: string, instanceId: string): number => {
-  const parsed = Number.parseInt(value, 10);
-  if (Number.isInteger(parsed) && parsed > 0 && parsed <= 65_535) {
-    return parsed;
-  }
-  throw new SovereignToolError(
-    "TOOL_INSTANCE_INVALID",
-    `Tool instance '${instanceId}' has an invalid IMAP port`,
-    false,
-    {
-      instanceId,
-      value,
-    },
+    { instanceId, value },
   );
 };
 
@@ -203,75 +126,6 @@ const formatTimestamp = (value: Date | string | undefined): string | undefined =
     return value;
   }
   return undefined;
-};
-
-const truncateText = (value: string, maxChars: number): { text: string; truncated: boolean } => {
-  const normalized = value.trim();
-  if (normalized.length <= maxChars) {
-    return {
-      text: normalized,
-      truncated: false,
-    };
-  }
-  return {
-    text: `${normalized.slice(0, maxChars).trimEnd()}\n\n[truncated]`,
-    truncated: true,
-  };
-};
-
-const stripHtmlTags = (value: string): string =>
-  value
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-const normalizeParsedHeaders = (value: unknown): Record<string, string> => {
-  if (value instanceof Map) {
-    return Object.fromEntries(
-      Array.from(value.entries()).flatMap(([key, entryValue]) => {
-        if (typeof key !== "string") {
-          return [];
-        }
-        if (Array.isArray(entryValue)) {
-          return [[key.toLowerCase(), entryValue.map((part) => String(part)).join(", ")]];
-        }
-        if (entryValue === undefined || entryValue === null) {
-          return [];
-        }
-        return [[key.toLowerCase(), String(entryValue)]];
-      }),
-    );
-  }
-  if (Array.isArray(value)) {
-    return Object.fromEntries(
-      value.flatMap((entry) => {
-        if (entry && typeof entry === "object") {
-          const record = entry as Record<string, unknown>;
-          const key = typeof record.key === "string" ? record.key : record.name;
-          if (typeof key === "string" && typeof record.value === "string") {
-            return [[key.toLowerCase(), record.value]];
-          }
-        }
-        return [];
-      }),
-    );
-  }
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).flatMap(([key, entryValue]) => {
-        if (Array.isArray(entryValue)) {
-          return [[key.toLowerCase(), entryValue.map((part) => String(part)).join(", ")]];
-        }
-        if (typeof entryValue === "string") {
-          return [[key.toLowerCase(), entryValue]];
-        }
-        return [];
-      }),
-    );
-  }
-  return {};
 };
 
 const splitSearchTerms = (value: string): string[] => {
@@ -537,16 +391,28 @@ export class ImapReadonlyToolService {
 
   private readonly runner: ToolRunner;
 
+  private readonly pop3: Pop3ReadonlyToolService;
+
   constructor(
     private readonly options: {
       configLoader?: RuntimeConfigLoader;
       runner?: ToolRunner;
+      /** POP3 backend; defaults to a real-socket service sharing the size limits. */
+      pop3?: Pop3ReadonlyToolService;
       maxMessageBytes?: number;
       maxTextChars?: number;
     } = {},
   ) {
     this.loadRuntimeConfig = options.configLoader ?? defaultRuntimeConfigLoader;
     this.runner = options.runner ?? defaultRunner;
+    this.pop3 =
+      options.pop3 ??
+      new Pop3ReadonlyToolService({
+        ...(options.maxMessageBytes === undefined
+          ? {}
+          : { maxMessageBytes: options.maxMessageBytes }),
+        ...(options.maxTextChars === undefined ? {} : { maxTextChars: options.maxTextChars }),
+      });
   }
 
   async searchMail(input: {
@@ -556,6 +422,14 @@ export class ImapReadonlyToolService {
     configPath?: string;
   }): Promise<ImapSearchMailResult> {
     const instance = await this.resolveToolInstance(input.instanceId, input.configPath);
+    if (instance.protocol === "pop3") {
+      return await this.pop3.searchMail({
+        instanceId: instance.instanceId,
+        account: instance.account,
+        query: input.query,
+        ...(input.limit === undefined ? {} : { limit: input.limit }),
+      });
+    }
     const normalizedQuery = normalizeImapSearchQuery(input.query, instance.account.mailbox);
     const searchQuery = buildImapSearchQuery(normalizedQuery);
     const limit = clampSearchLimit(input.limit);
@@ -615,6 +489,13 @@ export class ImapReadonlyToolService {
     configPath?: string;
   }): Promise<ImapReadMailResult> {
     const instance = await this.resolveToolInstance(input.instanceId, input.configPath);
+    if (instance.protocol === "pop3") {
+      return await this.pop3.readMail({
+        instanceId: instance.instanceId,
+        account: instance.account,
+        messageId: input.messageId,
+      });
+    }
     const maxMessageBytes = this.options.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES;
     const maxTextChars = this.options.maxTextChars ?? DEFAULT_MAX_TEXT_CHARS;
 
@@ -742,6 +623,7 @@ export class ImapReadonlyToolService {
       );
     }
 
+    const protocol = parseMailProtocol(tool.config.protocol, instanceId);
     const host = tool.config.host;
     const port = tool.config.port;
     const tls = tool.config.tls;
@@ -768,6 +650,7 @@ export class ImapReadonlyToolService {
 
     return {
       instanceId,
+      protocol,
       account: {
         host,
         port: parsePort(port, instanceId),

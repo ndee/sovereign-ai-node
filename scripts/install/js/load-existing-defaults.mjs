@@ -156,6 +156,7 @@ export function loadExistingDefaults({ requestPath, runtimePath, env }) {
 
   if (isPlainObject(imap) && Object.keys(imap).length > 0 && imap.status !== "pending") {
     emit("DEFAULT_IMAP_CONFIGURED", "1");
+    emit("DEFAULT_IMAP_PROTOCOL", imap.protocol === "pop3" ? "pop3" : "imap");
     emit("DEFAULT_IMAP_HOST", imap.host);
     emit("DEFAULT_IMAP_PORT", imap.port);
     emit("DEFAULT_IMAP_TLS", imap.tls === false ? "0" : "1");

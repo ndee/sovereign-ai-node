@@ -396,11 +396,21 @@ Purpose:
 
 Purpose:
 
-- target contract: update IMAP settings/credentials and validate them before persisting
+- replace the Mail Sentinel mail connection after install (IMAP or POP3): server, port, TLS, email address / username, password, and — for IMAP — the folder to watch
+
+Current CLI flags:
+
+- `--protocol imap|pop3` (defaults to the current protocol)
+- `--host`, `--port`, `--tls` / `--no-tls`, `--username`, `--mailbox`
+- `--password` or `--secret-ref` (one of them is required so the new connection can be tested)
 
 Behavior:
 
-- current CLI surface is scaffold-only and invokes reconfigure with placeholder IMAP values
+- the order is **validate → persist → apply**: the new connection is tested with the submitted credentials first; a failed test returns a `ReconfigureResult` whose `mail-connection` check is `fail`, with `changed = []`, and leaves the previous configuration, secret file and bot bindings untouched
+- only after a successful test is the password written to the managed secret store (`/etc/sovereign-node/secrets/imap-password`, mode `0600`), the saved install request and runtime config updated, and the idempotent install job re-run so the mail-sentinel bot/tool bindings are regenerated; `result.job` carries the job summary for polling
+- a POP3 connection always records `mailbox = "INBOX"` (POP3 has no folders)
+- switching accounts or protocols changes the tool's `uidValidity`, so Mail Sentinel drops its UID watermark and does not inherit one from the previous account
+- the same implementation backs `POST /api/reconfigure/imap` (see the Settings API below)
 - for the legacy/default `mail-sentinel` instance, the top-level `imap` section is the authoritative source for the instance IMAP host, port, TLS mode, username, mailbox, and password secret ref
 - when the top-level `imap` section is configured, update/reconfigure flows MUST overwrite stale legacy/default per-instance IMAP values with the top-level values
 - this reconciliation rule applies to the legacy/default `mail-sentinel` instance and MUST NOT be generalized to unrelated multi-instance Mail Sentinel entries without an explicit operator action
@@ -434,7 +444,13 @@ Behavior:
 
 Purpose:
 
-- update OpenRouter model and/or secret reference for the bundled deployment profile
+- update OpenRouter model and/or API key for the bundled deployment profile
+
+Behavior:
+
+- a new `--api-key` is validated against OpenRouter's key endpoint (`GET /api/v1/auth/key`, no completion, no credit usage) before anything is written; a rejected key returns `changed = []` with an `openrouter-key` check of `fail` and keeps the previous key
+- the key is stored at `/etc/sovereign-node/secrets/openrouter-api-key` (mode `0600`); it is never logged and never echoed in results
+- the OpenClaw gateway is restarted so the new key takes effect
 
 `--json` result schema:
 
@@ -642,6 +658,7 @@ type InstallRequest = {
 
 Constraints:
 
+- `imap.protocol` is optional and defaults to `"imap"`; `"pop3"` selects the read-only POP3 backend (the surrounding `imap` key is kept for compatibility with existing saved requests and runtime configs)
 - `mode` is required and must be `bundled_matrix` in phase B
 - `openclaw.manageInstallation` defaults to `true`
 - `openclaw.installMethod` defaults to `"install_sh"`
@@ -911,7 +928,7 @@ Response:
 
 Purpose:
 
-- validate IMAP connectivity/auth and optional mailbox access before persisting configuration
+- validate mail connectivity/auth (IMAP or POP3, per `imap.protocol`) and optional mailbox access before persisting configuration; POP3 tests authenticate and run `STAT` only — nothing is fetched or deleted
 
 Request body:
 
@@ -928,6 +945,7 @@ Response:
 ```ts
 type TestImapResult = {
   ok: boolean;
+  protocol?: "imap" | "pop3";
   host: string;
   port: number;
   tls: boolean;
@@ -937,6 +955,27 @@ type TestImapResult = {
   error?: ErrorDetail;
 };
 ```
+
+## `POST /api/install/test-openrouter`
+
+Purpose:
+
+- check an OpenRouter API key before it is persisted (install wizard and post-install key replacement)
+
+Request body: `{ openrouter: { apiKey: string } }`
+
+Response:
+
+- `result` MUST be `TestOpenrouterResult = { ok: boolean; label?: string; error?: ErrorDetail }`
+- the key is forwarded once in an `Authorization` header to `https://openrouter.ai/api/v1/auth/key` and never logged or echoed; `label` is OpenRouter's own free-form key label
+- responses carry `Cache-Control: no-store`
+
+## Settings API (post-install reconfiguration)
+
+- `GET /api/reconfigure/settings` → `SettingsSummary`: the non-secret view of installer-entered settings. Secrets are reported only as presence flags (`mail.passwordSet`, `openrouter.apiKeySet`); the existing values are never returned. `matrix` (homeserver identity) and `relay` (node name / slug) are reported with `editable: false` and a `reason`, because the homeserver identity, relay assignment and TLS certificate are all keyed to them — changing them is a migration, not a setting.
+- `POST /api/reconfigure/imap` → `ReconfigureResult` (see `sovereign-node reconfigure imap`); the body is `{ imap: InstallRequest["imap"] }` including the new password.
+- `POST /api/reconfigure/openrouter` → `ReconfigureResult` (see `sovereign-node reconfigure openrouter`).
+- All three are gated by the same operator authentication as the rest of `/api/`; secrets travel only in JSON request bodies, never in URLs.
 
 ## `POST /api/install/test-matrix`
 

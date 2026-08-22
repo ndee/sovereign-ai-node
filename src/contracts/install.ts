@@ -70,7 +70,14 @@ export const openclawInstallRequestSchema = z.object({
   runOnboard: z.literal(false).optional(),
 });
 
+// Mail connection protocol. Absent means IMAP: every install that predates
+// POP3 support keeps working without a migration step. The surrounding
+// `imap` key name is kept for backwards compatibility with saved install
+// requests and runtime configs.
+export const mailProtocolSchema = z.enum(["imap", "pop3"]);
+
 export const imapInstallInputSchema = z.object({
+  protocol: mailProtocolSchema.optional(),
   host: z.string().min(1),
   port: z.number().int().positive(),
   tls: z.boolean(),
@@ -362,6 +369,7 @@ export const sovereignStatusSchema = z.object({
   imap: z.object({
     lastCredentialTestAt: isoTimestampSchema.optional(),
     authStatus: z.enum(["ok", "failed", "unknown"]),
+    protocol: mailProtocolSchema.optional(),
     host: z.string().min(1).optional(),
     mailbox: z.string().min(1).optional(),
   }),
@@ -398,6 +406,57 @@ export const reconfigureResultSchema = z.object({
   changed: z.array(z.string()),
   restartRequiredServices: z.array(z.string()),
   validation: z.array(checkResultSchema),
+  // Present when the change is applied through a background install job
+  // (mail reconfiguration re-runs the idempotent install to regenerate the
+  // bot/tool bindings). Clients poll it like an install job.
+  job: installJobSummarySchema.optional(),
+});
+
+// Non-secret view of the installer-entered settings that can be changed after
+// install. Secrets are reported as presence flags only and are never echoed.
+export const settingsSummarySchema = z.object({
+  mail: z.object({
+    configured: z.boolean(),
+    protocol: mailProtocolSchema,
+    host: z.string(),
+    port: z.number().int().positive(),
+    tls: z.boolean(),
+    username: z.string(),
+    mailbox: z.string(),
+    passwordSet: z.boolean(),
+    editable: z.literal(true),
+  }),
+  openrouter: z.object({
+    model: z.string(),
+    apiKeySet: z.boolean(),
+    editable: z.literal(true),
+  }),
+  matrix: z.object({
+    accessMode: z.string(),
+    homeserverDomain: z.string(),
+    publicBaseUrl: z.string(),
+    federationEnabled: z.boolean(),
+    alertRoomName: z.string(),
+    // Homeserver identity is immutable after install (Synapse server_name,
+    // relay assignment and the TLS certificate are all keyed to it).
+    editable: z.literal(false),
+    reason: z.string(),
+  }),
+  relay: z
+    .object({
+      slug: z.string().optional(),
+      hostname: z.string().optional(),
+      editable: z.literal(false),
+      reason: z.string(),
+    })
+    .optional(),
+});
+
+export const testOpenrouterResultSchema = z.object({
+  ok: z.boolean(),
+  // Free-form label OpenRouter attaches to the key (never the key itself).
+  label: z.string().optional(),
+  error: errorDetailSchema.optional(),
 });
 
 export const matrixOnboardingIssueResultSchema = z.object({
@@ -434,6 +493,7 @@ export const matrixOnboardingReadinessSchema = z.object({
 
 export const testImapResultSchema = z.object({
   ok: z.boolean(),
+  protocol: mailProtocolSchema.optional(),
   host: z.string().min(1),
   port: z.number().int().positive(),
   tls: z.boolean(),
@@ -478,6 +538,9 @@ export type DoctorReport = z.infer<typeof doctorReportSchema>;
 export type TestAlertResult = z.infer<typeof testAlertResultSchema>;
 export type ReconfigureResult = z.infer<typeof reconfigureResultSchema>;
 export type TestImapResult = z.infer<typeof testImapResultSchema>;
+export type MailProtocol = z.infer<typeof mailProtocolSchema>;
+export type SettingsSummary = z.infer<typeof settingsSummarySchema>;
+export type TestOpenrouterResult = z.infer<typeof testOpenrouterResultSchema>;
 export type TestMatrixResult = z.infer<typeof testMatrixResultSchema>;
 export type StartInstallResult = z.infer<typeof startInstallResultSchema>;
 export type MatrixOnboardingIssueResult = z.infer<typeof matrixOnboardingIssueResultSchema>;

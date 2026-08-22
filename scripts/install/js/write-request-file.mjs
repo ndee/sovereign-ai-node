@@ -24,6 +24,7 @@
 //   SN_RELAY_ENROLLMENT_TOKEN — when SN_CONNECTIVITY_MODE=relay (custom relay)
 //   SN_RELAY_REQUESTED_SLUG   — when SN_CONNECTIVITY_MODE=relay
 //   SN_IMAP_CONFIGURE         — "1" includes the imap block
+//   SN_IMAP_PROTOCOL          — imap.protocol ("imap" default, or "pop3")
 //   SN_IMAP_HOST              — imap.host
 //   SN_IMAP_PORT              — imap.port (numeric, default 993)
 //   SN_IMAP_TLS               — "1" → imap.tls true
@@ -148,6 +149,7 @@ export function buildRequest(env) {
 
   if (env.SN_IMAP_CONFIGURE === "1") {
     req.imap = {
+      protocol: env.SN_IMAP_PROTOCOL === "pop3" ? "pop3" : "imap",
       host: env.SN_IMAP_HOST,
       port: Number(env.SN_IMAP_PORT || "993"),
       tls: env.SN_IMAP_TLS === "1",

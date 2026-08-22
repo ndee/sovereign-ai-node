@@ -1739,6 +1739,7 @@ describe("RealInstallerService", () => {
         },
         imap: {
           status: "configured",
+          protocol: "imap",
           host: "imap.example.org",
           port: 993,
           tls: true,
@@ -1948,6 +1949,7 @@ describe("RealInstallerService", () => {
       },
       imap: {
         status: "configured",
+        protocol: "imap",
         host: "imap.example.org",
         port: 993,
         tls: true,
@@ -5059,6 +5061,7 @@ describe("RealInstallerService", () => {
       },
       imap: {
         status: "configured",
+        protocol: "imap",
         host: "imap.example.org",
         port: 993,
         tls: true,
@@ -5289,6 +5292,7 @@ describe("RealInstallerService", () => {
       },
       imap: {
         status: "configured",
+        protocol: "imap",
         host: "imap.example.org",
         port: 993,
         tls: true,
@@ -5615,6 +5619,7 @@ describe("RealInstallerService", () => {
         },
         imap: {
           status: "configured",
+          protocol: "imap",
           host: "imap.example.org",
           port: 993,
           tls: true,
@@ -6878,6 +6883,7 @@ describe("RealInstallerService", () => {
             imapConfigured: true,
             imapHost: "imap.example.org",
             imapPort: 993,
+            imapProtocol: "imap",
             imapTls: true,
             imapUsername: "pending",
             imapMailbox: "INBOX",
@@ -7015,6 +7021,7 @@ describe("RealInstallerService", () => {
         },
         imap: {
           status: "configured",
+          protocol: "imap",
           host: "127.0.0.1",
           port: 1143,
           tls: true,
@@ -9605,6 +9612,354 @@ describe("RealInstallerService", () => {
       expect(updatedRequest.openrouter?.model).toBe("openai/gpt-5");
       expect(updatedRequest.openrouter?.secretRef).toBe(expectedSecretRef);
       expect(updatedRequest.openrouter?.apiKey).toBeUndefined();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  const buildReconfigureService = async (
+    paths: SovereignPaths,
+    overrides: {
+      imapTester?: ImapTester;
+      openrouterKeyValidator?: {
+        validate: (key: string) => Promise<{
+          ok: boolean;
+          error?: { code: string; message: string; retryable: boolean };
+        }>;
+      };
+    } = {},
+  ): Promise<RealInstallerService> =>
+    new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({ binaryPath: "/usr/local/bin/openclaw", version: "0.2.0" }),
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents add",
+          cronCommand: "openclaw cron add",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: overrides.imapTester ?? {
+        test: async (req) => ({
+          ok: true,
+          protocol: req.imap.protocol ?? "imap",
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      ...(overrides.openrouterKeyValidator === undefined
+        ? {}
+        : { openrouterKeyValidator: overrides.openrouterKeyValidator }),
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({ ok: true, homeserverUrl: "https://matrix.example.org", checks: [] }),
+      },
+    });
+
+  const buildReconfigurePaths = (tempRoot: string): SovereignPaths => ({
+    configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+    secretsDir: join(tempRoot, "etc", "secrets"),
+    stateDir: join(tempRoot, "var", "lib"),
+    logsDir: join(tempRoot, "var", "log"),
+    installJobsDir: join(tempRoot, "install-jobs"),
+    openclawServiceHome: join(tempRoot, "openclaw-home"),
+    provenancePath: join(tempRoot, "install-provenance.json"),
+    backupsDir: join(tempRoot, "backups"),
+  });
+
+  // Saved request with a migrated mail-sentinel instance so no migration is pending.
+  const buildReconfigureRequest = (): InstallRequest => {
+    const request = buildInstallRequest();
+    request.bots = {
+      ...request.bots,
+      selected: ["mail-sentinel"],
+      instances: [
+        {
+          id: "mail-sentinel",
+          packageId: "mail-sentinel",
+          workspace: "/var/lib/sovereign-node/mail-sentinel/workspace",
+          config: { imapConfigured: true, imapHost: "imap.example.org" },
+          secretRefs: { imapPassword: "file:/tmp/imap-secret" },
+          matrix: { allowedUsers: ["@operator:matrix.example.org"] },
+        },
+      ],
+    } as InstallRequest["bots"];
+    return request;
+  };
+
+  it("reconfigureImap leaves the working configuration untouched when the new connection fails", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths = buildReconfigurePaths(tempRoot);
+    await writeRuntimeArtifacts(paths);
+    const requestPath = join(dirname(paths.configPath), "install-request.json");
+    const originalRequest = `${JSON.stringify(buildReconfigureRequest(), null, 2)}\n`;
+    await writeFile(requestPath, originalRequest, "utf8");
+    const originalConfig = await readFile(paths.configPath, "utf8");
+
+    const service = await buildReconfigureService(paths, {
+      imapTester: {
+        test: async (req) => ({
+          ok: false,
+          protocol: req.imap.protocol ?? "imap",
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "failed",
+          mailbox: "INBOX",
+          error: {
+            code: "POP3_AUTH_FAILED",
+            message: "POP3 authentication failed",
+            retryable: false,
+          },
+        }),
+      },
+    });
+    const startInstall = vi.spyOn(service, "startInstall");
+
+    try {
+      const result = await service.reconfigureImap({
+        imap: {
+          protocol: "pop3",
+          host: "pop.example.org",
+          port: 995,
+          tls: true,
+          username: "new@example.org",
+          password: "wrong-password",
+        },
+      });
+      expect(result.target).toBe("imap");
+      expect(result.changed).toEqual([]);
+      expect(result.job).toBeUndefined();
+      expect(result.validation.find((entry) => entry.id === "mail-connection")?.status).toBe(
+        "fail",
+      );
+      expect(JSON.stringify(result)).not.toContain("wrong-password");
+      expect(startInstall).not.toHaveBeenCalled();
+      expect(await readFile(requestPath, "utf8")).toBe(originalRequest);
+      expect(await readFile(paths.configPath, "utf8")).toBe(originalConfig);
+      await expect(stat(join(paths.secretsDir, "imap-password"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reconfigureImap switches IMAP to POP3 after a successful test and applies via the install job", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths = buildReconfigurePaths(tempRoot);
+    await writeRuntimeArtifacts(paths);
+    const requestPath = join(dirname(paths.configPath), "install-request.json");
+    await writeFile(requestPath, `${JSON.stringify(buildReconfigureRequest(), null, 2)}\n`, "utf8");
+
+    const tested: Array<{ protocol?: string; password?: string }> = [];
+    const service = await buildReconfigureService(paths, {
+      imapTester: {
+        test: async (req) => {
+          tested.push({
+            ...(req.imap.protocol === undefined ? {} : { protocol: req.imap.protocol }),
+            ...(req.imap.password === undefined ? {} : { password: req.imap.password }),
+          });
+          return {
+            ok: true,
+            protocol: req.imap.protocol ?? "imap",
+            host: req.imap.host,
+            port: req.imap.port,
+            tls: req.imap.tls,
+            auth: "ok",
+            mailbox: "INBOX",
+          };
+        },
+      },
+    });
+    const startInstall = vi.spyOn(service, "startInstall").mockResolvedValue({
+      job: {
+        jobId: "job_test",
+        state: "pending",
+        createdAt: "2026-08-22T00:00:00.000Z",
+        steps: [],
+      },
+    });
+
+    try {
+      const result = await service.reconfigureImap({
+        imap: {
+          protocol: "pop3",
+          host: "pop.example.org",
+          port: 995,
+          tls: true,
+          username: "new@example.org",
+          password: "new-password",
+          mailbox: "Archive",
+        },
+      });
+      expect(tested).toEqual([{ protocol: "pop3", password: "new-password" }]);
+      expect(result.changed).toEqual(
+        expect.arrayContaining([
+          "imap.protocol",
+          "imap.host",
+          "imap.port",
+          "imap.username",
+          "imap.secretRef",
+        ]),
+      );
+      expect(result.job?.jobId).toBe("job_test");
+      expect(startInstall).toHaveBeenCalledTimes(1);
+      const applied = startInstall.mock.calls[0]?.[0] as InstallRequest;
+      expect(applied.imap).toEqual({
+        protocol: "pop3",
+        host: "pop.example.org",
+        port: 995,
+        tls: true,
+        username: "new@example.org",
+        mailbox: "INBOX",
+        secretRef: `file:${join(paths.secretsDir, "imap-password")}`,
+      });
+      expect(applied.imap?.password).toBeUndefined();
+      const instance = applied.bots?.instances?.[0] as {
+        config: Record<string, unknown>;
+        secretRefs: Record<string, string>;
+      };
+      expect(instance.config.imapProtocol).toBe("pop3");
+      expect(instance.config.imapHost).toBe("pop.example.org");
+      expect(instance.config.imapMailbox).toBe("INBOX");
+      expect(instance.secretRefs.imapPassword).toBe(
+        `file:${join(paths.secretsDir, "imap-password")}`,
+      );
+
+      const secretStat = await stat(join(paths.secretsDir, "imap-password"));
+      expect(secretStat.mode & 0o777).toBe(0o600);
+      expect(await readFile(join(paths.secretsDir, "imap-password"), "utf8")).toBe(
+        "new-password\n",
+      );
+      const savedRequest = await readFile(requestPath, "utf8");
+      expect(savedRequest).not.toContain("new-password");
+      expect(JSON.parse(savedRequest).imap.protocol).toBe("pop3");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reconfigureImap requires a credential so the connection can be tested", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths = buildReconfigurePaths(tempRoot);
+    await writeRuntimeArtifacts(paths);
+    await writeFile(
+      join(dirname(paths.configPath), "install-request.json"),
+      `${JSON.stringify(buildReconfigureRequest(), null, 2)}\n`,
+      "utf8",
+    );
+    const service = await buildReconfigureService(paths);
+    try {
+      await expect(
+        service.reconfigureImap({
+          imap: { host: "imap.example.org", port: 993, tls: true, username: "a@example.org" },
+        }),
+      ).rejects.toMatchObject({ code: "MAIL_CREDENTIALS_REQUIRED" });
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("getSettings reports non-secret values, secret presence flags and immutable fields", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths = buildReconfigurePaths(tempRoot);
+    await writeRuntimeArtifacts(paths);
+    const service = await buildReconfigureService(paths);
+    try {
+      const settings = await service.getSettings();
+      expect(settings.mail).toEqual({
+        configured: true,
+        protocol: "imap",
+        host: "imap.example.org",
+        port: 993,
+        tls: true,
+        username: "pending",
+        mailbox: "INBOX",
+        passwordSet: false,
+        editable: true,
+      });
+      // The fixture references env:OPENROUTER_API_KEY, so presence mirrors the
+      // ambient environment; the important part is that no value is echoed.
+      expect(settings.openrouter).toEqual({
+        model: "qwen/qwen-2.5-7b-instruct",
+        apiKeySet: (process.env.OPENROUTER_API_KEY ?? "").length > 0,
+        editable: true,
+      });
+      expect(settings.matrix.editable).toBe(false);
+      expect(settings.matrix.homeserverDomain).toBe("matrix.example.org");
+      expect(settings.relay).toBeUndefined();
+      expect(JSON.stringify(settings)).not.toMatch(/secretRef|apiKey[^S]/);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reconfigureOpenrouter keeps the previous key when the replacement is rejected", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths = buildReconfigurePaths(tempRoot);
+    await writeRuntimeArtifacts(paths);
+    const requestPath = join(dirname(paths.configPath), "install-request.json");
+    await writeFile(requestPath, `${JSON.stringify(buildInstallRequest(), null, 2)}\n`, "utf8");
+    const originalConfig = await readFile(paths.configPath, "utf8");
+    const validated: string[] = [];
+    const service = await buildReconfigureService(paths, {
+      openrouterKeyValidator: {
+        validate: async (key) => {
+          validated.push(key);
+          return {
+            ok: false,
+            error: {
+              code: "OPENROUTER_KEY_INVALID",
+              message: "OpenRouter rejected the API key",
+              retryable: false,
+            },
+          };
+        },
+      },
+    });
+    try {
+      const result = await service.reconfigureOpenrouter({ openrouter: { apiKey: "sk-or-bad" } });
+      expect(validated).toEqual(["sk-or-bad"]);
+      expect(result.changed).toEqual([]);
+      expect(result.validation.find((entry) => entry.id === "openrouter-key")?.status).toBe("fail");
+      expect(JSON.stringify(result)).not.toContain("sk-or-bad");
+      expect(await readFile(paths.configPath, "utf8")).toBe(originalConfig);
+      await expect(stat(join(paths.secretsDir, "openrouter-api-key"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
