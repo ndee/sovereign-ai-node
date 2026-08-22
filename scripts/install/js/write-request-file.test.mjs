@@ -142,6 +142,7 @@ describe("buildRequest", () => {
       SN_IMAP_MAILBOX: "INBOX",
     });
     expect(on.imap).toEqual({
+      protocol: "imap",
       host: "imap.example.com",
       port: 993,
       tls: true,
@@ -149,6 +150,30 @@ describe("buildRequest", () => {
       secretRef: "file:/etc/sovereign-node/secrets/imap-password",
       mailbox: "INBOX",
     });
+  });
+
+  it("carries SN_IMAP_PROTOCOL=pop3 into imap.protocol and defaults anything else to imap", () => {
+    const pop3 = buildRequest({
+      ...baseEnv,
+      SN_IMAP_CONFIGURE: "1",
+      SN_IMAP_PROTOCOL: "pop3",
+      SN_IMAP_HOST: "pop.example.com",
+      SN_IMAP_PORT: "995",
+      SN_IMAP_TLS: "1",
+      SN_IMAP_USERNAME: "operator@example.com",
+      SN_IMAP_SECRET_REF: "file:/etc/sovereign-node/secrets/imap-password",
+    });
+    expect(pop3.imap.protocol).toBe("pop3");
+    const odd = buildRequest({
+      ...baseEnv,
+      SN_IMAP_CONFIGURE: "1",
+      SN_IMAP_PROTOCOL: "nntp",
+      SN_IMAP_HOST: "imap.example.com",
+      SN_IMAP_TLS: "1",
+      SN_IMAP_USERNAME: "operator@example.com",
+      SN_IMAP_SECRET_REF: "file:/etc/sovereign-node/secrets/imap-password",
+    });
+    expect(odd.imap.protocol).toBe("imap");
   });
 
   it("defaults imap.port to 993 and imap.mailbox to INBOX", () => {

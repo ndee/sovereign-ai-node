@@ -22,6 +22,12 @@ export const testImapRequestSchema = z.object({
   imap: imapInstallInputSchema,
 });
 
+export const testOpenrouterRequestSchema = z.object({
+  openrouter: z.object({
+    apiKey: z.string().min(1),
+  }),
+});
+
 export const testMatrixRequestSchema = z.object({
   publicBaseUrl: z.string().min(1),
   federationEnabled: z.boolean().optional(),
@@ -100,6 +106,7 @@ export const apiErrorSchema = baseErrorEnvelopeSchema;
 
 export type PreflightRequest = z.infer<typeof preflightRequestSchema>;
 export type TestImapRequest = z.infer<typeof testImapRequestSchema>;
+export type TestOpenrouterRequest = z.infer<typeof testOpenrouterRequestSchema>;
 export type TestMatrixRequest = z.infer<typeof testMatrixRequestSchema>;
 export type TestAlertRequest = z.infer<typeof testAlertRequestSchema>;
 export type ReconfigureImapRequest = z.infer<typeof reconfigureImapRequestSchema>;

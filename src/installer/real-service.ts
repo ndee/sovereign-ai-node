@@ -40,6 +40,7 @@ import type {
   TestAlertRequest,
   TestImapRequest,
   TestMatrixRequest,
+  TestOpenrouterRequest,
 } from "../contracts/api.js";
 import { type CheckResult, CONTRACT_VERSION, type ComponentHealth } from "../contracts/common.js";
 import {
@@ -49,12 +50,14 @@ import {
   type InstallRequest,
   installJobStatusResponseSchema,
   installRequestSchema,
+  type MailProtocol,
   type MatrixOnboardingIssueResult,
   type MatrixOnboardingPublicState,
   type MatrixOnboardingReadiness,
   type PreflightResult,
   type ReconfigureResult,
   type RelayDns01Input,
+  type SettingsSummary,
   type SetupUiBootstrapIssueResult,
   type SetupUiBootstrapPublicState,
   type SovereignStatus,
@@ -62,6 +65,7 @@ import {
   type TestAlertResult,
   type TestImapResult,
   type TestMatrixResult,
+  type TestOpenrouterResult,
 } from "../contracts/index.js";
 import type { Logger } from "../logging/logger.js";
 import {
@@ -116,6 +120,7 @@ import {
   FilesystemMatrixAvatarResolver,
   type MatrixAvatarResolver,
 } from "../system/matrix-avatars.js";
+import type { OpenrouterKeyValidator } from "../system/openrouter.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
 import { formatGiB, parseDfAvailableBytes } from "../system/preflight.js";
 import {
@@ -406,6 +411,7 @@ const RELAY_PASSTHROUGH_TLS_PROBE_ATTEMPTS = Math.max(
   Math.ceil(RELAY_PASSTHROUGH_TLS_SMOKE_WINDOW_MS / RELAY_PASSTHROUGH_TLS_PROBE_INTERVAL_MS),
 );
 const MAIL_SENTINEL_MIGRATION_ID = "mail-sentinel-instances";
+const MAIL_SENTINEL_IMAP_PROTOCOL_KEY = "imapProtocol";
 const MAIL_SENTINEL_IMAP_HOST_KEY = "imapHost";
 const MAIL_SENTINEL_IMAP_PORT_KEY = "imapPort";
 const MAIL_SENTINEL_IMAP_TLS_KEY = "imapTls";
@@ -432,6 +438,8 @@ type RealInstallerServiceDeps = {
   preflightChecker: HostPreflightChecker;
   dockerRuntimePreparer?: DockerRuntimePreparer;
   imapTester: ImapTester;
+  /** Optional: when absent, OpenRouter keys are accepted without a live check. */
+  openrouterKeyValidator?: OpenrouterKeyValidator;
   matrixProvisioner: BundledMatrixProvisioner;
   execRunner?: ExecRunner;
   fetchImpl?: FetchLike;
@@ -484,6 +492,8 @@ export class RealInstallerService implements InstallerService {
   private readonly dockerRuntimePreparer: DockerRuntimePreparer;
 
   private readonly imapTester: ImapTester;
+
+  private readonly openrouterKeyValidator: OpenrouterKeyValidator | null;
 
   private readonly matrixProvisioner: BundledMatrixProvisioner;
 
@@ -553,6 +563,7 @@ export class RealInstallerService implements InstallerService {
       }),
     };
     this.imapTester = deps.imapTester;
+    this.openrouterKeyValidator = deps.openrouterKeyValidator ?? null;
     this.matrixProvisioner = deps.matrixProvisioner;
     this.execRunner = deps.execRunner ?? null;
     this.fetchImpl = deps.fetchImpl ?? defaultFetch;
@@ -873,6 +884,7 @@ export class RealInstallerService implements InstallerService {
         ...(topLevelImapAuthoritative
           ? {
               [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: true,
+              [MAIL_SENTINEL_IMAP_PROTOCOL_KEY]: input.imap.protocol,
               [MAIL_SENTINEL_IMAP_HOST_KEY]: input.imap.host,
               [MAIL_SENTINEL_IMAP_PORT_KEY]: input.imap.port,
               [MAIL_SENTINEL_IMAP_TLS_KEY]: input.imap.tls,
@@ -882,6 +894,12 @@ export class RealInstallerService implements InstallerService {
           : {
               ...(isImapSentinel(input.entry.config[MAIL_SENTINEL_IMAP_CONFIGURED_KEY])
                 ? { [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: false }
+                : {}),
+              ...(input.entry.config[MAIL_SENTINEL_IMAP_PROTOCOL_KEY] === undefined
+                ? {
+                    [MAIL_SENTINEL_IMAP_PROTOCOL_KEY]:
+                      previous?.config[MAIL_SENTINEL_IMAP_PROTOCOL_KEY] ?? input.imap.protocol,
+                  }
                 : {}),
               ...(input.entry.config[MAIL_SENTINEL_IMAP_HOST_KEY] === undefined
                 ? {
@@ -1142,6 +1160,20 @@ export class RealInstallerService implements InstallerService {
 
   async testImap(req: TestImapRequest): Promise<TestImapResult> {
     return this.imapTester.test(req);
+  }
+
+  async testOpenrouter(req: TestOpenrouterRequest): Promise<TestOpenrouterResult> {
+    if (this.openrouterKeyValidator === null) {
+      return {
+        ok: false,
+        error: {
+          code: "OPENROUTER_KEY_CHECK_UNAVAILABLE",
+          message: "OpenRouter key validation is not available in this runtime",
+          retryable: false,
+        },
+      };
+    }
+    return await this.openrouterKeyValidator.validate(req.openrouter.apiKey);
   }
 
   async testMatrix(req: TestMatrixRequest): Promise<TestMatrixResult> {
@@ -1459,6 +1491,7 @@ export class RealInstallerService implements InstallerService {
       hostResources: hostResourceStatus.resources,
       imap: {
         authStatus: "unknown",
+        ...(runtimeConfig === null ? {} : { protocol: runtimeConfig.imap.protocol }),
         ...(runtimeConfig?.imap.status !== "configured" || runtimeConfig.imap.host === undefined
           ? {}
           : { host: runtimeConfig.imap.host }),
@@ -1761,8 +1794,229 @@ export class RealInstallerService implements InstallerService {
     };
   }
 
+  /** Non-secret view of the settings that can be changed after install. */
+  async getSettings(): Promise<SettingsSummary> {
+    const runtimeConfig = await this.readRuntimeConfig();
+    const saved = await this.tryReadSavedInstallRequest();
+    const imap = runtimeConfig.imap;
+    const relayHostname = runtimeConfig.relay?.hostname;
+    const requestedSlug = saved?.request.relay?.requestedSlug;
+    return {
+      mail: {
+        configured: imap.status === "configured",
+        protocol: imap.protocol,
+        host: imap.status === "configured" ? imap.host : "",
+        port: imap.port,
+        tls: imap.tls,
+        username: imap.status === "configured" ? imap.username : "",
+        mailbox: imap.mailbox,
+        passwordSet:
+          imap.status === "configured" && (await this.secretRefIsReadable(imap.secretRef)),
+        editable: true,
+      },
+      openrouter: {
+        model: runtimeConfig.openrouter.model,
+        apiKeySet: await this.secretRefIsReadable(runtimeConfig.openrouter.apiKeySecretRef),
+        editable: true,
+      },
+      matrix: {
+        accessMode: runtimeConfig.matrix.accessMode,
+        homeserverDomain: runtimeConfig.matrix.homeserverDomain,
+        publicBaseUrl: runtimeConfig.matrix.publicBaseUrl,
+        federationEnabled: runtimeConfig.matrix.federationEnabled,
+        alertRoomName: runtimeConfig.matrix.alertRoom.roomName,
+        editable: false,
+        reason:
+          "The homeserver identity is fixed at install time: Matrix user IDs, room history and the TLS certificate are all bound to it. Changing it requires a migration (re-install with a new node name).",
+      },
+      ...(runtimeConfig.matrix.accessMode === "relay"
+        ? {
+            relay: {
+              ...(requestedSlug === undefined
+                ? relayHostname === undefined
+                  ? {}
+                  : { slug: relayHostname.split(".")[0] ?? relayHostname }
+                : { slug: requestedSlug }),
+              ...(relayHostname === undefined ? {} : { hostname: relayHostname }),
+              editable: false,
+              reason:
+                "The node name (relay slug) is the Matrix homeserver domain on the managed relay; changing it means a new homeserver identity, relay re-enrollment and a new certificate. It is read-only for now.",
+            },
+          }
+        : {}),
+    };
+  }
+
+  private async secretRefIsReadable(secretRef: string): Promise<boolean> {
+    if (secretRef.startsWith("file:")) {
+      try {
+        await access(secretRef.slice("file:".length), fsConstants.R_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    if (secretRef.startsWith("env:")) {
+      const value = process.env[secretRef.slice("env:".length)];
+      return value !== undefined && value.length > 0;
+    }
+    return false;
+  }
+
+  /**
+   * Replace the mail connection after install: validate → persist → apply.
+   *
+   * The new connection is tested first with the submitted credentials; if
+   * that fails nothing on disk changes and the previously working connection
+   * stays active. Only after a successful test is the secret written, the
+   * saved install request and runtime config updated, and the idempotent
+   * install job re-run so the mail-sentinel bot/tool bindings are regenerated
+   * (the same path `mail-sentinels update` uses). The scan unit is a oneshot
+   * that re-reads its config on every timer tick, so no daemon restart is
+   * required beyond what the job itself performs.
+   */
   async reconfigureImap(req: ReconfigureImapRequest): Promise<ReconfigureResult> {
-    return this.stubService.reconfigureImap(req);
+    await this.assertNoPendingMigrations();
+    const runtimeConfig = await this.readRuntimeConfig();
+    const { request } = await this.readSavedInstallRequestOrThrow();
+    const protocol = req.imap.protocol ?? "imap";
+    // POP3 has no folders; never carry an IMAP folder name across.
+    const mailbox = protocol === "pop3" ? "INBOX" : (req.imap.mailbox ?? "INBOX");
+    const candidate = { ...req.imap, protocol, mailbox };
+
+    const hasCredential =
+      (req.imap.password !== undefined && req.imap.password.length > 0) ||
+      (req.imap.secretRef !== undefined && req.imap.secretRef.length > 0);
+    if (!hasCredential) {
+      throw {
+        code: "MAIL_CREDENTIALS_REQUIRED",
+        message: "Provide the mail password (or a secretRef) to change the mail connection",
+        retryable: false,
+      };
+    }
+
+    const test = await this.testImap({ imap: candidate });
+    if (!test.ok) {
+      return {
+        target: "imap",
+        changed: [],
+        restartRequiredServices: [],
+        validation: [
+          check(
+            "mail-connection",
+            "Mail connection test",
+            "fail",
+            test.error?.message ?? "The mail server rejected the new connection settings",
+            {
+              ...(test.error?.code === undefined ? {} : { code: test.error.code }),
+              protocol,
+              host: candidate.host,
+              port: candidate.port,
+              tls: candidate.tls,
+            },
+          ),
+          check(
+            "mail-config",
+            "Mail configuration",
+            "pass",
+            "Previous mail configuration left unchanged",
+          ),
+        ],
+      };
+    }
+
+    const secretRef =
+      req.imap.password !== undefined && req.imap.password.length > 0
+        ? await this.writeManagedSecretFile("imap-password", req.imap.password)
+        : await this.materializeEnvSecretRef({
+            secretRef: req.imap.secretRef ?? "",
+            fileName: "imap-password",
+            missingErrorCode: "IMAP_SECRET_READ_FAILED",
+          });
+
+    const previous = runtimeConfig.imap;
+    const changed: string[] = [];
+    if (previous.status !== "configured") {
+      changed.push("imap.status");
+    }
+    if (previous.protocol !== protocol) {
+      changed.push("imap.protocol");
+    }
+    if (previous.host !== candidate.host) {
+      changed.push("imap.host");
+    }
+    if (previous.port !== candidate.port) {
+      changed.push("imap.port");
+    }
+    if (previous.tls !== candidate.tls) {
+      changed.push("imap.tls");
+    }
+    if (previous.username !== candidate.username) {
+      changed.push("imap.username");
+    }
+    if (previous.mailbox !== mailbox) {
+      changed.push("imap.mailbox");
+    }
+    // A submitted password always counts as a credential change; the file is
+    // overwritten in place and there is no way (by design) to compare it.
+    changed.push("imap.secretRef");
+
+    request.imap = {
+      protocol,
+      host: candidate.host,
+      port: candidate.port,
+      tls: candidate.tls,
+      username: candidate.username,
+      mailbox,
+      secretRef,
+    };
+    // The top-level imap block is authoritative for every mail-sentinel
+    // instance's connection settings, but the per-instance secret binding is
+    // only seeded when absent — point every instance at the new secret so an
+    // instance created with its own secret file switches over too.
+    for (const instance of request.bots?.instances ?? []) {
+      if (instance.packageId !== MAIL_SENTINEL_AGENT_ID) {
+        continue;
+      }
+      instance.secretRefs = normalizeStringRecord({
+        ...(instance.secretRefs ?? {}),
+        [MAIL_SENTINEL_IMAP_PASSWORD_SECRET_KEY]: secretRef,
+      });
+      instance.config = {
+        ...(instance.config ?? {}),
+        [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: true,
+        [MAIL_SENTINEL_IMAP_PROTOCOL_KEY]: protocol,
+        [MAIL_SENTINEL_IMAP_HOST_KEY]: candidate.host,
+        [MAIL_SENTINEL_IMAP_PORT_KEY]: candidate.port,
+        [MAIL_SENTINEL_IMAP_TLS_KEY]: candidate.tls,
+        [MAIL_SENTINEL_IMAP_USERNAME_KEY]: candidate.username,
+        [MAIL_SENTINEL_IMAP_MAILBOX_KEY]: mailbox,
+      };
+    }
+    await this.writeSavedInstallRequest(request);
+    const { job } = await this.startInstall(request);
+
+    return {
+      target: "imap",
+      changed,
+      restartRequiredServices: [],
+      validation: [
+        check(
+          "mail-connection",
+          "Mail connection test",
+          "pass",
+          `${protocol.toUpperCase()} connection to ${candidate.host}:${String(candidate.port)} succeeded`,
+        ),
+        check(
+          "mail-config",
+          "Mail configuration",
+          "pass",
+          "New mail connection saved; applying through the install job",
+          { jobId: job.jobId },
+        ),
+      ],
+      job,
+    };
   }
 
   async reconfigureMatrix(req: ReconfigureMatrixRequest): Promise<ReconfigureResult> {
@@ -1864,6 +2118,33 @@ export class RealInstallerService implements InstallerService {
 
   async reconfigureOpenrouter(req: ReconfigureOpenrouterRequest): Promise<ReconfigureResult> {
     const runtimeConfig = await this.readRuntimeConfig();
+    // Validate a replacement key before anything is written: a rejected key
+    // leaves the previous working key in place.
+    if (req.openrouter.apiKey !== undefined && this.openrouterKeyValidator !== null) {
+      const keyCheck = await this.openrouterKeyValidator.validate(req.openrouter.apiKey);
+      if (!keyCheck.ok) {
+        return {
+          target: "openrouter",
+          changed: [],
+          restartRequiredServices: [],
+          validation: [
+            check(
+              "openrouter-key",
+              "OpenRouter API key check",
+              "fail",
+              keyCheck.error?.message ?? "OpenRouter rejected the API key",
+              keyCheck.error?.code === undefined ? undefined : { code: keyCheck.error.code },
+            ),
+            check(
+              "openrouter-runtime",
+              "OpenRouter runtime config",
+              "pass",
+              "Previous OpenRouter settings left unchanged",
+            ),
+          ],
+        };
+      }
+    }
     const raw = await readFile(this.paths.configPath, "utf8");
     const parsed = parseJsonDocument(raw);
     if (!isRecord(parsed)) {
@@ -2490,6 +2771,7 @@ export class RealInstallerService implements InstallerService {
     const migratedConfig: Record<string, BotConfigValue> = {
       ...legacyBotConfig,
       [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: runtimeConfig.imap.status === "configured",
+      [MAIL_SENTINEL_IMAP_PROTOCOL_KEY]: runtimeConfig.imap.protocol,
       [MAIL_SENTINEL_IMAP_HOST_KEY]: runtimeConfig.imap.host,
       [MAIL_SENTINEL_IMAP_PORT_KEY]: runtimeConfig.imap.port,
       [MAIL_SENTINEL_IMAP_TLS_KEY]: runtimeConfig.imap.tls,
@@ -2557,6 +2839,7 @@ export class RealInstallerService implements InstallerService {
                 workspace: legacyAgent.workspace,
                 config: {
                   [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: runtimeConfig.imap.status === "configured",
+                  [MAIL_SENTINEL_IMAP_PROTOCOL_KEY]: runtimeConfig.imap.protocol,
                   [MAIL_SENTINEL_IMAP_HOST_KEY]: runtimeConfig.imap.host,
                   [MAIL_SENTINEL_IMAP_PORT_KEY]: runtimeConfig.imap.port,
                   [MAIL_SENTINEL_IMAP_TLS_KEY]: runtimeConfig.imap.tls,
@@ -2618,6 +2901,7 @@ export class RealInstallerService implements InstallerService {
     imapHost: string;
     imapPort: number;
     imapTls: boolean;
+    imapProtocol?: MailProtocol;
     imapUsername: string;
     imapPassword?: string;
     imapSecretRef?: string;
@@ -2640,6 +2924,7 @@ export class RealInstallerService implements InstallerService {
     imapHost?: string;
     imapPort?: number;
     imapTls?: boolean;
+    imapProtocol?: MailProtocol;
     imapUsername?: string;
     imapPassword?: string;
     imapSecretRef?: string;
@@ -8153,7 +8438,7 @@ export default function (api) {
       },
       {
         id: "imap_validate",
-        label: "Validate IMAP",
+        label: "Validate mail connection",
         softFail: true,
         run: async () => {
           if (req.imap === undefined) {
@@ -8166,7 +8451,7 @@ export default function (api) {
           if (!result.ok) {
             throw {
               code: "IMAP_TEST_FAILED",
-              message: result.error?.message ?? "IMAP validation failed",
+              message: result.error?.message ?? "Mail connection validation failed",
               retryable: result.error?.retryable ?? true,
             };
           }
@@ -10381,6 +10666,9 @@ export default function (api) {
         ? {}
         : { alertRoomName: instance.matrix.alertRoom.roomName }),
       allowedUsers: instance.matrix?.allowedUsers ?? [],
+      ...(instance.config[MAIL_SENTINEL_IMAP_PROTOCOL_KEY] === "pop3"
+        ? { imapProtocol: "pop3" as const }
+        : { imapProtocol: "imap" as const }),
       ...(typeof instance.config[MAIL_SENTINEL_IMAP_HOST_KEY] === "string"
         ? { imapHost: instance.config[MAIL_SENTINEL_IMAP_HOST_KEY] }
         : {}),
@@ -10418,6 +10706,7 @@ export default function (api) {
       imapHost?: string;
       imapPort?: number;
       imapTls?: boolean;
+      imapProtocol?: MailProtocol;
       imapUsername?: string;
       imapPassword?: string;
       imapSecretRef?: string;
@@ -10526,6 +10815,8 @@ export default function (api) {
       config: {
         ...base.config,
         [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: true,
+        [MAIL_SENTINEL_IMAP_PROTOCOL_KEY]:
+          req.imapProtocol ?? String(base.config[MAIL_SENTINEL_IMAP_PROTOCOL_KEY] ?? "imap"),
         [MAIL_SENTINEL_IMAP_HOST_KEY]:
           req.imapHost ?? String(base.config[MAIL_SENTINEL_IMAP_HOST_KEY] ?? ""),
         [MAIL_SENTINEL_IMAP_PORT_KEY]:
@@ -10561,7 +10852,8 @@ export default function (api) {
     ) {
       throw {
         code: "MAIL_SENTINEL_IMAP_CONFIG_INVALID",
-        message: "Mail Sentinel IMAP host, port, tls, and username must be configured",
+        message:
+          "Mail Sentinel mail server host, port, TLS and email address / username must be configured",
         retryable: false,
       };
     }
@@ -11086,6 +11378,7 @@ export default function (api) {
       },
       imap: {
         status: imapConfig.status,
+        protocol: imapConfig.protocol,
         host: imapConfig.host,
         port: imapConfig.port,
         tls: imapConfig.tls,
@@ -11839,6 +12132,7 @@ export default function (api) {
       },
       imap: {
         status: runtimeConfig.imap.status,
+        protocol: runtimeConfig.imap.protocol,
         host: runtimeConfig.imap.host,
         mailbox: runtimeConfig.imap.mailbox,
       },
@@ -11934,6 +12228,7 @@ export default function (api) {
     if (imap === undefined) {
       return {
         status: "pending",
+        protocol: "imap",
         host: "pending",
         port: 993,
         tls: true,
@@ -11953,6 +12248,7 @@ export default function (api) {
       });
       return {
         status: "configured",
+        protocol: imap.protocol ?? "imap",
         host: imap.host,
         port: imap.port,
         tls: imap.tls,
@@ -11965,6 +12261,7 @@ export default function (api) {
     if (imap.password !== undefined && imap.password.length > 0) {
       return {
         status: "configured",
+        protocol: imap.protocol ?? "imap",
         host: imap.host,
         port: imap.port,
         tls: imap.tls,
@@ -11976,6 +12273,7 @@ export default function (api) {
 
     return {
       status: "pending",
+      protocol: imap.protocol ?? "imap",
       host: imap.host,
       port: imap.port,
       tls: imap.tls,

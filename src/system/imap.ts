@@ -5,6 +5,7 @@ import type { ErrorDetail } from "../contracts/common.js";
 import type { TestImapResult } from "../contracts/index.js";
 import type { Logger } from "../logging/logger.js";
 import { ImapConnectionError, listImapCapabilities, runWithImapClient } from "./imap-client.js";
+import { Pop3ConnectionError, runWithPop3Client } from "./pop3-client.js";
 
 const DEFAULT_IMAP_TIMEOUT_MS = 10_000;
 
@@ -19,8 +20,10 @@ export class SocketImapTester implements ImapTester {
   ) {}
 
   async test(req: TestImapRequest): Promise<TestImapResult> {
+    const protocol = req.imap.protocol ?? "imap";
     const mailbox = req.imap.mailbox ?? "INBOX";
     const base = {
+      protocol,
       host: req.imap.host,
       port: req.imap.port,
       tls: req.imap.tls,
@@ -31,13 +34,14 @@ export class SocketImapTester implements ImapTester {
     if (!passwordResult.ok) {
       return {
         ok: false,
-        host: base.host,
-        port: base.port,
-        tls: base.tls,
+        ...base,
         auth: "failed",
-        mailbox,
         error: passwordResult.error,
       };
+    }
+
+    if (protocol === "pop3") {
+      return await this.testPop3(req, passwordResult.password);
     }
 
     try {
@@ -61,22 +65,62 @@ export class SocketImapTester implements ImapTester {
 
       return {
         ok: true,
-        host: base.host,
-        port: base.port,
-        tls: base.tls,
+        ...base,
         auth: "ok",
-        mailbox,
         ...(capabilities.length === 0 ? {} : { capabilities }),
       };
     } catch (error) {
       return {
         ok: false,
-        host: base.host,
-        port: base.port,
-        tls: base.tls,
+        ...base,
         auth: "failed",
-        mailbox,
         error: normalizeImapTestError(error),
+      };
+    }
+  }
+
+  /**
+   * POP3 credential check: connect (TLS/STLS), authenticate, STAT, QUIT.
+   * Read-only by construction — the client cannot issue DELE. The mailbox
+   * folder is reported as INBOX because POP3 has no folders.
+   */
+  private async testPop3(req: TestImapRequest, password: string): Promise<TestImapResult> {
+    const base = {
+      protocol: "pop3" as const,
+      host: req.imap.host,
+      port: req.imap.port,
+      tls: req.imap.tls,
+      mailbox: "INBOX",
+    };
+    try {
+      const capabilities = await runWithPop3Client(
+        {
+          account: {
+            host: req.imap.host,
+            port: req.imap.port,
+            tls: req.imap.tls,
+            username: req.imap.username,
+            password,
+          },
+          timeoutMs: this.timeoutMs,
+        },
+        async (client) => {
+          await client.stat();
+          return await client.capa();
+        },
+      );
+      return {
+        ok: true,
+        ...base,
+        auth: "ok",
+        ...(capabilities.length === 0 ? {} : { capabilities }),
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        ...base,
+        auth: "failed",
+        error: normalizePop3TestError(error),
       };
     }
   }
@@ -94,7 +138,7 @@ export class SocketImapTester implements ImapTester {
         ok: false,
         error: {
           code: "IMAP_CREDENTIALS_MISSING",
-          message: "IMAP password or secretRef is required for credential validation",
+          message: "Mail password or secretRef is required for credential validation",
           retryable: false,
         },
       };
@@ -161,6 +205,22 @@ export class SocketImapTester implements ImapTester {
     };
   }
 }
+
+const normalizePop3TestError = (error: unknown): ErrorDetail => {
+  if (error instanceof Pop3ConnectionError) {
+    return {
+      code: error.code,
+      message: error.message,
+      retryable: error.retryable,
+      ...(error.details === undefined ? {} : { details: error.details }),
+    };
+  }
+  return {
+    code: "POP3_CONNECTION_FAILED",
+    message: error instanceof Error ? error.message : String(error),
+    retryable: false,
+  };
+};
 
 const normalizeImapTestError = (error: unknown): ErrorDetail => {
   if (error instanceof ImapConnectionError) {

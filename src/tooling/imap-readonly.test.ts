@@ -8,6 +8,7 @@ import {
   ImapReadonlyToolService,
   normalizeImapSearchQuery,
 } from "./imap-readonly.js";
+import type { Pop3ReadonlyToolService } from "./pop3-readonly.js";
 
 const TEST_SECRET_ENV = "SOVEREIGN_TEST_IMAP_PASSWORD";
 
@@ -38,6 +39,7 @@ const buildRuntimeConfig = (secretRef: string): RuntimeConfig => ({
   },
   imap: {
     status: "configured",
+    protocol: "imap",
     host: "127.0.0.1",
     port: 1143,
     tls: true,
@@ -412,5 +414,77 @@ describe("imap-readonly tool service", () => {
         sizeBytes: 5,
       },
     ]);
+  });
+});
+
+describe("ImapReadonlyToolService protocol dispatch", () => {
+  it("routes pop3-bound tool instances to the POP3 backend and resolves the secret", async () => {
+    process.env[TEST_SECRET_ENV] = "pop3-secret";
+    const runtimeConfig = buildRuntimeConfig(`env:${TEST_SECRET_ENV}`);
+    const instance = runtimeConfig.sovereignTools.instances[0];
+    if (instance === undefined) {
+      throw new Error("fixture missing tool instance");
+    }
+    instance.config = { ...instance.config, protocol: "pop3", port: "995" };
+    const calls: unknown[] = [];
+    const pop3 = {
+      searchMail: async (input: unknown) => {
+        calls.push(input);
+        return {
+          instanceId: "mail-sentinel-imap",
+          mailbox: "INBOX",
+          query: "since:2026-08-01",
+          totalMatches: 0,
+          messages: [],
+          uidValidity: "abc:def",
+        };
+      },
+      readMail: async (input: unknown) => {
+        calls.push(input);
+        throw new Error("not reached");
+      },
+    } as unknown as Pop3ReadonlyToolService;
+    const service = new ImapReadonlyToolService({
+      configLoader: async () => runtimeConfig,
+      runner: async () => {
+        throw new Error("IMAP runner must not be used for POP3 instances");
+      },
+      pop3,
+    });
+    try {
+      const result = await service.searchMail({
+        instanceId: "mail-sentinel-imap",
+        query: "since:2026-08-01",
+        limit: 5,
+      });
+      expect(result.uidValidity).toBe("abc:def");
+      expect(calls[0]).toMatchObject({
+        instanceId: "mail-sentinel-imap",
+        query: "since:2026-08-01",
+        limit: 5,
+        account: {
+          host: "127.0.0.1",
+          port: 995,
+          tls: true,
+          username: "bridge-user",
+          password: "pop3-secret",
+        },
+      });
+    } finally {
+      delete process.env[TEST_SECRET_ENV];
+    }
+  });
+
+  it("rejects unknown protocol bindings", async () => {
+    const runtimeConfig = buildRuntimeConfig("env:UNUSED");
+    const instance = runtimeConfig.sovereignTools.instances[0];
+    if (instance === undefined) {
+      throw new Error("fixture missing tool instance");
+    }
+    instance.config = { ...instance.config, protocol: "nntp" };
+    const service = new ImapReadonlyToolService({ configLoader: async () => runtimeConfig });
+    await expect(
+      service.searchMail({ instanceId: "mail-sentinel-imap", query: "ALL" }),
+    ).rejects.toMatchObject({ code: "TOOL_INSTANCE_INVALID" });
   });
 });
