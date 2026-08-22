@@ -13529,6 +13529,330 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
       await rm(tempRoot, { recursive: true, force: true });
     }
   });
+
+  describe("per-node relay secret", () => {
+    type CapturedAuthRequest = {
+      url: string;
+      authorization: string;
+      body: Record<string, unknown>;
+    };
+
+    const capture = (
+      captured: CapturedAuthRequest[],
+      respond: (request: CapturedAuthRequest) => Response,
+    ) => {
+      return async (url: string, init?: RequestInit): Promise<Response> => {
+        const request: CapturedAuthRequest = {
+          url,
+          authorization: new Headers(init?.headers).get("Authorization") ?? "",
+          body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+        };
+        captured.push(request);
+        return respond(request);
+      };
+    };
+
+    const withNodeSecret = (response: Response, nodeSecret: string): Promise<Response> =>
+      response.json().then((value: unknown) => {
+        const payload = value as { result: Record<string, unknown> };
+        return new Response(JSON.stringify({ result: { ...payload.result, nodeSecret } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+
+    const relayError = (status: number, code?: string): Response =>
+      new Response(JSON.stringify({ ok: false, error: "rejected", ...(code ? { code } : {}) }), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+
+    const secretPath = (paths: SovereignPaths): string =>
+      join(paths.secretsDir, "relay-node-secret");
+
+    it("persists a freshly issued node secret (0600) and strips it from the enrollment", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-node-secret-"));
+      try {
+        const paths = buildPaths(tempRoot);
+        const captured: CapturedAuthRequest[] = [];
+        let issued: Response | null = null;
+        const service = buildService(paths, async (url, init) => {
+          issued ??= await withNodeSecret(
+            httpResponse("pilot.relay.sovereign-ai-node.com"),
+            "issued-node-secret",
+          );
+          return capture(captured, () => issued as Response)(url, init);
+        });
+        stubRuntimeConfig(service, null);
+        stubStableId(service, "stable-machine-id");
+
+        const enrollment = await invoke(service, {
+          controlUrl: "https://relay.sovereign-ai-node.com",
+        });
+
+        // First enrollment: the node has no secret yet, so no bearer is sent.
+        expect(captured).toHaveLength(1);
+        expect(captured[0]?.authorization).toBe("");
+        // The secret is persisted 0600 and NOT part of the returned enrollment
+        // (so runtime config / job records can never capture it).
+        await expect(readFile(secretPath(paths), "utf8")).resolves.toBe("issued-node-secret\n");
+        expect((await stat(secretPath(paths))).mode & 0o777).toBe(0o600);
+        expect(enrollment).not.toHaveProperty("nodeSecret");
+        expect(JSON.stringify(enrollment)).not.toContain("issued-node-secret");
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("sends the persisted secret as a bearer token on a later enrollment", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-node-secret-"));
+      try {
+        const paths = buildPaths(tempRoot);
+        await mkdir(paths.secretsDir, { recursive: true });
+        await writeFile(secretPath(paths), "persisted-node-secret\n", "utf8");
+        const captured: CapturedAuthRequest[] = [];
+        const service = buildService(
+          paths,
+          capture(captured, () => httpResponse("pilot.relay.sovereign-ai-node.com")),
+        );
+        stubRuntimeConfig(service, null);
+        stubStableId(service, "stable-machine-id");
+
+        await invoke(service, { controlUrl: "https://relay.sovereign-ai-node.com" });
+
+        expect(captured).toHaveLength(1);
+        expect(captured[0]?.authorization).toBe("Bearer persisted-node-secret");
+        // An unchanged re-enroll issues no new secret; the file is untouched.
+        await expect(readFile(secretPath(paths), "utf8")).resolves.toBe("persisted-node-secret\n");
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("reads the secret from the resolved fallback secrets dir too", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-node-secret-"));
+      try {
+        const paths = buildPaths(tempRoot);
+        const fallback = join(tempRoot, "fallback-secrets");
+        await mkdir(fallback, { recursive: true });
+        await writeFile(join(fallback, "relay-node-secret"), "fallback-secret\n", "utf8");
+        const captured: CapturedAuthRequest[] = [];
+        const service = buildService(
+          paths,
+          capture(captured, () => httpResponse("pilot.relay.sovereign-ai-node.com")),
+        );
+        (service as unknown as { resolvedSecretsDir: string | null }).resolvedSecretsDir = fallback;
+        stubRuntimeConfig(service, null);
+        stubStableId(service, "stable-machine-id");
+
+        await invoke(service, { controlUrl: "https://relay.sovereign-ai-node.com" });
+
+        expect(captured[0]?.authorization).toBe("Bearer fallback-secret");
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("fails without retry on 401 and tells the operator to re-key the node", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-node-secret-"));
+      try {
+        const captured: CapturedAuthRequest[] = [];
+        const service = buildService(
+          buildPaths(tempRoot),
+          capture(captured, () => relayError(401, "NODE_SECRET_REQUIRED")),
+        );
+        stubRuntimeConfig(service, null);
+        stubStableId(service, "stable-machine-id");
+
+        await expect(
+          invoke(service, { controlUrl: "https://relay.sovereign-ai-node.com" }),
+        ).rejects.toMatchObject({
+          code: "RELAY_NODE_SECRET_REJECTED",
+          retryable: false,
+          message: expect.stringContaining("/etc/sovereign-node/secrets/relay-node-secret"),
+          details: { status: 401, relayCode: "NODE_SECRET_REQUIRED" },
+        });
+        expect(captured).toHaveLength(1);
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("fails without retry on 429", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-node-secret-"));
+      try {
+        const captured: CapturedAuthRequest[] = [];
+        const service = buildService(
+          buildPaths(tempRoot),
+          capture(captured, () => relayError(429)),
+        );
+        stubRuntimeConfig(service, null);
+        stubStableId(service, "stable-machine-id");
+
+        await expect(
+          invoke(service, { controlUrl: "https://relay.sovereign-ai-node.com" }),
+        ).rejects.toMatchObject({ code: "RELAY_THROTTLED", retryable: true });
+        expect(captured).toHaveLength(1);
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("fails without retry on 409 SLUG_TAKEN for an operator-chosen name", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-node-secret-"));
+      try {
+        const captured: CapturedAuthRequest[] = [];
+        const service = buildService(
+          buildPaths(tempRoot),
+          capture(captured, () => relayError(409, "SLUG_TAKEN")),
+        );
+        stubRuntimeConfig(service, null);
+
+        await expect(
+          invoke(service, {
+            controlUrl: "https://relay.example.org",
+            enrollmentToken: "custom-token",
+            requestedSlug: "my-node",
+          }),
+        ).rejects.toMatchObject({
+          code: "RELAY_SLUG_TAKEN",
+          retryable: false,
+          details: { requestedSlug: "my-node" },
+        });
+        expect(captured).toHaveLength(1);
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("still regenerates on 409 SLUG_TAKEN for a generated public name", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-node-secret-"));
+      try {
+        const captured: CapturedAuthRequest[] = [];
+        const service = buildService(
+          buildPaths(tempRoot),
+          capture(captured, (request) =>
+            captured.length === 1
+              ? relayError(409, "SLUG_TAKEN")
+              : httpResponse(`${String(request.body.requestedSlug)}.relay.sovereign-ai-node.com`),
+          ),
+        );
+        stubRuntimeConfig(service, null);
+        stubStableId(service, "stable-machine-id");
+
+        const enrollment = await invoke(service, {
+          controlUrl: "https://relay.sovereign-ai-node.com",
+        });
+
+        expect(captured).toHaveLength(2);
+        expect(captured[0]?.body.requestedSlug).not.toBe(captured[1]?.body.requestedSlug);
+        expect(enrollment.hostname).toBe(
+          `${String(captured[1]?.body.requestedSlug)}.relay.sovereign-ai-node.com`,
+        );
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("persists a secret issued on a legacy refresh even when the node stays legacy", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-node-secret-"));
+      try {
+        const paths = buildPaths(tempRoot);
+        const captured: CapturedAuthRequest[] = [];
+        let adopted: Response | null = null;
+        const service = buildService(paths, async (url, init) => {
+          adopted ??= await withNodeSecret(
+            httpResponse("cathouse.relay.sovereign-ai-node.com"),
+            "adopted-node-secret",
+          );
+          return capture(captured, () => adopted as Response)(url, init);
+        });
+        stubRuntimeConfig(service, legacyRuntimeConfig());
+        stubSecret(service, "reused-tunnel-token");
+        stubStableId(service, "stable-machine-id");
+
+        const enrollment = await invoke(service, {
+          controlUrl: "https://relay.sovereign-ai-node.com",
+        });
+
+        // Relay adopted the legacy record and issued the secret, but returned
+        // http ⇒ keep-legacy. The secret must still be kept for the next call.
+        expect(captured).toHaveLength(1);
+        expect(captured[0]?.authorization).toBe("");
+        expect(enrollment.tunnel.type).toBe("http");
+        await expect(readFile(secretPath(paths), "utf8")).resolves.toBe("adopted-node-secret\n");
+        expect(JSON.stringify(enrollment)).not.toContain("adopted-node-secret");
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("sends the bearer on a legacy refresh and strips a rotated secret from the result", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-node-secret-"));
+      try {
+        const paths = buildPaths(tempRoot);
+        await mkdir(paths.secretsDir, { recursive: true });
+        await writeFile(secretPath(paths), "persisted-node-secret\n", "utf8");
+        const captured: CapturedAuthRequest[] = [];
+        let refreshed: Response | null = null;
+        const service = buildService(paths, async (url, init) => {
+          refreshed ??= await withNodeSecret(
+            passthroughResponse("cathouse.relay.sovereign-ai-node.com"),
+            "rotated-node-secret",
+          );
+          return capture(captured, () => refreshed as Response)(url, init);
+        });
+        stubRuntimeConfig(service, legacyRuntimeConfig());
+        stubSecret(service, "reused-tunnel-token");
+        stubStableId(service, "stable-machine-id");
+
+        const enrollment = await invoke(service, {
+          controlUrl: "https://relay.sovereign-ai-node.com",
+        });
+
+        expect(captured[0]?.authorization).toBe("Bearer persisted-node-secret");
+        expect(enrollment.tunnel.type).toBe("https");
+        expect(enrollment).not.toHaveProperty("nodeSecret");
+        await expect(readFile(secretPath(paths), "utf8")).resolves.toBe("rotated-node-secret\n");
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps the legacy enrollment on a 401 refresh but logs the re-key instruction", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-node-secret-"));
+      try {
+        const captured: CapturedAuthRequest[] = [];
+        const service = buildService(
+          buildPaths(tempRoot),
+          capture(captured, () => relayError(401, "NODE_SECRET_INVALID")),
+        );
+        const errors: string[] = [];
+        vi.spyOn(
+          (service as unknown as { logger: { error: (...args: unknown[]) => void } }).logger,
+          "error",
+        ).mockImplementation((...args: unknown[]) => {
+          errors.push(String(args[1]));
+        });
+        stubRuntimeConfig(service, legacyRuntimeConfig());
+        stubSecret(service, "reused-tunnel-token");
+        stubStableId(service, "stable-machine-id");
+
+        const enrollment = await invoke(service, {
+          controlUrl: "https://relay.sovereign-ai-node.com",
+        });
+
+        expect(captured).toHaveLength(1);
+        expect(enrollment.tunnel.type).toBe("http");
+        expect(enrollment.tunnel.token).toBe("reused-tunnel-token");
+        expect(errors).toHaveLength(1);
+        expect(errors[0]).toContain("re-keyed");
+        expect(errors[0]).toContain("/etc/sovereign-node/secrets/relay-node-secret");
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+  });
 });
 
 describe("resolveStableInstallationId", () => {
