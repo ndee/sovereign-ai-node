@@ -1,13 +1,15 @@
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
-
 import JSON5 from "json5";
-
 import type { BotConfigValue } from "../bots/catalog.js";
 import type { CheckResult, ComponentHealth } from "../contracts/common.js";
 import type { DoctorReport } from "../contracts/index.js";
 import { resolveRequestedOpenClawVersion } from "../openclaw/bootstrap.js";
 import { isSystemdBusUnavailableMessage } from "../openclaw/gateway-service.js";
+import {
+  type OpenRouterPrivacyConfig,
+  resolveOpenRouterPrivacy,
+} from "../openclaw/openrouter-routing.js";
 import { formatTemplateRef, parseTemplateRef } from "../templates/catalog.js";
 import type { SovereignTemplateKind } from "./service.js";
 
@@ -173,6 +175,7 @@ export type RuntimeConfig = {
   openrouter: {
     model: string;
     apiKeySecretRef: string;
+    privacy: OpenRouterPrivacyConfig;
   };
   openclaw: {
     managedInstallation: boolean;
@@ -1165,6 +1168,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
         typeof openrouter.apiKeySecretRef === "string" && openrouter.apiKeySecretRef.length > 0
           ? openrouter.apiKeySecretRef
           : "env:OPENROUTER_API_KEY",
+      privacy: resolveOpenRouterPrivacy(openrouter.privacy),
     },
     openclawProfile: {
       plugins: {

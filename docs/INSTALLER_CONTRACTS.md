@@ -591,6 +591,13 @@ type InstallRequest = {
     // Exactly one of the following should be provided:
     apiKey?: string; // transient only
     secretRef?: string; // file:... or env:...
+    // OpenRouter provider routing / privacy controls (strict by default):
+    privacy?: {
+      zdr?: boolean; // default true: only zero-data-retention endpoints
+      dataCollection?: "deny" | "allow"; // default "deny": exclude providers that retain/train
+      allowFallbacks?: boolean; // default false: never fall back outside the filtered set
+      only?: string[]; // optional provider allowlist (OpenRouter provider slugs)
+    };
   };
   imap?: {
     host: string;
@@ -648,6 +655,20 @@ Constraints:
 - `openclaw.runOnboard` defaults to `false` and should remain `false` in the default Sovereign flow
 - `openrouter` is required
 - `openrouter.apiKey` or `openrouter.secretRef` is required
+- `openrouter.privacy` is optional; omitted fields default to the strict profile
+  (`zdr: true`, `dataCollection: "deny"`, `allowFallbacks: false`). The resolved
+  block is persisted as `openrouter.privacy` in `sovereign-node.json5`, rendered into
+  the managed OpenClaw config as
+  `agents.defaults.models["openrouter/<model>"].params.provider`
+  (`{ data_collection, zdr, allow_fallbacks, only? }`) and sent by OpenClaw as the
+  `provider` routing block of every OpenRouter request, including `llm-task` mail
+  classification. Weakening it is an explicit opt-out. The configured model must have
+  at least one endpoint matching the profile (see
+  `https://openrouter.ai/api/v1/endpoints/zdr`), otherwise OpenRouter returns no
+  eligible provider. The managed OpenClaw config also sets `agents.defaults.workspace`
+  to a dedicated empty directory (`<service home>/llm-task-workspace`, `0750`,
+  service-owned) so `llm-task` calls never carry agent bootstrap files
+  (`AGENTS.md`, `SOUL.md`, `TOOLS.md`, `USER.md`, `MEMORY.md`).
 - `imap.password` MUST NOT be persisted if provided
 - `imap` may be omitted (pending IMAP mode)
 - `connectivity.mode = "relay"` requires a valid `relay` object

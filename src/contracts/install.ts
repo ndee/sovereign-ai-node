@@ -80,11 +80,19 @@ export const imapInstallInputSchema = z.object({
   mailbox: z.string().min(1).optional(),
 });
 
+export const openrouterPrivacyInputSchema = z.object({
+  zdr: z.boolean().optional(),
+  dataCollection: z.enum(["deny", "allow"]).optional(),
+  allowFallbacks: z.boolean().optional(),
+  only: z.array(z.string().min(1)).optional(),
+});
+
 export const openrouterInstallInputSchema = z
   .object({
     model: z.string().min(1).optional(),
     apiKey: z.string().min(1).optional(),
     secretRef: z.string().min(1).optional(),
+    privacy: openrouterPrivacyInputSchema.optional(),
   })
   .refine(
     (value: {
