@@ -11,6 +11,14 @@ import type { ExecResult, ExecRunner } from "./exec.js";
 import { detectLanIPv4 } from "./lan-ips.js";
 import type { MatrixAvatarResolver } from "./matrix-avatars.js";
 import {
+  BUNDLED_MATRIX_CONFIG_FILE_MODE,
+  BUNDLED_MATRIX_ENV_FILE_MODE,
+  type BundledMatrixOwner,
+  hardenDirectory,
+  hardenFile,
+  resolveBundledMatrixOwner,
+} from "./matrix-file-modes.js";
+import {
   buildOnboardingPageUrl,
   normalizeEmbeddedSvg,
   renderFallbackQrSvg,
@@ -265,22 +273,32 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       await mkdir(proxyConfigDir, { recursive: true });
       await mkdir(onboardingDir, { recursive: true });
     }
-    // The Synapse and Postgres containers run as non-root users (UID 991 and
-    // 70 respectively). They need to traverse baseDir and projectDir to reach
-    // their bind-mounted /data, so force those parents to 0o755 even if the
-    // installer was invoked under a restrictive umask.
-    await chmodIgnoreMissing(baseDir, 0o755);
-    await chmodIgnoreMissing(projectDir, 0o755);
-    await ensureDirectoryTreesWritable([synapseDir, postgresDir]);
-    if (usesReverseProxy) {
-      await ensureDirectoryTreesWritable([
-        wellKnownDir,
-        proxyDir,
-        proxyDataDir,
-        proxyConfigDir,
-        onboardingDir,
-      ]);
-    }
+    // Project files carry credentials, so the tree is private to the owner
+    // (the runtime service user, or the current user when unprivileged).
+    // Synapse is handed the same uid/gid through the compose UID/GID
+    // variables, Postgres/Caddy/onboarding-api run as root inside their
+    // containers, and Docker resolves bind mounts as root, so nothing needs
+    // to be world- or group-accessible. See matrix-file-modes.ts.
+    const owner = await this.resolveOwner();
+    const projectDirs = [
+      baseDir,
+      projectDir,
+      synapseDir,
+      postgresDir,
+      ...(usesReverseProxy
+        ? [
+            wellKnownDir,
+            join(wellKnownDir, ".well-known"),
+            join(wellKnownDir, ".well-known", "matrix"),
+            join(wellKnownDir, "onboard"),
+            proxyDir,
+            proxyDataDir,
+            proxyConfigDir,
+            onboardingDir,
+          ]
+        : []),
+    ];
+    await this.hardenDirectories(projectDirs, owner);
 
     const existingEnv = await this.readExistingEnv(projectDir);
     const existingPostgresPassword = existingEnv.POSTGRES_PASSWORD?.trim();
@@ -328,6 +346,8 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       federationEnabled,
       postgresPassword: generated.postgresPassword,
       synapseConfigPath: "/data/homeserver.yaml",
+      ownerUid: owner.uid,
+      ownerGid: owner.gid,
       ...(passthrough && dns01?.token !== undefined && dns01.token.length > 0
         ? { desecToken: dns01.token }
         : {}),
@@ -390,15 +410,24 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     }
 
     await Promise.all(writes);
-    // Make the bind-mounted Synapse config files readable by the Synapse
-    // container's non-root user. homeserver.yaml and the signing key already
-    // contain Postgres credentials and shared secrets, so 0o644 does not
-    // weaken the existing threat model — anyone with shell access to baseDir
-    // can already read them.
+    // Every rendered file is re-hardened on each run so upgrades of nodes
+    // installed with the former world-readable modes converge too.
+    const configFiles = [
+      composeFilePath,
+      join(synapseDir, "homeserver.yaml"),
+      join(synapseDir, generated.signingKeyFile),
+      join(synapseDir, "log.config"),
+      ...(usesReverseProxy
+        ? [
+            join(proxyDir, "Caddyfile"),
+            join(wellKnownDir, ".well-known", "matrix", "client"),
+            join(wellKnownDir, ".well-known", "matrix", "server"),
+          ]
+        : []),
+    ];
     await Promise.all([
-      chmodIgnoreMissing(join(synapseDir, "homeserver.yaml"), 0o644),
-      chmodIgnoreMissing(join(synapseDir, generated.signingKeyFile), 0o644),
-      chmodIgnoreMissing(join(synapseDir, "log.config"), 0o644),
+      hardenFile(envFilePath, BUNDLED_MATRIX_ENV_FILE_MODE, owner),
+      ...configFiles.map((file) => hardenFile(file, BUNDLED_MATRIX_CONFIG_FILE_MODE, owner)),
     ]);
     if (usesReverseProxy) {
       await this.writeOnboardingPage({
@@ -410,19 +439,13 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
           ? { alertRoomName: req.matrix.alertRoomName.trim() }
           : {}),
       });
+      await hardenFile(
+        join(wellKnownDir, "onboard", "index.html"),
+        BUNDLED_MATRIX_CONFIG_FILE_MODE,
+        owner,
+      );
     }
-    await chmodIgnoreMissing(baseDir, 0o755);
-    await chmodIgnoreMissing(projectDir, 0o755);
-    await ensureDirectoryTreesWritable([synapseDir, postgresDir]);
-    if (usesReverseProxy) {
-      await ensureDirectoryTreesWritable([
-        wellKnownDir,
-        proxyDir,
-        proxyDataDir,
-        proxyConfigDir,
-        onboardingDir,
-      ]);
-    }
+    await this.hardenDirectories(projectDirs, owner);
 
     const composeConfigCheck = await this.runComposeCommand(projectDir, composeFilePath, [
       "config",
@@ -1746,7 +1769,17 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     await this.reclaimOwnership(postgresDir);
     await rm(postgresDir, { recursive: true, force: true });
     await mkdir(postgresDir, { recursive: true });
-    await ensureDirectoryTreeWritable(postgresDir);
+    await hardenDirectory(postgresDir, await this.resolveOwner(), { logger: this.logger });
+  }
+
+  private async resolveOwner(): Promise<BundledMatrixOwner> {
+    return resolveBundledMatrixOwner({ execRunner: this.execRunner, logger: this.logger });
+  }
+
+  private async hardenDirectories(dirs: string[], owner: BundledMatrixOwner): Promise<void> {
+    for (const dir of dirs) {
+      await hardenDirectory(dir, owner, { logger: this.logger });
+    }
   }
 
   private async collectComposeDiagnostics(
@@ -2325,6 +2358,9 @@ type EnvTemplateInput = {
   federationEnabled: boolean;
   postgresPassword: string;
   synapseConfigPath: string;
+  // uid/gid the Synapse container runs as (and that owns the project files).
+  ownerUid: number;
+  ownerGid: number;
   // Per-node scoped deSEC token, injected into the reverse-proxy container for
   // the Caddy DNS-01 challenge. Present only in relay TLS-passthrough mode.
   desecToken?: string;
@@ -2365,6 +2401,10 @@ services:
       - postgres
     environment:
       SYNAPSE_CONFIG_PATH: \${SYNAPSE_CONFIG_PATH}
+      # start.py (root) chowns /data to UID:GID and drops privileges via gosu,
+      # so the 0640 config files are readable by their owner only.
+      UID: "\${SOVEREIGN_MATRIX_UID}"
+      GID: "\${SOVEREIGN_MATRIX_GID}"
     ports:
       - "${input.localSynapsePortBinding}"
     volumes:
@@ -2428,6 +2468,8 @@ const renderEnvFile = (input: EnvTemplateInput): string =>
   [
     `POSTGRES_PASSWORD=${input.postgresPassword}`,
     `SYNAPSE_CONFIG_PATH=${input.synapseConfigPath}`,
+    `SOVEREIGN_MATRIX_UID=${input.ownerUid}`,
+    `SOVEREIGN_MATRIX_GID=${input.ownerGid}`,
     `MATRIX_HOMESERVER_DOMAIN=${input.homeserverDomain}`,
     `MATRIX_PUBLIC_BASE_URL=${input.publicBaseUrl}`,
     `MATRIX_FEDERATION_ENABLED=${input.federationEnabled ? "true" : "false"}`,
@@ -2809,46 +2851,6 @@ const renderWellKnownFiles = (input: {
       2,
     ),
   };
-};
-
-const ensureDirectoryTreeWritable = async (root: string): Promise<void> => {
-  const queue: string[] = [root];
-  while (queue.length > 0) {
-    const current = queue.shift();
-    if (current === undefined) {
-      break;
-    }
-    await chmod(current, 0o777);
-    const entries = await readdir(current, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory()) {
-        continue;
-      }
-      queue.push(join(current, entry.name));
-    }
-  }
-};
-
-const ensureDirectoryTreesWritable = async (dirs: string[]): Promise<void> => {
-  for (const dir of dirs) {
-    await ensureDirectoryTreeWritable(dir);
-  }
-};
-
-const chmodIgnoreMissing = async (path: string, mode: number): Promise<void> => {
-  try {
-    await chmod(path, mode);
-  } catch (error) {
-    if (
-      error !== null &&
-      typeof error === "object" &&
-      "code" in error &&
-      (error as NodeJS.ErrnoException).code === "ENOENT"
-    ) {
-      return;
-    }
-    throw error;
-  }
 };
 
 const allServicesRunning = (states: ComposeServiceState[]): boolean =>
