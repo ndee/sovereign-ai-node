@@ -129,6 +129,7 @@ import {
   type ToolTemplateDefinition,
   verifySignedTemplateManifest,
 } from "../templates/catalog.js";
+import { pruneInstallJobRecords, redactInstallRequestSecrets } from "./install-request-secrets.js";
 import {
   type InstallContext,
   type InstallStep,
@@ -281,6 +282,12 @@ import {
   type TemplateTransitionDiff,
 } from "./template-transition.js";
 import { renderTemplateWorkspaceContent } from "./workspace-documents.js";
+
+const TERMINAL_INSTALL_JOB_STATES: ReadonlySet<InstallJobSummary["state"]> = new Set([
+  "succeeded",
+  "failed",
+  "canceled",
+]);
 
 type PersistedInstallJobRecord = {
   version: 1;
@@ -1168,6 +1175,7 @@ export class RealInstallerService implements InstallerService {
       })),
     };
 
+    await this.pruneInstallJobRecords();
     await this.persistJobSnapshot({
       installationId,
       request: req,
@@ -9322,23 +9330,42 @@ export default function (api) {
       ...(input.snapshot.error === undefined ? {} : { error: input.snapshot.error }),
     };
 
+    // Job records live on disk for the lifetime of the install (and are
+    // served back to the wizard), so inline credentials from the request must
+    // never be persisted — only their secretRef forms.
     const record: PersistedInstallJobRecord = {
       version: 1,
       installationId: input.installationId,
-      request: installRequestSchema.parse(input.request),
+      request: this.redactInstallRequest(installRequestSchema.parse(input.request)),
       response: installJobStatusResponseSchema.parse(response),
       updatedAt: now(),
     };
 
     await this.writeJobRecord(record);
+    if (TERMINAL_INSTALL_JOB_STATES.has(record.response.job.state)) {
+      await this.pruneInstallJobRecords(record.response.job.jobId);
+    }
+  }
+
+  private redactInstallRequest(request: InstallRequest): InstallRequest {
+    return redactInstallRequestSecrets(request, { secretsDir: this.paths.secretsDir });
   }
 
   private async writeJobRecord(record: PersistedInstallJobRecord): Promise<void> {
     const filePath = await this.getJobFilePath(record.response.job.jobId);
-    const tempPath = `${filePath}.${randomUUID()}.tmp`;
-    const payload = `${JSON.stringify(record, null, 2)}\n`;
-    await writeFile(tempPath, payload, "utf8");
-    await rename(tempPath, filePath);
+    await this.writeProtectedJsonFile(filePath, record);
+  }
+
+  private async pruneInstallJobRecords(protectJobId?: string): Promise<void> {
+    try {
+      const dir = await this.ensureInstallJobsDir();
+      const removed = await pruneInstallJobRecords(dir, { protectJobId });
+      if (removed.length > 0) {
+        this.logger.debug({ removed }, "Pruned finished install job records");
+      }
+    } catch (error) {
+      this.logger.warn({ error: describeError(error) }, "Failed to prune install job records");
+    }
   }
 
   private async readJobRecord(jobId: string): Promise<PersistedInstallJobRecord | null> {
@@ -9383,20 +9410,20 @@ export default function (api) {
 
     const override = process.env.SOVEREIGN_NODE_INSTALL_JOBS_DIR;
     if (override !== undefined && override.length > 0) {
-      await mkdir(override, { recursive: true });
+      await this.ensurePrivateDir(override);
       await access(override, fsConstants.W_OK);
       this.resolvedInstallJobsDir = override;
       return override;
     }
 
     try {
-      await mkdir(this.paths.installJobsDir, { recursive: true });
+      await this.ensurePrivateDir(this.paths.installJobsDir);
       await access(this.paths.installJobsDir, fsConstants.W_OK);
       this.resolvedInstallJobsDir = this.paths.installJobsDir;
       return this.resolvedInstallJobsDir;
     } catch (error) {
       const fallback = resolve(process.cwd(), ".sovereign-node-dev", "install-jobs");
-      await mkdir(fallback, { recursive: true });
+      await this.ensurePrivateDir(fallback);
       this.logger.debug(
         {
           preferredInstallJobsDir: this.paths.installJobsDir,
@@ -9408,6 +9435,13 @@ export default function (api) {
       this.resolvedInstallJobsDir = fallback;
       return fallback;
     }
+  }
+
+  // Install job records carry the (redacted) install request; keep the
+  // directory owner-only even when it pre-exists with a wider mode.
+  private async ensurePrivateDir(dir: string): Promise<void> {
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await chmod(dir, 0o700);
   }
 
   private async registerManagedBots(
@@ -10249,7 +10283,7 @@ export default function (api) {
 
   private async writeSavedInstallRequest(request: InstallRequest): Promise<string> {
     const requestFile = this.getInstallRequestPath();
-    await this.writeInstallerJsonFile(requestFile, request, 0o640);
+    await this.writeInstallerJsonFile(requestFile, this.redactInstallRequest(request), 0o640);
     return requestFile;
   }
 
