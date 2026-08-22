@@ -152,6 +152,13 @@ import {
   type RelayEnrollmentData,
   tryUsePreEnrolledRelay as tryUsePreEnrolledRelayFile,
 } from "./real-service-relay-enrollment.js";
+import {
+  describeRelayNodeAuthFailure,
+  RELAY_NODE_SECRET_FILE_NAME,
+  readRelayNodeSecretFile,
+  relayNodeSecretAuthHeaders,
+  stripRelayNodeSecret,
+} from "./real-service-relay-node-secret.js";
 import { renderRelayTunnelConfig, renderRelayTunnelUnit } from "./real-service-relay-tunnel.js";
 import {
   areMatrixIdentitiesEqual,
@@ -8777,6 +8784,9 @@ export default function (api) {
       ensureTrailingSlash(relay.controlUrl),
     ).toString();
 
+    // Present the per-node secret when this node already holds one; the relay
+    // requires it to touch an existing assignment.
+    const nodeSecret = await this.readRelayNodeSecret();
     let response: Response;
     try {
       response = await this.fetchImpl(endpoint, {
@@ -8784,6 +8794,7 @@ export default function (api) {
         headers: {
           "Content-Type": "application/json",
           Accept: "application/json",
+          ...relayNodeSecretAuthHeaders(nodeSecret),
         },
         body: JSON.stringify({
           ...(usesManagedPublicEnroll
@@ -8814,6 +8825,23 @@ export default function (api) {
 
     const responseText = await response.text();
     if (!response.ok) {
+      // Authentication / ownership rejections are never retried and carry an
+      // operator-facing message. The node keeps its working legacy enrollment
+      // (never break a running node), but the operator must act on this.
+      const authFailure = describeRelayNodeAuthFailure({
+        status: response.status,
+        responseText,
+        controlUrl: relay.controlUrl,
+        requestedSlug: existingSlug,
+        presentedNodeSecret: nodeSecret !== undefined,
+      });
+      if (authFailure !== null) {
+        this.logger.error(
+          { code: authFailure.code, ...authFailure.details },
+          `${authFailure.message} Keeping existing legacy enrollment.`,
+        );
+        return "keep-legacy";
+      }
       this.logger.warn(
         {
           controlUrl: relay.controlUrl,
@@ -8827,13 +8855,15 @@ export default function (api) {
 
     let enrollment: RelayEnrollmentResult;
     try {
-      enrollment = parseManagedRelayEnrollmentResponse({
-        responseText,
-        controlUrl: relay.controlUrl,
-        requestedSlug: existingSlug,
-        localEdgePort: RELAY_LOCAL_EDGE_PORT,
-        localTlsPort: RELAY_LOCAL_TLS_PORT,
-      });
+      enrollment = await this.persistRelayNodeSecret(
+        parseManagedRelayEnrollmentResponse({
+          responseText,
+          controlUrl: relay.controlUrl,
+          requestedSlug: existingSlug,
+          localEdgePort: RELAY_LOCAL_EDGE_PORT,
+          localTlsPort: RELAY_LOCAL_TLS_PORT,
+        }),
+      );
     } catch (error) {
       this.logger.warn(
         { error: describeError(error), controlUrl: relay.controlUrl },
@@ -8975,12 +9005,15 @@ export default function (api) {
     const publicEnrollInstallationId = usesManagedPublicEnroll
       ? await this.resolveStableInstallationId()
       : installationId;
+    // A node that already holds a per-node relay secret must present it, or the
+    // relay refuses to touch its existing assignment.
+    const nodeSecret = await this.readRelayNodeSecret();
     let lastFailure: { status?: number; responseText?: string; error?: unknown } | null = null;
     for (let attempt = 1; attempt <= 6; attempt += 1) {
-      const requestedSlug =
-        attempt === 1 && callerSlugEligible
-          ? (callerSlug as string)
-          : this.generateManagedRelayRequestedSlug();
+      const slugFromCaller = attempt === 1 && callerSlugEligible;
+      const requestedSlug = slugFromCaller
+        ? (callerSlug as string)
+        : this.generateManagedRelayRequestedSlug();
       let response: Response;
       try {
         response = await this.fetchImpl(endpoint, {
@@ -8988,6 +9021,7 @@ export default function (api) {
           headers: {
             "Content-Type": "application/json",
             Accept: "application/json",
+            ...relayNodeSecretAuthHeaders(nodeSecret),
           },
           body: JSON.stringify({
             ...(usesManagedPublicEnroll
@@ -9014,6 +9048,20 @@ export default function (api) {
           status: response.status,
           responseText,
         };
+        // 401 (node secret missing/invalid), 409 SLUG_TAKEN on an operator-chosen
+        // name, and 429 are terminal for this run: retrying cannot succeed and
+        // would only trip the relay's throttle. A 409 on a GENERATED name is a
+        // random collision and falls through to the existing regenerate loop.
+        const authFailure = describeRelayNodeAuthFailure({
+          status: response.status,
+          responseText,
+          controlUrl: relay.controlUrl,
+          requestedSlug,
+          presentedNodeSecret: nodeSecret !== undefined,
+        });
+        if (authFailure !== null && !(authFailure.code === "RELAY_SLUG_TAKEN" && !slugFromCaller)) {
+          throw authFailure;
+        }
         const responseTextLower = responseText.toLowerCase();
         const slugConflict =
           response.status === 409 ||
@@ -9046,13 +9094,15 @@ export default function (api) {
         };
       }
 
-      const enrollment = parseManagedRelayEnrollmentResponse({
-        responseText,
-        controlUrl: relay.controlUrl,
-        requestedSlug,
-        localEdgePort: RELAY_LOCAL_EDGE_PORT,
-        localTlsPort: RELAY_LOCAL_TLS_PORT,
-      });
+      const enrollment = await this.persistRelayNodeSecret(
+        parseManagedRelayEnrollmentResponse({
+          responseText,
+          controlUrl: relay.controlUrl,
+          requestedSlug,
+          localEdgePort: RELAY_LOCAL_EDGE_PORT,
+          localTlsPort: RELAY_LOCAL_TLS_PORT,
+        }),
+      );
 
       this.logger.info(
         {
@@ -9080,6 +9130,41 @@ export default function (api) {
         ...(lastFailure?.error === undefined ? {} : { error: describeError(lastFailure.error) }),
       },
     };
+  }
+
+  /**
+   * Read the persisted per-node relay secret, if this node already holds one.
+   * Checks the canonical secrets dir and, when the service fell back to a
+   * dev-local dir, that dir too. Absence simply means "not yet issued".
+   */
+  private async readRelayNodeSecret(): Promise<string | undefined> {
+    const candidates = [this.paths.secretsDir];
+    if (this.resolvedSecretsDir !== null && this.resolvedSecretsDir !== this.paths.secretsDir) {
+      candidates.push(this.resolvedSecretsDir);
+    }
+    return readRelayNodeSecretFile(candidates);
+  }
+
+  /**
+   * Persist a freshly issued per-node relay secret (0600, atomic, never logged)
+   * and return the enrollment WITHOUT it, so nothing downstream (runtime config,
+   * job records, install request snapshots) can capture the value.
+   */
+  private async persistRelayNodeSecret(
+    enrollment: RelayEnrollmentResult,
+  ): Promise<RelayEnrollmentResult> {
+    if (enrollment.nodeSecret === undefined) {
+      return enrollment;
+    }
+    const secretRef = await this.writeSecretFile(
+      RELAY_NODE_SECRET_FILE_NAME,
+      enrollment.nodeSecret,
+    );
+    this.logger.info(
+      { hostname: enrollment.hostname, secretRef },
+      "Stored per-node relay secret issued by the relay",
+    );
+    return stripRelayNodeSecret(enrollment);
   }
 
   private generateManagedRelayRequestedSlug(): string {

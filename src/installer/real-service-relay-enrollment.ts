@@ -25,6 +25,10 @@ export type RelayEnrollmentData = {
   publicBaseUrl: string;
   tunnel: RelayTunnelConfig;
   dns01?: RelayEnrollmentDns01;
+  // Per-node relay secret, present ONLY when the relay issued one on this call.
+  // Persisted by the caller via writeSecretFile and stripped before the
+  // enrollment is handed to any code path that records it.
+  nodeSecret?: string;
 };
 
 // Parse a dns01 block (response root or install-request relay block). Returns
@@ -135,6 +139,12 @@ export const parseManagedRelayEnrollmentResponse = (input: {
   const tunnelType = tunnel !== null && tunnel.type === "https" ? "https" : "http";
   const dns01 = parseEnrollmentDns01(payload?.dns01);
   const passthrough = mode === "https-passthrough" || tunnelType === "https";
+  const nodeSecret =
+    payload !== null &&
+    typeof payload.nodeSecret === "string" &&
+    payload.nodeSecret.trim().length > 0
+      ? payload.nodeSecret.trim()
+      : undefined;
 
   if (
     hostname.length === 0 ||
@@ -185,5 +195,6 @@ export const parseManagedRelayEnrollmentResponse = (input: {
       localPort: passthrough ? input.localTlsPort : input.localEdgePort,
     },
     ...(dns01 === undefined ? {} : { dns01 }),
+    ...(nodeSecret === undefined ? {} : { nodeSecret }),
   };
 };
