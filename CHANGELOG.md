@@ -11,6 +11,13 @@ by the `.github/workflows/release.yml` workflow.
 
 ## [Unreleased]
 
+## [2.3.9] - 2026-08-20
+
+mail-sentinel scan reliability: lobster CLI resolution, bot-unit npm PATH, IMAP error surfacing and opening-search retry
+
+- **Turn an IMAP socket timeout into a structured error instead of a crash, and stop the idle timeout undercutting the caller's budget.** `runWithImapClient` never listened for the client's `'error'` event, so imapflow's idle `Socket timeout` (`ETIMEOUT`) mid-search/read was thrown as an uncaught exception: `sovereign-tool imap-search-mail` died with a Node stack trace instead of the `{ ok:false, error }` envelope, and the bot/journal saw a crash dump. The client error is now captured and surfaced as `IMAP_CONNECTION_LOST` (retryable, with the strategy, reason and code), and the idle socket timeout is floored at 60 s (connect/greeting stay at the call timeout) so a remote provider that answers late (Gmail, 3–59 s observed for a small `SINCE` search) is not cut off at 30 s while the caller still has 60 s. ([#231](https://github.com/ndee/sovereign-ai-node/issues/231))
+- **Put the service user's npm prefix on every bot unit's `PATH`.** `ensureLobsterCliInstalled` installs the lobster CLI into `<service home>/.npm-global/bin` and relied on a `10-lobster-path.conf` drop-in that never existed, while bot units (mail-sentinel's scan unit) render the manifest's literal system `PATH` — so on every install where lobster lived only in that prefix (Pro web installer, Pi image) the semantic reviewer failed with `spawn lobster ENOENT` on every candidate. The host-resource renderer now prepends the resolved `<getent passwd home>/.npm-global/bin` (same resolution and fallback as the install/probe) to any `PATH` a bot-declared systemd unit sets, once, so the unit can reach what the installer installed. ([#232](https://github.com/ndee/sovereign-ai-node/issues/232))
+
 ## [2.3.5] - 2026-07-02
 
 Patch hardening ARM (aarch64) relay-passthrough installs so they succeed without manual intervention.
@@ -114,7 +121,8 @@ Bootstrap release formalizing the semantic versioning scheme for this project.
 See the [v2.0.0 GitHub Release](https://github.com/ndee/sovereign-ai-node/releases/tag/v2.0.0)
 for details.
 
-[Unreleased]: https://github.com/ndee/sovereign-ai-node/compare/v2.2.1...HEAD
+[Unreleased]: https://github.com/ndee/sovereign-ai-node/compare/v2.3.9...HEAD
+[2.3.9]: https://github.com/ndee/sovereign-ai-node/releases/tag/v2.3.9
 [2.2.1]: https://github.com/ndee/sovereign-ai-node/releases/tag/v2.2.1
 [2.2.0]: https://github.com/ndee/sovereign-ai-node/releases/tag/v2.2.0
 [2.1.0]: https://github.com/ndee/sovereign-ai-node/releases/tag/v2.1.0
