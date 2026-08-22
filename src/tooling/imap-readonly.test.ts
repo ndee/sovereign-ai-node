@@ -15,6 +15,7 @@ const buildRuntimeConfig = (secretRef: string): RuntimeConfig => ({
   openrouter: {
     model: "qwen/qwen-2.5-7b-instruct",
     apiKeySecretRef: "env:OPENROUTER_API_KEY",
+    privacy: { zdr: true, dataCollection: "deny", allowFallbacks: false },
   },
   openclaw: {
     managedInstallation: true,

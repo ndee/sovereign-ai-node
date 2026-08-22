@@ -99,6 +99,10 @@ import type {
   ManagedAgentRegistrationResult,
   OpenClawManagedAgentRegistrar,
 } from "../openclaw/managed-agent.js";
+import {
+  buildOpenClawOpenRouterModelParams,
+  resolveOpenRouterPrivacy,
+} from "../openclaw/openrouter-routing.js";
 import type { DockerRuntimePreparer } from "../system/docker-runtime.js";
 import type { ExecResult, ExecRunner } from "../system/exec.js";
 import type { ImapTester } from "../system/imap.js";
@@ -1920,6 +1924,7 @@ export class RealInstallerService implements InstallerService {
       const nextRuntimeConfig: RuntimeConfig = {
         ...runtimeConfig,
         openrouter: {
+          ...runtimeConfig.openrouter,
           model: nextModel,
           apiKeySecretRef: nextSecretRef,
         },
@@ -7999,6 +8004,14 @@ export default function (api) {
     };
   }
 
+  /**
+   * Dedicated, intentionally empty workspace used by OpenClaw's `llm-task`
+   * plugin (`agents.defaults.workspace`). Never seed bootstrap files here.
+   */
+  private getManagedLlmTaskWorkspaceDir(runtimeConfig: RuntimeConfig): string {
+    return join(dirname(runtimeConfig.openclaw.gatewayEnvPath), "llm-task-workspace");
+  }
+
   private getManagedOpenClawTempDir(runtimeConfig?: RuntimeConfig): string {
     const gatewayEnvPath =
       runtimeConfig?.openclaw.gatewayEnvPath ?? join(this.paths.openclawServiceHome, "gateway.env");
@@ -11073,6 +11086,7 @@ export default function (api) {
       openrouter: {
         model: openrouterModel,
         apiKeySecretRef: openrouterSecretRef,
+        privacy: resolveOpenRouterPrivacy(input.req.openrouter.privacy),
       },
       openclawProfile: {
         plugins: {
@@ -11413,6 +11427,7 @@ export default function (api) {
         provider: "openrouter",
         model: runtimeConfig.openrouter.model,
         apiKeySecretRef: runtimeConfig.openrouter.apiKeySecretRef,
+        privacy: runtimeConfig.openrouter.privacy,
       },
       imap:
         runtimeConfig.imap.status === "configured" && input.req.imap !== undefined
@@ -11573,6 +11588,7 @@ export default function (api) {
       };
     }
     const managedPluginLoadPaths = await this.listManagedOpenClawPluginLoadPaths(runtimeConfig);
+    const llmTaskWorkspaceDir = this.getManagedLlmTaskWorkspaceDir(runtimeConfig);
     const matrixAccounts: Record<
       string,
       {
@@ -11803,6 +11819,21 @@ export default function (api) {
       agents: {
         defaults: {
           model: normalizeOpenClawAgentModel(runtimeConfig.openrouter.model),
+          // Dedicated EMPTY workspace for `llm-task`. OpenClaw's llm-task
+          // plugin runs the embedded runner with
+          // `workspaceDir: agents.defaults.workspace ?? process.cwd()`, and
+          // the runner prepends the workspace bootstrap files (AGENTS.md,
+          // SOUL.md, TOOLS.md, USER.md, MEMORY.md) to every call. Pointing it
+          // at a directory that contains none of them keeps bot instructions
+          // and memory out of mail-classification prompts.
+          workspace: llmTaskWorkspaceDir,
+          // OpenRouter privacy routing: OpenClaw forwards
+          // `models["openrouter/<model>"].params.provider` as the `provider`
+          // block of the request body (compat.openRouterRouting).
+          models: buildOpenClawOpenRouterModelParams(
+            runtimeConfig.openrouter.model,
+            runtimeConfig.openrouter.privacy,
+          ),
         },
         list: await Promise.all(
           managedAgents.map(async (entry) => {
@@ -11848,6 +11879,9 @@ export default function (api) {
 
     try {
       await mkdir(this.paths.openclawServiceHome, { recursive: true });
+      await mkdir(llmTaskWorkspaceDir, { recursive: true });
+      await chmod(llmTaskWorkspaceDir, 0o750);
+      await this.applyConfiguredRuntimeOwnership(llmTaskWorkspaceDir, runtimeConfig);
       await mkdir(runtimeConfig.openclaw.openclawHome, { recursive: true });
       await mkdir(dirname(runtimeConfig.openclaw.runtimeProfilePath), { recursive: true });
       await mkdir(managedTempDir, { recursive: true });
