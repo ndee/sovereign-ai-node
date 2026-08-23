@@ -671,7 +671,10 @@ afterAll(async () => {
   }
 });
 
-const writeRuntimeArtifacts = async (paths: SovereignPaths): Promise<void> => {
+const writeRuntimeArtifacts = async (
+  paths: SovereignPaths,
+  options: { openrouterPrivacy?: Record<string, unknown> } = {},
+): Promise<void> => {
   const runtimeConfigPath = join(paths.openclawServiceHome, ".openclaw", "openclaw.json5");
   const runtimeProfilePath = join(
     paths.openclawServiceHome,
@@ -714,6 +717,9 @@ const writeRuntimeArtifacts = async (paths: SovereignPaths): Promise<void> => {
         openrouter: {
           model: "qwen/qwen-2.5-7b-instruct",
           apiKeySecretRef: "env:OPENROUTER_API_KEY",
+          ...(options.openrouterPrivacy === undefined
+            ? {}
+            : { privacy: options.openrouterPrivacy }),
         },
         openclawProfile: {
           plugins: {
@@ -1722,6 +1728,7 @@ describe("RealInstallerService", () => {
         openrouter: {
           model: "qwen/qwen-2.5-7b-instruct",
           apiKeySecretRef: "env:OPENROUTER_API_KEY",
+          privacy: { zdr: true, dataCollection: "deny", allowFallbacks: false },
         },
         openclaw: {
           managedInstallation: true,
@@ -1917,6 +1924,7 @@ describe("RealInstallerService", () => {
       openrouter: {
         model: "qwen/qwen-2.5-7b-instruct",
         apiKeySecretRef: "env:OPENROUTER_API_KEY",
+        privacy: { zdr: true, dataCollection: "deny", allowFallbacks: false },
       },
       openclaw: {
         managedInstallation: true,
@@ -2527,7 +2535,11 @@ describe("RealInstallerService", () => {
               };
             };
           }>;
-          defaults?: { model?: string };
+          defaults?: {
+            model?: string;
+            workspace?: string;
+            models?: Record<string, { params?: { provider?: Record<string, unknown> } }>;
+          };
         };
         plugins?: {
           allow?: string[];
@@ -2643,6 +2655,26 @@ describe("RealInstallerService", () => {
         ]),
       );
       expect(openclawConfig.agents?.defaults?.model).toBe("openrouter/qwen/qwen-2.5-7b-instruct");
+      // Strict OpenRouter privacy routing is the default and reaches the
+      // request body via agents.defaults.models[<model>].params.provider.
+      expect(openclawConfig.agents?.defaults?.models).toEqual({
+        "openrouter/qwen/qwen-2.5-7b-instruct": {
+          params: {
+            provider: { data_collection: "deny", zdr: true, allow_fallbacks: false },
+          },
+        },
+      });
+      // llm-task runs in a dedicated empty workspace so no bootstrap files
+      // (AGENTS.md / SOUL.md / TOOLS.md / USER.md / MEMORY.md) get injected.
+      const llmTaskWorkspaceDir = join(paths.openclawServiceHome, "llm-task-workspace");
+      expect(openclawConfig.agents?.defaults?.workspace).toBe(llmTaskWorkspaceDir);
+      const llmTaskWorkspaceStat = await stat(llmTaskWorkspaceDir);
+      expect(llmTaskWorkspaceStat.isDirectory()).toBe(true);
+      expect(llmTaskWorkspaceStat.mode & 0o777).toBe(0o750);
+      expect(await readdir(llmTaskWorkspaceDir)).toEqual([]);
+      expect(
+        openclawConfig.agents?.list?.some((entry) => entry.workspace === llmTaskWorkspaceDir),
+      ).toBe(false);
 
       const runtimeConfigRaw = await readFile(paths.configPath, "utf8");
       const runtimeConfig = JSON.parse(runtimeConfigRaw) as {
@@ -5020,6 +5052,7 @@ describe("RealInstallerService", () => {
       openrouter: {
         model: "qwen/qwen-2.5-7b-instruct",
         apiKeySecretRef: "env:OPENROUTER_API_KEY",
+        privacy: { zdr: true, dataCollection: "deny", allowFallbacks: false },
       },
       openclaw: {
         managedInstallation: true,
@@ -5266,6 +5299,7 @@ describe("RealInstallerService", () => {
       openrouter: {
         model: "qwen/qwen-2.5-7b-instruct",
         apiKeySecretRef: "env:OPENROUTER_API_KEY",
+        privacy: { zdr: true, dataCollection: "deny", allowFallbacks: false },
       },
       openclaw: {
         managedInstallation: true,
@@ -5579,6 +5613,7 @@ describe("RealInstallerService", () => {
         openrouter: {
           model: "qwen/qwen-2.5-7b-instruct",
           apiKeySecretRef: "env:OPENROUTER_API_KEY",
+          privacy: { zdr: true, dataCollection: "deny", allowFallbacks: false },
         },
         openclaw: {
           managedInstallation: true,
@@ -9480,7 +9515,14 @@ describe("RealInstallerService", () => {
       provenancePath: join(tempRoot, "install-provenance.json"),
       backupsDir: join(tempRoot, "backups"),
     };
-    await writeRuntimeArtifacts(paths);
+    await writeRuntimeArtifacts(paths, {
+      openrouterPrivacy: {
+        zdr: false,
+        dataCollection: "allow",
+        allowFallbacks: true,
+        only: ["together", "deepinfra"],
+      },
+    });
 
     const requestPath = join(dirname(paths.configPath), "install-request.json");
     await writeFile(requestPath, `${JSON.stringify(buildInstallRequest(), null, 2)}\n`, "utf8");
@@ -9572,11 +9614,18 @@ describe("RealInstallerService", () => {
 
       const updatedConfigRaw = await readFile(paths.configPath, "utf8");
       const updatedConfig = JSON.parse(updatedConfigRaw) as {
-        openrouter?: { model?: string; apiKeySecretRef?: string };
+        openrouter?: { model?: string; apiKeySecretRef?: string; privacy?: unknown };
       };
       const expectedSecretRef = `file:${join(paths.secretsDir, "openrouter-api-key")}`;
       expect(updatedConfig.openrouter?.model).toBe("openai/gpt-5");
       expect(updatedConfig.openrouter?.apiKeySecretRef).toBe(expectedSecretRef);
+      // An explicit privacy opt-out survives a model/credential reconfigure.
+      expect(updatedConfig.openrouter?.privacy).toEqual({
+        zdr: false,
+        dataCollection: "allow",
+        allowFallbacks: true,
+        only: ["together", "deepinfra"],
+      });
 
       const secretRaw = await readFile(join(paths.secretsDir, "openrouter-api-key"), "utf8");
       expect(secretRaw).toBe("sk-or-updated\n");
@@ -9586,9 +9635,31 @@ describe("RealInstallerService", () => {
         "utf8",
       );
       const openclawConfig = JSON.parse(openclawConfigRaw) as {
-        agents?: { defaults?: { model?: string } };
+        agents?: {
+          defaults?: {
+            model?: string;
+            workspace?: string;
+            models?: Record<string, { params?: { provider?: Record<string, unknown> } }>;
+          };
+        };
       };
       expect(openclawConfig.agents?.defaults?.model).toBe("openrouter/openai/gpt-5");
+      // The routing block follows the new model key and honours the override.
+      expect(openclawConfig.agents?.defaults?.models).toEqual({
+        "openrouter/openai/gpt-5": {
+          params: {
+            provider: {
+              data_collection: "allow",
+              zdr: false,
+              allow_fallbacks: true,
+              only: ["together", "deepinfra"],
+            },
+          },
+        },
+      });
+      expect(openclawConfig.agents?.defaults?.workspace).toBe(
+        join(paths.openclawServiceHome, "llm-task-workspace"),
+      );
 
       const gatewayEnvRaw = await readFile(join(paths.openclawServiceHome, "gateway.env"), "utf8");
       expect(gatewayEnvRaw).toContain(`HOME=${paths.openclawServiceHome}`);
