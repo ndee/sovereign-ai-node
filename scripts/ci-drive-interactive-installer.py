@@ -49,7 +49,7 @@ PROMPT_STEPS: tuple[PromptStep, ...] = (
     PromptStep("bot_selection", "Choose bots to install", b"\r"),
     PromptStep("mail_sentinel_poll_interval", "Mail Sentinel poll interval", b"\r"),
     PromptStep("mail_sentinel_lookback_window", "Mail Sentinel lookback window", b"\r"),
-    PromptStep("imap_configure", "Configure IMAP now? (choose no to keep IMAP pending)", b"\r"),
+    PromptStep("imap_configure", "Configure the mailbox connection now? (choose no to keep it pending)", b"\r"),
     PromptStep("write_request", "Write the request file and continue?", b"\r"),
 )
 

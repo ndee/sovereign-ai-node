@@ -225,6 +225,8 @@ export type RuntimeConfig = {
   };
   imap: {
     status: "configured" | "pending";
+    // "imap" when absent from older configs (see mailProtocolSchema).
+    protocol: "imap" | "pop3";
     host: string;
     port: number;
     tls: boolean;
@@ -1199,6 +1201,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
           : inferredImapConfigured
             ? "configured"
             : "pending",
+      protocol: imap.protocol === "pop3" ? "pop3" : "imap",
       host: typeof imap.host === "string" && imap.host.length > 0 ? imap.host : "unknown",
       port:
         typeof imap.port === "number" && Number.isFinite(imap.port) ? Math.trunc(imap.port) : 993,

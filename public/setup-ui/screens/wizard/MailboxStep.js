@@ -32,6 +32,7 @@ export const MailboxStep = ({ wizardState, onUpdateSection, onBack, onNext, secr
     try {
       const response = await apiPost("/api/install/test-imap", {
         imap: {
+          protocol: i.protocol === "pop3" ? "pop3" : "imap",
           host: i.host.trim(),
           port: i.port,
           tls: i.tls === true,
@@ -52,7 +53,7 @@ export const MailboxStep = ({ wizardState, onUpdateSection, onBack, onNext, secr
     <${WizardShell}
       stepIndex=${3}
       title="Mailbox connection"
-      subtitle="Mail Sentinel watches one mailbox over IMAP and surfaces important incoming signals in Matrix."
+      subtitle="Mail Sentinel watches one mailbox over IMAP or POP3 and surfaces important incoming signals in Matrix."
       onBack=${onBack}
       onNext=${onNext}
       nextDisabled=${!canContinue || busy}
@@ -67,7 +68,7 @@ export const MailboxStep = ({ wizardState, onUpdateSection, onBack, onNext, secr
                   ? `Mailbox connection looks good — ${testResult.host}:${testResult.port} (${
                       testResult.tls ? "TLS" : "plain"
                     }).`
-                  : "Mailbox connection failed. Re-check host, port, TLS, and credentials."}
+                  : "Mailbox connection failed. Re-check host, port, TLS, email address / username and password."}
               </div>
               ${testResult.error
                 ? html`<p class="muted">${testResult.error.message ?? testResult.error.code}</p>`
@@ -76,11 +77,29 @@ export const MailboxStep = ({ wizardState, onUpdateSection, onBack, onNext, secr
           : null}
       `}
     >
+      <${Field}
+        label="Protocol"
+        hint="IMAP is recommended. POP3 is read-only too, has no folders, and Mail Sentinel keeps its own message index for it."
+      >
+        <select
+          class="input"
+          value=${i.protocol === "pop3" ? "pop3" : "imap"}
+          onChange=${(event) => {
+            const protocol = event.target.value === "pop3" ? "pop3" : "imap";
+            const defaultPort = protocol === "pop3" ? 995 : 993;
+            const wasDefault = i.port === 993 || i.port === 995;
+            onUpdateSection("imap", { protocol, ...(wasDefault ? { port: defaultPort } : {}) });
+          }}
+        >
+          <option value="imap">IMAP</option>
+          <option value="pop3">POP3</option>
+        </select>
+      <//>
       <${Field} label="Host">
         <${TextInput}
           value=${i.host}
           onInput=${(value) => onUpdateSection("imap", { host: value })}
-          placeholder="imap.example.com"
+          placeholder=${i.protocol === "pop3" ? "pop.example.com" : "imap.example.com"}
         />
       <//>
       <div class="row">
@@ -89,18 +108,21 @@ export const MailboxStep = ({ wizardState, onUpdateSection, onBack, onNext, secr
             value=${i.port}
             min=${1}
             max=${65535}
-            onInput=${(value) => onUpdateSection("imap", { port: value ?? 993 })}
+            onInput=${(value) => onUpdateSection("imap", { port: value ?? (i.protocol === "pop3" ? 995 : 993) })}
           />
         <//>
         <${Field} label="TLS">
           <${Checkbox}
             checked=${i.tls === true}
             onInput=${(value) => onUpdateSection("imap", { tls: value })}
-            label="Use TLS (IMAPS)"
+            label=${i.protocol === "pop3" ? "Use TLS (POP3S)" : "Use TLS (IMAPS)"}
           />
         <//>
       </div>
-      <${Field} label="Username">
+      <${Field}
+        label="Email address / username"
+        hint="Usually your full email address, depending on your mail provider."
+      >
         <${TextInput}
           value=${i.username}
           onInput=${(value) => onUpdateSection("imap", { username: value })}
@@ -117,16 +139,20 @@ export const MailboxStep = ({ wizardState, onUpdateSection, onBack, onNext, secr
           type="password"
         />
       <//>
-      <${Field}
-        label="Folder"
-        hint="Defaults to INBOX. Change only if you want Mail Sentinel to watch a different folder."
-      >
-        <${TextInput}
-          value=${i.mailbox}
-          onInput=${(value) => onUpdateSection("imap", { mailbox: value })}
-          placeholder="INBOX"
-        />
-      <//>
+      ${i.protocol === "pop3"
+        ? null
+        : html`
+            <${Field}
+              label="Folder"
+              hint="Defaults to INBOX. Change only if you want Mail Sentinel to watch a different folder."
+            >
+              <${TextInput}
+                value=${i.mailbox}
+                onInput=${(value) => onUpdateSection("imap", { mailbox: value })}
+                placeholder="INBOX"
+              />
+            <//>
+          `}
       <div class="btn-row">
         <button
           class="btn btn--secondary"

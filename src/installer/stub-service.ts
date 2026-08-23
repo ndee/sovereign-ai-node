@@ -7,6 +7,7 @@ import type {
   TestAlertRequest,
   TestImapRequest,
   TestMatrixRequest,
+  TestOpenrouterRequest,
 } from "../contracts/api.js";
 import { type CheckResult, CONTRACT_VERSION } from "../contracts/common.js";
 import type {
@@ -18,6 +19,7 @@ import type {
   MatrixOnboardingReadiness,
   PreflightResult,
   ReconfigureResult,
+  SettingsSummary,
   SetupUiBootstrapIssueResult,
   SetupUiBootstrapPublicState,
   SovereignStatus,
@@ -25,6 +27,7 @@ import type {
   TestAlertResult,
   TestImapResult,
   TestMatrixResult,
+  TestOpenrouterResult,
 } from "../contracts/index.js";
 import type { Logger } from "../logging/logger.js";
 import type {
@@ -81,9 +84,47 @@ export class StubInstallerService implements InstallerService {
     };
   }
 
+  async testOpenrouter(_req: TestOpenrouterRequest): Promise<TestOpenrouterResult> {
+    return {
+      ok: false,
+      error: {
+        code: "NOT_IMPLEMENTED",
+        message: "OpenRouter key validation scaffold only; implementation pending",
+        retryable: true,
+      },
+    };
+  }
+
+  async getSettings(): Promise<SettingsSummary> {
+    return {
+      mail: {
+        configured: false,
+        protocol: "imap",
+        host: "",
+        port: 993,
+        tls: true,
+        username: "",
+        mailbox: "INBOX",
+        passwordSet: false,
+        editable: true,
+      },
+      openrouter: { model: "scaffold", apiKeySet: false, editable: true },
+      matrix: {
+        accessMode: "direct",
+        homeserverDomain: "scaffold.local",
+        publicBaseUrl: "https://scaffold.local",
+        federationEnabled: false,
+        alertRoomName: "Sovereign Alerts",
+        editable: false,
+        reason: "Scaffold only",
+      },
+    };
+  }
+
   async testImap(req: TestImapRequest): Promise<TestImapResult> {
     return {
       ok: false,
+      protocol: req.imap.protocol ?? "imap",
       host: req.imap.host,
       port: req.imap.port,
       tls: req.imap.tls,

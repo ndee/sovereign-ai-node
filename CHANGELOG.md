@@ -11,6 +11,18 @@ by the `.github/workflows/release.yml` workflow.
 
 ## [Unreleased]
 
+### Added
+
+- POP3 as a second mail protocol for Mail Sentinel (`imap.protocol: "pop3"`), backed by a dependency-free read-only POP3 client (no `DELE`) and a per-instance UIDL index that gives the scan loop stable, monotonic IDs and a `uidValidity` token.
+- Real `sovereign-node reconfigure imap` / `POST /api/reconfigure/imap`: replace the mail connection after install with validate → persist → apply semantics; a failed connection test leaves the working configuration untouched.
+- `GET /api/reconfigure/settings`: non-secret settings summary (secret presence flags only) with explicit `editable: false` markers for the homeserver identity and relay slug.
+- `POST /api/install/test-openrouter` and pre-persist validation of replacement OpenRouter keys in `reconfigure openrouter`.
+
+### Changed
+
+- Mail account field is labelled **Email address / username** ("Usually your full email address, depending on your mail provider") in the setup UI, terminal installer and CLI help.
+- Existing installs need no migration: a missing `imap.protocol` means IMAP everywhere.
+
 ## [2.3.9] - 2026-08-20
 
 mail-sentinel scan reliability: lobster CLI resolution, bot-unit npm PATH, IMAP error surfacing and opening-search retry

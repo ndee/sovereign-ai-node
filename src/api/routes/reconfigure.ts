@@ -6,10 +6,22 @@ import {
   reconfigureMatrixRequestSchema,
   reconfigureOpenrouterRequestSchema,
 } from "../../contracts/api.js";
-import { reconfigureResultSchema } from "../../contracts/index.js";
+import { reconfigureResultSchema, settingsSummarySchema } from "../../contracts/index.js";
 import { sendApiError, sendApiSuccess } from "../response.js";
 
 export const registerReconfigureRoutes = (server: FastifyInstance, app: AppContainer): void => {
+  // Non-secret snapshot of the installer-entered settings that a post-install
+  // UI can edit. Secrets are reported as presence flags only.
+  server.get("/api/reconfigure/settings", async (_request, reply) => {
+    try {
+      const result = await app.installerService.getSettings();
+      reply.header("Cache-Control", "no-store");
+      return sendApiSuccess(reply, result, settingsSummarySchema);
+    } catch (error) {
+      return sendApiError(reply, 400, error);
+    }
+  });
+
   server.post("/api/reconfigure/imap", async (request, reply) => {
     try {
       const body = reconfigureImapRequestSchema.parse(request.body);

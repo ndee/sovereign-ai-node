@@ -6,16 +6,19 @@ import type {
   TestAlertRequest,
   TestImapRequest,
   TestMatrixRequest,
+  TestOpenrouterRequest,
 } from "../contracts/api.js";
 import type {
   DoctorReport,
   InstallJobStatusResponse,
   InstallRequest,
+  MailProtocol,
   MatrixOnboardingIssueResult,
   MatrixOnboardingPublicState,
   MatrixOnboardingReadiness,
   PreflightResult,
   ReconfigureResult,
+  SettingsSummary,
   SetupUiBootstrapIssueResult,
   SetupUiBootstrapPublicState,
   SovereignStatus,
@@ -23,6 +26,7 @@ import type {
   TestAlertResult,
   TestImapResult,
   TestMatrixResult,
+  TestOpenrouterResult,
 } from "../contracts/index.js";
 
 export type ManagedAgent = {
@@ -188,6 +192,7 @@ export type MailSentinelSummary = {
   alertRoomId?: string;
   alertRoomName?: string;
   allowedUsers: string[];
+  imapProtocol?: MailProtocol;
   imapHost?: string;
   imapUsername?: string;
   mailbox?: string;
@@ -219,6 +224,8 @@ export type MailSentinelDeleteResult = {
 export interface InstallerService {
   preflight(input?: PreflightRequest): Promise<PreflightResult>;
   testImap(req: TestImapRequest): Promise<TestImapResult>;
+  testOpenrouter(req: TestOpenrouterRequest): Promise<TestOpenrouterResult>;
+  getSettings(): Promise<SettingsSummary>;
   testMatrix(req: TestMatrixRequest): Promise<TestMatrixResult>;
   startInstall(req: InstallRequest): Promise<StartInstallResult>;
   getInstallJob(jobId: string): Promise<InstallJobStatusResponse>;
@@ -266,6 +273,7 @@ export interface InstallerService {
     imapHost: string;
     imapPort: number;
     imapTls: boolean;
+    imapProtocol?: MailProtocol;
     imapUsername: string;
     imapPassword?: string;
     imapSecretRef?: string;
@@ -285,6 +293,7 @@ export interface InstallerService {
     imapHost?: string;
     imapPort?: number;
     imapTls?: boolean;
+    imapProtocol?: MailProtocol;
     imapUsername?: string;
     imapPassword?: string;
     imapSecretRef?: string;

@@ -56,6 +56,7 @@ const buildRuntimeConfig = (input: {
   },
   imap: {
     status: "pending",
+    protocol: "imap",
     host: "imap.example.org",
     port: 993,
     tls: true,

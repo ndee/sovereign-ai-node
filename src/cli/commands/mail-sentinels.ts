@@ -13,6 +13,7 @@ const mailSentinelSchema = z.object({
   alertRoomId: z.string().min(1).optional(),
   alertRoomName: z.string().min(1).optional(),
   allowedUsers: z.array(z.string().min(1)),
+  imapProtocol: z.enum(["imap", "pop3"]).optional(),
   imapHost: z.string().min(1).optional(),
   imapUsername: z.string().min(1).optional(),
   mailbox: z.string().min(1).optional(),
@@ -52,6 +53,7 @@ const deleteMailSentinelSchema = z.object({
 });
 
 type CreateOrUpdateOptions = {
+  imapProtocol?: string;
   json?: boolean;
   imapHost?: string;
   imapPort?: string;
@@ -124,13 +126,14 @@ export const registerMailSentinelsCommand = (program: Command, app: AppContainer
     .command("create")
     .description("Create a Mail Sentinel instance and apply it via the installer")
     .argument("<id>", "Mail Sentinel instance ID")
-    .option("--imap-host <host>", "IMAP host")
-    .option("--imap-port <port>", "IMAP port")
-    .option("--imap-tls <enabled>", "IMAP TLS true|false (default true)")
-    .option("--imap-username <user>", "IMAP username")
-    .option("--imap-password <password>", "IMAP password (stored as a managed secret)")
-    .option("--imap-secret-ref <ref>", "Secret reference for the IMAP password")
-    .option("--mailbox <mailbox>", "IMAP mailbox (default INBOX)")
+    .option("--imap-protocol <protocol>", "Mail protocol: imap (default) or pop3")
+    .option("--imap-host <host>", "Mail server host")
+    .option("--imap-port <port>", "Mail server port")
+    .option("--imap-tls <enabled>", "Mail TLS true|false (default true)")
+    .option("--imap-username <user>", "Email address / username (usually the full email address)")
+    .option("--imap-password <password>", "Mail password (stored as a managed secret)")
+    .option("--imap-secret-ref <ref>", "Secret reference for the mail password")
+    .option("--mailbox <mailbox>", "IMAP folder (default INBOX; ignored for POP3)")
     .option("--matrix-localpart <localpart>", "Dedicated Matrix localpart for this Mail Sentinel")
     .option("--alert-room-id <roomId>", "Use an existing Matrix alert room")
     .option("--alert-room-name <name>", "Human-readable name for --alert-room-id")
@@ -150,6 +153,9 @@ export const registerMailSentinelsCommand = (program: Command, app: AppContainer
       try {
         const result = await app.installerService.createMailSentinelInstance({
           id,
+          ...(opts.imapProtocol === undefined
+            ? {}
+            : { imapProtocol: parseProtocolOption(command, opts.imapProtocol) }),
           imapHost: requireOption(command, "--imap-host", opts.imapHost),
           imapPort: parsePort(command, opts.imapPort),
           imapTls: parseBooleanOption(command, "--imap-tls", opts.imapTls, true),
@@ -182,13 +188,14 @@ export const registerMailSentinelsCommand = (program: Command, app: AppContainer
     .command("update")
     .description("Update a Mail Sentinel instance and apply it via the installer")
     .argument("<id>", "Mail Sentinel instance ID")
-    .option("--imap-host <host>", "IMAP host")
-    .option("--imap-port <port>", "IMAP port")
-    .option("--imap-tls <enabled>", "IMAP TLS true|false")
-    .option("--imap-username <user>", "IMAP username")
-    .option("--imap-password <password>", "IMAP password (stored as a managed secret)")
-    .option("--imap-secret-ref <ref>", "Secret reference for the IMAP password")
-    .option("--mailbox <mailbox>", "IMAP mailbox")
+    .option("--imap-protocol <protocol>", "Mail protocol: imap or pop3")
+    .option("--imap-host <host>", "Mail server host")
+    .option("--imap-port <port>", "Mail server port")
+    .option("--imap-tls <enabled>", "Mail TLS true|false")
+    .option("--imap-username <user>", "Email address / username (usually the full email address)")
+    .option("--imap-password <password>", "Mail password (stored as a managed secret)")
+    .option("--imap-secret-ref <ref>", "Secret reference for the mail password")
+    .option("--mailbox <mailbox>", "IMAP folder (ignored for POP3)")
     .option("--matrix-localpart <localpart>", "Dedicated Matrix localpart for this Mail Sentinel")
     .option("--alert-room-id <roomId>", "Use an existing Matrix alert room")
     .option("--alert-room-name <name>", "Human-readable name for --alert-room-id")
@@ -208,6 +215,9 @@ export const registerMailSentinelsCommand = (program: Command, app: AppContainer
       try {
         const result = await app.installerService.updateMailSentinelInstance({
           id,
+          ...(opts.imapProtocol === undefined
+            ? {}
+            : { imapProtocol: parseProtocolOption(command, opts.imapProtocol) }),
           ...(opts.imapHost === undefined ? {} : { imapHost: opts.imapHost }),
           ...(opts.imapPort === undefined ? {} : { imapPort: parsePort(command, opts.imapPort) }),
           ...(opts.imapTls === undefined
@@ -266,6 +276,14 @@ const parsePort = (command: string, value: string | undefined): number => {
     };
   }
   return parsed;
+};
+
+const parseProtocolOption = (command: string, value: string): "imap" | "pop3" => {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "imap" || normalized === "pop3") {
+    return normalized;
+  }
+  throw new Error(`${command}: --imap-protocol must be imap or pop3`);
 };
 
 const parseBooleanOption = (

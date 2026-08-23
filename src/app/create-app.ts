@@ -10,6 +10,7 @@ import { ShellDockerRuntimePreparer } from "../system/docker-runtime.js";
 import { ExecaExecRunner } from "../system/exec.js";
 import { SocketImapTester } from "../system/imap.js";
 import { DockerComposeBundledMatrixProvisioner } from "../system/matrix.js";
+import { HttpOpenrouterKeyValidator } from "../system/openrouter.js";
 import { ShellHostPreflightChecker } from "../system/preflight.js";
 
 export const createApp = () => {
@@ -18,6 +19,7 @@ export const createApp = () => {
 
   const openclawBootstrapper = new ShellOpenClawBootstrapper(execRunner, logger);
   const imapTester = new SocketImapTester(logger);
+  const openrouterKeyValidator = new HttpOpenrouterKeyValidator();
   const matrixProvisioner = new DockerComposeBundledMatrixProvisioner(
     execRunner,
     logger,
@@ -40,6 +42,7 @@ export const createApp = () => {
       preflightChecker,
       dockerRuntimePreparer,
       imapTester,
+      openrouterKeyValidator,
       matrixProvisioner,
       execRunner,
     }),
