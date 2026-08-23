@@ -6883,7 +6883,12 @@ describe("RealInstallerService", () => {
       expect(result.instance.allowedUsers).toEqual(["@operator:matrix.example.org"]);
 
       const raw = await readFile(requestPath, "utf8");
+      // The rewritten request must not carry inline credentials: the
+      // fixture's inline OpenRouter key is replaced by its file secretRef.
+      expect(raw).not.toMatch(/sk-or-|"password"/);
+      expect((await stat(requestPath)).mode & 0o777).toBe(0o640);
       const request = JSON.parse(raw) as {
+        openrouter?: { apiKey?: string; secretRef?: string };
         bots?: {
           selected?: string[];
           instances?: Array<{
@@ -6900,6 +6905,10 @@ describe("RealInstallerService", () => {
           }>;
         };
       };
+      expect(request.openrouter).toEqual({
+        model: "qwen/qwen-2.5-7b-instruct",
+        secretRef: `file:${join(paths.secretsDir, "openrouter-api-key")}`,
+      });
       expect(request.bots?.selected).toContain("mail-sentinel");
       expect(request.bots?.instances).toEqual([
         {

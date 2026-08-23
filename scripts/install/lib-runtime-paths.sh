@@ -46,7 +46,7 @@ ensure_runtime_directories() {
   install -d -m 0700 /etc/sovereign-node/secrets
   install -d -m 0755 /var/lib/sovereign-node
   install -d -m 0755 /var/lib/sovereign-node/openclaw-home
-  install -d -m 0755 /var/lib/sovereign-node/install-jobs
+  install -d -m 0700 /var/lib/sovereign-node/install-jobs
   install -d -m 0755 /var/log/sovereign-node
   install -d -m 0755 "$INSTALL_ROOT"
 
