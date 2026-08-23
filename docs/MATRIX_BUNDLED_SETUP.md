@@ -292,6 +292,42 @@ Relay note:
 - relay mode can support federation when `/.well-known/matrix/server` delegates the homeserver name to the public relay endpoint on port `443`
 - relay deployments should verify the published `m.server` value after install or reconfigure, because other homeservers will otherwise fall back to port `8448`
 
+## Project Directory Ownership and File Modes
+
+The bundled stack lives under `<stateDir>/bundled-matrix/<homeserver-slug>/` (by default
+`/var/lib/sovereign-node/bundled-matrix/...`). Every file there either carries credentials or
+references them, so the renderer keeps the tree private and re-applies the modes on every run
+(fresh install and upgrade alike):
+
+| Path | Mode | Contents |
+|------|------|----------|
+| `bundled-matrix/`, `<slug>/`, `synapse/`, `postgres-data/`, `reverse-proxy*/`, `well-known/`, `onboarding/` | `0750` | project directories |
+| `<slug>/.env` | `0600` | `POSTGRES_PASSWORD`, `DESEC_TOKEN` (passthrough only), owner uid/gid |
+| `<slug>/compose.yaml` | `0640` | compose definition |
+| `synapse/homeserver.yaml` | `0640` | `registration_shared_secret`, `macaroon_secret_key`, `form_secret`, Postgres password |
+| `synapse/<domain>.signing.key` | `0640` | Synapse federation signing key |
+| `synapse/log.config`, `reverse-proxy/Caddyfile`, `well-known/**` | `0640` | non-secret config, kept consistent |
+
+Ownership follows who renders the project: the runtime API service user when it runs
+unprivileged, or — when the CLI installer renders as root — the configured service user
+(`SOVEREIGN_NODE_SERVICE_USER`, default `sovereign-node`), so later unprivileged re-renders
+need no escalation.
+
+The containers do not need relaxed host modes:
+
+- **Synapse** receives the owner's uid/gid through `SOVEREIGN_MATRIX_UID` / `SOVEREIGN_MATRIX_GID`
+  (compose `UID`/`GID` environment). The image entrypoint runs as root, `chown -R`s `/data` to
+  that identity and drops privileges to it, so it reads the `0640` config as its owner. This
+  also migrates media and config previously owned by the image default uid 991 on upgrade.
+- **Postgres** keeps its stock entrypoint: it adopts `postgres-data` itself (`chown postgres`,
+  `chmod 0700`) on every start, so the renderer never recurses into or re-owns that directory.
+- **Caddy** and the **onboarding API** run as root inside their containers and read their
+  read-only bind mounts regardless of host modes.
+- Docker resolves bind-mount sources as root, so parent directories need not be world-traversable.
+
+Nodes provisioned before this scheme (world-readable `homeserver.yaml`, `0777` directories)
+converge on the next install or upgrade run; existing secrets are preserved, not regenerated.
+
 ## Operations and Backup Expectations
 
 Bundled Matrix is part of the platform and must be operated as a stateful service.

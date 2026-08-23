@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -101,30 +101,32 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(composeText).toContain("postgres:16-alpine");
       expect(composeText).toContain('POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"');
       expect(composeText).toContain('"0.0.0.0:8008:8008"');
+      // The Synapse container is handed the project owner's uid/gid so its
+      // entrypoint chowns /data to that identity and drops privileges to it.
+      const uid = process.getuid?.() ?? 0;
+      const gid = process.getgid?.() ?? 0;
+      expect(composeText).toContain(`UID: "\${SOVEREIGN_MATRIX_UID}"`);
+      expect(composeText).toContain(`GID: "\${SOVEREIGN_MATRIX_GID}"`);
       const envText = await readFile(join(result.projectDir, ".env"), "utf8");
       expect(envText).toContain("SYNAPSE_CONFIG_PATH=/data/homeserver.yaml");
-      const synapseDirStat = await stat(join(result.projectDir, "synapse"));
-      const postgresDirStat = await stat(join(result.projectDir, "postgres-data"));
-      expect(synapseDirStat.mode & 0o777).toBe(0o777);
-      expect(postgresDirStat.mode & 0o777).toBe(0o777);
+      expect(envText).toContain(`SOVEREIGN_MATRIX_UID=${uid}`);
+      expect(envText).toContain(`SOVEREIGN_MATRIX_GID=${gid}`);
 
-      // Parent directories must be traversable by the Synapse and Postgres
-      // container UIDs (non-root) so they can reach their bind-mounts.
-      const baseDirStat = await stat(join(tempRoot, "state", "bundled-matrix"));
-      const projectDirStat = await stat(result.projectDir);
-      expect(baseDirStat.mode & 0o755).toBe(0o755);
-      expect(projectDirStat.mode & 0o755).toBe(0o755);
+      // Directories are private to the owner; nothing is world-writable.
+      const modeOf = async (path: string): Promise<number> => (await stat(path)).mode & 0o777;
+      expect(await modeOf(join(tempRoot, "state", "bundled-matrix"))).toBe(0o750);
+      expect(await modeOf(result.projectDir)).toBe(0o750);
+      expect(await modeOf(join(result.projectDir, "synapse"))).toBe(0o750);
+      expect(await modeOf(join(result.projectDir, "postgres-data"))).toBe(0o750);
 
-      // Synapse config files must be readable by the Synapse container's
-      // non-root user (UID 991 in the upstream image).
-      const homeserverStat = await stat(join(result.projectDir, "synapse", "homeserver.yaml"));
-      const signingKeyStat = await stat(
-        join(result.projectDir, "synapse", "matrix.local.test.signing.key"),
-      );
-      const logConfigStat = await stat(join(result.projectDir, "synapse", "log.config"));
-      expect(homeserverStat.mode & 0o644).toBe(0o644);
-      expect(signingKeyStat.mode & 0o644).toBe(0o644);
-      expect(logConfigStat.mode & 0o644).toBe(0o644);
+      // Credential-bearing files are never world-readable.
+      expect(await modeOf(join(result.projectDir, ".env"))).toBe(0o600);
+      expect(await modeOf(join(result.projectDir, "compose.yaml"))).toBe(0o640);
+      expect(await modeOf(join(result.projectDir, "synapse", "homeserver.yaml"))).toBe(0o640);
+      expect(
+        await modeOf(join(result.projectDir, "synapse", "matrix.local.test.signing.key")),
+      ).toBe(0o640);
+      expect(await modeOf(join(result.projectDir, "synapse", "log.config"))).toBe(0o640);
 
       const homeserverText = await readFile(
         join(result.projectDir, "synapse", "homeserver.yaml"),
@@ -145,6 +147,89 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(recordedExecCalls[0]?.command).toBe("docker");
       expect(recordedExecCalls[0]?.args).toContain("compose");
       expect(recordedExecCalls[0]?.args).toContain("config");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("tightens modes left behind by an earlier install on re-provision", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-test-"));
+    const fakeExecRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => ({
+        command: [input.command, ...(input.args ?? [])].join(" "),
+        exitCode: 0,
+        stdout: "services:\n  postgres: {}\n  synapse: {}\n",
+        stderr: "",
+      }),
+    };
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "state"),
+      logsDir: join(tempRoot, "logs"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+    const provisioner = new DockerComposeBundledMatrixProvisioner(
+      fakeExecRunner,
+      createLogger(),
+      paths,
+    );
+
+    try {
+      // Simulate a node provisioned by an earlier release: world-writable
+      // directories, world-readable secrets and an .env written under the
+      // default umask.
+      const projectDir = join(tempRoot, "state", "bundled-matrix", "matrix-local-test");
+      const synapseDir = join(projectDir, "synapse");
+      await mkdir(synapseDir, { recursive: true });
+      await mkdir(join(projectDir, "postgres-data"), { recursive: true });
+      await chmod(join(tempRoot, "state", "bundled-matrix"), 0o755);
+      await chmod(projectDir, 0o755);
+      await chmod(synapseDir, 0o777);
+      await chmod(join(projectDir, "postgres-data"), 0o777);
+      await writeFile(join(projectDir, ".env"), "POSTGRES_PASSWORD=pg_existing\n", {
+        encoding: "utf8",
+        mode: 0o644,
+      });
+      await writeFile(
+        join(synapseDir, "homeserver.yaml"),
+        [
+          'registration_shared_secret: "reg-existing"',
+          'macaroon_secret_key: "mac-existing"',
+          'form_secret: "form-existing"',
+        ].join("\n"),
+        { encoding: "utf8", mode: 0o644 },
+      );
+      await writeFile(join(synapseDir, "matrix.local.test.signing.key"), "ed25519 a_1 seed", {
+        encoding: "utf8",
+        mode: 0o644,
+      });
+
+      const result = await provisioner.provision(buildInstallRequest());
+      expect(result.projectDir).toBe(projectDir);
+
+      const modeOf = async (path: string): Promise<number> => (await stat(path)).mode & 0o777;
+      expect(await modeOf(join(tempRoot, "state", "bundled-matrix"))).toBe(0o750);
+      expect(await modeOf(projectDir)).toBe(0o750);
+      expect(await modeOf(synapseDir)).toBe(0o750);
+      expect(await modeOf(join(projectDir, "postgres-data"))).toBe(0o750);
+      expect(await modeOf(join(projectDir, ".env"))).toBe(0o600);
+      expect(await modeOf(join(synapseDir, "homeserver.yaml"))).toBe(0o640);
+      expect(await modeOf(join(synapseDir, "matrix.local.test.signing.key"))).toBe(0o640);
+
+      // Existing secrets are preserved, not regenerated.
+      const envText = await readFile(join(projectDir, ".env"), "utf8");
+      expect(envText).toContain("POSTGRES_PASSWORD=pg_existing");
+      const homeserverText = await readFile(join(synapseDir, "homeserver.yaml"), "utf8");
+      expect(homeserverText).toContain('registration_shared_secret: "reg-existing"');
+      expect(homeserverText).toContain('macaroon_secret_key: "mac-existing"');
+      expect(homeserverText).toContain('form_secret: "form-existing"');
+      expect(await readFile(join(synapseDir, "matrix.local.test.signing.key"), "utf8")).toBe(
+        "ed25519 a_1 seed\n",
+      );
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -314,6 +399,30 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(onboardPage).toContain("Mail Sentinel");
       expect(onboardPage).toContain("<svg");
       expect(onboardPage).not.toContain("/downloads/caddy-root-ca.crt");
+
+      // Reverse-proxy outputs follow the same private modes as the Synapse
+      // bundle; Caddy and onboarding-api read them as in-container root.
+      const modeOf = async (path: string): Promise<number> => (await stat(path)).mode & 0o777;
+      for (const dir of [
+        "reverse-proxy",
+        "reverse-proxy-data",
+        "reverse-proxy-config",
+        "well-known",
+        join("well-known", ".well-known"),
+        join("well-known", ".well-known", "matrix"),
+        join("well-known", "onboard"),
+        "onboarding",
+      ]) {
+        expect(await modeOf(join(result.projectDir, dir)), dir).toBe(0o750);
+      }
+      for (const file of [
+        join("reverse-proxy", "Caddyfile"),
+        join("well-known", ".well-known", "matrix", "client"),
+        join("well-known", ".well-known", "matrix", "server"),
+        join("well-known", "onboard", "index.html"),
+      ]) {
+        expect(await modeOf(join(result.projectDir, file)), file).toBe(0o640);
+      }
       expect(recordedExecCalls).toHaveLength(2);
       expect(recordedExecCalls.some((call) => call.command === "qrencode")).toBe(true);
       expect(recordedExecCalls.some((call) => call.command === "docker")).toBe(true);
