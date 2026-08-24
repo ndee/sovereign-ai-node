@@ -1,6 +1,6 @@
 {
   "name": "sovereign-ai-node",
-  "version": "2.3.9",
+  "version": "2.3.10",
   "private": false,
   "type": "module",
   "engines": {
