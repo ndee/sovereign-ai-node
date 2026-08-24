@@ -11,6 +11,10 @@ by the `.github/workflows/release.yml` workflow.
 
 ## [Unreleased]
 
+## [2.3.10] - 2026-08-24
+
+POP3 support and real mail reconfiguration with post-install Settings UI, OpenRouter privacy routing, and security hardening (LAN-bound Pro API, secret-free install job records, per-node relay enrollment secret)
+
 ### Added
 
 - POP3 as a second mail protocol for Mail Sentinel (`imap.protocol: "pop3"`), backed by a dependency-free read-only POP3 client (no `DELE`) and a per-instance UIDL index that gives the scan loop stable, monotonic IDs and a `uidValidity` token.
@@ -133,7 +137,8 @@ Bootstrap release formalizing the semantic versioning scheme for this project.
 See the [v2.0.0 GitHub Release](https://github.com/ndee/sovereign-ai-node/releases/tag/v2.0.0)
 for details.
 
-[Unreleased]: https://github.com/ndee/sovereign-ai-node/compare/v2.3.9...HEAD
+[Unreleased]: https://github.com/ndee/sovereign-ai-node/compare/v2.3.10...HEAD
+[2.3.10]: https://github.com/ndee/sovereign-ai-node/releases/tag/v2.3.10
 [2.3.9]: https://github.com/ndee/sovereign-ai-node/releases/tag/v2.3.9
 [2.2.1]: https://github.com/ndee/sovereign-ai-node/releases/tag/v2.2.1
 [2.2.0]: https://github.com/ndee/sovereign-ai-node/releases/tag/v2.2.0
