@@ -30,6 +30,8 @@ export type Pop3ErrorCode =
   | "POP3_AUTH_FAILED"
   | "POP3_CONNECTION_FAILED"
   | "POP3_CONNECTION_LOST"
+  /** Login refused by a transient server condition (lock, rate limit), not bad credentials. */
+  | "POP3_LOGIN_TEMPORARILY_REJECTED"
   | "POP3_PLAINTEXT_REFUSED"
   | "POP3_PROTOCOL_ERROR"
   | "POP3_STLS_UNSUPPORTED";
@@ -410,22 +412,52 @@ export class SocketPop3Client implements Pop3ClientLike {
     assertSafeArgument(this.account.password, "password");
     const user = await this.command(`USER ${this.account.username}`, false);
     if (!user.status.startsWith("+OK")) {
-      throw new Pop3ConnectionError(
-        "POP3_AUTH_FAILED",
+      throw this.loginRejectionError(
+        user.status,
         "POP3 server rejected the email address / username",
-        false,
-        { host: this.account.host, port: this.account.port },
       );
     }
     const pass = await this.command(`PASS ${this.account.password}`, false);
     if (!pass.status.startsWith("+OK")) {
-      throw new Pop3ConnectionError(
-        "POP3_AUTH_FAILED",
+      throw this.loginRejectionError(
+        pass.status,
         "POP3 authentication failed; check the email address / username and password",
-        false,
-        { host: this.account.host, port: this.account.port },
       );
     }
+  }
+
+  /**
+   * POP3 collapses every login problem into a `-ERR` reply to USER/PASS, but
+   * not every `-ERR` means bad credentials: Gmail (and others) answer the same
+   * way for a maildrop locked by another session (`[IN-USE]`), per-account
+   * rate/bandwidth limits, login delays (`[LOGIN-DELAY]`) and temporary system
+   * trouble (`[SYS/TEMP]`). Reporting those as "check the username and
+   * password" sends an operator off to rotate perfectly good credentials while
+   * the condition clears on its own. Classify by the reply's RFC 2449 response
+   * code / wording, and always keep the server's own words in the message —
+   * they are the only record of what actually went wrong.
+   */
+  private loginRejectionError(status: string, credentialMessage: string): Pop3ConnectionError {
+    const serverText = status.replace(/^-ERR\s*/, "").trim();
+    const details = { host: this.account.host, port: this.account.port };
+    const transient =
+      /\[IN-USE\]|\[LOGIN-DELAY\]|\[SYS\/TEMP\]|web login required|rate limit|exceeded|too many|temporar|try again/i.test(
+        serverText,
+      );
+    if (transient) {
+      return new Pop3ConnectionError(
+        "POP3_LOGIN_TEMPORARILY_REJECTED",
+        `POP3 server temporarily refused the login${serverText.length === 0 ? "" : `: ${serverText}`}. This is usually a busy-mailbox lock or a rate limit, not a credential problem; it normally clears on its own within minutes.`,
+        true,
+        details,
+      );
+    }
+    return new Pop3ConnectionError(
+      "POP3_AUTH_FAILED",
+      `${credentialMessage}${serverText.length === 0 ? "" : ` (server said: ${serverText})`}`,
+      false,
+      details,
+    );
   }
 
   private async okOrThrow(
