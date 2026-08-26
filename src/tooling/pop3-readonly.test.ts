@@ -5,7 +5,13 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { Pop3AccountCredentials, Pop3ClientLike } from "../system/pop3-client.js";
-import { accountFingerprint, Pop3ReadonlyToolService, parseSinceBound } from "./pop3-readonly.js";
+import {
+  accountFingerprint,
+  buildStuckWindowNote,
+  Pop3ReadonlyToolService,
+  parseSinceBound,
+  STUCK_WINDOW_MARGIN_MS,
+} from "./pop3-readonly.js";
 
 type FakeMessage = { uidl: string; raw: string };
 
@@ -253,6 +259,110 @@ describe("Pop3ReadonlyToolService", () => {
     commands.length = 0;
     await bounded.searchMail({ instanceId: "ms-pop", account, query: "since:2026-08-01" });
     expect(commands.filter((entry) => entry.startsWith("TOP"))).toEqual([]);
+  });
+
+  it("reports a stuck POP3 window with Gmail remediation when the visible mail is years old", async () => {
+    // Gmail "all mail" POP mode: the server presents an old slice of the
+    // mailbox and never advances it for a read-only client. The scan must not
+    // look like a healthy quiet mailbox.
+    const gmailAccount: Pop3AccountCredentials = {
+      ...account,
+      host: "pop.gmail.com",
+      username: "ops@gmail.com",
+    };
+    const old: FakeMessage[] = [];
+    for (let index = 0; index < 12; index += 1) {
+      old.push({
+        uidl: `ancient-${String(index)}`,
+        raw: buildRaw({
+          id: `ancient${String(index)}@x`,
+          subject: `Ancient ${String(index)}`,
+          date: "Wed, 30 Jan 2008 20:54:28 +0100",
+        }),
+      });
+    }
+    const stuck = new Pop3ReadonlyToolService({
+      indexDir,
+      runner: async (_account, handler) => await handler(createFakeClient(old, commands)),
+    });
+    const result = await stuck.searchMail({
+      instanceId: "ms-pop",
+      account: gmailAccount,
+      query: "since:2026-08-25",
+    });
+    expect(result.messages).toEqual([]);
+    expect(result.note).toContain("appears to exclude recent mail");
+    expect(result.note).toContain("recent:ops@gmail.com");
+    // The condition persists, so the note does too.
+    const again = await stuck.searchMail({
+      instanceId: "ms-pop",
+      account: gmailAccount,
+      query: "since:2026-08-25",
+    });
+    expect(again.note).toContain("recent:ops@gmail.com");
+  });
+
+  it("emits no note for a mailbox that is merely quiet", async () => {
+    const result = await service.searchMail({
+      instanceId: "ms-pop",
+      account,
+      // Both 2026 messages fall inside the margin even though they are older
+      // than the bound itself.
+      query: "since:2026-08-25",
+    });
+    expect(result.messages).toEqual([]);
+    expect(result.note).toBeUndefined();
+  });
+});
+
+describe("buildStuckWindowNote", () => {
+  const base = {
+    account: { host: "pop.example.org", username: "ops@example.org" },
+    since: new Date("2026-08-25T00:00:00.000Z"),
+    matchingCount: 0,
+    visibleCount: 269,
+    newestKnownDate: new Date("2008-02-02T03:28:53.000Z"),
+  };
+
+  it("names the stuck window generically for non-Gmail hosts", () => {
+    const note = buildStuckWindowNote(base);
+    expect(note).toContain("269 message(s)");
+    expect(note).toContain("2008-02-02");
+    expect(note).toContain("POP3 download-window settings");
+    expect(note).not.toContain("recent:");
+  });
+
+  it("adds Gmail remediation for gmail hosts without the recent: prefix", () => {
+    const note = buildStuckWindowNote({
+      ...base,
+      account: { host: "POP.GMAIL.COM", username: "ops@gmail.com" },
+    });
+    expect(note).toContain("recent:ops@gmail.com");
+    expect(
+      buildStuckWindowNote({
+        ...base,
+        account: { host: "pop.googlemail.com", username: "recent:ops@gmail.com" },
+      }),
+    ).toContain("download-window settings");
+  });
+
+  it("stays silent without a since bound, with matches, on empty mailboxes, and inside the margin", () => {
+    expect(buildStuckWindowNote({ ...base, since: undefined })).toBeUndefined();
+    expect(buildStuckWindowNote({ ...base, matchingCount: 1 })).toBeUndefined();
+    expect(buildStuckWindowNote({ ...base, visibleCount: 0 })).toBeUndefined();
+    expect(buildStuckWindowNote({ ...base, newestKnownDate: undefined })).toBeUndefined();
+    expect(
+      buildStuckWindowNote({
+        ...base,
+        newestKnownDate: new Date(base.since.getTime() - STUCK_WINDOW_MARGIN_MS),
+      }),
+    ).toBeUndefined();
+    expect(
+      buildStuckWindowNote({
+        ...base,
+        newestKnownDate: new Date(base.since.getTime() - STUCK_WINDOW_MARGIN_MS - 1),
+      }),
+    ).toBeDefined();
   });
 });
 

@@ -53,6 +53,14 @@ const MAX_HEADER_FETCHES_PER_SEARCH = 200;
 /** Newest-first header walk stops after this many consecutive out-of-window messages. */
 const STOP_AFTER_CONSECUTIVE_OLD = 10;
 const INDEX_VERSION = 1;
+/**
+ * A search that matches nothing while the newest dated message the server
+ * shows is this much older than the `since:` bound is reported as a stuck
+ * POP3 window (see `buildStuckWindowNote`): the server is presenting an old
+ * slice of the mailbox, not a mailbox that happens to be quiet. The margin
+ * keeps a merely-quiet mailbox (days without mail) from tripping the note.
+ */
+export const STUCK_WINDOW_MARGIN_MS = 30 * 24 * 60 * 60 * 1000;
 
 export type Pop3ToolRunner = <T>(
   account: Pop3AccountCredentials,
@@ -141,6 +149,45 @@ export const parseSinceBound = (query: string): Date | undefined => {
   }
   const parsed = new Date(match[1]);
   return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+};
+
+const isGmailHost = (host: string): boolean => /(^|\.)(gmail|googlemail)\.com$/i.test(host.trim());
+
+/**
+ * Detects a POP3 view that is stuck in the past and names it, instead of
+ * letting the scan report a clean "no new messages" while recent mail is
+ * structurally invisible.
+ *
+ * Gmail's "all mail" POP mode is the known trigger: it serves the account's
+ * entire history oldest-first in batches of a few hundred and only advances
+ * the window when a client downloads the batch — which this read-only tool
+ * never does. On an old account every visible message can then be years old
+ * and new mail never enters the window. The note carries the Gmail-specific
+ * remediation (`recent:` username prefix, or the "mail that arrives from now
+ * on" POP setting) when the host is Gmail, and a generic hint otherwise.
+ */
+export const buildStuckWindowNote = (input: {
+  account: { host: string; username: string };
+  since: Date | undefined;
+  matchingCount: number;
+  visibleCount: number;
+  newestKnownDate: Date | undefined;
+}): string | undefined => {
+  if (
+    input.since === undefined ||
+    input.matchingCount > 0 ||
+    input.visibleCount === 0 ||
+    input.newestKnownDate === undefined ||
+    input.newestKnownDate.getTime() >= input.since.getTime() - STUCK_WINDOW_MARGIN_MS
+  ) {
+    return undefined;
+  }
+  const newest = input.newestKnownDate.toISOString().slice(0, 10);
+  const base = `POP3 shows ${String(input.visibleCount)} message(s) but the newest dated one is from ${newest}, far older than the search window — the server's POP3 view appears to exclude recent mail.`;
+  if (isGmailHost(input.account.host) && !/^recent:/i.test(input.account.username)) {
+    return `${base} Gmail's "all mail" POP mode serves the oldest messages first and never advances for a read-only client: set the POP3 username to "recent:${input.account.username}" or switch Gmail to "Enable POP for mail that arrives from now on".`;
+  }
+  return `${base} Check the mail server's POP3 download-window settings.`;
 };
 
 const clampSearchLimit = (value: number | undefined): number => {
@@ -318,6 +365,29 @@ export class Pop3ReadonlyToolService {
       )
       .sort((left, right) => right.uid - left.uid);
 
+    // Newest Date header across everything indexed (baseline entries carry no
+    // date); in a stuck window this stays years behind `since` on every scan.
+    let newestKnownDate: Date | undefined;
+    for (const entry of Object.values(index.entries)) {
+      if (entry.date === undefined) {
+        continue;
+      }
+      const date = new Date(entry.date);
+      if (
+        !Number.isNaN(date.getTime()) &&
+        (newestKnownDate === undefined || date > newestKnownDate)
+      ) {
+        newestKnownDate = date;
+      }
+    }
+    const note = buildStuckWindowNote({
+      account: input.account,
+      since,
+      matchingCount: matching.length,
+      visibleCount: Object.keys(index.entries).length,
+      newestKnownDate,
+    });
+
     return {
       instanceId: input.instanceId,
       mailbox: "INBOX",
@@ -325,6 +395,7 @@ export class Pop3ReadonlyToolService {
       totalMatches: matching.length,
       messages: matching.slice(0, limit).map((entry) => toSummary(entry)),
       uidValidity: `${accountFingerprint(input.account)}:${index.generation}`,
+      ...(note === undefined ? {} : { note }),
     };
   }
 

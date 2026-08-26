@@ -414,3 +414,20 @@ offer POP3, with these differences:
 POP3 has been validated against the dovecot-based test fixture used by the
 e2e suite; provider-specific quirks (for example Gmail's POP3 "download
 once" behaviour) have not been exhaustively tested.
+
+#### Gmail over POP3
+
+Gmail's POP setting **"Enable POP for all mail"** serves the account's entire
+history **oldest first**, a few hundred messages at a time, and only advances
+that window when a client downloads the batch. Sovereign's POP3 client is
+read-only and never downloads-to-advance, so on an account with old mail the
+visible window stays stuck in the past and **new mail never becomes visible**.
+The scan reports this as a stuck-window warning instead of a quiet mailbox.
+
+Use one of these instead:
+
+- Set the POP3 username to `recent:you@gmail.com` (note the prefix). Gmail
+  then serves the last 30 days of mail regardless of download state — the
+  right mode for a read-only watcher.
+- Or set Gmail to **"Enable POP for mail that arrives from now on"**; only
+  mail arriving after the change becomes visible.
