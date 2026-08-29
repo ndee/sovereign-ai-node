@@ -1,0 +1,63 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "dependencyDashboard": true,
+  "dependencyDashboardApproval": true,
+  "timezone": "Europe/Berlin",
+  "schedule": ["before 6am on monday"],
+  "packageRules": [
+    {
+      "description": "Group every third-party dependency (npm via pnpm, the caddy-desec Dockerfile, and the regex-managed container/version pins) into a single non-major PR to minimize CI runs on this metered-free public repo.",
+      "matchManagers": ["npm", "dockerfile", "custom.regex"],
+      "matchUpdateTypes": ["patch", "minor"],
+      "groupName": "third-party dependencies (non-major)",
+      "groupSlug": "third-party-deps-non-major"
+    },
+    {
+      "description": "Group major updates separately so a single breaking major cannot block routine patch/minor bumps.",
+      "matchManagers": ["npm", "dockerfile", "custom.regex"],
+      "matchUpdateTypes": ["major"],
+      "groupName": "third-party dependencies (major)",
+      "groupSlug": "third-party-deps-major"
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Container image constants in src/system/matrix.ts (Synapse, Caddy, onboarding-api Node base image). Deliberately excludes DEFAULT_CADDY_DESEC_IMAGE, which is a first-party image built from deploy/caddy-desec/Dockerfile and published to this org's own GHCR namespace.",
+      "managerFilePatterns": ["/^src/system/matrix\\.ts$/"],
+      "matchStrings": [
+        "const DEFAULT_(?:SYNAPSE|CADDY|ONBOARDING_API)_IMAGE\\s*=\\s*\"(?<depName>[^\"@:]+):(?<currentValue>[^\"@]+)\""
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "Hardcoded postgres image literal in the Synapse docker-compose template string in src/system/matrix.ts (no named constant exists for it).",
+      "managerFilePatterns": ["/^src/system/matrix\\.ts$/"],
+      "matchStrings": [
+        "image:\\s*(?<depName>postgres):(?<currentValue>[0-9][^\"'\\s@]*)"
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "frp tunnel client image pin in src/installer/real-service-shared.ts, used for the relay tunnel default image.",
+      "managerFilePatterns": ["/^src/installer/real-service-shared\\.ts$/"],
+      "matchStrings": [
+        "RELAY_TUNNEL_DEFAULT_IMAGE\\s*=\\s*\"(?<depName>[^\"@:]+):(?<currentValue>[^\"@]+)\""
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "OpenClaw CLI version pin in src/openclaw/bootstrap.ts. Uses the npm datasource (package `openclaw`) rather than github-releases: the npm registry carries all 248 published versions in the exact unprefixed CalVer-ish format used by the pin (e.g. \"2026.3.13\"), while GitHub Releases for openclaw/openclaw only exist for a handful of recent, mostly-beta, v-prefixed tags (e.g. \"v2026.9.1-beta.1\") that would need prefix stripping and cover far less history.",
+      "managerFilePatterns": ["/^src/openclaw/bootstrap\\.ts$/"],
+      "matchStrings": [
+        "SOVEREIGN_PINNED_OPENCLAW_VERSION\\s*=\\s*\"(?<currentValue>[^\"]+)\""
+      ],
+      "depNameTemplate": "openclaw",
+      "datasourceTemplate": "npm"
+    }
+  ]
+}
