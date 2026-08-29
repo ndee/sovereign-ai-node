@@ -23,6 +23,8 @@ const startFakePop3 = async (options: {
   password?: string;
   stls?: boolean;
   greeting?: string;
+  /** Full `-ERR …` line the server sends for a wrong password. */
+  passFailureReply?: string;
 }): Promise<{ port: number; commands: string[]; close: () => Promise<void> }> => {
   const commands: string[] = [];
   const password = options.password ?? "secret";
@@ -51,7 +53,9 @@ const startFakePop3 = async (options: {
             break;
           case "PASS":
             socket.write(
-              args.join(" ") === password ? "+OK logged in\r\n" : "-ERR auth failed\r\n",
+              args.join(" ") === password
+                ? "+OK logged in\r\n"
+                : `${options.passFailureReply ?? "-ERR auth failed"}\r\n`,
             );
             break;
           case "STAT":
@@ -205,6 +209,58 @@ describe("SocketPop3Client", () => {
       message: (error as Pop3ConnectionError).message,
     });
     expect(serialized).not.toContain("wrong-password");
+  });
+
+  it("keeps the server's own words in a genuine credential rejection", async () => {
+    const fake = await startFakePop3({
+      messages: [],
+      passFailureReply: "-ERR [AUTH] Username and password not accepted",
+    });
+    servers.push(fake.close);
+    const error: unknown = await SocketPop3Client.connect({
+      host: "127.0.0.1",
+      port: fake.port,
+      tls: false,
+      username: "ops@example.org",
+      password: "wrong-password",
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({
+      code: "POP3_AUTH_FAILED",
+      retryable: false,
+    });
+    expect((error as Pop3ConnectionError).message).toContain(
+      "server said: [AUTH] Username and password not accepted",
+    );
+  });
+
+  it.each([
+    "-ERR [IN-USE] Unable to lock maildrop: mailbox is locked by another POP session",
+    "-ERR [AUTH] Account exceeded pop command or bandwidth limits (Failure)",
+    "-ERR [LOGIN-DELAY] Minimum time between logins not met",
+    "-ERR [SYS/TEMP] Temporary system problem. Please try again later.",
+    "-ERR [AUTH] Web login required: https://support.google.com/mail/answer/78754",
+  ])("classifies a transient login refusal as retryable, not bad credentials: %s", async (reply) => {
+    // Gmail answers PASS with these while the credentials are perfectly fine
+    // (mailbox lock held by a concurrent session, per-account rate limits).
+    // Telling the operator to check the password would send them rotating
+    // working credentials for a condition that clears on its own.
+    const fake = await startFakePop3({ messages: [], passFailureReply: reply });
+    servers.push(fake.close);
+    const error: unknown = await SocketPop3Client.connect({
+      host: "127.0.0.1",
+      port: fake.port,
+      tls: false,
+      username: "ops@example.org",
+      password: "wrong-password",
+    }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({
+      code: "POP3_LOGIN_TEMPORARILY_REJECTED",
+      retryable: true,
+    });
+    const message = (error as Pop3ConnectionError).message;
+    expect(message).toContain(reply.replace(/^-ERR\s*/, ""));
+    expect(message).not.toContain("check the email address / username and password");
+    expect(JSON.stringify({ message })).not.toContain("wrong-password");
   });
 
   it("refuses plaintext for non-loopback hosts before opening a socket", async () => {
