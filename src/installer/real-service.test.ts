@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { createServer as createTlsServer } from "node:tls";
 
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -20,6 +22,7 @@ import type { ImapTester } from "../system/imap.js";
 import type { BundledMatrixProvisioner, BundledMatrixProvisionResult } from "../system/matrix.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
 import { RealInstallerService } from "./real-service.js";
+import type { RelayEnrollmentData } from "./real-service-relay-enrollment.js";
 import type { RuntimeConfig } from "./real-service-shared.js";
 import type { InstallerService } from "./service.js";
 
@@ -60,7 +63,7 @@ const buildInstallRequest = (): InstallRequest => ({
     runOnboard: false,
   },
   openrouter: {
-    model: "qwen/qwen3.5-9b",
+    model: "qwen/qwen-2.5-7b-instruct",
     apiKey: "sk-or-test",
   },
   imap: {
@@ -101,7 +104,14 @@ const maybeHandleInstalledLobsterExec = (input: {
   args?: string[];
 }): ExecResult | null => {
   const serialized = [input.command, ...(input.args ?? [])].join(" ");
-  if (serialized === "lobster commands.list | json") {
+  // The probe runs the lobster binary by its absolute path
+  // (<serviceHome>/.npm-global/bin/lobster) so it does not depend on PATH.
+  // Match by basename + args rather than a fixed string.
+  const argsJoined = (input.args ?? []).join(" ");
+  const isLobsterProbe =
+    (input.command === "lobster" || input.command.endsWith("/bin/lobster")) &&
+    argsJoined === "commands.list | json";
+  if (isLobsterProbe) {
     return {
       command: serialized,
       exitCode: 0,
@@ -630,6 +640,7 @@ const buildTestLoadedBotPackage = (input: {
   templateRef: `${input.id}@1.0.0`,
   keyId: "repo:sovereign-ai-bots",
   manifestSha256: `test-sha-${input.id}`,
+  manifestFileSha256: `test-file-sha-${input.id}`,
   rootDir: join("/tmp", "sovereign-bot-tests", input.id),
 });
 
@@ -660,7 +671,10 @@ afterAll(async () => {
   }
 });
 
-const writeRuntimeArtifacts = async (paths: SovereignPaths): Promise<void> => {
+const writeRuntimeArtifacts = async (
+  paths: SovereignPaths,
+  options: { openrouterPrivacy?: Record<string, unknown> } = {},
+): Promise<void> => {
   const runtimeConfigPath = join(paths.openclawServiceHome, ".openclaw", "openclaw.json5");
   const runtimeProfilePath = join(
     paths.openclawServiceHome,
@@ -701,8 +715,11 @@ const writeRuntimeArtifacts = async (paths: SovereignPaths): Promise<void> => {
           gatewayEnvPath,
         },
         openrouter: {
-          model: "qwen/qwen3.5-9b",
+          model: "qwen/qwen-2.5-7b-instruct",
           apiKeySecretRef: "env:OPENROUTER_API_KEY",
+          ...(options.openrouterPrivacy === undefined
+            ? {}
+            : { privacy: options.openrouterPrivacy }),
         },
         openclawProfile: {
           plugins: {
@@ -1085,6 +1102,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: false,
           tlsMode: "auto",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -1239,6 +1257,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: false,
           tlsMode: "auto",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -1395,6 +1414,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: false,
           tlsMode: "auto",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -1466,6 +1486,13 @@ describe("RealInstallerService", () => {
       req.matrix.federationEnabled = false;
       req.matrix.tlsMode = "auto";
 
+      // Public enrollment sends a STABLE machine-derived installation id (not the
+      // per-run correlation id passed below). Stub the resolver so the assertion is
+      // deterministic regardless of the host's /etc/machine-id.
+      (
+        service as unknown as { resolveStableInstallationId: () => Promise<string> }
+      ).resolveStableInstallationId = async () => "stable-machine-id";
+
       const enrollment = await (
         service as unknown as {
           resolveRelayEnrollment: (
@@ -1479,7 +1506,7 @@ describe("RealInstallerService", () => {
       ).resolveRelayEnrollment(req, "inst_public_managed_relay");
 
       expect(capturedUrl).toBe("https://relay.sovereign-ai-node.com/api/v1/enroll-public");
-      expect(capturedInstallationId).toBe("inst_public_managed_relay");
+      expect(capturedInstallationId).toBe("stable-machine-id");
       expect(capturedEnrollmentToken).toBe("");
       expect(enrollment.hostname).toBe("pilot-node.relay.sovereign-ai-node.com");
       expect(enrollment.publicBaseUrl).toBe("https://pilot-node.relay.sovereign-ai-node.com");
@@ -1699,8 +1726,9 @@ describe("RealInstallerService", () => {
 
       const previousRuntimeConfig: RuntimeConfig = {
         openrouter: {
-          model: "qwen/qwen3.5-9b",
+          model: "qwen/qwen-2.5-7b-instruct",
           apiKeySecretRef: "env:OPENROUTER_API_KEY",
+          privacy: { zdr: true, dataCollection: "deny", allowFallbacks: false },
         },
         openclaw: {
           managedInstallation: true,
@@ -1718,6 +1746,7 @@ describe("RealInstallerService", () => {
         },
         imap: {
           status: "configured",
+          protocol: "imap",
           host: "imap.example.org",
           port: 993,
           tls: true,
@@ -1894,8 +1923,9 @@ describe("RealInstallerService", () => {
     });
     const runtimeConfig = {
       openrouter: {
-        model: "qwen/qwen3.5-9b",
+        model: "qwen/qwen-2.5-7b-instruct",
         apiKeySecretRef: "env:OPENROUTER_API_KEY",
+        privacy: { zdr: true, dataCollection: "deny", allowFallbacks: false },
       },
       openclaw: {
         managedInstallation: true,
@@ -1927,6 +1957,7 @@ describe("RealInstallerService", () => {
       },
       imap: {
         status: "configured",
+        protocol: "imap",
         host: "imap.example.org",
         port: 993,
         tls: true,
@@ -2079,6 +2110,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: false,
           tlsMode: "local-dev",
+          passthrough: false,
         };
       },
       bootstrapAccounts: async () => {
@@ -2233,6 +2265,7 @@ describe("RealInstallerService", () => {
             adminBaseUrl: "http://127.0.0.1:8008",
             federationEnabled: req.matrix.federationEnabled ?? false,
             tlsMode: "local-dev",
+            passthrough: false,
           };
         },
         bootstrapAccounts: async () => {
@@ -2386,6 +2419,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -2503,7 +2537,11 @@ describe("RealInstallerService", () => {
               };
             };
           }>;
-          defaults?: { model?: string };
+          defaults?: {
+            model?: string;
+            workspace?: string;
+            models?: Record<string, { params?: { provider?: Record<string, unknown> } }>;
+          };
         };
         plugins?: {
           allow?: string[];
@@ -2618,7 +2656,27 @@ describe("RealInstallerService", () => {
           }),
         ]),
       );
-      expect(openclawConfig.agents?.defaults?.model).toBe("openrouter/qwen/qwen3.5-9b");
+      expect(openclawConfig.agents?.defaults?.model).toBe("openrouter/qwen/qwen-2.5-7b-instruct");
+      // Strict OpenRouter privacy routing is the default and reaches the
+      // request body via agents.defaults.models[<model>].params.provider.
+      expect(openclawConfig.agents?.defaults?.models).toEqual({
+        "openrouter/qwen/qwen-2.5-7b-instruct": {
+          params: {
+            provider: { data_collection: "deny", zdr: true, allow_fallbacks: false },
+          },
+        },
+      });
+      // llm-task runs in a dedicated empty workspace so no bootstrap files
+      // (AGENTS.md / SOUL.md / TOOLS.md / USER.md / MEMORY.md) get injected.
+      const llmTaskWorkspaceDir = join(paths.openclawServiceHome, "llm-task-workspace");
+      expect(openclawConfig.agents?.defaults?.workspace).toBe(llmTaskWorkspaceDir);
+      const llmTaskWorkspaceStat = await stat(llmTaskWorkspaceDir);
+      expect(llmTaskWorkspaceStat.isDirectory()).toBe(true);
+      expect(llmTaskWorkspaceStat.mode & 0o777).toBe(0o750);
+      expect(await readdir(llmTaskWorkspaceDir)).toEqual([]);
+      expect(
+        openclawConfig.agents?.list?.some((entry) => entry.workspace === llmTaskWorkspaceDir),
+      ).toBe(false);
 
       const runtimeConfigRaw = await readFile(paths.configPath, "utf8");
       const runtimeConfig = JSON.parse(runtimeConfigRaw) as {
@@ -2722,6 +2780,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -3020,6 +3079,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -3182,6 +3242,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -3377,6 +3438,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -3527,6 +3589,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -3717,6 +3780,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -4020,6 +4084,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -4741,6 +4806,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -4986,8 +5052,9 @@ describe("RealInstallerService", () => {
 
     const runtimeConfig: RuntimeConfig = {
       openrouter: {
-        model: "qwen/qwen3.5-9b",
+        model: "qwen/qwen-2.5-7b-instruct",
         apiKeySecretRef: "env:OPENROUTER_API_KEY",
+        privacy: { zdr: true, dataCollection: "deny", allowFallbacks: false },
       },
       openclaw: {
         managedInstallation: true,
@@ -5027,6 +5094,7 @@ describe("RealInstallerService", () => {
       },
       imap: {
         status: "configured",
+        protocol: "imap",
         host: "imap.example.org",
         port: 993,
         tls: true,
@@ -5232,8 +5300,9 @@ describe("RealInstallerService", () => {
     });
     const runtimeConfig: RuntimeConfig = {
       openrouter: {
-        model: "qwen/qwen3.5-9b",
+        model: "qwen/qwen-2.5-7b-instruct",
         apiKeySecretRef: "env:OPENROUTER_API_KEY",
+        privacy: { zdr: true, dataCollection: "deny", allowFallbacks: false },
       },
       openclaw: {
         managedInstallation: true,
@@ -5257,6 +5326,7 @@ describe("RealInstallerService", () => {
       },
       imap: {
         status: "configured",
+        protocol: "imap",
         host: "imap.example.org",
         port: 993,
         tls: true,
@@ -5545,8 +5615,9 @@ describe("RealInstallerService", () => {
 
       const runtimeConfig: RuntimeConfig = {
         openrouter: {
-          model: "qwen/qwen3.5-9b",
+          model: "qwen/qwen-2.5-7b-instruct",
           apiKeySecretRef: "env:OPENROUTER_API_KEY",
+          privacy: { zdr: true, dataCollection: "deny", allowFallbacks: false },
         },
         openclaw: {
           managedInstallation: true,
@@ -5583,6 +5654,7 @@ describe("RealInstallerService", () => {
         },
         imap: {
           status: "configured",
+          protocol: "imap",
           host: "imap.example.org",
           port: 993,
           tls: true,
@@ -6528,6 +6600,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => {
           const operatorPasswordPath = join(paths.secretsDir, "matrix-operator.password");
@@ -6648,7 +6721,7 @@ describe("RealInstallerService", () => {
     try {
       const req = buildInstallRequest();
       req.openrouter = {
-        model: "qwen/qwen3.5-9b",
+        model: "qwen/qwen-2.5-7b-instruct",
         secretRef: "env:OPENROUTER_API_KEY",
       };
       req.bots = {
@@ -6815,7 +6888,12 @@ describe("RealInstallerService", () => {
       expect(result.instance.allowedUsers).toEqual(["@operator:matrix.example.org"]);
 
       const raw = await readFile(requestPath, "utf8");
+      // The rewritten request must not carry inline credentials: the
+      // fixture's inline OpenRouter key is replaced by its file secretRef.
+      expect(raw).not.toMatch(/sk-or-|"password"/);
+      expect((await stat(requestPath)).mode & 0o777).toBe(0o640);
       const request = JSON.parse(raw) as {
+        openrouter?: { apiKey?: string; secretRef?: string };
         bots?: {
           selected?: string[];
           instances?: Array<{
@@ -6832,6 +6910,10 @@ describe("RealInstallerService", () => {
           }>;
         };
       };
+      expect(request.openrouter).toEqual({
+        model: "qwen/qwen-2.5-7b-instruct",
+        secretRef: `file:${join(paths.secretsDir, "openrouter-api-key")}`,
+      });
       expect(request.bots?.selected).toContain("mail-sentinel");
       expect(request.bots?.instances).toEqual([
         {
@@ -6845,6 +6927,7 @@ describe("RealInstallerService", () => {
             imapConfigured: true,
             imapHost: "imap.example.org",
             imapPort: 993,
+            imapProtocol: "imap",
             imapTls: true,
             imapUsername: "pending",
             imapMailbox: "INBOX",
@@ -6982,6 +7065,7 @@ describe("RealInstallerService", () => {
         },
         imap: {
           status: "configured",
+          protocol: "imap",
           host: "127.0.0.1",
           port: 1143,
           tls: true,
@@ -9447,7 +9531,14 @@ describe("RealInstallerService", () => {
       provenancePath: join(tempRoot, "install-provenance.json"),
       backupsDir: join(tempRoot, "backups"),
     };
-    await writeRuntimeArtifacts(paths);
+    await writeRuntimeArtifacts(paths, {
+      openrouterPrivacy: {
+        zdr: false,
+        dataCollection: "allow",
+        allowFallbacks: true,
+        only: ["together", "deepinfra"],
+      },
+    });
 
     const requestPath = join(dirname(paths.configPath), "install-request.json");
     await writeFile(requestPath, `${JSON.stringify(buildInstallRequest(), null, 2)}\n`, "utf8");
@@ -9539,11 +9630,18 @@ describe("RealInstallerService", () => {
 
       const updatedConfigRaw = await readFile(paths.configPath, "utf8");
       const updatedConfig = JSON.parse(updatedConfigRaw) as {
-        openrouter?: { model?: string; apiKeySecretRef?: string };
+        openrouter?: { model?: string; apiKeySecretRef?: string; privacy?: unknown };
       };
       const expectedSecretRef = `file:${join(paths.secretsDir, "openrouter-api-key")}`;
       expect(updatedConfig.openrouter?.model).toBe("openai/gpt-5");
       expect(updatedConfig.openrouter?.apiKeySecretRef).toBe(expectedSecretRef);
+      // An explicit privacy opt-out survives a model/credential reconfigure.
+      expect(updatedConfig.openrouter?.privacy).toEqual({
+        zdr: false,
+        dataCollection: "allow",
+        allowFallbacks: true,
+        only: ["together", "deepinfra"],
+      });
 
       const secretRaw = await readFile(join(paths.secretsDir, "openrouter-api-key"), "utf8");
       expect(secretRaw).toBe("sk-or-updated\n");
@@ -9553,9 +9651,31 @@ describe("RealInstallerService", () => {
         "utf8",
       );
       const openclawConfig = JSON.parse(openclawConfigRaw) as {
-        agents?: { defaults?: { model?: string } };
+        agents?: {
+          defaults?: {
+            model?: string;
+            workspace?: string;
+            models?: Record<string, { params?: { provider?: Record<string, unknown> } }>;
+          };
+        };
       };
       expect(openclawConfig.agents?.defaults?.model).toBe("openrouter/openai/gpt-5");
+      // The routing block follows the new model key and honours the override.
+      expect(openclawConfig.agents?.defaults?.models).toEqual({
+        "openrouter/openai/gpt-5": {
+          params: {
+            provider: {
+              data_collection: "allow",
+              zdr: false,
+              allow_fallbacks: true,
+              only: ["together", "deepinfra"],
+            },
+          },
+        },
+      });
+      expect(openclawConfig.agents?.defaults?.workspace).toBe(
+        join(paths.openclawServiceHome, "llm-task-workspace"),
+      );
 
       const gatewayEnvRaw = await readFile(join(paths.openclawServiceHome, "gateway.env"), "utf8");
       expect(gatewayEnvRaw).toContain(`HOME=${paths.openclawServiceHome}`);
@@ -9572,6 +9692,354 @@ describe("RealInstallerService", () => {
       expect(updatedRequest.openrouter?.model).toBe("openai/gpt-5");
       expect(updatedRequest.openrouter?.secretRef).toBe(expectedSecretRef);
       expect(updatedRequest.openrouter?.apiKey).toBeUndefined();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  const buildReconfigureService = async (
+    paths: SovereignPaths,
+    overrides: {
+      imapTester?: ImapTester;
+      openrouterKeyValidator?: {
+        validate: (key: string) => Promise<{
+          ok: boolean;
+          error?: { code: string; message: string; retryable: boolean };
+        }>;
+      };
+    } = {},
+  ): Promise<RealInstallerService> =>
+    new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({ binaryPath: "/usr/local/bin/openclaw", version: "0.2.0" }),
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents add",
+          cronCommand: "openclaw cron add",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: overrides.imapTester ?? {
+        test: async (req) => ({
+          ok: true,
+          protocol: req.imap.protocol ?? "imap",
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      ...(overrides.openrouterKeyValidator === undefined
+        ? {}
+        : { openrouterKeyValidator: overrides.openrouterKeyValidator }),
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({ ok: true, homeserverUrl: "https://matrix.example.org", checks: [] }),
+      },
+    });
+
+  const buildReconfigurePaths = (tempRoot: string): SovereignPaths => ({
+    configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+    secretsDir: join(tempRoot, "etc", "secrets"),
+    stateDir: join(tempRoot, "var", "lib"),
+    logsDir: join(tempRoot, "var", "log"),
+    installJobsDir: join(tempRoot, "install-jobs"),
+    openclawServiceHome: join(tempRoot, "openclaw-home"),
+    provenancePath: join(tempRoot, "install-provenance.json"),
+    backupsDir: join(tempRoot, "backups"),
+  });
+
+  // Saved request with a migrated mail-sentinel instance so no migration is pending.
+  const buildReconfigureRequest = (): InstallRequest => {
+    const request = buildInstallRequest();
+    request.bots = {
+      ...request.bots,
+      selected: ["mail-sentinel"],
+      instances: [
+        {
+          id: "mail-sentinel",
+          packageId: "mail-sentinel",
+          workspace: "/var/lib/sovereign-node/mail-sentinel/workspace",
+          config: { imapConfigured: true, imapHost: "imap.example.org" },
+          secretRefs: { imapPassword: "file:/tmp/imap-secret" },
+          matrix: { allowedUsers: ["@operator:matrix.example.org"] },
+        },
+      ],
+    } as InstallRequest["bots"];
+    return request;
+  };
+
+  it("reconfigureImap leaves the working configuration untouched when the new connection fails", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths = buildReconfigurePaths(tempRoot);
+    await writeRuntimeArtifacts(paths);
+    const requestPath = join(dirname(paths.configPath), "install-request.json");
+    const originalRequest = `${JSON.stringify(buildReconfigureRequest(), null, 2)}\n`;
+    await writeFile(requestPath, originalRequest, "utf8");
+    const originalConfig = await readFile(paths.configPath, "utf8");
+
+    const service = await buildReconfigureService(paths, {
+      imapTester: {
+        test: async (req) => ({
+          ok: false,
+          protocol: req.imap.protocol ?? "imap",
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "failed",
+          mailbox: "INBOX",
+          error: {
+            code: "POP3_AUTH_FAILED",
+            message: "POP3 authentication failed",
+            retryable: false,
+          },
+        }),
+      },
+    });
+    const startInstall = vi.spyOn(service, "startInstall");
+
+    try {
+      const result = await service.reconfigureImap({
+        imap: {
+          protocol: "pop3",
+          host: "pop.example.org",
+          port: 995,
+          tls: true,
+          username: "new@example.org",
+          password: "wrong-password",
+        },
+      });
+      expect(result.target).toBe("imap");
+      expect(result.changed).toEqual([]);
+      expect(result.job).toBeUndefined();
+      expect(result.validation.find((entry) => entry.id === "mail-connection")?.status).toBe(
+        "fail",
+      );
+      expect(JSON.stringify(result)).not.toContain("wrong-password");
+      expect(startInstall).not.toHaveBeenCalled();
+      expect(await readFile(requestPath, "utf8")).toBe(originalRequest);
+      expect(await readFile(paths.configPath, "utf8")).toBe(originalConfig);
+      await expect(stat(join(paths.secretsDir, "imap-password"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reconfigureImap switches IMAP to POP3 after a successful test and applies via the install job", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths = buildReconfigurePaths(tempRoot);
+    await writeRuntimeArtifacts(paths);
+    const requestPath = join(dirname(paths.configPath), "install-request.json");
+    await writeFile(requestPath, `${JSON.stringify(buildReconfigureRequest(), null, 2)}\n`, "utf8");
+
+    const tested: Array<{ protocol?: string; password?: string }> = [];
+    const service = await buildReconfigureService(paths, {
+      imapTester: {
+        test: async (req) => {
+          tested.push({
+            ...(req.imap.protocol === undefined ? {} : { protocol: req.imap.protocol }),
+            ...(req.imap.password === undefined ? {} : { password: req.imap.password }),
+          });
+          return {
+            ok: true,
+            protocol: req.imap.protocol ?? "imap",
+            host: req.imap.host,
+            port: req.imap.port,
+            tls: req.imap.tls,
+            auth: "ok",
+            mailbox: "INBOX",
+          };
+        },
+      },
+    });
+    const startInstall = vi.spyOn(service, "startInstall").mockResolvedValue({
+      job: {
+        jobId: "job_test",
+        state: "pending",
+        createdAt: "2026-08-22T00:00:00.000Z",
+        steps: [],
+      },
+    });
+
+    try {
+      const result = await service.reconfigureImap({
+        imap: {
+          protocol: "pop3",
+          host: "pop.example.org",
+          port: 995,
+          tls: true,
+          username: "new@example.org",
+          password: "new-password",
+          mailbox: "Archive",
+        },
+      });
+      expect(tested).toEqual([{ protocol: "pop3", password: "new-password" }]);
+      expect(result.changed).toEqual(
+        expect.arrayContaining([
+          "imap.protocol",
+          "imap.host",
+          "imap.port",
+          "imap.username",
+          "imap.secretRef",
+        ]),
+      );
+      expect(result.job?.jobId).toBe("job_test");
+      expect(startInstall).toHaveBeenCalledTimes(1);
+      const applied = startInstall.mock.calls[0]?.[0] as InstallRequest;
+      expect(applied.imap).toEqual({
+        protocol: "pop3",
+        host: "pop.example.org",
+        port: 995,
+        tls: true,
+        username: "new@example.org",
+        mailbox: "INBOX",
+        secretRef: `file:${join(paths.secretsDir, "imap-password")}`,
+      });
+      expect(applied.imap?.password).toBeUndefined();
+      const instance = applied.bots?.instances?.[0] as {
+        config: Record<string, unknown>;
+        secretRefs: Record<string, string>;
+      };
+      expect(instance.config.imapProtocol).toBe("pop3");
+      expect(instance.config.imapHost).toBe("pop.example.org");
+      expect(instance.config.imapMailbox).toBe("INBOX");
+      expect(instance.secretRefs.imapPassword).toBe(
+        `file:${join(paths.secretsDir, "imap-password")}`,
+      );
+
+      const secretStat = await stat(join(paths.secretsDir, "imap-password"));
+      expect(secretStat.mode & 0o777).toBe(0o600);
+      expect(await readFile(join(paths.secretsDir, "imap-password"), "utf8")).toBe(
+        "new-password\n",
+      );
+      const savedRequest = await readFile(requestPath, "utf8");
+      expect(savedRequest).not.toContain("new-password");
+      expect(JSON.parse(savedRequest).imap.protocol).toBe("pop3");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reconfigureImap requires a credential so the connection can be tested", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths = buildReconfigurePaths(tempRoot);
+    await writeRuntimeArtifacts(paths);
+    await writeFile(
+      join(dirname(paths.configPath), "install-request.json"),
+      `${JSON.stringify(buildReconfigureRequest(), null, 2)}\n`,
+      "utf8",
+    );
+    const service = await buildReconfigureService(paths);
+    try {
+      await expect(
+        service.reconfigureImap({
+          imap: { host: "imap.example.org", port: 993, tls: true, username: "a@example.org" },
+        }),
+      ).rejects.toMatchObject({ code: "MAIL_CREDENTIALS_REQUIRED" });
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("getSettings reports non-secret values, secret presence flags and immutable fields", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths = buildReconfigurePaths(tempRoot);
+    await writeRuntimeArtifacts(paths);
+    const service = await buildReconfigureService(paths);
+    try {
+      const settings = await service.getSettings();
+      expect(settings.mail).toEqual({
+        configured: true,
+        protocol: "imap",
+        host: "imap.example.org",
+        port: 993,
+        tls: true,
+        username: "pending",
+        mailbox: "INBOX",
+        passwordSet: false,
+        editable: true,
+      });
+      // The fixture references env:OPENROUTER_API_KEY, so presence mirrors the
+      // ambient environment; the important part is that no value is echoed.
+      expect(settings.openrouter).toEqual({
+        model: "qwen/qwen-2.5-7b-instruct",
+        apiKeySet: (process.env.OPENROUTER_API_KEY ?? "").length > 0,
+        editable: true,
+      });
+      expect(settings.matrix.editable).toBe(false);
+      expect(settings.matrix.homeserverDomain).toBe("matrix.example.org");
+      expect(settings.relay).toBeUndefined();
+      expect(JSON.stringify(settings)).not.toMatch(/secretRef|apiKey[^S]/);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reconfigureOpenrouter keeps the previous key when the replacement is rejected", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths = buildReconfigurePaths(tempRoot);
+    await writeRuntimeArtifacts(paths);
+    const requestPath = join(dirname(paths.configPath), "install-request.json");
+    await writeFile(requestPath, `${JSON.stringify(buildInstallRequest(), null, 2)}\n`, "utf8");
+    const originalConfig = await readFile(paths.configPath, "utf8");
+    const validated: string[] = [];
+    const service = await buildReconfigureService(paths, {
+      openrouterKeyValidator: {
+        validate: async (key) => {
+          validated.push(key);
+          return {
+            ok: false,
+            error: {
+              code: "OPENROUTER_KEY_INVALID",
+              message: "OpenRouter rejected the API key",
+              retryable: false,
+            },
+          };
+        },
+      },
+    });
+    try {
+      const result = await service.reconfigureOpenrouter({ openrouter: { apiKey: "sk-or-bad" } });
+      expect(validated).toEqual(["sk-or-bad"]);
+      expect(result.changed).toEqual([]);
+      expect(result.validation.find((entry) => entry.id === "openrouter-key")?.status).toBe("fail");
+      expect(JSON.stringify(result)).not.toContain("sk-or-bad");
+      expect(await readFile(paths.configPath, "utf8")).toBe(originalConfig);
+      await expect(stat(join(paths.secretsDir, "openrouter-api-key"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -9956,6 +10424,23 @@ describe("RealInstallerService", () => {
       expect(agentsDoc).toContain("Operator: @operator:matrix.example.org");
       expect(gatewayRestartCalls).toBe(1);
 
+      // Regression: an update replaces the bot CATALOG but nothing re-applied
+      // the agent WORKSPACE, so the code systemd runs stayed at the previously
+      // installed build. Simulate that drift and prove reconcile repairs it.
+      const workspaceToolsPath = join(paths.stateDir, "node-operator", "workspace", "TOOLS.md");
+      await writeFile(workspaceToolsPath, "STALE — left over from an older release\n", "utf8");
+
+      const reconciled = await service.reconcileAgentWorkspaces();
+      expect(reconciled.reconciled).toContain("node-operator");
+
+      const repaired = await readFile(workspaceToolsPath, "utf8");
+      expect(repaired).not.toContain("STALE");
+      expect(repaired).toContain("sovereign-node users remove <username> --json");
+
+      // Reconcile must NOT restart the gateway: an updater has to be able to
+      // call it without side effects it did not ask for.
+      expect(gatewayRestartCalls).toBe(1);
+
       const configRaw = await readFile(paths.configPath, "utf8");
       const config = JSON.parse(configRaw) as {
         templates?: {
@@ -10103,6 +10588,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async () => ({
           operator: {
@@ -10346,6 +10832,7 @@ describe("RealInstallerService", () => {
           adminBaseUrl: "http://127.0.0.1:8008",
           federationEnabled: req.matrix.federationEnabled ?? false,
           tlsMode: "local-dev",
+          passthrough: false,
         }),
         bootstrapAccounts: async (_req, _provision, options) => {
           bootstrapBotLocalpart = options?.botLocalpart ?? "service-bot";
@@ -11158,7 +11645,7 @@ describe("RealInstallerService", () => {
       installRequestPath,
       JSON.stringify({
         mode: "bundled_matrix",
-        openrouter: { model: "qwen/qwen3.5-9b", secretRef: "env:OPENROUTER_API_KEY" },
+        openrouter: { model: "qwen/qwen-2.5-7b-instruct", secretRef: "env:OPENROUTER_API_KEY" },
         matrix: {
           homeserverDomain: "matrix.example.org",
           publicBaseUrl: "https://matrix.example.org",
@@ -11736,6 +12223,3033 @@ describe("RealInstallerService", () => {
     } finally {
       getuidMock2?.mockRestore();
       delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("ensureRelayTunnelService", () => {
+  const buildPaths = (tempRoot: string): SovereignPaths => ({
+    configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+    secretsDir: join(tempRoot, "etc", "secrets"),
+    stateDir: join(tempRoot, "var", "lib"),
+    logsDir: join(tempRoot, "var", "log"),
+    installJobsDir: join(tempRoot, "install-jobs"),
+    openclawServiceHome: join(tempRoot, "openclaw-home"),
+    provenancePath: join(tempRoot, "install-provenance.json"),
+    backupsDir: join(tempRoot, "backups"),
+  });
+
+  const unusedDeps = {
+    openclawBootstrapper: {
+      detectInstalled: async () => null,
+      ensureInstalled: async () => ({
+        binaryPath: "/usr/local/bin/openclaw",
+        version: "test",
+        installMethod: "install_sh" as const,
+      }),
+    },
+    openclawGatewayServiceManager: {
+      install: async () => {},
+      start: async () => {},
+      restart: async () => {},
+    },
+    preflightChecker: {
+      run: async () => ({
+        mode: "bundled_matrix" as const,
+        overall: "pass" as const,
+        checks: [],
+        recommendedActions: [],
+      }),
+    },
+    imapTester: {
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+    matrixProvisioner: {
+      provision: async () => {
+        throw new Error("not used");
+      },
+      bootstrapAccounts: async () => {
+        throw new Error("not used");
+      },
+      bootstrapRoom: async () => {
+        throw new Error("not used");
+      },
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+  };
+
+  const buildService = (
+    paths: SovereignPaths,
+    execRunner: { run: (input: ExecInput) => Promise<ExecResult> },
+  ): RealInstallerService =>
+    new RealInstallerService(createLogger(), paths, {
+      ...unusedDeps,
+      execRunner,
+    } as ConstructorParameters<typeof RealInstallerService>[2]);
+
+  const buildRelayRuntimeConfig = (paths: SovereignPaths): RuntimeConfig =>
+    ({
+      relay: {
+        enabled: true,
+        controlUrl: "https://relay.sovereign-ai-node.com",
+        hostname: "node.sovereign-ai-node.com",
+        publicBaseUrl: "https://node.sovereign-ai-node.com",
+        connected: false,
+        serviceName: "sovereign-matrix-relay-tunnel.service",
+        configPath: join(paths.stateDir, "relay", "frpc.toml"),
+        tunnel: {
+          serverAddr: "relay.sovereign-ai-node.com",
+          serverPort: 7000,
+          tokenSecretRef: "file:/tmp/relay-token",
+          proxyName: "relay-node",
+          type: "http",
+          localIp: "127.0.0.1",
+          localPort: 18080,
+        },
+      },
+    }) as unknown as RuntimeConfig;
+
+  const stubSecret = (service: RealInstallerService, token: string): void => {
+    (service as unknown as { resolveSecretRef(ref: string): Promise<string> }).resolveSecretRef =
+      async () => token;
+  };
+
+  const invoke = (service: RealInstallerService, config: RuntimeConfig): Promise<boolean> =>
+    (
+      service as unknown as {
+        ensureRelayTunnelService(config: RuntimeConfig): Promise<boolean>;
+      }
+    ).ensureRelayTunnelService(config);
+
+  it("writes the frpc config and unit then enables the service (happy path)", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
+    const systemdDir = join(tempRoot, "systemd");
+    await mkdir(systemdDir, { recursive: true });
+    process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
+    const execCommands: string[] = [];
+    const service = buildService(buildPaths(tempRoot), {
+      run: async ({ command, args }) => {
+        const serialized = [command, ...(args ?? [])].join(" ");
+        execCommands.push(serialized);
+        return { command: serialized, exitCode: 0, stdout: "active", stderr: "" };
+      },
+    });
+    stubSecret(service, "secret-token");
+    const paths = buildPaths(tempRoot);
+    try {
+      const result = await invoke(service, buildRelayRuntimeConfig(paths));
+      expect(result).toBe(true);
+      const unit = await readFile(
+        join(systemdDir, "sovereign-matrix-relay-tunnel.service"),
+        "utf8",
+      );
+      expect(unit).toContain("Sovereign Matrix Relay Tunnel");
+      const config = await readFile(join(paths.stateDir, "relay", "frpc.toml"), "utf8");
+      expect(config).toContain('token = "secret-token"');
+      expect(execCommands).toEqual([
+        "systemctl daemon-reload",
+        "systemctl enable --now sovereign-matrix-relay-tunnel.service",
+        "systemctl restart sovereign-matrix-relay-tunnel.service",
+        "systemctl is-active sovereign-matrix-relay-tunnel.service",
+      ]);
+    } finally {
+      delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns false when relay is not enabled", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
+    const service = buildService(buildPaths(tempRoot), {
+      run: async ({ command, args }) => ({
+        command: [command, ...(args ?? [])].join(" "),
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      }),
+    });
+    try {
+      const result = await invoke(service, {
+        relay: { enabled: false },
+      } as unknown as RuntimeConfig);
+      expect(result).toBe(false);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+
+  // Reproduces the real Pi failure: the unprivileged runtime API service cannot
+  // write to /etc/systemd/system, so writeFile throws EACCES and the helper must
+  // fall back to `sudo -n tee`. Driven by a real read-only target dir — reliable
+  // for any non-root uid (local dev and the non-root CI runner). Skipped under
+  // root, where the kernel bypasses the directory permission bits.
+  it.skipIf(isRoot)("falls back to `sudo -n tee` when the unit write hits EACCES", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
+    const systemdDir = join(tempRoot, "systemd");
+    await mkdir(systemdDir, { recursive: true });
+    process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
+    const teeInputs: string[] = [];
+    const teeTargets: Array<string | undefined> = [];
+    const execCommands: string[] = [];
+    const service = buildService(buildPaths(tempRoot), {
+      run: async (input) => {
+        const serialized = [input.command, ...(input.args ?? [])].join(" ");
+        execCommands.push(serialized);
+        if (input.command === "sudo" && input.args?.[1] === "tee") {
+          teeInputs.push(String(input.options?.input ?? ""));
+          teeTargets.push(input.args?.[2]);
+          return { command: serialized, exitCode: 0, stdout: "", stderr: "" };
+        }
+        return { command: serialized, exitCode: 0, stdout: "active", stderr: "" };
+      },
+    });
+    stubSecret(service, "secret-token");
+    // Drop write permission so the direct writeFile throws EACCES.
+    await chmod(systemdDir, 0o500);
+    try {
+      const result = await invoke(service, buildRelayRuntimeConfig(buildPaths(tempRoot)));
+      expect(result).toBe(true);
+      expect(teeInputs.length).toBe(1);
+      expect(teeInputs[0]).toContain("Sovereign Matrix Relay Tunnel");
+      expect(teeTargets[0]).toBe(join(systemdDir, "sovereign-matrix-relay-tunnel.service"));
+      expect(execCommands.some((c) => c.startsWith("sudo -n tee"))).toBe(true);
+    } finally {
+      await chmod(systemdDir, 0o700);
+      delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(isRoot)(
+    "returns false when the unit write fails with EACCES and no exec runner",
+    async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
+      const systemdDir = join(tempRoot, "systemd");
+      await mkdir(systemdDir, { recursive: true });
+      process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
+      // No execRunner -> the helper cannot fall back to sudo tee, so the EACCES
+      // propagates and ensureRelayTunnelService returns false.
+      const service = new RealInstallerService(createLogger(), buildPaths(tempRoot), {
+        ...unusedDeps,
+      } as ConstructorParameters<typeof RealInstallerService>[2]);
+      stubSecret(service, "secret-token");
+      await chmod(systemdDir, 0o500);
+      try {
+        const result = await invoke(service, buildRelayRuntimeConfig(buildPaths(tempRoot)));
+        expect(result).toBe(false);
+      } finally {
+        await chmod(systemdDir, 0o700);
+        delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("retries via `sudo -n systemctl` on polkit interactive-auth failure", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
+    const systemdDir = join(tempRoot, "systemd");
+    await mkdir(systemdDir, { recursive: true });
+    process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
+    const execCommands: string[] = [];
+    const service = buildService(buildPaths(tempRoot), {
+      run: async ({ command, args }) => {
+        const serialized = [command, ...(args ?? [])].join(" ");
+        execCommands.push(serialized);
+        if (command === "sudo") {
+          return { command: serialized, exitCode: 0, stdout: "active", stderr: "" };
+        }
+        // Direct systemctl fails with polkit auth required.
+        return {
+          command: serialized,
+          exitCode: 1,
+          stdout: "",
+          stderr: "Interactive authentication required.",
+        };
+      },
+    });
+    stubSecret(service, "secret-token");
+    try {
+      const result = await invoke(service, buildRelayRuntimeConfig(buildPaths(tempRoot)));
+      expect(result).toBe(true);
+      // Each systemctl verb retried under sudo.
+      expect(execCommands.filter((c) => c.startsWith("sudo -n systemctl")).length).toBe(4);
+    } finally {
+      delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns false and warns when a systemctl command exits non-zero", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
+    const systemdDir = join(tempRoot, "systemd");
+    await mkdir(systemdDir, { recursive: true });
+    process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
+    const service = buildService(buildPaths(tempRoot), {
+      run: async ({ command, args }) => ({
+        command: [command, ...(args ?? [])].join(" "),
+        exitCode: 1,
+        stdout: "",
+        stderr: "boom",
+      }),
+    });
+    stubSecret(service, "secret-token");
+    try {
+      const result = await invoke(service, buildRelayRuntimeConfig(buildPaths(tempRoot)));
+      expect(result).toBe(false);
+    } finally {
+      delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns false when the relay token secret cannot be resolved", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
+    const systemdDir = join(tempRoot, "systemd");
+    await mkdir(systemdDir, { recursive: true });
+    process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
+    const service = buildService(buildPaths(tempRoot), {
+      run: async ({ command, args }) => ({
+        command: [command, ...(args ?? [])].join(" "),
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      }),
+    });
+    (service as unknown as { resolveSecretRef(ref: string): Promise<string> }).resolveSecretRef =
+      async () => {
+        throw new Error("missing token");
+      };
+    try {
+      const result = await invoke(service, buildRelayRuntimeConfig(buildPaths(tempRoot)));
+      expect(result).toBe(false);
+    } finally {
+      delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(isRoot)(
+    "returns false when the privileged `sudo -n tee` write exits non-zero",
+    async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
+      const systemdDir = join(tempRoot, "systemd");
+      await mkdir(systemdDir, { recursive: true });
+      process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
+      const service = buildService(buildPaths(tempRoot), {
+        run: async (input) => {
+          const serialized = [input.command, ...(input.args ?? [])].join(" ");
+          if (input.command === "sudo" && input.args?.[1] === "tee") {
+            return { command: serialized, exitCode: 1, stdout: "", stderr: "denied" };
+          }
+          return { command: serialized, exitCode: 0, stdout: "active", stderr: "" };
+        },
+      });
+      stubSecret(service, "secret-token");
+      await chmod(systemdDir, 0o500);
+      try {
+        const result = await invoke(service, buildRelayRuntimeConfig(buildPaths(tempRoot)));
+        expect(result).toBe(false);
+      } finally {
+        await chmod(systemdDir, 0o700);
+        delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("returns false when systemctl cannot run (no exec runner)", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
+    const systemdDir = join(tempRoot, "systemd");
+    await mkdir(systemdDir, { recursive: true });
+    process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
+    // No execRunner: the unit write succeeds (writable temp dir), then the
+    // first systemctl call comes back !ok ("Exec runner is not configured").
+    const service = new RealInstallerService(createLogger(), buildPaths(tempRoot), {
+      ...unusedDeps,
+    } as ConstructorParameters<typeof RealInstallerService>[2]);
+    stubSecret(service, "secret-token");
+    try {
+      const result = await invoke(service, buildRelayRuntimeConfig(buildPaths(tempRoot)));
+      expect(result).toBe(false);
+    } finally {
+      delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  describe("installRelayTunnelServiceOrThrow", () => {
+    const invokeOrThrow = (
+      service: RealInstallerService,
+      config: RuntimeConfig,
+    ): Promise<boolean> =>
+      (
+        service as unknown as {
+          installRelayTunnelServiceOrThrow(config: RuntimeConfig): Promise<boolean>;
+        }
+      ).installRelayTunnelServiceOrThrow(config);
+
+    it("returns true when the tunnel installs successfully", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
+      const systemdDir = join(tempRoot, "systemd");
+      await mkdir(systemdDir, { recursive: true });
+      process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
+      const service = buildService(buildPaths(tempRoot), {
+        run: async ({ command, args }) => ({
+          command: [command, ...(args ?? [])].join(" "),
+          exitCode: 0,
+          stdout: "active",
+          stderr: "",
+        }),
+      });
+      stubSecret(service, "secret-token");
+      try {
+        await expect(
+          invokeOrThrow(service, buildRelayRuntimeConfig(buildPaths(tempRoot))),
+        ).resolves.toBe(true);
+      } finally {
+        delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("throws RELAY_TUNNEL_INSTALL_FAILED when the tunnel cannot start", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
+      const systemdDir = join(tempRoot, "systemd");
+      await mkdir(systemdDir, { recursive: true });
+      process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
+      const service = buildService(buildPaths(tempRoot), {
+        run: async ({ command, args }) => ({
+          command: [command, ...(args ?? [])].join(" "),
+          exitCode: 1,
+          stdout: "",
+          stderr: "boom",
+        }),
+      });
+      stubSecret(service, "secret-token");
+      try {
+        await expect(
+          invokeOrThrow(service, buildRelayRuntimeConfig(buildPaths(tempRoot))),
+        ).rejects.toMatchObject({
+          code: "RELAY_TUNNEL_INSTALL_FAILED",
+          retryable: true,
+          details: { serviceName: "sovereign-matrix-relay-tunnel.service" },
+        });
+      } finally {
+        delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+  });
+});
+
+describe("tryReuseExistingRelayEnrollment", () => {
+  const buildPaths = (tempRoot: string): SovereignPaths => ({
+    configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+    secretsDir: join(tempRoot, "etc", "secrets"),
+    stateDir: join(tempRoot, "var", "lib"),
+    logsDir: join(tempRoot, "var", "log"),
+    installJobsDir: join(tempRoot, "install-jobs"),
+    openclawServiceHome: join(tempRoot, "openclaw-home"),
+    provenancePath: join(tempRoot, "install-provenance.json"),
+    backupsDir: join(tempRoot, "backups"),
+  });
+
+  const unusedDeps = {
+    openclawBootstrapper: {
+      detectInstalled: async () => null,
+      ensureInstalled: async () => ({
+        binaryPath: "/usr/local/bin/openclaw",
+        version: "test",
+        installMethod: "install_sh" as const,
+      }),
+    },
+    openclawGatewayServiceManager: {
+      install: async () => {},
+      start: async () => {},
+      restart: async () => {},
+    },
+    preflightChecker: {
+      run: async () => ({
+        mode: "bundled_matrix" as const,
+        overall: "pass" as const,
+        checks: [],
+        recommendedActions: [],
+      }),
+    },
+    imapTester: {
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+    matrixProvisioner: {
+      provision: async () => {
+        throw new Error("not used");
+      },
+      bootstrapAccounts: async () => {
+        throw new Error("not used");
+      },
+      bootstrapRoom: async () => {
+        throw new Error("not used");
+      },
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+    execRunner: {
+      run: async ({ command, args }: ExecInput) => ({
+        command: [command, ...(args ?? [])].join(" "),
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      }),
+    },
+  };
+
+  const buildService = (paths: SovereignPaths): RealInstallerService =>
+    new RealInstallerService(createLogger(), paths, {
+      ...unusedDeps,
+    } as ConstructorParameters<typeof RealInstallerService>[2]);
+
+  const stubRuntimeConfig = (
+    service: RealInstallerService,
+    runtimeConfig: RuntimeConfig | null,
+  ): void => {
+    (
+      service as unknown as { tryReadRuntimeConfig(): Promise<RuntimeConfig | null> }
+    ).tryReadRuntimeConfig = async () => runtimeConfig;
+  };
+
+  const stubSecret = (service: RealInstallerService, token: string): void => {
+    (service as unknown as { resolveSecretRef(ref: string): Promise<string> }).resolveSecretRef =
+      async () => token;
+  };
+
+  const invoke = (
+    service: RealInstallerService,
+    relay: NonNullable<InstallRequest["relay"]>,
+  ): Promise<RelayEnrollmentData | null> =>
+    (
+      service as unknown as {
+        tryReuseExistingRelayEnrollment(
+          relay: NonNullable<InstallRequest["relay"]>,
+        ): Promise<RelayEnrollmentData | null>;
+      }
+    ).tryReuseExistingRelayEnrollment(relay);
+
+  const passthroughRuntimeConfig = (): RuntimeConfig =>
+    ({
+      relay: {
+        enabled: true,
+        controlUrl: "https://relay.sovereign-ai-node.com",
+        hostname: "node.relay.sovereign-ai-node.com",
+        publicBaseUrl: "https://node.relay.sovereign-ai-node.com",
+        connected: false,
+        serviceName: "sovereign-matrix-relay-tunnel.service",
+        configPath: "/var/lib/relay/frpc.toml",
+        tunnel: {
+          serverAddr: "relay.sovereign-ai-node.com",
+          serverPort: 7000,
+          tokenSecretRef: "file:/tmp/relay-token",
+          proxyName: "relay-node",
+          type: "https",
+          localIp: "127.0.0.1",
+          localPort: 18443,
+        },
+        dns01: {
+          provider: "desec",
+          apiBase: "https://desec.io/api/v1",
+          zone: "relay.sovereign-ai-node.com",
+          subname: "_acme-challenge.node",
+          acmeEmail: "ops@example.org",
+          tokenSecretRef: "file:/tmp/relay-desec-token",
+        },
+      },
+    }) as unknown as RuntimeConfig;
+
+  it("preserves the persisted dns01 block on a TLS-passthrough re-enroll", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-reuse-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      stubRuntimeConfig(service, passthroughRuntimeConfig());
+      stubSecret(service, "reused-tunnel-token");
+
+      const reused = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      expect(reused).not.toBeNull();
+      // The whole point of the fix: dns01 survives reuse so `passthrough`
+      // stays true downstream and the node keeps rendering its TLS-terminating
+      // Caddyfile instead of silently downgrading to plaintext on upgrade.
+      expect(reused?.dns01).toEqual({
+        provider: "desec",
+        apiBase: "https://desec.io/api/v1",
+        zone: "relay.sovereign-ai-node.com",
+        subname: "_acme-challenge.node",
+        acmeEmail: "ops@example.org",
+      });
+      // The raw token is NOT persisted inline; the tunnel token is resolved
+      // from its secret ref. dns01's concrete token is resolved later, from
+      // the persisted dns01.tokenSecretRef, by buildRelayProvisionRequest.
+      expect(reused?.dns01?.token).toBeUndefined();
+      expect(reused?.tunnel.type).toBe("https");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves dns01 without acmeEmail when none was persisted", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-reuse-test-"));
+    try {
+      const runtimeConfig = passthroughRuntimeConfig();
+      const relay = runtimeConfig.relay as NonNullable<RuntimeConfig["relay"]>;
+      delete (relay.dns01 as { acmeEmail?: string }).acmeEmail;
+
+      const service = buildService(buildPaths(tempRoot));
+      stubRuntimeConfig(service, runtimeConfig);
+      stubSecret(service, "reused-tunnel-token");
+
+      const reused = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      expect(reused?.dns01).toEqual({
+        provider: "desec",
+        apiBase: "https://desec.io/api/v1",
+        zone: "relay.sovereign-ai-node.com",
+        subname: "_acme-challenge.node",
+      });
+      expect(reused?.dns01?.acmeEmail).toBeUndefined();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("omits dns01 (and acmeEmail) for a legacy http re-enroll", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-reuse-test-"));
+    try {
+      const runtimeConfig = passthroughRuntimeConfig();
+      const relay = runtimeConfig.relay as NonNullable<RuntimeConfig["relay"]>;
+      relay.tunnel.type = "http";
+      relay.tunnel.localPort = 18080;
+      delete (relay as { dns01?: unknown }).dns01;
+
+      const service = buildService(buildPaths(tempRoot));
+      stubRuntimeConfig(service, runtimeConfig);
+      stubSecret(service, "reused-tunnel-token");
+
+      const reused = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      expect(reused).not.toBeNull();
+      expect(reused?.dns01).toBeUndefined();
+      expect(reused?.tunnel.type).toBe("http");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null when no relay enrollment is persisted", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-reuse-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      stubRuntimeConfig(service, null);
+
+      const reused = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      expect(reused).toBeNull();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null when the persisted controlUrl differs from the request", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-reuse-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      stubRuntimeConfig(service, passthroughRuntimeConfig());
+
+      const reused = await invoke(service, {
+        controlUrl: "https://other-relay.example.org",
+      });
+
+      expect(reused).toBeNull();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null when the persisted tunnel secret cannot be resolved", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-reuse-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      stubRuntimeConfig(service, passthroughRuntimeConfig());
+      (service as unknown as { resolveSecretRef(ref: string): Promise<string> }).resolveSecretRef =
+        async () => {
+          throw new Error("secret missing");
+        };
+
+      const reused = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      expect(reused).toBeNull();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("probeRelayPassthroughTls (fail-closed gating)", () => {
+  const buildPaths = (tempRoot: string): SovereignPaths => ({
+    configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+    secretsDir: join(tempRoot, "etc", "secrets"),
+    stateDir: join(tempRoot, "var", "lib"),
+    logsDir: join(tempRoot, "var", "log"),
+    installJobsDir: join(tempRoot, "install-jobs"),
+    openclawServiceHome: join(tempRoot, "openclaw-home"),
+    provenancePath: join(tempRoot, "install-provenance.json"),
+    backupsDir: join(tempRoot, "backups"),
+  });
+
+  const unusedDeps = {
+    openclawBootstrapper: {
+      detectInstalled: async () => null,
+      ensureInstalled: async () => ({
+        binaryPath: "/usr/local/bin/openclaw",
+        version: "test",
+        installMethod: "install_sh" as const,
+      }),
+    },
+    openclawGatewayServiceManager: {
+      install: async () => {},
+      start: async () => {},
+      restart: async () => {},
+    },
+    preflightChecker: {
+      run: async () => ({
+        mode: "bundled_matrix" as const,
+        overall: "pass" as const,
+        checks: [],
+        recommendedActions: [],
+      }),
+    },
+    imapTester: {
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+    matrixProvisioner: {
+      provision: async () => {
+        throw new Error("not used");
+      },
+      bootstrapAccounts: async () => {
+        throw new Error("not used");
+      },
+      bootstrapRoom: async () => {
+        throw new Error("not used");
+      },
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+    execRunner: {
+      run: async ({ command, args }: ExecInput) => ({
+        command: [command, ...(args ?? [])].join(" "),
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      }),
+    },
+  };
+
+  const buildService = (paths: SovereignPaths): RealInstallerService =>
+    new RealInstallerService(createLogger(), paths, {
+      ...unusedDeps,
+    } as ConstructorParameters<typeof RealInstallerService>[2]);
+
+  const invoke = (
+    service: RealInstallerService,
+    runtimeConfig: RuntimeConfig,
+  ): Promise<{ ok: boolean; message?: string }> =>
+    (
+      service as unknown as {
+        probeRelayPassthroughTls(config: RuntimeConfig): Promise<{ ok: boolean; message?: string }>;
+      }
+    ).probeRelayPassthroughTls(runtimeConfig);
+
+  const relayConfig = (
+    overrides: { tunnelType?: "http" | "https"; dns01?: boolean; localPort?: number } = {},
+  ): RuntimeConfig =>
+    ({
+      relay: {
+        enabled: true,
+        controlUrl: "https://relay.sovereign-ai-node.com",
+        hostname: "node.relay.sovereign-ai-node.com",
+        publicBaseUrl: "https://node.relay.sovereign-ai-node.com",
+        connected: false,
+        serviceName: "sovereign-matrix-relay-tunnel.service",
+        configPath: "/var/lib/relay/frpc.toml",
+        tunnel: {
+          serverAddr: "relay.sovereign-ai-node.com",
+          serverPort: 7000,
+          tokenSecretRef: "file:/tmp/relay-token",
+          proxyName: "relay-node",
+          type: overrides.tunnelType ?? "http",
+          localIp: "127.0.0.1",
+          localPort: overrides.localPort ?? (overrides.tunnelType === "https" ? 18443 : 18080),
+        },
+        ...(overrides.dns01 === true
+          ? {
+              dns01: {
+                provider: "desec",
+                apiBase: "https://desec.io/api/v1",
+                zone: "relay.sovereign-ai-node.com",
+                subname: "_acme-challenge.node",
+                tokenSecretRef: "file:/tmp/relay-desec-token",
+              },
+            }
+          : {}),
+      },
+    }) as unknown as RuntimeConfig;
+
+  it("skips (ok) when there is no relay block at all", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-probe-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      const result = await invoke(service, {} as unknown as RuntimeConfig);
+      expect(result).toEqual({ ok: true });
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("skips (ok) for a legacy http relay with no dns01 block", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-probe-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      const result = await invoke(service, relayConfig({ tunnelType: "http" }));
+      expect(result).toEqual({ ok: true });
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when the tunnel is https-passthrough but dns01 is missing", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-probe-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      // This is the exact downgrade symptom: the reuse path dropped dns01,
+      // the render fell back to plaintext, but the tunnel still advertises
+      // https. The probe must NOT skip — it must fail closed.
+      const result = await invoke(service, relayConfig({ tunnelType: "https" }));
+      expect(result.ok).toBe(false);
+      expect(result.message).toMatch(/https-passthrough/);
+      expect(result.message).toMatch(/no dns01/);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("probes the local TLS port and passes when a certificate is presented", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-probe-test-"));
+    // Self-signed fixture cert + key (CN=node.relay.sovereign-ai-node.com, 10y),
+    // stored base64-of-PEM so the literal stays single-line and robust to
+    // formatter re-wrapping. Used only to make the local TLS listener present
+    // *a* certificate; the probe connects with rejectUnauthorized:false and
+    // merely asserts a cert is presented.
+    const TLS_FIXTURE_CERT_B64 =
+      "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUROekNDQWgrZ0F3SUJBZ0lVRmRaNlZ0b3dtWHAzeGNnem4wSzBWdWFVSUpjd0RRWUpLb1pJaHZjTkFRRUwKQlFBd0t6RXBNQ2NHQTFVRUF3d2dibTlrWlM1eVpXeGhlUzV6YjNabGNtVnBaMjR0WVdrdGJtOWtaUzVqYjIwdwpIaGNOTWpZd05qSXlNVGcxTURFeldoY05Nell3TmpFNU1UZzFNREV6V2pBck1Ta3dKd1lEVlFRRERDQnViMlJsCkxuSmxiR0Y1TG5OdmRtVnlaV2xuYmkxaGFTMXViMlJsTG1OdmJUQ0NBU0l3RFFZSktvWklodmNOQVFFQkJRQUQKZ2dFUEFEQ0NBUW9DZ2dFQkFNYVdNaG9rUXlsckt3QmFGaythaTJZcEtoN2dEdjdEdm1FK083dUpVTVRYcmdjVgpNa2Ntc3kxZUNTNE9uSU43aEJ0dXkyYXhvUVIxKzY5WExVcFdXY1hPWVp5ekZ5WXNkQjA0czQwRTArbVk0OUNQCmY5dTQreGxJS0VERE1Pdmhwc0pGTFZFSnMrNEFjUFVLYmFYeldCbGI2c01xTjdHQ1hSQ3hRREtPaXVkem5MSDMKeUl6cmtEbVVpSFFWRnBUeURZa0FiZGExQTFndVAzSUlKUDhBYnV3dkV4Z290alpCVXVkYjlmdmdFd3VETER5TQoxcjRubXZkejJSbnZ0NnJCUnFEWmRtdFVTbEQ0U21YUm5OUkIwZG41SFUxRm1pMjFBUWtPM204Q2xNT2xxbG9RCmUrNi8yK01Wak1FcWc2ODN0blRzbUlPbElMUXYzYTVjL2dzN3BhRUNBd0VBQWFOVE1GRXdIUVlEVlIwT0JCWUUKRk40Z3Z1NTJkMjhod1NiWE10K0FzNjAvMjNUa01COEdBMVVkSXdRWU1CYUFGTjRndnU1MmQyOGh3U2JYTXQrQQpzNjAvMjNUa01BOEdBMVVkRXdFQi93UUZNQU1CQWY4d0RRWUpLb1pJaHZjTkFRRUxCUUFEZ2dFQkFGTWRaQ21MClJ5c0dQcWZoK3pidlFaL0l1RTFvTDF5c3gxR1ZZUmVyRndJVDFvQlJ4b3Z0SHJtVmF2akwvNmFhNjFtUE8rd2MKZXcrS251aE8rNS9teDNvTWcvRzZ6TGpxMFBOUG04QlUreU8xbjJkMlRNTFpuQTVnYUhRdGtHRzlmOUpYTnZIMgp1c2N1cEhjZ0ZXeEVESVZLeFIxckoxcHRxSHdJc1RCVGRNRWRyNGs3REJ4anlSWmNyYVk3SlpIQVJ6NVo5SzNKCnduVXFwUkJsS2NQaTdmTGQ2UHZnbEgyaW5teVZueUxJZTNNKzJYZWhIdlkxU1c5KzNTSlJaaFphZGkyUWlrdXkKK2FOT1Bra01mM0RMQmdaOHN5cG1lMjdSWktSRU9zL1dxd3Q4SzlUOEtOYzRFY2owcnJYSXllelJDVFpKdFBobQpZcnowWnRlc3pLcnFwQms9Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0K";
+    const TLS_FIXTURE_KEY_B64 =
+      "LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JSUV2Z0lCQURBTkJna3Foa2lHOXcwQkFRRUZBQVNDQktnd2dnU2tBZ0VBQW9JQkFRREdsaklhSkVNcGF5c0EKV2haUG1vdG1LU29lNEE3K3c3NWhQanU3aVZERTE2NEhGVEpISnJNdFhna3VEcHlEZTRRYmJzdG1zYUVFZGZ1dgpWeTFLVmxuRnptR2NzeGNtTEhRZE9MT05CTlBwbU9QUWozL2J1UHNaU0NoQXd6RHI0YWJDUlMxUkNiUHVBSEQxCkNtMmw4MWdaVytyREtqZXhnbDBRc1VBeWpvcm5jNXl4OThpTTY1QTVsSWgwRlJhVThnMkpBRzNXdFFOWUxqOXkKQ0NUL0FHN3NMeE1ZS0xZMlFWTG5XL1g3NEJNTGd5dzhqTmErSjVyM2M5a1o3N2Vxd1VhZzJYWnJWRXBRK0VwbAowWnpVUWRIWitSMU5SWm90dFFFSkR0NXZBcFREcGFwYUVIdnV2OXZqRll6QktvT3ZON1owN0ppRHBTQzBMOTJ1ClhQNExPNldoQWdNQkFBRUNnZ0VBQ1AyaG5OMHMwejd0Si9nNDlpcXA4TTNUczl4Wk93eU5FT1ZuZ0xYSnRYRlgKaVdFbmwzcDNrQW4wandyQTZFYWJBUXdsL0xmMWNWNzFybTEwMzVIUVFVWGRiMGhBQkkyNVJoRUNuYUJUYmNvZQpJK2hzNG1IYUZ0ZHUrazdWbWthMytmU3BPTjVUZldhMHRuNlJFbnR2Q0k0VmZDcTQyQzF0M2RHQWowTUJjTG1vCmhKclQxMkQzcjRjMnpVWm5haDcxYUpzR25iTG1pVWtIQUdhV1lpeGVleHhRSTdGMUlNOUUzdElUQjRtUTdFc3kKTnpIaTdOQ1RITmhYbko2UkFEaHlpNkVtUVR2OEExbjdNZVhuY2Nuejl4VmZhdXBPMzJGNjd2MHpTRWtTdStBQwpieC96MU52cFE1WU9PL24zZyt5bm00ZzJaUjA1bGwrWTNZSVhyd1dIQ1FLQmdRRHBQSUdHVXh3azRUZ1pBZHVxCnJqZVlkcUpMNVlYT0N2MTd5UkR6ZXBXTEFKaVMwemxvTzJ0OG5Xek9BS3B1elMxbHpRZmIySHRER0s4ajZlOWYKS1FXSURQQVJuK3hlS1Jwa09oQnVEYngxWVYvbFk1TzA1S2pDZEx6N0ZrRkZCUlcrNGVaaXBnM1RiVFVhS0MrYwpBd3FwNFBCYWYvYVVYQjFiNVRidWhrZU8xUUtCZ1FEWjkvU3dVV1gyZ1h0ZlljTDhpY08wTktCWGRZMlQ1azRtCitWWC9yVTBHTjllZTJ0Wk1pSDFCYm43Z1ZYRHBFRUtZS2lpKzJ1b0gzcjhUMG53ZTM0aEY1RmVINldibWViWkkKdnovam9HbFhja3Y5VUJiWC84OG9SU2ZOcW5jMmhVMm9CWTk5VjJLYUpNZnFweHpTZVhSdkhuckFhQVh3ektlUApabkxUQUcxWm5RS0JnUURnU1MwTkxQTE5qRDdUM1hPT0NJYXgrTE5OWk9SdEpTaHBWd3NUK0hmQitjcSt0cHhuCjNXd1pvNUV6OEhQMHBSM1kzWGVITkFBa242SWNXU08xVU05ZTY0SVlrTDlPTlJ5SjhVUkhjTElmOW9tdkh6aTEKSllZYnFRTHFPWlorZHN0WWlnZHdLZHIxeS9qYXRIWkVBckRJZCtUcVFrK3VqMzQwRnBIaWdnSmlHUUtCZ0EvQQpXMjVpYzN2YzM0MkZBeEk4NG1lalpmTHNDODhrVllGN2d6dDJ5cG9vYnV5TDQvQ2o3R2xPRXQwalQ0V0lKMGZYCnhCb0d0K0xadGZVNHdMOTZaOTZsSWE0d3I3NzRETFExSGVqVkxzZWkrdHJUYnRNdEtVcy90Q0Nvc1BTL3JWejMKQ2VlRTZSczZqVGZuMjYxYUdZL3VJL0REazZwVEg4aTlIbzhnK01ZQkFvR0JBSytEdnRwNVNJdHlHM1BibDQxUApZaktWTnF2N0JKeTZUc0YxeGRGL25Md1JTcjRtRFhZbnF4WmxGREU3VnU0K011M1lUTEliWm5PQkRQUTZoSmorCktna2NSd05BY2gxa25lMHd3UktLSThSODhoNm83QW9oTU9xSGxncXRYT3AyOGNPNHNjV1hzamxaNCt1M0N6WGwKTnN1UmhhdWoxOVNyYVlTY3RpMGFnbFVXCi0tLS0tRU5EIFBSSVZBVEUgS0VZLS0tLS0K";
+    const server = createTlsServer(
+      {
+        cert: Buffer.from(TLS_FIXTURE_CERT_B64, "base64").toString("utf8"),
+        key: Buffer.from(TLS_FIXTURE_KEY_B64, "base64").toString("utf8"),
+      },
+      (socket) => socket.end(),
+    );
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      const result = await invoke(
+        service,
+        relayConfig({ tunnelType: "https", dns01: true, localPort: port }),
+      );
+      expect(result).toEqual({ ok: true });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed after exhausting the smoke window when no certificate ever appears", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-probe-test-"));
+    // Bind then immediately release a port so the probe target refuses every
+    // connection (no TLS listener -> no cert is ever presented). This is the
+    // "cert never materialised" case: the loop must exhaust its attempts and
+    // STILL fail closed (ok:false) rather than passing.
+    const refusedPort = await new Promise<number>((resolve) => {
+      const probe = createTlsServer({}, () => {});
+      probe.listen(0, "127.0.0.1", () => {
+        const { port } = probe.address() as AddressInfo;
+        probe.close(() => resolve(port));
+      });
+    });
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      // Shrink the poll cadence so the loop-exhaustion path runs fast in tests;
+      // this only changes timing, not the fail-closed semantics under test.
+      (
+        service as unknown as {
+          relayPassthroughTlsProbeIntervalMs: number;
+          relayPassthroughTlsProbeAttempts: number;
+        }
+      ).relayPassthroughTlsProbeIntervalMs = 1;
+      (
+        service as unknown as {
+          relayPassthroughTlsProbeIntervalMs: number;
+          relayPassthroughTlsProbeAttempts: number;
+        }
+      ).relayPassthroughTlsProbeAttempts = 2;
+      const result = await invoke(
+        service,
+        relayConfig({ tunnelType: "https", dns01: true, localPort: refusedPort }),
+      );
+      expect(result.ok).toBe(false);
+      expect(result.message).toBeDefined();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("sizes the default smoke window to outlast the DNS-01 propagation delay", () => {
+    // Regression guard for the false-negative-install finding: the cert cannot
+    // exist until Caddy has waited out propagation_delay (150s), so the smoke
+    // window must comfortably exceed that. Assert the derived defaults cover at
+    // least propagation_delay with headroom, so a future edit can't silently
+    // shrink the window back below propagation and reintroduce the bug.
+    const service = buildService(buildPaths("/nonexistent"));
+    const defaults = service as unknown as {
+      relayPassthroughTlsProbeIntervalMs: number;
+      relayPassthroughTlsProbeAttempts: number;
+    };
+    const windowMs =
+      defaults.relayPassthroughTlsProbeAttempts * defaults.relayPassthroughTlsProbeIntervalMs;
+    // propagation_delay is 150s; require the window to exceed it with margin.
+    expect(windowMs).toBeGreaterThan(150_000);
+  });
+});
+
+describe("runSmokeChecks relay passthrough gate", () => {
+  const buildPaths = (tempRoot: string): SovereignPaths => ({
+    configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+    secretsDir: join(tempRoot, "etc", "secrets"),
+    stateDir: join(tempRoot, "var", "lib"),
+    logsDir: join(tempRoot, "var", "log"),
+    installJobsDir: join(tempRoot, "install-jobs"),
+    openclawServiceHome: join(tempRoot, "openclaw-home"),
+    provenancePath: join(tempRoot, "install-provenance.json"),
+    backupsDir: join(tempRoot, "backups"),
+  });
+
+  const unusedDeps = {
+    openclawBootstrapper: {
+      detectInstalled: async () => null,
+      ensureInstalled: async () => ({
+        binaryPath: "/usr/local/bin/openclaw",
+        version: "test",
+        installMethod: "install_sh" as const,
+      }),
+    },
+    openclawGatewayServiceManager: {
+      install: async () => {},
+      start: async () => {},
+      restart: async () => {},
+    },
+    preflightChecker: {
+      run: async () => ({
+        mode: "bundled_matrix" as const,
+        overall: "pass" as const,
+        checks: [],
+        recommendedActions: [],
+      }),
+    },
+    imapTester: {
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+    matrixProvisioner: {
+      provision: async () => {
+        throw new Error("not used");
+      },
+      bootstrapAccounts: async () => {
+        throw new Error("not used");
+      },
+      bootstrapRoom: async () => {
+        throw new Error("not used");
+      },
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+    execRunner: {
+      run: async ({ command, args }: ExecInput) => ({
+        command: [command, ...(args ?? [])].join(" "),
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      }),
+    },
+  };
+
+  const buildService = (paths: SovereignPaths): RealInstallerService =>
+    new RealInstallerService(createLogger(), paths, {
+      ...unusedDeps,
+    } as ConstructorParameters<typeof RealInstallerService>[2]);
+
+  // Stub every smoke-check helper that runs BEFORE the relay block so execution
+  // reaches the relay TLS-passthrough gate without touching the network/disk.
+  const stubPreRelayChecks = (service: RealInstallerService, relayRunning = true): void => {
+    const overrides = service as unknown as {
+      testMatrix(input: unknown): Promise<{ ok: boolean; checks: unknown[] }>;
+      safeDetectOpenClaw(): Promise<unknown>;
+      probeMatrixRoomReachable(config: RuntimeConfig): Promise<boolean>;
+      inspectRelayTunnelService(): Promise<{
+        installed: boolean;
+        state: string;
+        message?: string;
+      }>;
+    };
+    overrides.testMatrix = async () => ({ ok: true, checks: [] });
+    overrides.safeDetectOpenClaw = async () => ({ binaryPath: "/usr/local/bin/openclaw" });
+    overrides.probeMatrixRoomReachable = async () => true;
+    overrides.inspectRelayTunnelService = async () => ({
+      installed: relayRunning,
+      state: relayRunning ? "running" : "stopped",
+    });
+  };
+
+  const runtimeConfigWithRelay = (
+    paths: SovereignPaths,
+    tunnelType: "http" | "https",
+  ): RuntimeConfig =>
+    ({
+      matrix: {
+        alertRoom: { roomId: "!alerts:node.relay.sovereign-ai-node.com" },
+      },
+      relay: {
+        enabled: true,
+        controlUrl: "https://relay.sovereign-ai-node.com",
+        hostname: "node.relay.sovereign-ai-node.com",
+        publicBaseUrl: "https://node.relay.sovereign-ai-node.com",
+        connected: false,
+        serviceName: "sovereign-matrix-relay-tunnel.service",
+        configPath: join(paths.stateDir, "relay", "frpc.toml"),
+        tunnel: {
+          serverAddr: "relay.sovereign-ai-node.com",
+          serverPort: 7000,
+          tokenSecretRef: "file:/tmp/relay-token",
+          proxyName: "relay-node",
+          type: tunnelType,
+          localIp: "127.0.0.1",
+          localPort: tunnelType === "https" ? 18443 : 18080,
+        },
+      },
+    }) as unknown as RuntimeConfig;
+
+  const matrixProvision = (passthrough: boolean): BundledMatrixProvisionResult =>
+    ({
+      projectDir: "/tmp/fake-matrix",
+      composeFilePath: "/tmp/fake-matrix/compose.yaml",
+      accessMode: "relay",
+      homeserverDomain: "node.relay.sovereign-ai-node.com",
+      publicBaseUrl: "https://node.relay.sovereign-ai-node.com",
+      adminBaseUrl: "http://127.0.0.1:8008",
+      federationEnabled: false,
+      tlsMode: "auto",
+      passthrough,
+    }) as unknown as BundledMatrixProvisionResult;
+
+  const invoke = (
+    service: RealInstallerService,
+    provision: BundledMatrixProvisionResult,
+    runtimeConfig: RuntimeConfig,
+  ): Promise<void> =>
+    (
+      service as unknown as {
+        runSmokeChecks(
+          matrixProvision: BundledMatrixProvisionResult,
+          runtimeConfig: RuntimeConfig,
+          gatewayServiceSkipped: boolean,
+          relayModeEnabled: boolean,
+        ): Promise<void>;
+      }
+    ).runSmokeChecks(provision, runtimeConfig, true, true);
+
+  it("runs the TLS probe and fails closed when passthrough collapsed but the tunnel is https", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "smoke-relay-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      stubPreRelayChecks(service);
+      // Spy the probe so we can assert it was invoked despite passthrough=false.
+      let probed = false;
+      (
+        service as unknown as {
+          probeRelayPassthroughTls(
+            config: RuntimeConfig,
+          ): Promise<{ ok: boolean; message?: string }>;
+        }
+      ).probeRelayPassthroughTls = async () => {
+        probed = true;
+        return { ok: false, message: "no dns01 block; would serve plaintext" };
+      };
+
+      // passthrough=false simulates the reuse-path downgrade; the persisted
+      // tunnel type is still https, so the gate MUST still run the probe.
+      await expect(
+        invoke(
+          service,
+          matrixProvision(false),
+          runtimeConfigWithRelay(buildPaths(tempRoot), "https"),
+        ),
+      ).rejects.toMatchObject({
+        code: "SMOKE_CHECKS_FAILED",
+        message: "Relay passthrough node did not obtain a TLS certificate",
+      });
+      expect(probed).toBe(true);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("skips the TLS probe for a legacy http relay when passthrough is false", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "smoke-relay-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      stubPreRelayChecks(service);
+      let probed = false;
+      (
+        service as unknown as {
+          probeRelayPassthroughTls(
+            config: RuntimeConfig,
+          ): Promise<{ ok: boolean; message?: string }>;
+        }
+      ).probeRelayPassthroughTls = async () => {
+        probed = true;
+        return { ok: true };
+      };
+      // Short-circuit everything after the relay block so the call resolves.
+      (
+        service as unknown as {
+          inspectOpenClawRuntimeWiring(
+            config: RuntimeConfig,
+          ): Promise<{ status: string; details?: unknown }>;
+        }
+      ).inspectOpenClawRuntimeWiring = async () => ({ status: "fail", details: {} });
+
+      await expect(
+        invoke(
+          service,
+          matrixProvision(false),
+          runtimeConfigWithRelay(buildPaths(tempRoot), "http"),
+        ),
+      ).rejects.toMatchObject({
+        code: "SMOKE_CHECKS_FAILED",
+        message: "OpenClaw runtime wiring check failed",
+      });
+      // http relay + passthrough false ⇒ the gate must NOT run the probe.
+      expect(probed).toBe(false);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
+  const buildPaths = (tempRoot: string): SovereignPaths => ({
+    configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+    secretsDir: join(tempRoot, "etc", "secrets"),
+    stateDir: join(tempRoot, "var", "lib"),
+    logsDir: join(tempRoot, "var", "log"),
+    installJobsDir: join(tempRoot, "install-jobs"),
+    openclawServiceHome: join(tempRoot, "openclaw-home"),
+    provenancePath: join(tempRoot, "install-provenance.json"),
+    backupsDir: join(tempRoot, "backups"),
+  });
+
+  const unusedDeps = {
+    openclawBootstrapper: {
+      detectInstalled: async () => null,
+      ensureInstalled: async () => ({
+        binaryPath: "/usr/local/bin/openclaw",
+        version: "test",
+        installMethod: "install_sh" as const,
+      }),
+    },
+    openclawGatewayServiceManager: {
+      install: async () => {},
+      start: async () => {},
+      restart: async () => {},
+    },
+    preflightChecker: {
+      run: async () => ({
+        mode: "bundled_matrix" as const,
+        overall: "pass" as const,
+        checks: [],
+        recommendedActions: [],
+      }),
+    },
+    imapTester: {
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+    matrixProvisioner: {
+      provision: async () => {
+        throw new Error("not used");
+      },
+      bootstrapAccounts: async () => {
+        throw new Error("not used");
+      },
+      bootstrapRoom: async () => {
+        throw new Error("not used");
+      },
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+    execRunner: {
+      run: async ({ command, args }: ExecInput) => ({
+        command: [command, ...(args ?? [])].join(" "),
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      }),
+    },
+  };
+
+  type CapturedRequest = { url: string; body: Record<string, unknown> };
+
+  const buildService = (
+    paths: SovereignPaths,
+    fetchImpl: (input: string, init?: RequestInit) => Promise<Response>,
+  ): RealInstallerService =>
+    new RealInstallerService(createLogger(), paths, {
+      ...unusedDeps,
+      fetchImpl,
+    } as ConstructorParameters<typeof RealInstallerService>[2]);
+
+  const stubRuntimeConfig = (
+    service: RealInstallerService,
+    runtimeConfig: RuntimeConfig | null,
+  ): void => {
+    (
+      service as unknown as { tryReadRuntimeConfig(): Promise<RuntimeConfig | null> }
+    ).tryReadRuntimeConfig = async () => runtimeConfig;
+  };
+
+  const stubSecret = (service: RealInstallerService, token: string): void => {
+    (service as unknown as { resolveSecretRef(ref: string): Promise<string> }).resolveSecretRef =
+      async () => token;
+  };
+
+  const stubStableId = (service: RealInstallerService, id: string): void => {
+    (
+      service as unknown as { resolveStableInstallationId(): Promise<string> }
+    ).resolveStableInstallationId = async () => id;
+  };
+
+  // Legacy http enrollment for cathouse-style node (no dns01).
+  const legacyRuntimeConfig = (controlUrl = "https://relay.sovereign-ai-node.com"): RuntimeConfig =>
+    ({
+      relay: {
+        enabled: true,
+        controlUrl,
+        hostname: "cathouse.relay.sovereign-ai-node.com",
+        publicBaseUrl: "https://cathouse.relay.sovereign-ai-node.com",
+        connected: false,
+        serviceName: "sovereign-matrix-relay-tunnel.service",
+        configPath: "/var/lib/relay/frpc.toml",
+        tunnel: {
+          serverAddr: "relay.sovereign-ai-node.com",
+          serverPort: 7000,
+          tokenSecretRef: "file:/tmp/relay-token",
+          proxyName: "relay-cathouse",
+          type: "http",
+          localIp: "127.0.0.1",
+          localPort: 18080,
+        },
+      },
+    }) as unknown as RuntimeConfig;
+
+  const passthroughResponse = (hostname: string): Response =>
+    new Response(
+      JSON.stringify({
+        result: {
+          assignedHostname: hostname,
+          publicBaseUrl: `https://${hostname}`,
+          mode: "https-passthrough",
+          tunnel: {
+            serverAddr: "relay.sovereign-ai-node.com",
+            serverPort: 7000,
+            token: "refreshed-token",
+            proxyName: `relay-${hostname.split(".")[0]}`,
+            type: "https",
+          },
+          dns01: {
+            provider: "desec",
+            apiBase: "https://desec.io/api/v1",
+            zone: "relay.sovereign-ai-node.com",
+            subname: "_acme-challenge.cathouse",
+            acmeEmail: "ops@example.org",
+            token: "scoped-desec-secret",
+          },
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+
+  const httpResponse = (hostname: string): Response =>
+    new Response(
+      JSON.stringify({
+        result: {
+          assignedHostname: hostname,
+          publicBaseUrl: `https://${hostname}`,
+          tunnel: {
+            serverAddr: "relay.sovereign-ai-node.com",
+            serverPort: 7000,
+            token: "relay-token",
+            proxyName: `relay-${hostname.split(".")[0]}`,
+          },
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+
+  const invoke = (
+    service: RealInstallerService,
+    relay: NonNullable<InstallRequest["relay"]>,
+  ): Promise<RelayEnrollmentData> =>
+    (
+      service as unknown as {
+        resolveRelayEnrollment(
+          relay: { relay: NonNullable<InstallRequest["relay"]> },
+          installationId: string,
+        ): Promise<RelayEnrollmentData>;
+      }
+    ).resolveRelayEnrollment(
+      { connectivity: { mode: "relay" }, relay } as unknown as {
+        relay: NonNullable<InstallRequest["relay"]>;
+      },
+      "inst_run_correlation",
+    );
+
+  it("upgrades a legacy node to passthrough when the relay returns the same slug", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      const captured: CapturedRequest[] = [];
+      const service = buildService(buildPaths(tempRoot), async (url, init) => {
+        captured.push({
+          url,
+          body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+        });
+        return passthroughResponse("cathouse.relay.sovereign-ai-node.com");
+      });
+      stubRuntimeConfig(service, legacyRuntimeConfig());
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      expect(captured).toHaveLength(1);
+      expect(captured[0]?.url).toBe("https://relay.sovereign-ai-node.com/api/v1/enroll-public");
+      // The existing slug is sent on the PUBLIC enroll path (refresh exception).
+      expect(captured[0]?.body.requestedSlug).toBe("cathouse");
+      expect(captured[0]?.body.installationId).toBe("stable-machine-id");
+      expect(captured[0]?.body.capabilities).toEqual(["tls-passthrough"]);
+      // A legacy node refreshing to passthrough has no dns01 secret yet, so it
+      // forces the relay to (re)mint and return the token inline — otherwise a
+      // prior failed refresh's persisted desecTokenId traps it without a secret.
+      expect(captured[0]?.body.rotateDns01).toBe(true);
+      // Result is now passthrough, hostname unchanged.
+      expect(enrollment.hostname).toBe("cathouse.relay.sovereign-ai-node.com");
+      expect(enrollment.dns01).toBeDefined();
+      expect(enrollment.tunnel.type).toBe("https");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("stays legacy when the relay returns http (no deSEC token / kill switch)", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      let calls = 0;
+      const service = buildService(buildPaths(tempRoot), async () => {
+        calls += 1;
+        return httpResponse("cathouse.relay.sovereign-ai-node.com");
+      });
+      stubRuntimeConfig(service, legacyRuntimeConfig());
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+        // Blank token on the default managed relay still uses public enroll.
+        enrollmentToken: "  ",
+      });
+
+      expect(calls).toBe(1);
+      // Refresh returned http ⇒ keep-legacy ⇒ reuse the persisted legacy block.
+      expect(enrollment.dns01).toBeUndefined();
+      expect(enrollment.tunnel.type).toBe("http");
+      expect(enrollment.hostname).toBe("cathouse.relay.sovereign-ai-node.com");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed (keeps legacy) when the relay returns a different slug", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot), async () =>
+        passthroughResponse("someone-else.relay.sovereign-ai-node.com"),
+      );
+      stubRuntimeConfig(service, legacyRuntimeConfig());
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      // Hostname would have changed ⇒ refuse the refresh, keep the legacy node.
+      expect(enrollment.hostname).toBe("cathouse.relay.sovereign-ai-node.com");
+      expect(enrollment.dns01).toBeUndefined();
+      expect(enrollment.tunnel.type).toBe("http");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps legacy when the relay refresh request fails on the network", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot), async () => {
+        throw new Error("connection refused");
+      });
+      stubRuntimeConfig(service, legacyRuntimeConfig());
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      expect(enrollment.hostname).toBe("cathouse.relay.sovereign-ai-node.com");
+      expect(enrollment.dns01).toBeUndefined();
+      expect(enrollment.tunnel.type).toBe("http");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps legacy when the relay rejects the refresh with a non-2xx status", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      const service = buildService(
+        buildPaths(tempRoot),
+        async () =>
+          new Response(JSON.stringify({ error: "slug taken" }), {
+            status: 409,
+            headers: { "Content-Type": "application/json" },
+          }),
+      );
+      stubRuntimeConfig(service, legacyRuntimeConfig());
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      expect(enrollment.hostname).toBe("cathouse.relay.sovereign-ai-node.com");
+      expect(enrollment.dns01).toBeUndefined();
+      expect(enrollment.tunnel.type).toBe("http");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("refreshes via the authenticated endpoint for a custom relay with a token", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      const captured: CapturedRequest[] = [];
+      const service = buildService(buildPaths(tempRoot), async (url, init) => {
+        captured.push({
+          url,
+          body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+        });
+        return passthroughResponse("cathouse.relay.sovereign-ai-node.com");
+      });
+      // Custom relay: persisted runtime config points at a non-default control URL.
+      stubRuntimeConfig(service, legacyRuntimeConfig("https://relay.example.com"));
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.example.com",
+        enrollmentToken: "custom-relay-token",
+      });
+
+      expect(captured).toHaveLength(1);
+      expect(captured[0]?.url).toBe("https://relay.example.com/api/v1/enroll");
+      expect(captured[0]?.body.enrollmentToken).toBe("custom-relay-token");
+      expect(captured[0]?.body.requestedSlug).toBe("cathouse");
+      expect(captured[0]?.body.installationId).toBeUndefined();
+      expect(enrollment.dns01).toBeDefined();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does not re-contact the relay when the existing enrollment is already passthrough", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      let calls = 0;
+      const service = buildService(buildPaths(tempRoot), async () => {
+        calls += 1;
+        return passthroughResponse("cathouse.relay.sovereign-ai-node.com");
+      });
+      const config = legacyRuntimeConfig();
+      (config.relay as NonNullable<RuntimeConfig["relay"]>).dns01 = {
+        provider: "desec",
+        apiBase: "https://desec.io/api/v1",
+        zone: "relay.sovereign-ai-node.com",
+        subname: "_acme-challenge.cathouse",
+        tokenSecretRef: "file:/tmp/relay-desec-token",
+      };
+      (config.relay as NonNullable<RuntimeConfig["relay"]>).tunnel.type = "https";
+      stubRuntimeConfig(service, config);
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      // Already passthrough ⇒ reuse path returns dns01, no network call.
+      expect(calls).toBe(0);
+      expect(enrollment.dns01).toBeDefined();
+      expect(enrollment.tunnel.type).toBe("https");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does not attempt a refresh when no relay enrollment is persisted (fresh install)", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      const captured: CapturedRequest[] = [];
+      const service = buildService(buildPaths(tempRoot), async (url, init) => {
+        captured.push({
+          url,
+          body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+        });
+        return passthroughResponse("freshly-allocated.relay.sovereign-ai-node.com");
+      });
+      // Disabled relay block ⇒ tryReadExistingRelayRuntimeConfig returns null.
+      const disabled = legacyRuntimeConfig();
+      (disabled.relay as NonNullable<RuntimeConfig["relay"]>).enabled = false;
+      stubRuntimeConfig(service, disabled);
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      // No existing enrollment ⇒ a normal fresh public enroll runs (one call),
+      // not a slug-preserving refresh.
+      expect(captured).toHaveLength(1);
+      expect(captured[0]?.body.requestedSlug).toMatch(/^[a-z0-9-]+$/);
+      expect(enrollment.hostname).toBe("freshly-allocated.relay.sovereign-ai-node.com");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does not refresh when the persisted enrollment is for a different control URL", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      let calls = 0;
+      const service = buildService(buildPaths(tempRoot), async () => {
+        calls += 1;
+        return passthroughResponse("other.relay.sovereign-ai-node.com");
+      });
+      // Persisted enrollment points at a DIFFERENT control URL than requested.
+      stubRuntimeConfig(service, legacyRuntimeConfig("https://relay.example.com"));
+      stubStableId(service, "stable-machine-id");
+
+      // Request the default managed relay (mismatch) ⇒ no refresh; fresh enroll.
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      // One fresh enroll call with a generated slug (not the existing one).
+      expect(calls).toBe(1);
+      expect(enrollment.hostname).toBe("other.relay.sovereign-ai-node.com");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("derives the existing slug from publicBaseUrl when the hostname is empty", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      const captured: CapturedRequest[] = [];
+      const service = buildService(buildPaths(tempRoot), async (url, init) => {
+        captured.push({
+          url,
+          body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+        });
+        return passthroughResponse("cathouse.relay.sovereign-ai-node.com");
+      });
+      const config = legacyRuntimeConfig();
+      (config.relay as NonNullable<RuntimeConfig["relay"]>).hostname = "";
+      stubRuntimeConfig(service, config);
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      // Slug came from publicBaseUrl's first label.
+      expect(captured[0]?.body.requestedSlug).toBe("cathouse");
+      expect(enrollment.dns01).toBeDefined();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps legacy when no slug can be derived from the existing enrollment", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      let calls = 0;
+      const service = buildService(buildPaths(tempRoot), async () => {
+        calls += 1;
+        return passthroughResponse("cathouse.relay.sovereign-ai-node.com");
+      });
+      const config = legacyRuntimeConfig();
+      // Neither a usable hostname nor a parseable publicBaseUrl ⇒ slug "".
+      (config.relay as NonNullable<RuntimeConfig["relay"]>).hostname = "";
+      (config.relay as NonNullable<RuntimeConfig["relay"]>).publicBaseUrl = "not a url";
+      stubRuntimeConfig(service, config);
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      // No slug ⇒ refresh aborted before any network call ⇒ keep legacy.
+      expect(calls).toBe(0);
+      expect(enrollment.dns01).toBeUndefined();
+      expect(enrollment.tunnel.type).toBe("http");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps legacy for a custom relay refresh when no enrollment token is available", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      let calls = 0;
+      const service = buildService(buildPaths(tempRoot), async () => {
+        calls += 1;
+        return passthroughResponse("cathouse.relay.sovereign-ai-node.com");
+      });
+      // Custom (non-default) relay enrollment persisted, but the request carries
+      // a blank enrollmentToken ⇒ cannot re-enroll ⇒ keep legacy without a call.
+      stubRuntimeConfig(service, legacyRuntimeConfig("https://relay.example.com"));
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.example.com",
+        enrollmentToken: "   ",
+      });
+
+      expect(calls).toBe(0);
+      expect(enrollment.dns01).toBeUndefined();
+      expect(enrollment.tunnel.type).toBe("http");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps legacy when the relay returns 200 with an unparseable refresh response", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      const service = buildService(
+        buildPaths(tempRoot),
+        async () =>
+          // 200 OK but missing the required tunnel/hostname fields ⇒ the parser
+          // throws RELAY_ENROLL_INVALID ⇒ refresh keeps legacy.
+          new Response(JSON.stringify({ result: {} }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+      );
+      stubRuntimeConfig(service, legacyRuntimeConfig());
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+      });
+
+      expect(enrollment.dns01).toBeUndefined();
+      expect(enrollment.tunnel.type).toBe("http");
+      expect(enrollment.hostname).toBe("cathouse.relay.sovereign-ai-node.com");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns the pre-enrolled legacy block when a refresh keeps legacy", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot), async () =>
+        httpResponse("cathouse.relay.sovereign-ai-node.com"),
+      );
+      stubRuntimeConfig(service, legacyRuntimeConfig());
+      stubSecret(service, "reused-tunnel-token");
+      stubStableId(service, "stable-machine-id");
+
+      // Request file ALSO carries a legacy pre-enrolled tunnel block, so the
+      // pre-enrolled short-circuit is the fallback after the refresh declines.
+      const enrollment = await invoke(service, {
+        controlUrl: "https://relay.sovereign-ai-node.com",
+        hostname: "cathouse.relay.sovereign-ai-node.com",
+        publicBaseUrl: "https://cathouse.relay.sovereign-ai-node.com",
+        tunnel: {
+          serverAddr: "relay.sovereign-ai-node.com",
+          serverPort: 7000,
+          token: "pre-enrolled-token",
+          proxyName: "relay-cathouse",
+        },
+      });
+
+      // Refresh returned http ⇒ keep-legacy ⇒ pre-enrolled block is used.
+      expect(enrollment.hostname).toBe("cathouse.relay.sovereign-ai-node.com");
+      expect(enrollment.dns01).toBeUndefined();
+      expect(enrollment.tunnel.type).toBe("http");
+      expect(enrollment.tunnel.token).toBe("pre-enrolled-token");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  describe("per-node relay secret", () => {
+    type CapturedAuthRequest = {
+      url: string;
+      authorization: string;
+      body: Record<string, unknown>;
+    };
+
+    const capture = (
+      captured: CapturedAuthRequest[],
+      respond: (request: CapturedAuthRequest) => Response,
+    ) => {
+      return async (url: string, init?: RequestInit): Promise<Response> => {
+        const request: CapturedAuthRequest = {
+          url,
+          authorization: new Headers(init?.headers).get("Authorization") ?? "",
+          body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+        };
+        captured.push(request);
+        return respond(request);
+      };
+    };
+
+    const withNodeSecret = (response: Response, nodeSecret: string): Promise<Response> =>
+      response.json().then((value: unknown) => {
+        const payload = value as { result: Record<string, unknown> };
+        return new Response(JSON.stringify({ result: { ...payload.result, nodeSecret } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+
+    const relayError = (status: number, code?: string): Response =>
+      new Response(JSON.stringify({ ok: false, error: "rejected", ...(code ? { code } : {}) }), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+
+    const secretPath = (paths: SovereignPaths): string =>
+      join(paths.secretsDir, "relay-node-secret");
+
+    it("persists a freshly issued node secret (0600) and strips it from the enrollment", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-node-secret-"));
+      try {
+        const paths = buildPaths(tempRoot);
+        const captured: CapturedAuthRequest[] = [];
+        let issued: Response | null = null;
+        const service = buildService(paths, async (url, init) => {
+          issued ??= await withNodeSecret(
+            httpResponse("pilot.relay.sovereign-ai-node.com"),
+            "issued-node-secret",
+          );
+          return capture(captured, () => issued as Response)(url, init);
+        });
+        stubRuntimeConfig(service, null);
+        stubStableId(service, "stable-machine-id");
+
+        const enrollment = await invoke(service, {
+          controlUrl: "https://relay.sovereign-ai-node.com",
+        });
+
+        // First enrollment: the node has no secret yet, so no bearer is sent.
+        expect(captured).toHaveLength(1);
+        expect(captured[0]?.authorization).toBe("");
+        // The secret is persisted 0600 and NOT part of the returned enrollment
+        // (so runtime config / job records can never capture it).
+        await expect(readFile(secretPath(paths), "utf8")).resolves.toBe("issued-node-secret\n");
+        expect((await stat(secretPath(paths))).mode & 0o777).toBe(0o600);
+        expect(enrollment).not.toHaveProperty("nodeSecret");
+        expect(JSON.stringify(enrollment)).not.toContain("issued-node-secret");
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("sends the persisted secret as a bearer token on a later enrollment", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-node-secret-"));
+      try {
+        const paths = buildPaths(tempRoot);
+        await mkdir(paths.secretsDir, { recursive: true });
+        await writeFile(secretPath(paths), "persisted-node-secret\n", "utf8");
+        const captured: CapturedAuthRequest[] = [];
+        const service = buildService(
+          paths,
+          capture(captured, () => httpResponse("pilot.relay.sovereign-ai-node.com")),
+        );
+        stubRuntimeConfig(service, null);
+        stubStableId(service, "stable-machine-id");
+
+        await invoke(service, { controlUrl: "https://relay.sovereign-ai-node.com" });
+
+        expect(captured).toHaveLength(1);
+        expect(captured[0]?.authorization).toBe("Bearer persisted-node-secret");
+        // An unchanged re-enroll issues no new secret; the file is untouched.
+        await expect(readFile(secretPath(paths), "utf8")).resolves.toBe("persisted-node-secret\n");
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("reads the secret from the resolved fallback secrets dir too", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-node-secret-"));
+      try {
+        const paths = buildPaths(tempRoot);
+        const fallback = join(tempRoot, "fallback-secrets");
+        await mkdir(fallback, { recursive: true });
+        await writeFile(join(fallback, "relay-node-secret"), "fallback-secret\n", "utf8");
+        const captured: CapturedAuthRequest[] = [];
+        const service = buildService(
+          paths,
+          capture(captured, () => httpResponse("pilot.relay.sovereign-ai-node.com")),
+        );
+        (service as unknown as { resolvedSecretsDir: string | null }).resolvedSecretsDir = fallback;
+        stubRuntimeConfig(service, null);
+        stubStableId(service, "stable-machine-id");
+
+        await invoke(service, { controlUrl: "https://relay.sovereign-ai-node.com" });
+
+        expect(captured[0]?.authorization).toBe("Bearer fallback-secret");
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("fails without retry on 401 and tells the operator to re-key the node", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-node-secret-"));
+      try {
+        const captured: CapturedAuthRequest[] = [];
+        const service = buildService(
+          buildPaths(tempRoot),
+          capture(captured, () => relayError(401, "NODE_SECRET_REQUIRED")),
+        );
+        stubRuntimeConfig(service, null);
+        stubStableId(service, "stable-machine-id");
+
+        await expect(
+          invoke(service, { controlUrl: "https://relay.sovereign-ai-node.com" }),
+        ).rejects.toMatchObject({
+          code: "RELAY_NODE_SECRET_REJECTED",
+          retryable: false,
+          message: expect.stringContaining("/etc/sovereign-node/secrets/relay-node-secret"),
+          details: { status: 401, relayCode: "NODE_SECRET_REQUIRED" },
+        });
+        expect(captured).toHaveLength(1);
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("fails without retry on 429", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-node-secret-"));
+      try {
+        const captured: CapturedAuthRequest[] = [];
+        const service = buildService(
+          buildPaths(tempRoot),
+          capture(captured, () => relayError(429)),
+        );
+        stubRuntimeConfig(service, null);
+        stubStableId(service, "stable-machine-id");
+
+        await expect(
+          invoke(service, { controlUrl: "https://relay.sovereign-ai-node.com" }),
+        ).rejects.toMatchObject({ code: "RELAY_THROTTLED", retryable: true });
+        expect(captured).toHaveLength(1);
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("fails without retry on 409 SLUG_TAKEN for an operator-chosen name", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-node-secret-"));
+      try {
+        const captured: CapturedAuthRequest[] = [];
+        const service = buildService(
+          buildPaths(tempRoot),
+          capture(captured, () => relayError(409, "SLUG_TAKEN")),
+        );
+        stubRuntimeConfig(service, null);
+
+        await expect(
+          invoke(service, {
+            controlUrl: "https://relay.example.org",
+            enrollmentToken: "custom-token",
+            requestedSlug: "my-node",
+          }),
+        ).rejects.toMatchObject({
+          code: "RELAY_SLUG_TAKEN",
+          retryable: false,
+          details: { requestedSlug: "my-node" },
+        });
+        expect(captured).toHaveLength(1);
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("still regenerates on 409 SLUG_TAKEN for a generated public name", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-node-secret-"));
+      try {
+        const captured: CapturedAuthRequest[] = [];
+        const service = buildService(
+          buildPaths(tempRoot),
+          capture(captured, (request) =>
+            captured.length === 1
+              ? relayError(409, "SLUG_TAKEN")
+              : httpResponse(`${String(request.body.requestedSlug)}.relay.sovereign-ai-node.com`),
+          ),
+        );
+        stubRuntimeConfig(service, null);
+        stubStableId(service, "stable-machine-id");
+
+        const enrollment = await invoke(service, {
+          controlUrl: "https://relay.sovereign-ai-node.com",
+        });
+
+        expect(captured).toHaveLength(2);
+        expect(captured[0]?.body.requestedSlug).not.toBe(captured[1]?.body.requestedSlug);
+        expect(enrollment.hostname).toBe(
+          `${String(captured[1]?.body.requestedSlug)}.relay.sovereign-ai-node.com`,
+        );
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("persists a secret issued on a legacy refresh even when the node stays legacy", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-node-secret-"));
+      try {
+        const paths = buildPaths(tempRoot);
+        const captured: CapturedAuthRequest[] = [];
+        let adopted: Response | null = null;
+        const service = buildService(paths, async (url, init) => {
+          adopted ??= await withNodeSecret(
+            httpResponse("cathouse.relay.sovereign-ai-node.com"),
+            "adopted-node-secret",
+          );
+          return capture(captured, () => adopted as Response)(url, init);
+        });
+        stubRuntimeConfig(service, legacyRuntimeConfig());
+        stubSecret(service, "reused-tunnel-token");
+        stubStableId(service, "stable-machine-id");
+
+        const enrollment = await invoke(service, {
+          controlUrl: "https://relay.sovereign-ai-node.com",
+        });
+
+        // Relay adopted the legacy record and issued the secret, but returned
+        // http ⇒ keep-legacy. The secret must still be kept for the next call.
+        expect(captured).toHaveLength(1);
+        expect(captured[0]?.authorization).toBe("");
+        expect(enrollment.tunnel.type).toBe("http");
+        await expect(readFile(secretPath(paths), "utf8")).resolves.toBe("adopted-node-secret\n");
+        expect(JSON.stringify(enrollment)).not.toContain("adopted-node-secret");
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("sends the bearer on a legacy refresh and strips a rotated secret from the result", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-node-secret-"));
+      try {
+        const paths = buildPaths(tempRoot);
+        await mkdir(paths.secretsDir, { recursive: true });
+        await writeFile(secretPath(paths), "persisted-node-secret\n", "utf8");
+        const captured: CapturedAuthRequest[] = [];
+        let refreshed: Response | null = null;
+        const service = buildService(paths, async (url, init) => {
+          refreshed ??= await withNodeSecret(
+            passthroughResponse("cathouse.relay.sovereign-ai-node.com"),
+            "rotated-node-secret",
+          );
+          return capture(captured, () => refreshed as Response)(url, init);
+        });
+        stubRuntimeConfig(service, legacyRuntimeConfig());
+        stubSecret(service, "reused-tunnel-token");
+        stubStableId(service, "stable-machine-id");
+
+        const enrollment = await invoke(service, {
+          controlUrl: "https://relay.sovereign-ai-node.com",
+        });
+
+        expect(captured[0]?.authorization).toBe("Bearer persisted-node-secret");
+        expect(enrollment.tunnel.type).toBe("https");
+        expect(enrollment).not.toHaveProperty("nodeSecret");
+        await expect(readFile(secretPath(paths), "utf8")).resolves.toBe("rotated-node-secret\n");
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps the legacy enrollment on a 401 refresh but logs the re-key instruction", async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "relay-node-secret-"));
+      try {
+        const captured: CapturedAuthRequest[] = [];
+        const service = buildService(
+          buildPaths(tempRoot),
+          capture(captured, () => relayError(401, "NODE_SECRET_INVALID")),
+        );
+        const errors: string[] = [];
+        vi.spyOn(
+          (service as unknown as { logger: { error: (...args: unknown[]) => void } }).logger,
+          "error",
+        ).mockImplementation((...args: unknown[]) => {
+          errors.push(String(args[1]));
+        });
+        stubRuntimeConfig(service, legacyRuntimeConfig());
+        stubSecret(service, "reused-tunnel-token");
+        stubStableId(service, "stable-machine-id");
+
+        const enrollment = await invoke(service, {
+          controlUrl: "https://relay.sovereign-ai-node.com",
+        });
+
+        expect(captured).toHaveLength(1);
+        expect(enrollment.tunnel.type).toBe("http");
+        expect(enrollment.tunnel.token).toBe("reused-tunnel-token");
+        expect(errors).toHaveLength(1);
+        expect(errors[0]).toContain("re-keyed");
+        expect(errors[0]).toContain("/etc/sovereign-node/secrets/relay-node-secret");
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+  });
+});
+
+describe("resolveStableInstallationId", () => {
+  const buildPaths = (tempRoot: string): SovereignPaths => ({
+    configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+    secretsDir: join(tempRoot, "etc", "secrets"),
+    stateDir: join(tempRoot, "var", "lib"),
+    logsDir: join(tempRoot, "var", "log"),
+    installJobsDir: join(tempRoot, "install-jobs"),
+    openclawServiceHome: join(tempRoot, "openclaw-home"),
+    provenancePath: join(tempRoot, "install-provenance.json"),
+    backupsDir: join(tempRoot, "backups"),
+  });
+
+  const unusedDeps = {
+    openclawBootstrapper: {
+      detectInstalled: async () => null,
+      ensureInstalled: async () => ({
+        binaryPath: "/usr/local/bin/openclaw",
+        version: "test",
+        installMethod: "install_sh" as const,
+      }),
+    },
+    openclawGatewayServiceManager: {
+      install: async () => {},
+      start: async () => {},
+      restart: async () => {},
+    },
+    preflightChecker: {
+      run: async () => ({
+        mode: "bundled_matrix" as const,
+        overall: "pass" as const,
+        checks: [],
+        recommendedActions: [],
+      }),
+    },
+    imapTester: {
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+    matrixProvisioner: {
+      provision: async () => {
+        throw new Error("not used");
+      },
+      bootstrapAccounts: async () => {
+        throw new Error("not used");
+      },
+      bootstrapRoom: async () => {
+        throw new Error("not used");
+      },
+      test: async () => {
+        throw new Error("not used");
+      },
+    },
+  };
+
+  const buildService = (paths: SovereignPaths): RealInstallerService =>
+    new RealInstallerService(createLogger(), paths, {
+      ...unusedDeps,
+    } as ConstructorParameters<typeof RealInstallerService>[2]);
+
+  const call = (service: RealInstallerService): Promise<string> =>
+    (
+      service as unknown as { resolveStableInstallationId(): Promise<string> }
+    ).resolveStableInstallationId();
+
+  const setMachineIdPaths = (service: RealInstallerService, paths: readonly string[]): void => {
+    (service as unknown as { machineIdCandidatePaths: readonly string[] }).machineIdCandidatePaths =
+      paths;
+  };
+
+  it("reads /etc/machine-id when present and memoises it", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-stableid-test-"));
+    try {
+      const machineIdPath = join(tempRoot, "machine-id");
+      await writeFile(machineIdPath, "abc123def456\n", "utf8");
+      const service = buildService(buildPaths(tempRoot));
+      setMachineIdPaths(service, [machineIdPath]);
+
+      const first = await call(service);
+      expect(first).toBe("abc123def456");
+
+      // Memoised: a later read of a different file is ignored.
+      await writeFile(machineIdPath, "changed\n", "utf8");
+      const second = await call(service);
+      expect(second).toBe("abc123def456");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("skips empty machine-id files and falls through to the next candidate", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-stableid-test-"));
+    try {
+      const emptyPath = join(tempRoot, "empty-machine-id");
+      const realPath = join(tempRoot, "real-machine-id");
+      await writeFile(emptyPath, "   \n", "utf8");
+      await writeFile(realPath, "second-source-id\n", "utf8");
+      const service = buildService(buildPaths(tempRoot));
+      setMachineIdPaths(service, [emptyPath, realPath]);
+
+      expect(await call(service)).toBe("second-source-id");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("generates and persists a stable id when no machine-id is available", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-stableid-test-"));
+    try {
+      const service = buildService(buildPaths(tempRoot));
+      setMachineIdPaths(service, [join(tempRoot, "does-not-exist")]);
+
+      const first = await call(service);
+      expect(first).toMatch(/^inst_/);
+
+      // Persisted to disk under the state dir.
+      const persisted = (
+        await readFile(join(buildPaths(tempRoot).stateDir, "relay", "installation-id"), "utf8")
+      ).trim();
+      expect(persisted).toBe(first);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reuses a previously persisted generated id across fresh service instances", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-stableid-test-"));
+    try {
+      const paths = buildPaths(tempRoot);
+      const missing = [join(tempRoot, "does-not-exist")];
+
+      const first = buildService(paths);
+      setMachineIdPaths(first, missing);
+      const id = await call(first);
+
+      // A brand-new service instance (no in-memory cache) reads the persisted id.
+      const second = buildService(paths);
+      setMachineIdPaths(second, missing);
+      expect(await call(second)).toBe(id);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("still returns a generated id when it cannot be persisted", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-stableid-test-"));
+    try {
+      const paths = buildPaths(tempRoot);
+      // Pre-create state-dir/relay as a FILE so mkdir of that directory fails and
+      // the persist step throws (exercising the warn-and-continue fallback).
+      await mkdir(paths.stateDir, { recursive: true });
+      await writeFile(join(paths.stateDir, "relay"), "blocker", "utf8");
+
+      const service = buildService(paths);
+      setMachineIdPaths(service, [join(tempRoot, "does-not-exist")]);
+
+      const id = await call(service);
+      expect(id).toMatch(/^inst_/);
+      // Memoised even though persistence failed.
+      expect(await call(service)).toBe(id);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("RealInstallerService.resolveServiceUserHome", () => {
+  const buildPaths = (): SovereignPaths => ({
+    configPath: "/etc/sovereign-node/sovereign-node.json5",
+    secretsDir: "/etc/sovereign-node/secrets",
+    stateDir: "/var/lib/sovereign-node",
+    logsDir: "/var/log/sovereign-node",
+    installJobsDir: "/var/lib/sovereign-node/install-jobs",
+    openclawServiceHome: "/var/lib/sovereign-node/openclaw-home",
+    provenancePath: "/var/lib/sovereign-node/install-provenance.json",
+    backupsDir: "/var/lib/sovereign-node/backups",
+  });
+
+  const buildService = (
+    execRun: ((input: ExecInput) => Promise<ExecResult>) | null,
+  ): RealInstallerService =>
+    new RealInstallerService(createLogger(), buildPaths(), {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async (opts): Promise<OpenClawInstallInfo> => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: opts.version,
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async (): Promise<BundledMatrixProvisionResult> => {
+          throw new Error("unexpected provision call");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("unexpected bootstrapAccounts call");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("unexpected bootstrapRoom call");
+        },
+        test: async (req) => ({ ok: true, homeserverUrl: req.publicBaseUrl, checks: [] }),
+      },
+      ...(execRun === null ? {} : { execRunner: { run: execRun } }),
+    });
+
+  const callResolve = (service: RealInstallerService, user: string): Promise<string | null> =>
+    (
+      service as unknown as {
+        resolveServiceUserHome: (serviceUser: string) => Promise<string | null>;
+      }
+    ).resolveServiceUserHome(user);
+
+  it("returns null for root or empty service users without invoking getent", async () => {
+    const calls: string[] = [];
+    const service = buildService(async (input) => {
+      calls.push([input.command, ...(input.args ?? [])].join(" "));
+      return { command: "", exitCode: 0, stdout: "", stderr: "" };
+    });
+    expect(await callResolve(service, "root")).toBeNull();
+    expect(await callResolve(service, "   ")).toBeNull();
+    expect(calls).toEqual([]);
+  });
+
+  it("returns null when no exec runner is configured", async () => {
+    const service = buildService(null);
+    expect(await callResolve(service, "sovereign-node")).toBeNull();
+  });
+
+  it("parses the home directory (field 6) from getent passwd output", async () => {
+    const service = buildService(async (input) => {
+      expect([input.command, ...(input.args ?? [])].join(" ")).toBe("getent passwd sovereign-node");
+      return {
+        command: "getent passwd sovereign-node",
+        exitCode: 0,
+        stdout: "sovereign-node:x:998:998::/var/lib/sovereign-node:/usr/sbin/nologin\n",
+        stderr: "",
+      };
+    });
+    expect(await callResolve(service, "sovereign-node")).toBe("/var/lib/sovereign-node");
+  });
+
+  it("returns null when getent exits non-zero", async () => {
+    const service = buildService(async () => ({
+      command: "getent",
+      exitCode: 2,
+      stdout: "",
+      stderr: "",
+    }));
+    expect(await callResolve(service, "sovereign-node")).toBeNull();
+  });
+
+  it("returns null when the passwd entry has no home field", async () => {
+    const service = buildService(async () => ({
+      command: "getent",
+      exitCode: 0,
+      stdout: "sovereign-node:x:998:998\n",
+      stderr: "",
+    }));
+    expect(await callResolve(service, "sovereign-node")).toBeNull();
+  });
+
+  it("returns null when the exec runner throws", async () => {
+    const service = buildService(async () => {
+      throw new Error("boom");
+    });
+    expect(await callResolve(service, "sovereign-node")).toBeNull();
+  });
+});
+
+// #232: bot-declared units get the service user's npm prefix bin dir on PATH
+// — the directory ensureLobsterCliInstalled installs into — so they can exec
+// `lobster` by bare name. Before this nothing bridged the manifest's literal
+// PATH and the install location, and mail-sentinel's semantic review failed
+// with `spawn lobster ENOENT` wherever lobster lived only in that prefix.
+describe("RealInstallerService bot unit PATH carries the service npm prefix (#232)", () => {
+  const buildPaths = (): SovereignPaths => ({
+    configPath: "/etc/sovereign-node/sovereign-node.json5",
+    secretsDir: "/etc/sovereign-node/secrets",
+    stateDir: "/var/lib/sovereign-node",
+    logsDir: "/var/log/sovereign-node",
+    installJobsDir: "/var/lib/sovereign-node/install-jobs",
+    openclawServiceHome: "/var/lib/sovereign-node/openclaw-home",
+    provenancePath: "/var/lib/sovereign-node/install-provenance.json",
+    backupsDir: "/var/lib/sovereign-node/backups",
+  });
+
+  const buildService = (
+    execRun: ((input: ExecInput) => Promise<ExecResult>) | null,
+  ): RealInstallerService =>
+    new RealInstallerService(createLogger(), buildPaths(), {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async (opts): Promise<OpenClawInstallInfo> => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: opts.version,
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async (): Promise<BundledMatrixProvisionResult> => {
+          throw new Error("unexpected provision call");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("unexpected bootstrapAccounts call");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("unexpected bootstrapRoom call");
+        },
+        test: async (req) => ({ ok: true, homeserverUrl: req.publicBaseUrl, checks: [] }),
+      },
+      ...(execRun === null ? {} : { execRunner: { run: execRun } }),
+    });
+
+  type Internals = {
+    resolveHostResourceEnvironmentValue: (
+      context: { serviceNpmBinDir?: string },
+      key: string,
+      value: string,
+    ) => string;
+    resolveServiceNpmBinDir: (runtimeConfig: RuntimeConfig) => Promise<string | undefined>;
+    renderSystemdServiceResource: (
+      context: { serviceNpmBinDir?: string },
+      resource: Record<string, unknown>,
+    ) => string;
+  };
+  const internalsOf = (service: RealInstallerService): Internals => service as unknown as Internals;
+
+  const systemPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+  const npmBin = "/var/lib/sovereign-node/.npm-global/bin";
+
+  it("prepends the service npm bin dir to a declared PATH, once", () => {
+    const { resolveHostResourceEnvironmentValue } = internalsOf(buildService(null));
+    const context = { serviceNpmBinDir: npmBin };
+    // Pure function of (context, key, value); no `this` involved.
+    expect(resolveHostResourceEnvironmentValue(context, "PATH", systemPath)).toBe(
+      `${npmBin}:${systemPath}`,
+    );
+    // Already present (anywhere) → unchanged, no duplicate.
+    expect(
+      resolveHostResourceEnvironmentValue(context, "PATH", `/opt/bin:${npmBin}:/usr/bin`),
+    ).toBe(`/opt/bin:${npmBin}:/usr/bin`);
+    // Empty segments are dropped rather than turned into ".".
+    expect(resolveHostResourceEnvironmentValue(context, "PATH", "/usr/bin::/bin")).toBe(
+      `${npmBin}:/usr/bin:/bin`,
+    );
+  });
+
+  it("leaves non-PATH variables and contexts without a resolved dir alone", () => {
+    const { resolveHostResourceEnvironmentValue } = internalsOf(buildService(null));
+    expect(
+      resolveHostResourceEnvironmentValue({ serviceNpmBinDir: npmBin }, "HOME", "/srv/home"),
+    ).toBe("/srv/home");
+    expect(resolveHostResourceEnvironmentValue({}, "PATH", systemPath)).toBe(systemPath);
+  });
+
+  it("resolves the dir from the configured service user's passwd home", async () => {
+    const service = buildService(async (input) => {
+      expect([input.command, ...(input.args ?? [])].join(" ")).toBe("getent passwd sovereign-node");
+      return {
+        command: "getent passwd sovereign-node",
+        exitCode: 0,
+        stdout: "sovereign-node:x:998:998::/var/lib/sovereign-node:/usr/sbin/nologin\n",
+        stderr: "",
+      };
+    });
+    const runtimeConfig = {
+      openclaw: { serviceUser: "sovereign-node", serviceGroup: "sovereign-node" },
+    } as unknown as RuntimeConfig;
+    const previousUser = process.env.SOVEREIGN_NODE_SERVICE_USER;
+    const previousGroup = process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+    delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+    delete process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+    try {
+      expect(await internalsOf(service).resolveServiceNpmBinDir(runtimeConfig)).toBe(npmBin);
+    } finally {
+      if (previousUser !== undefined) process.env.SOVEREIGN_NODE_SERVICE_USER = previousUser;
+      if (previousGroup !== undefined) process.env.SOVEREIGN_NODE_SERVICE_GROUP = previousGroup;
+    }
+  });
+
+  it("renders the mail-sentinel scan unit with the npm bin dir ahead of the declared PATH", () => {
+    const internals = internalsOf(buildService(null));
+    const resource = {
+      id: "scan-service",
+      kind: "systemdService",
+      spec: {
+        name: "sovereign-mail-sentinel-scan.service",
+        description: "Sovereign Mail Sentinel Scan mail-sentinel",
+        after: ["network-online.target"],
+        wants: ["network-online.target"],
+        type: "oneshot",
+        user: "sovereign-node",
+        group: "sovereign-node",
+        workingDirectory: "/var/lib/sovereign-node/mail-sentinel/workspace",
+        environment: {
+          HOME: "/var/lib/sovereign-node/openclaw-home",
+          PATH: systemPath,
+        },
+        execStart: ["/usr/bin/env", "node", "bin/mail-sentinel.js", "scan"],
+        timeoutStartSec: 300,
+        wantedBy: [],
+        desiredState: { enabled: false, active: false },
+      },
+    };
+    const rendered = internals.renderSystemdServiceResource({ serviceNpmBinDir: npmBin }, resource);
+    expect(rendered).toContain(`Environment=PATH=${npmBin}:${systemPath}\n`);
+    expect(rendered).toContain("Environment=HOME=/var/lib/sovereign-node/openclaw-home\n");
+    // Without a resolved dir the manifest's literal PATH is rendered verbatim.
+    expect(internals.renderSystemdServiceResource({}, resource)).toContain(
+      `Environment=PATH=${systemPath}\n`,
+    );
+  });
+});
+
+describe("ensureMatrixCryptoRuntimeWritable (issue #207)", () => {
+  const buildPaths = (tempRoot: string): SovereignPaths => ({
+    configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+    secretsDir: join(tempRoot, "etc", "secrets"),
+    stateDir: join(tempRoot, "var", "lib"),
+    logsDir: join(tempRoot, "var", "log"),
+    installJobsDir: join(tempRoot, "install-jobs"),
+    openclawServiceHome: join(tempRoot, "openclaw-home"),
+    provenancePath: join(tempRoot, "install-provenance.json"),
+    backupsDir: join(tempRoot, "backups"),
+  });
+
+  const baseDeps = (
+    execRun: (input: ExecInput) => Promise<ExecResult>,
+  ): ConstructorParameters<typeof RealInstallerService>[2] =>
+    ({
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => {
+          throw new Error("not used");
+        },
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => {
+          throw new Error("not used");
+        },
+      },
+      preflightChecker: {
+        run: async () => ({
+          ok: true,
+          mode: "bundled_matrix" as const,
+          overall: "pass" as const,
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async () => {
+          throw new Error("not used");
+        },
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      execRunner: { run: execRun },
+    }) as ConstructorParameters<typeof RealInstallerService>[2];
+
+  const cryptoRelPath = join(
+    "openclaw",
+    "extensions",
+    "matrix",
+    "node_modules",
+    "@matrix-org",
+    "matrix-sdk-crypto-nodejs",
+  );
+
+  const invoke = (service: RealInstallerService, runtimeConfig?: RuntimeConfig): Promise<void> =>
+    (
+      service as unknown as {
+        ensureMatrixCryptoRuntimeWritable(config?: RuntimeConfig): Promise<void>;
+      }
+    ).ensureMatrixCryptoRuntimeWritable(runtimeConfig);
+
+  const withGlobalRoot = async (root: string, fn: () => Promise<void>): Promise<void> => {
+    const prior = process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT;
+    process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT = root;
+    try {
+      await fn();
+    } finally {
+      if (prior === undefined) {
+        delete process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT;
+      } else {
+        process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT = prior;
+      }
+    }
+  };
+
+  const spyGetuid = (value: number) =>
+    typeof process.getuid === "function"
+      ? vi
+          .spyOn(process as typeof process & { getuid: () => number }, "getuid")
+          .mockImplementation(() => value)
+      : null;
+
+  it("no-ops when the crypto dir is absent", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    const calls: string[] = [];
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      baseDeps(async ({ command, args }) => {
+        calls.push([command, ...(args ?? [])].join(" "));
+        return { command, exitCode: 0, stdout: "", stderr: "" };
+      }),
+    );
+    const getuidMock = spyGetuid(0);
+    try {
+      // No crypto dir created under the env-overridden global root.
+      await withGlobalRoot(tempRoot, async () => {
+        await expect(invoke(service)).resolves.toBeUndefined();
+      });
+      // No chown / npm root attempted.
+      expect(calls).toEqual([]);
+    } finally {
+      getuidMock?.mockRestore();
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("no-ops when process uid/gid are unavailable", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    const cryptoDir = join(tempRoot, cryptoRelPath);
+    await mkdir(cryptoDir, { recursive: true });
+    const calls: string[] = [];
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      baseDeps(async ({ command, args }) => {
+        calls.push([command, ...(args ?? [])].join(" "));
+        return { command, exitCode: 0, stdout: "", stderr: "" };
+      }),
+    );
+    // Simulate a non-POSIX platform where process.getuid is not a function.
+    const proc = process as unknown as { getuid?: unknown; getgid?: unknown };
+    const priorGetuid = proc.getuid;
+    const priorGetgid = proc.getgid;
+    proc.getuid = undefined;
+    proc.getgid = undefined;
+    try {
+      await withGlobalRoot(tempRoot, async () => {
+        await expect(invoke(service)).resolves.toBeUndefined();
+      });
+      // Bailed before resolving ownership / chowning.
+      expect(calls).toEqual([]);
+    } finally {
+      proc.getuid = priorGetuid;
+      proc.getgid = priorGetgid;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("warns and never throws when sudo cannot run because no exec runner is configured", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    const cryptoDir = join(tempRoot, cryptoRelPath);
+    await mkdir(cryptoDir, { recursive: true });
+    // Build the service WITHOUT an execRunner so the non-root sudo path hits
+    // the "exec runner unavailable" guard. The env override means no exec is
+    // needed to resolve the global root.
+    const depsNoRunner = baseDeps(async ({ command }) => ({
+      command,
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    })) as Record<string, unknown>;
+    delete depsNoRunner.execRunner;
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      depsNoRunner as ConstructorParameters<typeof RealInstallerService>[2],
+    );
+    const getuidMock = spyGetuid(1234);
+    try {
+      await withGlobalRoot(tempRoot, async () => {
+        await expect(invoke(service)).resolves.toBeUndefined();
+      });
+    } finally {
+      getuidMock?.mockRestore();
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("no-ops when the crypto path exists but is not a directory", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    const cryptoDir = join(tempRoot, cryptoRelPath);
+    await mkdir(dirname(cryptoDir), { recursive: true });
+    await writeFile(cryptoDir, "not-a-dir", "utf8");
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      baseDeps(async ({ command }) => ({ command, exitCode: 0, stdout: "", stderr: "" })),
+    );
+    const getuidMock = spyGetuid(0);
+    try {
+      await withGlobalRoot(tempRoot, async () => {
+        await expect(invoke(service)).resolves.toBeUndefined();
+      });
+    } finally {
+      getuidMock?.mockRestore();
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("warns and skips when stat fails with a non-ENOENT error", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    // Make a PARENT of the crypto dir a regular file so stat() of the crypto
+    // path raises ENOTDIR (a non-ENOENT error) -> the warn-and-skip branch.
+    const matrixExtDir = join(tempRoot, "openclaw", "extensions", "matrix");
+    await mkdir(dirname(matrixExtDir), { recursive: true });
+    await writeFile(matrixExtDir, "blocker", "utf8");
+    const calls: string[] = [];
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      baseDeps(async ({ command, args }) => {
+        calls.push([command, ...(args ?? [])].join(" "));
+        return { command, exitCode: 0, stdout: "", stderr: "" };
+      }),
+    );
+    const getuidMock = spyGetuid(0);
+    try {
+      await withGlobalRoot(tempRoot, async () => {
+        await expect(invoke(service)).resolves.toBeUndefined();
+      });
+      // Bailed before resolving ownership / chowning.
+      expect(calls).toEqual([]);
+    } finally {
+      getuidMock?.mockRestore();
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does a direct chown to the resolved service uid:gid when running as root", async () => {
+    if (typeof process.getuid !== "function" || typeof process.getgid !== "function") {
+      return; // platform without uid/gid; root branch is not exercisable here
+    }
+    // Resolve the real uid/gid of this test process BEFORE mocking getuid, so
+    // the helper's direct node:fs chown(2) actually succeeds (a no-op chown to
+    // the current owner) and we exercise the root branch end-to-end.
+    const realUid = process.getuid();
+    const realGid = process.getgid();
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    const cryptoDir = join(tempRoot, cryptoRelPath);
+    await mkdir(cryptoDir, { recursive: true });
+    const priorServiceUser = process.env.SOVEREIGN_NODE_SERVICE_USER;
+    const priorServiceGroup = process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+    process.env.SOVEREIGN_NODE_SERVICE_USER = "gateway-user";
+    process.env.SOVEREIGN_NODE_SERVICE_GROUP = "gateway-user";
+    const calls: string[] = [];
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      baseDeps(async ({ command, args }) => {
+        const serialized = [command, ...(args ?? [])].join(" ");
+        calls.push(serialized);
+        if (serialized === "getent passwd gateway-user") {
+          return {
+            command: serialized,
+            exitCode: 0,
+            stdout: `gateway-user:x:${realUid}:${realGid}::/home/gateway-user:/bin/bash\n`,
+            stderr: "",
+          };
+        }
+        return { command: serialized, exitCode: 1, stdout: "", stderr: "unexpected" };
+      }),
+    );
+    const getuidMock = spyGetuid(0);
+    try {
+      await withGlobalRoot(tempRoot, async () => {
+        await expect(invoke(service)).resolves.toBeUndefined();
+      });
+      // Resolved the service identity via getent (root branch) and used a
+      // direct fs chown -- no sudo was issued.
+      expect(calls).toEqual(["getent passwd gateway-user"]);
+      expect(calls.some((c) => c.startsWith("sudo "))).toBe(false);
+      await expect(stat(cryptoDir)).resolves.toBeDefined();
+    } finally {
+      getuidMock?.mockRestore();
+      if (priorServiceUser === undefined) delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+      else process.env.SOVEREIGN_NODE_SERVICE_USER = priorServiceUser;
+      if (priorServiceGroup === undefined) delete process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+      else process.env.SOVEREIGN_NODE_SERVICE_GROUP = priorServiceGroup;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("warns but never throws when the root direct chown fails", async () => {
+    if (typeof process.getuid !== "function") {
+      return;
+    }
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    const cryptoDir = join(tempRoot, cryptoRelPath);
+    await mkdir(cryptoDir, { recursive: true });
+    const priorServiceUser = process.env.SOVEREIGN_NODE_SERVICE_USER;
+    const priorServiceGroup = process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+    process.env.SOVEREIGN_NODE_SERVICE_USER = "gateway-user";
+    process.env.SOVEREIGN_NODE_SERVICE_GROUP = "gateway-user";
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      baseDeps(async ({ command, args }) => {
+        const serialized = [command, ...(args ?? [])].join(" ");
+        if (serialized === "getent passwd gateway-user") {
+          // A bogus high uid:gid the unprivileged test process cannot chown to
+          // -> real fs chown(2) raises EPERM, which the helper warns on.
+          return {
+            command: serialized,
+            exitCode: 0,
+            stdout: "gateway-user:x:65530:65530::/home/gateway-user:/bin/bash\n",
+            stderr: "",
+          };
+        }
+        return { command: serialized, exitCode: 1, stdout: "", stderr: "unexpected" };
+      }),
+    );
+    const getuidMock = spyGetuid(0);
+    try {
+      await withGlobalRoot(tempRoot, async () => {
+        await expect(invoke(service)).resolves.toBeUndefined();
+      });
+      await expect(stat(cryptoDir)).resolves.toBeDefined();
+    } finally {
+      getuidMock?.mockRestore();
+      if (priorServiceUser === undefined) delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+      else process.env.SOVEREIGN_NODE_SERVICE_USER = priorServiceUser;
+      if (priorServiceGroup === undefined) delete process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+      else process.env.SOVEREIGN_NODE_SERVICE_GROUP = priorServiceGroup;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves the dir untouched when running as root but service ownership cannot be resolved", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    const cryptoDir = join(tempRoot, cryptoRelPath);
+    await mkdir(cryptoDir, { recursive: true });
+    const priorServiceUser = process.env.SOVEREIGN_NODE_SERVICE_USER;
+    const priorServiceGroup = process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+    process.env.SOVEREIGN_NODE_SERVICE_USER = "ghost-user";
+    process.env.SOVEREIGN_NODE_SERVICE_GROUP = "ghost-user";
+    const calls: string[] = [];
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      baseDeps(async ({ command, args }) => {
+        const serialized = [command, ...(args ?? [])].join(" ");
+        calls.push(serialized);
+        // getent passwd fails -> ownership resolves to null.
+        return { command: serialized, exitCode: 2, stdout: "", stderr: "no such user" };
+      }),
+    );
+    const getuidMock = spyGetuid(0);
+    try {
+      await withGlobalRoot(tempRoot, async () => {
+        await expect(invoke(service)).resolves.toBeUndefined();
+      });
+      expect(calls).toContain("getent passwd ghost-user");
+    } finally {
+      getuidMock?.mockRestore();
+      if (priorServiceUser === undefined) delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+      else process.env.SOVEREIGN_NODE_SERVICE_USER = priorServiceUser;
+      if (priorServiceGroup === undefined) delete process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+      else process.env.SOVEREIGN_NODE_SERVICE_GROUP = priorServiceGroup;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("issues sudo -n chown -R uid:gid for the crypto dir when running non-root", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    const cryptoDir = join(tempRoot, cryptoRelPath);
+    await mkdir(cryptoDir, { recursive: true });
+    const calls: string[] = [];
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      baseDeps(async ({ command, args }) => {
+        const serialized = [command, ...(args ?? [])].join(" ");
+        calls.push(serialized);
+        return { command: serialized, exitCode: 0, stdout: "", stderr: "" };
+      }),
+    );
+    const getuidMock = spyGetuid(1234);
+    const getgidMock =
+      typeof process.getgid === "function"
+        ? vi
+            .spyOn(process as typeof process & { getgid: () => number }, "getgid")
+            .mockImplementation(() => 4321)
+        : null;
+    try {
+      await withGlobalRoot(tempRoot, async () => {
+        await expect(invoke(service)).resolves.toBeUndefined();
+      });
+      expect(calls).toContain(`sudo -n chown -R 1234:4321 ${cryptoDir}`);
+    } finally {
+      getuidMock?.mockRestore();
+      getgidMock?.mockRestore();
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("warns but never throws when the non-root sudo chown fails", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    const cryptoDir = join(tempRoot, cryptoRelPath);
+    await mkdir(cryptoDir, { recursive: true });
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      baseDeps(async ({ command, args }) => {
+        const serialized = [command, ...(args ?? [])].join(" ");
+        return {
+          command: serialized,
+          exitCode: 1,
+          stdout: "",
+          stderr: "sudo: a password is required",
+        };
+      }),
+    );
+    const getuidMock = spyGetuid(1234);
+    try {
+      await withGlobalRoot(tempRoot, async () => {
+        await expect(invoke(service)).resolves.toBeUndefined();
+      });
+    } finally {
+      getuidMock?.mockRestore();
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves the global root via `npm root -g` when no env override is set", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    const cryptoDir = join(tempRoot, cryptoRelPath);
+    await mkdir(cryptoDir, { recursive: true });
+    const calls: string[] = [];
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      baseDeps(async ({ command, args }) => {
+        const serialized = [command, ...(args ?? [])].join(" ");
+        calls.push(serialized);
+        if (serialized === "npm root -g") {
+          return { command: serialized, exitCode: 0, stdout: `${tempRoot}\n`, stderr: "" };
+        }
+        return { command: serialized, exitCode: 0, stdout: "", stderr: "" };
+      }),
+    );
+    const priorOverride = process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT;
+    delete process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT;
+    const getuidMock = spyGetuid(1234);
+    const getgidMock =
+      typeof process.getgid === "function"
+        ? vi
+            .spyOn(process as typeof process & { getgid: () => number }, "getgid")
+            .mockImplementation(() => 1234)
+        : null;
+    try {
+      await expect(invoke(service)).resolves.toBeUndefined();
+      expect(calls).toContain("npm root -g");
+      expect(calls).toContain(`sudo -n chown -R 1234:1234 ${cryptoDir}`);
+    } finally {
+      getuidMock?.mockRestore();
+      getgidMock?.mockRestore();
+      if (priorOverride === undefined) delete process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT;
+      else process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT = priorOverride;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to /usr/lib/node_modules when `npm root -g` yields nothing", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
+    const calls: string[] = [];
+    const service = new RealInstallerService(
+      createLogger(),
+      buildPaths(tempRoot),
+      baseDeps(async ({ command, args }) => {
+        const serialized = [command, ...(args ?? [])].join(" ");
+        calls.push(serialized);
+        if (serialized === "npm root -g") {
+          return { command: serialized, exitCode: 0, stdout: "   \n", stderr: "" };
+        }
+        return { command: serialized, exitCode: 0, stdout: "", stderr: "" };
+      }),
+    );
+    const priorOverride = process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT;
+    delete process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT;
+    const getuidMock = spyGetuid(1234);
+    try {
+      // /usr/lib/node_modules/.../matrix-sdk-crypto-nodejs is absent in tests,
+      // so this resolves to the fallback root and then no-ops on the absent dir.
+      await expect(invoke(service)).resolves.toBeUndefined();
+      expect(calls).toEqual(["npm root -g"]);
+    } finally {
+      getuidMock?.mockRestore();
+      if (priorOverride === undefined) delete process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT;
+      else process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT = priorOverride;
       await rm(tempRoot, { recursive: true, force: true });
     }
   });

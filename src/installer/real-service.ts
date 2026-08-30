@@ -10,21 +10,27 @@ import {
   rename,
   rm,
   stat,
+  unlink,
   writeFile,
 } from "node:fs/promises";
+import { request as httpsRequest } from "node:https";
+import { isIPv4 } from "node:net";
 import { basename, dirname, join, resolve } from "node:path";
+import { connect as tlsConnect } from "node:tls";
 import type {
   BotCatalog,
   BotConfigRecord,
   BotConfigValue,
   LoadedBotPackage,
+  SovereignBotPackageManifest,
 } from "../bots/catalog.js";
-import { FilesystemBotCatalog } from "../bots/catalog.js";
+import { FilesystemBotCatalog, tryParseBotPackageManifest } from "../bots/catalog.js";
 import type {
   HostResourceValueExpr,
   SovereignBotHostResource,
   SovereignBotHostStateCheck,
 } from "../bots/host-resources.js";
+import { getNodeBuildInfo } from "../build-info.js";
 import type { SovereignPaths } from "../config/paths.js";
 import type {
   PreflightRequest,
@@ -34,6 +40,7 @@ import type {
   TestAlertRequest,
   TestImapRequest,
   TestMatrixRequest,
+  TestOpenrouterRequest,
 } from "../contracts/api.js";
 import { type CheckResult, CONTRACT_VERSION, type ComponentHealth } from "../contracts/common.js";
 import {
@@ -43,10 +50,14 @@ import {
   type InstallRequest,
   installJobStatusResponseSchema,
   installRequestSchema,
+  type MailProtocol,
   type MatrixOnboardingIssueResult,
   type MatrixOnboardingPublicState,
+  type MatrixOnboardingReadiness,
   type PreflightResult,
   type ReconfigureResult,
+  type RelayDns01Input,
+  type SettingsSummary,
   type SetupUiBootstrapIssueResult,
   type SetupUiBootstrapPublicState,
   type SovereignStatus,
@@ -54,6 +65,7 @@ import {
   type TestAlertResult,
   type TestImapResult,
   type TestMatrixResult,
+  type TestOpenrouterResult,
 } from "../contracts/index.js";
 import type { Logger } from "../logging/logger.js";
 import {
@@ -91,6 +103,10 @@ import type {
   ManagedAgentRegistrationResult,
   OpenClawManagedAgentRegistrar,
 } from "../openclaw/managed-agent.js";
+import {
+  buildOpenClawOpenRouterModelParams,
+  resolveOpenRouterPrivacy,
+} from "../openclaw/openrouter-routing.js";
 import type { DockerRuntimePreparer } from "../system/docker-runtime.js";
 import type { ExecResult, ExecRunner } from "../system/exec.js";
 import type { ImapTester } from "../system/imap.js";
@@ -101,9 +117,14 @@ import type {
   BundledMatrixRoomBootstrapResult,
 } from "../system/matrix.js";
 import {
+  RELAY_PASSTHROUGH_DNS01_PROPAGATION_DELAY_SECONDS,
+  RELAY_PASSTHROUGH_DNS01_PROPAGATION_TIMEOUT_SECONDS,
+} from "../system/matrix.js";
+import {
   FilesystemMatrixAvatarResolver,
   type MatrixAvatarResolver,
 } from "../system/matrix-avatars.js";
+import type { OpenrouterKeyValidator } from "../system/openrouter.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
 import { formatGiB, parseDfAvailableBytes } from "../system/preflight.js";
 import {
@@ -117,6 +138,7 @@ import {
   type ToolTemplateDefinition,
   verifySignedTemplateManifest,
 } from "../templates/catalog.js";
+import { pruneInstallJobRecords, redactInstallRequestSecrets } from "./install-request-secrets.js";
 import {
   type InstallContext,
   type InstallStep,
@@ -127,7 +149,7 @@ import {
   renderGuardedJsonStateWorkspacePluginConfig as renderGuardedJsonStateWorkspacePluginConfigFile,
   renderGuardedJsonStateWorkspacePluginManifest as renderGuardedJsonStateWorkspacePluginManifestFile,
 } from "./real-service-guarded-json-state-plugin.js";
-import { ensureLobsterCliInstalled } from "./real-service-lobster.js";
+import { ensureLobsterCliInstalled, resolveServiceNpmBinDir } from "./real-service-lobster.js";
 import {
   buildRelayProvisionRequest as buildRelayProvisionRequestFile,
   generateManagedRelayRequestedSlug as generateManagedRelayRequestedSlugFile,
@@ -140,6 +162,13 @@ import {
   type RelayEnrollmentData,
   tryUsePreEnrolledRelay as tryUsePreEnrolledRelayFile,
 } from "./real-service-relay-enrollment.js";
+import {
+  describeRelayNodeAuthFailure,
+  RELAY_NODE_SECRET_FILE_NAME,
+  readRelayNodeSecretFile,
+  relayNodeSecretAuthHeaders,
+  stripRelayNodeSecret,
+} from "./real-service-relay-node-secret.js";
 import { renderRelayTunnelConfig, renderRelayTunnelUnit } from "./real-service-relay-tunnel.js";
 import {
   areMatrixIdentitiesEqual,
@@ -190,6 +219,7 @@ import {
   parseJsonSafely,
   parseRuntimeConfigDocument,
   RELAY_LOCAL_EDGE_PORT,
+  RELAY_LOCAL_TLS_PORT,
   RELAY_TUNNEL_DEFAULT_IMAGE,
   RELAY_TUNNEL_SYSTEMD_UNIT,
   RESERVED_AGENT_IDS,
@@ -230,6 +260,12 @@ import {
   sortToolInstances,
   toSystemdDuration,
 } from "./real-service-utils.js";
+import {
+  type AuthorizedReleaseBot,
+  findAuthorizedReleaseBot,
+  loadReleaseAuthorization,
+  type ReleaseAuthorization,
+} from "./release-authorization.js";
 import type {
   InstallerService,
   MailSentinelApplyResult,
@@ -244,6 +280,9 @@ import type {
   MatrixUserRemoveResult,
   MigrationStatusResult,
   PendingMigration,
+  ReconcileAgentWorkspacesOptions,
+  ReconcileAgentWorkspacesResult,
+  ReconcileTemplateTransitionReport,
   SovereignBotInstantiateResult,
   SovereignBotListResult,
   SovereignTemplateInstallResult,
@@ -253,7 +292,18 @@ import type {
   SovereignToolInstanceUpsertResult,
 } from "./service.js";
 import { StubInstallerService } from "./stub-service.js";
+import {
+  diffBotPackageSurfaces,
+  diffToolTemplateSurfaces,
+  type TemplateTransitionDiff,
+} from "./template-transition.js";
 import { renderTemplateWorkspaceContent } from "./workspace-documents.js";
+
+const TERMINAL_INSTALL_JOB_STATES: ReadonlySet<InstallJobSummary["state"]> = new Set([
+  "succeeded",
+  "failed",
+  "canceled",
+]);
 
 type PersistedInstallJobRecord = {
   version: 1;
@@ -277,6 +327,13 @@ type HostResourceContext = {
   botInstance?: RuntimeBotInstance;
   toolInstanceIds: string[];
   toolInstanceIdMap: Record<string, string>;
+  /**
+   * `<service user home>/.npm-global/bin` — where the installer puts the
+   * lobster (and openclaw) CLIs for the service user. Prepended to any PATH a
+   * bot-declared systemd unit sets, so the unit can exec those CLIs by bare
+   * name (#232). Absent when it could not be resolved (no exec runner).
+   */
+  serviceNpmBinDir?: string;
 };
 
 type MaterializedBotToolInstance = RuntimeConfig["sovereignTools"]["instances"][number] & {
@@ -301,7 +358,78 @@ const DOCTOR_DISK_WARN_BYTES = 2 * 1024 * 1024 * 1024;
 const DOCTOR_DISK_FAIL_BYTES = 500 * 1024 * 1024;
 const LOBSTER_CLI_PROBE_TIMEOUT_MS = 20_000;
 const LOBSTER_CLI_INSTALL_TIMEOUT_MS = 5 * 60_000;
+// Per-attempt timeout for a single onboarding-page reachability GET. The
+// repeated polling (and its overall deadline) lives in the CLI/web callers; this
+// only bounds one request so a hung connection can't stall a poll tick.
+const ONBOARDING_READINESS_PROBE_TIMEOUT_MS = 4_000;
+const ONBOARDING_PRIVATE_IPV4_RANGES = [/^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./];
+// Return the lowercased hostname of a URL, or null if it does not parse — so a
+// partially-written/malformed publicBaseUrl never throws out of a readiness
+// probe (it just falls through to the public/validating path and reports
+// not-ready).
+const tryParseHostname = (url: string): string | null => {
+  try {
+    return new URL(url).hostname.trim().toLowerCase();
+  } catch {
+    return null;
+  }
+};
+// A private/loopback/.local host implies the node served a Caddy local-CA
+// ("tls internal") cert, so an onboarding-readiness GET must relax chain
+// verification. Public hostnames get a real CA cert and must validate normally.
+// Covers IPv4 RFC1918 + loopback and IPv6 loopback / ULA (fc00::/7) /
+// link-local (fe80::); anything else is treated as public.
+const isLanOrLoopbackHost = (host: string): boolean => {
+  const normalized = host
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "");
+  if (normalized === "localhost" || normalized.endsWith(".local")) {
+    return true;
+  }
+  if (isIPv4(normalized)) {
+    return (
+      normalized.startsWith("127.") ||
+      ONBOARDING_PRIVATE_IPV4_RANGES.some((re) => re.test(normalized))
+    );
+  }
+  // IPv6: loopback, IPv4-mapped loopback, ULA (fc00::/7 → fc.. / fd..), and
+  // link-local (fe80::/10 → fe8.. fe9.. fea.. feb..).
+  if (normalized === "::1" || normalized.startsWith("::ffff:127.")) {
+    return true;
+  }
+  return /^f[cd][0-9a-f]*:/.test(normalized) || /^fe[89ab][0-9a-f]*:/.test(normalized);
+};
+// How often the passthrough TLS smoke check re-probes the local TLS port while
+// waiting for the node's own Caddy to obtain its DNS-01 certificate.
+const RELAY_PASSTHROUGH_TLS_PROBE_INTERVAL_MS = 5_000;
+// Total wall-clock budget for the passthrough TLS smoke check. In relay
+// TLS-passthrough mode the node terminates its own HTTPS via a DNS-01-backed
+// Caddy. Caddy intentionally waits `propagation_delay` (150s) after publishing
+// the DNS-01 TXT record before asking the ACME CA to validate it, and may keep
+// polling for propagation up to `propagation_timeout` (600s) before that. So
+// the certificate legitimately does NOT exist until ~propagation_delay plus
+// real propagation + ACME finalize have elapsed — well past the old ~20s poll
+// window, which declared SMOKE_CHECKS_FAILED on every passthrough install even
+// though the cert appeared seconds later.
+//
+// Size the smoke window from the SAME propagation constants the Caddyfile is
+// rendered with (imported, not re-hardcoded, so they can't drift) plus a small
+// finalize headroom. This only WIDENS the window; the fail-closed semantics are
+// unchanged — if no certificate is ever presented within the budget the install
+// still fails and the node never falls back to serving plaintext.
+const RELAY_PASSTHROUGH_TLS_FINALIZE_HEADROOM_MS = 60_000;
+const RELAY_PASSTHROUGH_TLS_SMOKE_WINDOW_MS =
+  (RELAY_PASSTHROUGH_DNS01_PROPAGATION_DELAY_SECONDS +
+    RELAY_PASSTHROUGH_DNS01_PROPAGATION_TIMEOUT_SECONDS) *
+    1_000 +
+  RELAY_PASSTHROUGH_TLS_FINALIZE_HEADROOM_MS;
+const RELAY_PASSTHROUGH_TLS_PROBE_ATTEMPTS = Math.max(
+  1,
+  Math.ceil(RELAY_PASSTHROUGH_TLS_SMOKE_WINDOW_MS / RELAY_PASSTHROUGH_TLS_PROBE_INTERVAL_MS),
+);
 const MAIL_SENTINEL_MIGRATION_ID = "mail-sentinel-instances";
+const MAIL_SENTINEL_IMAP_PROTOCOL_KEY = "imapProtocol";
 const MAIL_SENTINEL_IMAP_HOST_KEY = "imapHost";
 const MAIL_SENTINEL_IMAP_PORT_KEY = "imapPort";
 const MAIL_SENTINEL_IMAP_TLS_KEY = "imapTls";
@@ -328,9 +456,35 @@ type RealInstallerServiceDeps = {
   preflightChecker: HostPreflightChecker;
   dockerRuntimePreparer?: DockerRuntimePreparer;
   imapTester: ImapTester;
+  /** Optional: when absent, OpenRouter keys are accepted without a live check. */
+  openrouterKeyValidator?: OpenrouterKeyValidator;
   matrixProvisioner: BundledMatrixProvisioner;
   execRunner?: ExecRunner;
   fetchImpl?: FetchLike;
+  /**
+   * Uids allowed to own a release-authorization attestation (default: root
+   * only). Injectable exclusively for tests, which cannot create root-owned
+   * files; production wiring never sets it.
+   */
+  releaseAuthorizationOwnerUids?: readonly number[];
+};
+
+type RuntimeConfigTemplatesInstalledEntry = RuntimeConfig["templates"]["installed"][number];
+
+/** A pin transition staged during an authorized reconcile, keyed by ref. */
+type StagedTemplatePinTransition = {
+  botId: string;
+  templateRef: string;
+  kind: "tool" | "agent";
+  previous: { manifestSha256: string; keyId: string };
+  next: { manifestSha256: string; keyId: string };
+  entry: RuntimeConfigTemplatesInstalledEntry;
+  diff: TemplateTransitionDiff;
+};
+
+type ReconcileTransitionContext = {
+  authorization: ReleaseAuthorization;
+  transitions: Map<string, StagedTemplatePinTransition>;
 };
 
 export class RealInstallerService implements InstallerService {
@@ -357,11 +511,47 @@ export class RealInstallerService implements InstallerService {
 
   private readonly imapTester: ImapTester;
 
+  private readonly openrouterKeyValidator: OpenrouterKeyValidator | null;
+
   private readonly matrixProvisioner: BundledMatrixProvisioner;
 
   private readonly execRunner: ExecRunner | null;
 
   private readonly fetchImpl: FetchLike;
+
+  // Passthrough TLS smoke-check poll cadence. These default to the DNS-01-aware
+  // window derived from the Caddyfile propagation constants (so they never drift
+  // from the values the node is actually rendered with). They are instance
+  // fields rather than direct constant reads only so tests can shrink the cadence
+  // and exercise the loop-exhaustion (fail-closed) path without waiting minutes.
+  protected relayPassthroughTlsProbeIntervalMs = RELAY_PASSTHROUGH_TLS_PROBE_INTERVAL_MS;
+  protected relayPassthroughTlsProbeAttempts = RELAY_PASSTHROUGH_TLS_PROBE_ATTEMPTS;
+
+  // Per-attempt timeout for a single onboarding-readiness GET. A protected field
+  // (not a direct constant read) only so tests can shrink it and exercise the
+  // not-reachable path without waiting out the real timeout.
+  protected onboardingReadinessProbeTimeoutMs = ONBOARDING_READINESS_PROBE_TIMEOUT_MS;
+
+  // Cached stable installation id (see resolveStableInstallationId). Memoised so
+  // every relay enroll/refresh in a single install run sends the same identity.
+  private stableInstallationId: string | null = null;
+
+  // Active verified-release transition context. Non-null ONLY while
+  // reconcileAgentWorkspaces runs with a valid release authorization; the
+  // resolveInstalled*Template pin checks consult it to stage an authorized
+  // transition instead of throwing TEMPLATE_PIN_MISMATCH. Never set by any
+  // other entry point, so every other caller keeps the hard refusal.
+  private reconcileTransitionContext: ReconcileTransitionContext | null = null;
+
+  private readonly releaseAuthorizationOwnerUids: readonly number[];
+
+  // Candidate machine-id paths for resolveStableInstallationId, in priority
+  // order. A protected field (not a direct constant read) only so tests can
+  // redirect them to point at temp files and exercise the persisted fallback.
+  protected machineIdCandidatePaths: readonly string[] = [
+    "/etc/machine-id",
+    "/var/lib/dbus/machine-id",
+  ];
 
   constructor(
     private readonly logger: Logger,
@@ -391,9 +581,11 @@ export class RealInstallerService implements InstallerService {
       }),
     };
     this.imapTester = deps.imapTester;
+    this.openrouterKeyValidator = deps.openrouterKeyValidator ?? null;
     this.matrixProvisioner = deps.matrixProvisioner;
     this.execRunner = deps.execRunner ?? null;
     this.fetchImpl = deps.fetchImpl ?? defaultFetch;
+    this.releaseAuthorizationOwnerUids = deps.releaseAuthorizationOwnerUids ?? [0];
   }
 
   private async listBotPackages(): Promise<LoadedBotPackage[]> {
@@ -710,6 +902,7 @@ export class RealInstallerService implements InstallerService {
         ...(topLevelImapAuthoritative
           ? {
               [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: true,
+              [MAIL_SENTINEL_IMAP_PROTOCOL_KEY]: input.imap.protocol,
               [MAIL_SENTINEL_IMAP_HOST_KEY]: input.imap.host,
               [MAIL_SENTINEL_IMAP_PORT_KEY]: input.imap.port,
               [MAIL_SENTINEL_IMAP_TLS_KEY]: input.imap.tls,
@@ -719,6 +912,12 @@ export class RealInstallerService implements InstallerService {
           : {
               ...(isImapSentinel(input.entry.config[MAIL_SENTINEL_IMAP_CONFIGURED_KEY])
                 ? { [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: false }
+                : {}),
+              ...(input.entry.config[MAIL_SENTINEL_IMAP_PROTOCOL_KEY] === undefined
+                ? {
+                    [MAIL_SENTINEL_IMAP_PROTOCOL_KEY]:
+                      previous?.config[MAIL_SENTINEL_IMAP_PROTOCOL_KEY] ?? input.imap.protocol,
+                  }
                 : {}),
               ...(input.entry.config[MAIL_SENTINEL_IMAP_HOST_KEY] === undefined
                 ? {
@@ -981,6 +1180,20 @@ export class RealInstallerService implements InstallerService {
     return this.imapTester.test(req);
   }
 
+  async testOpenrouter(req: TestOpenrouterRequest): Promise<TestOpenrouterResult> {
+    if (this.openrouterKeyValidator === null) {
+      return {
+        ok: false,
+        error: {
+          code: "OPENROUTER_KEY_CHECK_UNAVAILABLE",
+          message: "OpenRouter key validation is not available in this runtime",
+          retryable: false,
+        },
+      };
+    }
+    return await this.openrouterKeyValidator.validate(req.openrouter.apiKey);
+  }
+
   async testMatrix(req: TestMatrixRequest): Promise<TestMatrixResult> {
     return this.matrixProvisioner.test(req);
   }
@@ -1005,6 +1218,7 @@ export class RealInstallerService implements InstallerService {
       })),
     };
 
+    await this.pruneInstallJobRecords();
     await this.persistJobSnapshot({
       installationId,
       request: req,
@@ -1296,6 +1510,7 @@ export class RealInstallerService implements InstallerService {
       hostResources: hostResourceStatus.resources,
       imap: {
         authStatus: "unknown",
+        ...(runtimeConfig === null ? {} : { protocol: runtimeConfig.imap.protocol }),
         ...(runtimeConfig?.imap.status !== "configured" || runtimeConfig.imap.host === undefined
           ? {}
           : { host: runtimeConfig.imap.host }),
@@ -1304,7 +1519,13 @@ export class RealInstallerService implements InstallerService {
           : { mailbox: runtimeConfig.imap.mailbox }),
       },
       version: {
-        sovereignNode: process.env.npm_package_version ?? "2.0.0",
+        // Build identity, not `process.env.npm_package_version`. That variable is
+        // only set when a process is launched *by npm*, so every systemd-launched
+        // node reported the old `?? "2.0.0"` fallback regardless of what it was
+        // actually running — a confidently wrong version that sent support down
+        // the wrong path. `getNodeBuildInfo()` reports "unknown" when it cannot
+        // tell, which is honest and actionable.
+        sovereignNode: getNodeBuildInfo().version,
         contractVersion: CONTRACT_VERSION,
         ...(detectedOpenClaw?.version === undefined ? {} : { openclaw: detectedOpenClaw.version }),
         ...(pluginIds === undefined
@@ -1592,8 +1813,229 @@ export class RealInstallerService implements InstallerService {
     };
   }
 
+  /** Non-secret view of the settings that can be changed after install. */
+  async getSettings(): Promise<SettingsSummary> {
+    const runtimeConfig = await this.readRuntimeConfig();
+    const saved = await this.tryReadSavedInstallRequest();
+    const imap = runtimeConfig.imap;
+    const relayHostname = runtimeConfig.relay?.hostname;
+    const requestedSlug = saved?.request.relay?.requestedSlug;
+    return {
+      mail: {
+        configured: imap.status === "configured",
+        protocol: imap.protocol,
+        host: imap.status === "configured" ? imap.host : "",
+        port: imap.port,
+        tls: imap.tls,
+        username: imap.status === "configured" ? imap.username : "",
+        mailbox: imap.mailbox,
+        passwordSet:
+          imap.status === "configured" && (await this.secretRefIsReadable(imap.secretRef)),
+        editable: true,
+      },
+      openrouter: {
+        model: runtimeConfig.openrouter.model,
+        apiKeySet: await this.secretRefIsReadable(runtimeConfig.openrouter.apiKeySecretRef),
+        editable: true,
+      },
+      matrix: {
+        accessMode: runtimeConfig.matrix.accessMode,
+        homeserverDomain: runtimeConfig.matrix.homeserverDomain,
+        publicBaseUrl: runtimeConfig.matrix.publicBaseUrl,
+        federationEnabled: runtimeConfig.matrix.federationEnabled,
+        alertRoomName: runtimeConfig.matrix.alertRoom.roomName,
+        editable: false,
+        reason:
+          "The homeserver identity is fixed at install time: Matrix user IDs, room history and the TLS certificate are all bound to it. Changing it requires a migration (re-install with a new node name).",
+      },
+      ...(runtimeConfig.matrix.accessMode === "relay"
+        ? {
+            relay: {
+              ...(requestedSlug === undefined
+                ? relayHostname === undefined
+                  ? {}
+                  : { slug: relayHostname.split(".")[0] ?? relayHostname }
+                : { slug: requestedSlug }),
+              ...(relayHostname === undefined ? {} : { hostname: relayHostname }),
+              editable: false,
+              reason:
+                "The node name (relay slug) is the Matrix homeserver domain on the managed relay; changing it means a new homeserver identity, relay re-enrollment and a new certificate. It is read-only for now.",
+            },
+          }
+        : {}),
+    };
+  }
+
+  private async secretRefIsReadable(secretRef: string): Promise<boolean> {
+    if (secretRef.startsWith("file:")) {
+      try {
+        await access(secretRef.slice("file:".length), fsConstants.R_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    if (secretRef.startsWith("env:")) {
+      const value = process.env[secretRef.slice("env:".length)];
+      return value !== undefined && value.length > 0;
+    }
+    return false;
+  }
+
+  /**
+   * Replace the mail connection after install: validate → persist → apply.
+   *
+   * The new connection is tested first with the submitted credentials; if
+   * that fails nothing on disk changes and the previously working connection
+   * stays active. Only after a successful test is the secret written, the
+   * saved install request and runtime config updated, and the idempotent
+   * install job re-run so the mail-sentinel bot/tool bindings are regenerated
+   * (the same path `mail-sentinels update` uses). The scan unit is a oneshot
+   * that re-reads its config on every timer tick, so no daemon restart is
+   * required beyond what the job itself performs.
+   */
   async reconfigureImap(req: ReconfigureImapRequest): Promise<ReconfigureResult> {
-    return this.stubService.reconfigureImap(req);
+    await this.assertNoPendingMigrations();
+    const runtimeConfig = await this.readRuntimeConfig();
+    const { request } = await this.readSavedInstallRequestOrThrow();
+    const protocol = req.imap.protocol ?? "imap";
+    // POP3 has no folders; never carry an IMAP folder name across.
+    const mailbox = protocol === "pop3" ? "INBOX" : (req.imap.mailbox ?? "INBOX");
+    const candidate = { ...req.imap, protocol, mailbox };
+
+    const hasCredential =
+      (req.imap.password !== undefined && req.imap.password.length > 0) ||
+      (req.imap.secretRef !== undefined && req.imap.secretRef.length > 0);
+    if (!hasCredential) {
+      throw {
+        code: "MAIL_CREDENTIALS_REQUIRED",
+        message: "Provide the mail password (or a secretRef) to change the mail connection",
+        retryable: false,
+      };
+    }
+
+    const test = await this.testImap({ imap: candidate });
+    if (!test.ok) {
+      return {
+        target: "imap",
+        changed: [],
+        restartRequiredServices: [],
+        validation: [
+          check(
+            "mail-connection",
+            "Mail connection test",
+            "fail",
+            test.error?.message ?? "The mail server rejected the new connection settings",
+            {
+              ...(test.error?.code === undefined ? {} : { code: test.error.code }),
+              protocol,
+              host: candidate.host,
+              port: candidate.port,
+              tls: candidate.tls,
+            },
+          ),
+          check(
+            "mail-config",
+            "Mail configuration",
+            "pass",
+            "Previous mail configuration left unchanged",
+          ),
+        ],
+      };
+    }
+
+    const secretRef =
+      req.imap.password !== undefined && req.imap.password.length > 0
+        ? await this.writeManagedSecretFile("imap-password", req.imap.password)
+        : await this.materializeEnvSecretRef({
+            secretRef: req.imap.secretRef ?? "",
+            fileName: "imap-password",
+            missingErrorCode: "IMAP_SECRET_READ_FAILED",
+          });
+
+    const previous = runtimeConfig.imap;
+    const changed: string[] = [];
+    if (previous.status !== "configured") {
+      changed.push("imap.status");
+    }
+    if (previous.protocol !== protocol) {
+      changed.push("imap.protocol");
+    }
+    if (previous.host !== candidate.host) {
+      changed.push("imap.host");
+    }
+    if (previous.port !== candidate.port) {
+      changed.push("imap.port");
+    }
+    if (previous.tls !== candidate.tls) {
+      changed.push("imap.tls");
+    }
+    if (previous.username !== candidate.username) {
+      changed.push("imap.username");
+    }
+    if (previous.mailbox !== mailbox) {
+      changed.push("imap.mailbox");
+    }
+    // A submitted password always counts as a credential change; the file is
+    // overwritten in place and there is no way (by design) to compare it.
+    changed.push("imap.secretRef");
+
+    request.imap = {
+      protocol,
+      host: candidate.host,
+      port: candidate.port,
+      tls: candidate.tls,
+      username: candidate.username,
+      mailbox,
+      secretRef,
+    };
+    // The top-level imap block is authoritative for every mail-sentinel
+    // instance's connection settings, but the per-instance secret binding is
+    // only seeded when absent — point every instance at the new secret so an
+    // instance created with its own secret file switches over too.
+    for (const instance of request.bots?.instances ?? []) {
+      if (instance.packageId !== MAIL_SENTINEL_AGENT_ID) {
+        continue;
+      }
+      instance.secretRefs = normalizeStringRecord({
+        ...(instance.secretRefs ?? {}),
+        [MAIL_SENTINEL_IMAP_PASSWORD_SECRET_KEY]: secretRef,
+      });
+      instance.config = {
+        ...(instance.config ?? {}),
+        [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: true,
+        [MAIL_SENTINEL_IMAP_PROTOCOL_KEY]: protocol,
+        [MAIL_SENTINEL_IMAP_HOST_KEY]: candidate.host,
+        [MAIL_SENTINEL_IMAP_PORT_KEY]: candidate.port,
+        [MAIL_SENTINEL_IMAP_TLS_KEY]: candidate.tls,
+        [MAIL_SENTINEL_IMAP_USERNAME_KEY]: candidate.username,
+        [MAIL_SENTINEL_IMAP_MAILBOX_KEY]: mailbox,
+      };
+    }
+    await this.writeSavedInstallRequest(request);
+    const { job } = await this.startInstall(request);
+
+    return {
+      target: "imap",
+      changed,
+      restartRequiredServices: [],
+      validation: [
+        check(
+          "mail-connection",
+          "Mail connection test",
+          "pass",
+          `${protocol.toUpperCase()} connection to ${candidate.host}:${String(candidate.port)} succeeded`,
+        ),
+        check(
+          "mail-config",
+          "Mail configuration",
+          "pass",
+          "New mail connection saved; applying through the install job",
+          { jobId: job.jobId },
+        ),
+      ],
+      job,
+    };
   }
 
   async reconfigureMatrix(req: ReconfigureMatrixRequest): Promise<ReconfigureResult> {
@@ -1695,6 +2137,33 @@ export class RealInstallerService implements InstallerService {
 
   async reconfigureOpenrouter(req: ReconfigureOpenrouterRequest): Promise<ReconfigureResult> {
     const runtimeConfig = await this.readRuntimeConfig();
+    // Validate a replacement key before anything is written: a rejected key
+    // leaves the previous working key in place.
+    if (req.openrouter.apiKey !== undefined && this.openrouterKeyValidator !== null) {
+      const keyCheck = await this.openrouterKeyValidator.validate(req.openrouter.apiKey);
+      if (!keyCheck.ok) {
+        return {
+          target: "openrouter",
+          changed: [],
+          restartRequiredServices: [],
+          validation: [
+            check(
+              "openrouter-key",
+              "OpenRouter API key check",
+              "fail",
+              keyCheck.error?.message ?? "OpenRouter rejected the API key",
+              keyCheck.error?.code === undefined ? undefined : { code: keyCheck.error.code },
+            ),
+            check(
+              "openrouter-runtime",
+              "OpenRouter runtime config",
+              "pass",
+              "Previous OpenRouter settings left unchanged",
+            ),
+          ],
+        };
+      }
+    }
     const raw = await readFile(this.paths.configPath, "utf8");
     const parsed = parseJsonDocument(raw);
     if (!isRecord(parsed)) {
@@ -1751,6 +2220,7 @@ export class RealInstallerService implements InstallerService {
       const nextRuntimeConfig: RuntimeConfig = {
         ...runtimeConfig,
         openrouter: {
+          ...runtimeConfig.openrouter,
           model: nextModel,
           apiKeySecretRef: nextSecretRef,
         },
@@ -1867,6 +2337,147 @@ export class RealInstallerService implements InstallerService {
       username: state.username,
       homeserverUrl: state.homeserverUrl,
     };
+  }
+
+  /**
+   * One-shot reachability check of the public onboarding page. Both installers
+   * (CLI and web) poll this to decide when it is safe to reveal the onboarding
+   * URL/QR: in relay-passthrough mode the node terminates its own TLS via deSEC
+   * DNS-01, so the page is unreachable for the minutes it takes the cert to
+   * issue. This never throws — every failure path (config not written yet, page
+   * not exposed, network/TLS error) returns `ready: false` so callers can keep
+   * polling and eventually reveal-with-warning on their own timeout.
+   */
+  async getMatrixOnboardingReadiness(): Promise<MatrixOnboardingReadiness> {
+    const runtimeConfig = await this.tryReadRuntimeConfig();
+    if (runtimeConfig === null) {
+      // Config still being written by an in-flight install. Not an error —
+      // callers should keep polling.
+      return { ready: false, url: "", mode: "direct", reason: "config-not-found" };
+    }
+
+    const mode = this.resolveOnboardingReadinessMode(runtimeConfig);
+
+    let url: string;
+    try {
+      url = this.assertMatrixOnboardingAvailable(runtimeConfig);
+    } catch {
+      // local-dev / plaintext installs have no HTTPS onboarding page to reach.
+      return { ready: false, url: "", mode, reason: "onboarding-unavailable" };
+    }
+
+    const probe = await this.probeOnboardingUrlReachable(url, mode === "internal");
+    return {
+      ready: probe.ready,
+      url,
+      mode,
+      ...(probe.status === undefined ? {} : { status: probe.status }),
+      ...(probe.ready
+        ? { reason: "public-200" }
+        : probe.reason === undefined
+          ? {}
+          : { reason: probe.reason }),
+    };
+  }
+
+  private resolveOnboardingReadinessMode(
+    runtimeConfig: RuntimeConfig,
+  ): MatrixOnboardingReadiness["mode"] {
+    const relay = runtimeConfig.relay;
+    if (relay?.enabled) {
+      return relay.tunnel.type === "https" ? "relay-passthrough" : "relay";
+    }
+    if (runtimeConfig.matrix.accessMode === "relay") {
+      return "relay";
+    }
+    // Direct mode: a private/loopback/.local host means Caddy issued a local-CA
+    // ("tls internal") cert, so the readiness GET must tolerate it. A malformed
+    // publicBaseUrl (partially-written config) is treated as direct/public — the
+    // probe then fails and reports not-ready rather than throwing.
+    const host = tryParseHostname(runtimeConfig.matrix.publicBaseUrl);
+    return host !== null && isLanOrLoopbackHost(host) ? "internal" : "direct";
+  }
+
+  // A single fast GET of the public onboarding URL. Readiness is end-to-end:
+  // the page must actually answer 200 the way a client's browser/phone would.
+  // We deliberately do NOT probe a local port as a fallback — the clients poll
+  // this on an interval with their own deadline, so transient unreachability
+  // (e.g. a relay-passthrough cert still issuing) simply keeps polling and, on
+  // timeout, reveals-with-warning. Redirects are followed: a 200 after a
+  // canonical-host/slash/HTTPS-upgrade redirect still means the page serves.
+  private async probeOnboardingUrlReachable(
+    url: string,
+    allowSelfSigned: boolean,
+  ): Promise<{ ready: boolean; status?: number; reason?: string }> {
+    if (allowSelfSigned) {
+      return this.probeOnboardingUrlSelfSigned(url);
+    }
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), this.onboardingReadinessProbeTimeoutMs);
+      try {
+        const response = await this.fetchImpl(url, {
+          method: "GET",
+          headers: { Accept: "text/html" },
+          signal: controller.signal,
+        });
+        return response.status === 200
+          ? { ready: true, status: response.status }
+          : { ready: false, status: response.status, reason: `http-${response.status}` };
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch (error) {
+      return {
+        ready: false,
+        reason: error instanceof Error ? error.message : "fetch-error",
+      };
+    }
+  }
+
+  // Internal/LAN mode serves a local-CA cert that a validating fetch rejects.
+  // Issue the GET with chain verification relaxed (never globally) while still
+  // requiring a 200. Uses node:https directly because FetchLike's RequestInit
+  // has no way to pass a per-request rejectUnauthorized.
+  private probeOnboardingUrlSelfSigned(
+    url: string,
+  ): Promise<{ ready: boolean; status?: number; reason?: string }> {
+    return new Promise((resolvePromise) => {
+      let settled = false;
+      const settle = (value: { ready: boolean; status?: number; reason?: string }): void => {
+        if (settled) return;
+        settled = true;
+        resolvePromise(value);
+      };
+      const req = httpsRequest(
+        url,
+        {
+          method: "GET",
+          rejectUnauthorized: false,
+          headers: { Accept: "text/html" },
+          timeout: this.onboardingReadinessProbeTimeoutMs,
+        },
+        (res) => {
+          const status = res.statusCode ?? 0;
+          res.resume();
+          // A 3xx from the local edge still means the page serves; treat any
+          // 2xx/3xx as reachable (the validating-fetch path follows redirects
+          // and lands on 200, so keep the two paths' notion of "ready" aligned).
+          const ready = status >= 200 && status < 400;
+          settle(
+            ready ? { ready: true, status } : { ready: false, status, reason: `http-${status}` },
+          );
+        },
+      );
+      req.on("timeout", () => {
+        req.destroy();
+        settle({ ready: false, reason: "timeout" });
+      });
+      req.on("error", (error: Error) => {
+        settle({ ready: false, reason: error.message });
+      });
+      req.end();
+    });
   }
 
   private getSetupUiBootstrapStatePath(): string {
@@ -2180,6 +2791,7 @@ export class RealInstallerService implements InstallerService {
     const migratedConfig: Record<string, BotConfigValue> = {
       ...legacyBotConfig,
       [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: runtimeConfig.imap.status === "configured",
+      [MAIL_SENTINEL_IMAP_PROTOCOL_KEY]: runtimeConfig.imap.protocol,
       [MAIL_SENTINEL_IMAP_HOST_KEY]: runtimeConfig.imap.host,
       [MAIL_SENTINEL_IMAP_PORT_KEY]: runtimeConfig.imap.port,
       [MAIL_SENTINEL_IMAP_TLS_KEY]: runtimeConfig.imap.tls,
@@ -2247,6 +2859,7 @@ export class RealInstallerService implements InstallerService {
                 workspace: legacyAgent.workspace,
                 config: {
                   [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: runtimeConfig.imap.status === "configured",
+                  [MAIL_SENTINEL_IMAP_PROTOCOL_KEY]: runtimeConfig.imap.protocol,
                   [MAIL_SENTINEL_IMAP_HOST_KEY]: runtimeConfig.imap.host,
                   [MAIL_SENTINEL_IMAP_PORT_KEY]: runtimeConfig.imap.port,
                   [MAIL_SENTINEL_IMAP_TLS_KEY]: runtimeConfig.imap.tls,
@@ -2308,6 +2921,7 @@ export class RealInstallerService implements InstallerService {
     imapHost: string;
     imapPort: number;
     imapTls: boolean;
+    imapProtocol?: MailProtocol;
     imapUsername: string;
     imapPassword?: string;
     imapSecretRef?: string;
@@ -2330,6 +2944,7 @@ export class RealInstallerService implements InstallerService {
     imapHost?: string;
     imapPort?: number;
     imapTls?: boolean;
+    imapProtocol?: MailProtocol;
     imapUsername?: string;
     imapPassword?: string;
     imapSecretRef?: string;
@@ -2383,6 +2998,385 @@ export class RealInstallerService implements InstallerService {
     return {
       agents: runtimeConfig.openclawProfile.agents.map((entry) => this.toManagedAgentOutput(entry)),
     };
+  }
+
+  /**
+   * Re-materialise every managed agent's workspace from the CURRENTLY INSTALLED
+   * bot catalog.
+   *
+   * Why this exists: a bot lives on a device twice — the catalog under
+   * `<botsDir>/bots/<id>/`, and the agent workspace at
+   * `<workspace>/bin/<id>.js` that systemd actually executes. A Pro update
+   * replaces the catalog wholesale but nothing re-applied the workspace, so the
+   * running bot stayed at the previously installed build indefinitely. The
+   * installer's own `verify_bot_pins` could not see it: it reads the catalog's
+   * sovereign-bot.json, which was correctly updated.
+   *
+   * Deliberately NARROWER than persistManagedAgentTopology: it recompiles the
+   * host-resource plan and rewrites workspace files, but does NOT restart the
+   * OpenClaw gateway, reset agent sessions, or touch Matrix. An updater must be
+   * able to call this without causing side effects it did not ask for — and
+   * refreshGatewayAfterRuntimeConfig throws when the gateway cannot restart,
+   * which would abort an otherwise healthy update.
+   *
+   * Honours writePolicy: `always` files are overwritten from the catalog,
+   * `ifMissing` files (operator state such as user-policy.json) are left alone.
+   * Idempotent — re-running it on an up-to-date device rewrites identical bytes.
+   */
+  async reconcileAgentWorkspaces(
+    options?: ReconcileAgentWorkspacesOptions,
+  ): Promise<ReconcileAgentWorkspacesResult> {
+    let runtimeConfig: RuntimeConfig;
+    try {
+      runtimeConfig = await this.readRuntimeConfig();
+    } catch (error) {
+      // No core config yet (fresh host, pre-wizard). Nothing to reconcile; the
+      // install job materialises the workspaces when it runs. Any OTHER failure
+      // is a real problem and must surface.
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        (error as { code?: unknown }).code === "CONFIG_NOT_FOUND"
+      ) {
+        return {
+          reconciled: [],
+          templateTransitions: [],
+          releaseAuthorization: null,
+          systemdUnits: { applied: [] },
+        };
+      }
+      throw error;
+    }
+
+    // A release authorization is loaded and validated up front; ANY problem
+    // with it is a hard failure — an invalid attestation must never degrade
+    // into an unauthorized transition or a silent normal reconcile.
+    const authorization =
+      options?.releaseAuthorizationPath === undefined
+        ? null
+        : loadReleaseAuthorization(options.releaseAuthorizationPath, {
+            allowedOwnerUids: this.releaseAuthorizationOwnerUids,
+          });
+    this.reconcileTransitionContext =
+      authorization === null ? null : { authorization, transitions: new Map() };
+
+    try {
+      // Compilation resolves every pinned template. With a transition context,
+      // a pin mismatch that the authorization exactly binds is STAGED (the
+      // target template is used in-memory; the pin on disk is untouched).
+      // Every other mismatch still throws here, before any file is written.
+      await this.refreshRuntimeHostResources(runtimeConfig);
+
+      const transitions = Array.from(this.reconcileTransitionContext?.transitions.values() ?? []);
+      if (transitions.length > 0 && authorization !== null) {
+        // Journal first: a crash between the workspace writes and the pin
+        // commit leaves a diagnosable marker. The journal never authorizes
+        // anything — a retry must present the (still root-owned) attestation
+        // again and re-derives every digest from scratch.
+        await this.writeTemplateTransitionJournal(authorization, transitions);
+      } else {
+        await this.clearTemplateTransitionJournal();
+      }
+
+      const reconciled: string[] = [];
+      for (const agent of runtimeConfig.openclawProfile.agents) {
+        await this.ensureManagedAgentWorkspace({
+          id: agent.id,
+          workspace: agent.workspace,
+          runtimeConfig,
+        });
+        reconciled.push(agent.id);
+      }
+
+      let committed = false;
+      if (transitions.length > 0) {
+        // Workspaces now reflect the release-authorized templates; commit the
+        // pins in one atomic config write, then verify pin ↔ catalog agreement.
+        await this.persistTemplatePinTransitions(runtimeConfig, transitions);
+        await this.verifyTemplatePinTransitions(transitions);
+        await this.clearTemplateTransitionJournal();
+        committed = true;
+      }
+
+      // Converge the compiled bot systemd units (scan service/timer). The
+      // workspace loop above only writes workspace-local files; without this,
+      // a device whose units were never created (issue #224: the wizard's
+      // unprivileged configure step silently skipped them) stays unscheduled
+      // through every update while reporting healthy. Reconcile runs as root
+      // on the update path, so this is also the fleet-wide repair. A unit
+      // that cannot be converged fails the reconcile — and thereby the
+      // update — rather than leaving a bot installed but never scheduled.
+      const systemdUnits = await this.applyCompiledSystemdResourcesOrThrow(runtimeConfig);
+
+      return {
+        reconciled,
+        systemdUnits,
+        templateTransitions: transitions.map((transition) =>
+          renderTemplateTransitionReport(transition, committed),
+        ),
+        releaseAuthorization:
+          authorization === null
+            ? null
+            : {
+                releaseId: authorization.releaseId,
+                artifactSha256: authorization.artifactSha256,
+                runId: authorization.runId,
+              },
+      };
+    } finally {
+      this.reconcileTransitionContext = null;
+    }
+  }
+
+  /**
+   * Attempt to authorize a pin transition for `ref` under the active
+   * verified-release context. Returns true only when the attestation binds
+   * the EXACT installed catalog content: bot id, bot version, and the raw
+   * byte digest of the catalog's sovereign-bot.json must all match what the
+   * root updater captured from the signature-verified bundle. On success the
+   * transition (with its structural diff) is staged; nothing touches disk.
+   */
+  private tryStageTemplatePinTransition(input: {
+    kind: "tool" | "agent";
+    ref: string;
+    installed: RuntimeConfigTemplatesInstalledEntry;
+    botPackage: LoadedBotPackage;
+    next: { manifestSha256: string; keyId: string };
+    entry: RuntimeConfigTemplatesInstalledEntry;
+    targetToolTemplate?: ToolTemplateDefinition;
+  }): boolean {
+    const context = this.reconcileTransitionContext;
+    if (context === null) {
+      return false;
+    }
+    const authorizedBot = findAuthorizedReleaseBot(context.authorization, {
+      botId: input.botPackage.manifest.id,
+      botVersion: input.botPackage.manifest.version,
+      manifestFileSha256: input.botPackage.manifestFileSha256,
+    });
+    if (authorizedBot === null) {
+      return false;
+    }
+
+    const existing = context.transitions.get(input.ref);
+    if (existing !== undefined) {
+      // Already staged during this compilation pass (the same ref resolves
+      // repeatedly). Accept only the identical target.
+      return (
+        existing.next.manifestSha256 === input.next.manifestSha256 &&
+        existing.next.keyId === input.next.keyId
+      );
+    }
+
+    context.transitions.set(input.ref, {
+      botId: input.botPackage.manifest.id,
+      templateRef: input.ref,
+      kind: input.kind,
+      previous: {
+        manifestSha256: input.installed.manifestSha256,
+        keyId: input.installed.keyId,
+      },
+      next: input.next,
+      entry: input.entry,
+      diff: this.buildTemplateTransitionDiff(input, authorizedBot),
+    });
+    this.logger.info(
+      {
+        templateRef: input.ref,
+        botId: input.botPackage.manifest.id,
+        previousManifestSha256: input.installed.manifestSha256,
+        newManifestSha256: input.next.manifestSha256,
+        releaseId: context.authorization.releaseId,
+        runId: context.authorization.runId,
+      },
+      "Template pin transition authorized by verified release",
+    );
+    return true;
+  }
+
+  private buildTemplateTransitionDiff(
+    input: {
+      kind: "tool" | "agent";
+      ref: string;
+      installed: RuntimeConfigTemplatesInstalledEntry;
+      botPackage: LoadedBotPackage;
+      next: { manifestSha256: string; keyId: string };
+      targetToolTemplate?: ToolTemplateDefinition;
+    },
+    authorizedBot: AuthorizedReleaseBot,
+  ): TemplateTransitionDiff {
+    // The previous manifest content is informational (it came from the
+    // service-user-writable pre-update catalog): it feeds the operator-visible
+    // diff only, never the authorization decision. We additionally verify it
+    // actually matches the OLD pin before presenting a detailed diff, so a
+    // fabricated "previous" cannot make a transition look smaller than it is.
+    const previousManifest =
+      authorizedBot.previousManifest === undefined
+        ? null
+        : tryParseBotPackageManifest(authorizedBot.previousManifest);
+
+    if (input.kind === "tool" && input.targetToolTemplate !== undefined) {
+      const parsedRef = parseTemplateRef(input.ref);
+      const previousEntry =
+        previousManifest?.toolTemplates.find(
+          (entry) => entry.id === parsedRef.id && entry.version === parsedRef.version,
+        ) ?? null;
+      return diffToolTemplateSurfaces({
+        previous:
+          previousEntry === null
+            ? null
+            : {
+                kind: "sovereign-tool-template",
+                id: previousEntry.id,
+                version: previousEntry.version,
+                description: previousEntry.description,
+                capabilities: [...previousEntry.capabilities],
+                requiredSecretRefs: [...previousEntry.requiredSecretRefs],
+                requiredConfigKeys: [...previousEntry.requiredConfigKeys],
+                allowedCommands: [...previousEntry.allowedCommands],
+                openclawPlugins: [...previousEntry.openclawPlugins],
+                openclawBundledPlugins: [...previousEntry.openclawBundledPlugins],
+                openclawToolNames: [...previousEntry.openclawToolNames],
+              },
+        next: input.targetToolTemplate,
+        previousKeyId: input.installed.keyId,
+        nextKeyId: input.next.keyId,
+      });
+    }
+
+    return diffBotPackageSurfaces({
+      previous: previousManifest,
+      next: input.botPackage.manifest,
+      previousKeyId: input.installed.keyId,
+      nextKeyId: input.next.keyId,
+    });
+  }
+
+  private templateTransitionJournalPath(): string {
+    return join(dirname(this.paths.configPath), "template-transition-journal.json");
+  }
+
+  private async writeTemplateTransitionJournal(
+    authorization: ReleaseAuthorization,
+    transitions: StagedTemplatePinTransition[],
+  ): Promise<void> {
+    await this.writeInstallerJsonFile(
+      this.templateTransitionJournalPath(),
+      {
+        schemaVersion: 1,
+        state: "prepared",
+        createdAt: now(),
+        releaseId: authorization.releaseId,
+        artifactSha256: authorization.artifactSha256,
+        runId: authorization.runId,
+        transitions: transitions.map((transition) => ({
+          templateRef: transition.templateRef,
+          botId: transition.botId,
+          previousManifestSha256: transition.previous.manifestSha256,
+          newManifestSha256: transition.next.manifestSha256,
+        })),
+      },
+      0o600,
+    );
+  }
+
+  private async clearTemplateTransitionJournal(): Promise<void> {
+    try {
+      await unlink(this.templateTransitionJournalPath());
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
+
+  /**
+   * Commit staged pin transitions in ONE atomic config write. Operates on the
+   * raw on-disk document (read-modify-write of `templates.installed` only) so
+   * concurrent unrelated keys are preserved.
+   */
+  private async persistTemplatePinTransitions(
+    runtimeConfig: RuntimeConfig,
+    transitions: StagedTemplatePinTransition[],
+  ): Promise<void> {
+    const raw = await readFile(this.paths.configPath, "utf8");
+    const parsed = parseJsonDocument(raw);
+    if (!isRecord(parsed) || !isRecord(parsed.templates)) {
+      throw {
+        code: "CONFIG_INVALID",
+        message: "Sovereign runtime config does not match expected shape",
+        retryable: false,
+        details: { configPath: this.paths.configPath },
+      };
+    }
+    const templates = parsed.templates as Record<string, unknown>;
+    const installedRaw = Array.isArray(templates.installed) ? [...templates.installed] : [];
+    const remaining = new Map(
+      transitions.map((transition) => [transition.templateRef, transition] as const),
+    );
+    const nextInstalled = installedRaw.map((item) => {
+      if (!isRecord(item) || typeof item.id !== "string" || typeof item.version !== "string") {
+        return item;
+      }
+      const ref = formatTemplateRef(item.id, item.version);
+      const transition = remaining.get(ref);
+      if (transition === undefined) {
+        return item;
+      }
+      remaining.delete(ref);
+      return {
+        ...item,
+        ...transition.entry,
+        installedAt:
+          typeof item.installedAt === "string" ? item.installedAt : transition.entry.installedAt,
+      };
+    });
+    for (const transition of remaining.values()) {
+      nextInstalled.push(transition.entry);
+    }
+    templates.installed = nextInstalled;
+    await this.writeInstallerJsonFile(this.paths.configPath, parsed, 0o644);
+
+    // Keep the in-memory view coherent for the verification step and for any
+    // later use of this runtimeConfig object.
+    for (const transition of transitions) {
+      const updated = this.upsertInstalledTemplateEntry(
+        runtimeConfig.templates.installed,
+        transition.templateRef,
+        transition.entry,
+      );
+      runtimeConfig.templates.installed = updated.installed;
+    }
+  }
+
+  /**
+   * Post-commit verification: re-read the persisted config and require that
+   * every transitioned pin now equals its release-authorized target. Fails
+   * hard — an update must never report success with a pin/workspace split.
+   */
+  private async verifyTemplatePinTransitions(
+    transitions: StagedTemplatePinTransition[],
+  ): Promise<void> {
+    const persisted = await this.readRuntimeConfig();
+    for (const transition of transitions) {
+      const parsedRef = parseTemplateRef(transition.templateRef);
+      const entry = persisted.templates.installed.find(
+        (candidate) => candidate.id === parsedRef.id && candidate.version === parsedRef.version,
+      );
+      if (
+        entry === undefined ||
+        entry.manifestSha256 !== transition.next.manifestSha256 ||
+        entry.keyId !== transition.next.keyId ||
+        !entry.pinned
+      ) {
+        throw {
+          code: "TEMPLATE_TRANSITION_VERIFY_FAILED",
+          message: `Template pin for '${transition.templateRef}' does not match the release-authorized target after commit`,
+          retryable: true,
+          details: { templateRef: transition.templateRef },
+        };
+      }
+    }
   }
 
   async listSovereignBots(): Promise<SovereignBotListResult> {
@@ -2840,10 +3834,20 @@ export class RealInstallerService implements InstallerService {
     botPackages: LoadedBotPackage[],
     ref: string,
   ): LoadedBotPackage["toolTemplates"][number] | null {
+    return this.findBotToolTemplateWithPackage(botPackages, ref)?.toolTemplate ?? null;
+  }
+
+  private findBotToolTemplateWithPackage(
+    botPackages: LoadedBotPackage[],
+    ref: string,
+  ): {
+    botPackage: LoadedBotPackage;
+    toolTemplate: LoadedBotPackage["toolTemplates"][number];
+  } | null {
     for (const botPackage of botPackages) {
       const matched = botPackage.toolTemplates.find((entry) => entry.templateRef === ref);
       if (matched !== undefined) {
-        return matched;
+        return { botPackage, toolTemplate: matched };
       }
     }
     return null;
@@ -3152,6 +4156,7 @@ export class RealInstallerService implements InstallerService {
   ): Promise<CompiledHostPlan> {
     const resources: CompiledHostResource[] = [];
     const botStatus: CompiledBotStatus[] = [];
+    const serviceNpmBinDir = await this.resolveServiceNpmBinDir(runtimeConfig);
 
     for (const botPackage of botPackages) {
       const agents = runtimeConfig.openclawProfile.agents.filter(
@@ -3172,6 +4177,7 @@ export class RealInstallerService implements InstallerService {
             botPackage,
             botInstance?.id ?? agent.id,
           ),
+          ...(serviceNpmBinDir === undefined ? {} : { serviceNpmBinDir }),
         };
         for (const resource of botPackage.manifest.hostResources) {
           if (!this.isBotHostResourceEnabled(context, resource.enabledWhen)) {
@@ -3647,7 +4653,12 @@ export class RealInstallerService implements InstallerService {
             `WorkingDirectory=${this.resolveHostResourceString(context, resource.spec.workingDirectory)}`,
           ]),
       ...Object.entries(resource.spec.environment).map(
-        ([key, value]) => `Environment=${key}=${this.resolveHostResourceString(context, value)}`,
+        ([key, value]) =>
+          `Environment=${key}=${this.resolveHostResourceEnvironmentValue(
+            context,
+            key,
+            this.resolveHostResourceString(context, value),
+          )}`,
       ),
       `ExecStart=${resource.spec.execStart.map((entry) => this.resolveHostResourceString(context, entry)).join(" ")}`,
       ...(resource.spec.timeoutStartSec === undefined
@@ -3665,6 +4676,36 @@ export class RealInstallerService implements InstallerService {
       "",
     ];
     return lines.join("\n");
+  }
+
+  // A bot manifest declares its unit PATH as a literal (mail-sentinel's scan
+  // unit: the fixed system default), while the installer puts the lobster and
+  // openclaw CLIs into the *service user's* npm prefix. Nothing else bridged
+  // the two, so the unit could not exec `lobster` by bare name — mail-sentinel
+  // lost its semantic reviewer on every install where lobster existed only
+  // there (#232). Prepend the prefix's bin dir to every declared PATH, once.
+  private resolveHostResourceEnvironmentValue(
+    context: HostResourceContext,
+    key: string,
+    value: string,
+  ): string {
+    if (key !== "PATH" || context.serviceNpmBinDir === undefined) {
+      return value;
+    }
+    const entries = value.split(":").filter((entry) => entry.length > 0);
+    if (entries.includes(context.serviceNpmBinDir)) {
+      return value;
+    }
+    return [context.serviceNpmBinDir, ...entries].join(":");
+  }
+
+  // The service user's npm prefix bin dir — resolved from `getent passwd`
+  // like the lobster install/probe, with the same original-HOME fallback for
+  // root/dev installs, so the unit PATH and the install location cannot drift.
+  private async resolveServiceNpmBinDir(runtimeConfig: RuntimeConfig): Promise<string | undefined> {
+    const serviceIdentity = this.getConfiguredServiceIdentity(runtimeConfig);
+    const serviceHome = await this.resolveServiceUserHome(serviceIdentity.user);
+    return resolveServiceNpmBinDir(serviceHome ?? undefined);
   }
 
   private renderSystemdTimerResource(
@@ -4173,23 +5214,39 @@ export class RealInstallerService implements InstallerService {
       return coreManifest;
     }
 
-    const botTemplate = this.findBotToolTemplate(await this.listBotPackages(), ref);
-    if (botTemplate === null) {
+    const located = this.findBotToolTemplateWithPackage(await this.listBotPackages(), ref);
+    if (located === null) {
       throw {
         code: "TEMPLATE_MANIFEST_UNAVAILABLE",
         message: `Trusted manifest for '${ref}' is unavailable`,
         retryable: false,
       };
     }
+    const botTemplate = located.toolTemplate;
     if (
       botTemplate.manifestSha256 !== installed.manifestSha256 ||
       botTemplate.keyId !== installed.keyId
     ) {
-      throw {
-        code: "TEMPLATE_PIN_MISMATCH",
-        message: `Pinned metadata does not match trusted manifest for '${ref}'`,
-        retryable: false,
-      };
+      // The trusted manifest changed relative to the pin. This stays a hard
+      // refusal UNLESS an active verified-release authorization binds the
+      // exact installed catalog bytes for this bot — in that case the
+      // transition is staged and the release-authorized template is used.
+      const authorized = this.tryStageTemplatePinTransition({
+        kind: "tool",
+        ref,
+        installed,
+        botPackage: located.botPackage,
+        next: { manifestSha256: botTemplate.manifestSha256, keyId: botTemplate.keyId },
+        entry: this.buildInstalledToolTemplateEntryFromBot(botTemplate),
+        targetToolTemplate: botTemplate.manifest,
+      });
+      if (!authorized) {
+        throw {
+          code: "TEMPLATE_PIN_MISMATCH",
+          message: `Pinned metadata does not match trusted manifest for '${ref}'`,
+          retryable: false,
+        };
+      }
     }
     return botTemplate.manifest;
   }
@@ -4235,11 +5292,24 @@ export class RealInstallerService implements InstallerService {
       botPackage.manifestSha256 !== installed.manifestSha256 ||
       botPackage.keyId !== installed.keyId
     ) {
-      throw {
-        code: "TEMPLATE_PIN_MISMATCH",
-        message: `Pinned metadata does not match trusted manifest for '${ref}'`,
-        retryable: false,
-      };
+      // Same rule as the tool branch: only an active verified-release
+      // authorization that binds this exact catalog content may transition
+      // the pin; everything else remains a hard refusal.
+      const authorized = this.tryStageTemplatePinTransition({
+        kind: "agent",
+        ref,
+        installed,
+        botPackage,
+        next: { manifestSha256: botPackage.manifestSha256, keyId: botPackage.keyId },
+        entry: this.buildInstalledTemplateEntryFromBot(botPackage),
+      });
+      if (!authorized) {
+        throw {
+          code: "TEMPLATE_PIN_MISMATCH",
+          message: `Pinned metadata does not match trusted manifest for '${ref}'`,
+          retryable: false,
+        };
+      }
     }
     return botPackage.template;
   }
@@ -4454,7 +5524,21 @@ export class RealInstallerService implements InstallerService {
     );
   }
 
-  private async ensureLobsterCliInstalled(): Promise<void> {
+  private async ensureLobsterCliInstalled(runtimeConfig?: RuntimeConfig): Promise<void> {
+    // The scan service runs as the configured service user with
+    // PATH=<serviceUserHome>/.npm-global/bin (the 10-lobster-path.conf
+    // drop-in) and HOME=<serviceUserHome>. Install lobster into THAT home's
+    // npm prefix so the binary is reachable for the service user at runtime —
+    // not under the root install process's HOME (/root, mode 0700), which the
+    // service user cannot read. The installer can run as the service user
+    // (real node: the API systemd unit runs as sovereign-node) or as root
+    // (CI / curl installer): in the root case it can still write into the
+    // service user's home (which the install scripts create + own first), and
+    // npm writes world-readable/executable bins (0755) so the service user can
+    // run them. The helper probes the binary by its absolute path, so it does
+    // not depend on PATH resolution under either identity.
+    const serviceIdentity = this.getConfiguredServiceIdentity(runtimeConfig);
+    const serviceHome = await this.resolveServiceUserHome(serviceIdentity.user);
     await ensureLobsterCliInstalled({
       execRunner: this.execRunner,
       logger: this.logger,
@@ -4463,7 +5547,39 @@ export class RealInstallerService implements InstallerService {
       installTimeoutMs: LOBSTER_CLI_INSTALL_TIMEOUT_MS,
       probeTimeoutMs: LOBSTER_CLI_PROBE_TIMEOUT_MS,
       requiredCommands: ["clawd.invoke"],
+      serviceHome: serviceHome ?? undefined,
     });
+  }
+
+  // Resolve the home directory of the configured service user from
+  // getent passwd (field 6). Returns null when the user is root or cannot be
+  // resolved, in which case the lobster helper falls back to its captured
+  // ORIGINAL_HOME (dev/root installs where the service user IS the invoker).
+  private async resolveServiceUserHome(serviceUser: string): Promise<string | null> {
+    const user = serviceUser.trim();
+    if (user.length === 0 || user === "root") {
+      return null;
+    }
+    if (this.execRunner === null) {
+      return null;
+    }
+    try {
+      const passwdResult = await this.execRunner.run({
+        command: "getent",
+        args: ["passwd", user],
+        options: {
+          timeout: INSTALLER_EXEC_TIMEOUT_MS,
+        },
+      });
+      if (passwdResult.exitCode !== 0) {
+        return null;
+      }
+      const passwdFields = passwdResult.stdout.trim().split(":");
+      const home = passwdFields[5]?.trim();
+      return home !== undefined && home.length > 0 ? home : null;
+    } catch {
+      return null;
+    }
   }
 
   private renderGuardedJsonStateWorkspacePluginManifest(): string {
@@ -5355,18 +6471,49 @@ export default function (api) {
           }
         }
       }
-      await writeFile(resource.path, resource.content, "utf8");
-      if (resource.mode !== undefined) {
-        await chmod(resource.path, Number.parseInt(resource.mode, 8));
+      // Stage-then-rename: a crash mid-write must never leave a truncated
+      // managed file at the final path (the workspace entry point is what
+      // systemd executes). rename(2) within the same directory is atomic.
+      const stagedPath = `${resource.path}.staged-${randomUUID()}`;
+      try {
+        await writeFile(stagedPath, resource.content, "utf8");
+        if (resource.mode !== undefined) {
+          await chmod(stagedPath, Number.parseInt(resource.mode, 8));
+        }
+        await rename(stagedPath, resource.path);
+      } catch (error) {
+        await rm(stagedPath, { force: true });
+        throw error;
       }
       await this.applyRuntimeOwnership(resource.path);
     }
   }
 
-  private async applyCompiledSystemdResources(runtimeConfig: RuntimeConfig): Promise<void> {
-    if (typeof process.getuid !== "function" || process.getuid() !== 0) {
-      return;
-    }
+  /**
+   * Write and enable the compiled bot systemd units (e.g. Mail Sentinel's
+   * scan service + timer).
+   *
+   * This must work from BOTH privilege contexts that create or update bots:
+   * the root updater (reconcile during a verified update) and the
+   * unprivileged Pro API service (the install wizard's configure step, bot
+   * reconfiguration at runtime). The unprivileged path elevates through the
+   * scoped sudoers fragment exactly like the gateway and relay-tunnel units
+   * do — an earlier revision instead silently returned when not running as
+   * root, which is how a wizard-installed device ended up with a fully
+   * installed, correctly pinned Mail Sentinel that was never scheduled
+   * (issue #224).
+   *
+   * Never throws: every unit that could not be converged is reported in
+   * `failed` so callers decide whether that is fatal (reconcile and the
+   * install step treat it as a hard error via
+   * applyCompiledSystemdResourcesOrThrow).
+   */
+  private async applyCompiledSystemdResources(runtimeConfig: RuntimeConfig): Promise<{
+    applied: string[];
+    failed: Array<{ name: string; reason: string }>;
+  }> {
+    const applied: string[] = [];
+    const failed: Array<{ name: string; reason: string }> = [];
 
     const systemdResources = (runtimeConfig.hostResources?.resources ?? []).filter(
       (
@@ -5375,7 +6522,7 @@ export default function (api) {
         resource.kind === "systemdService" || resource.kind === "systemdTimer",
     );
     if (systemdResources.length === 0) {
-      return;
+      return { applied, failed };
     }
 
     const changedUnits: Array<{
@@ -5404,7 +6551,7 @@ export default function (api) {
         continue;
       }
       try {
-        await writeFile(unitPath, resource.content, "utf8");
+        await this.writeSystemdUnitFileElevated(unitPath, resource.content);
       } catch (error) {
         this.logger.warn(
           {
@@ -5413,6 +6560,7 @@ export default function (api) {
           },
           "Failed to write bot systemd unit",
         );
+        failed.push({ name: resource.name, reason: describeError(error) });
         continue;
       }
       changedUnits.push({
@@ -5426,23 +6574,64 @@ export default function (api) {
     }
 
     if (changedUnits.length === 0) {
-      return;
+      return { applied, failed };
     }
 
-    const reloadResult = await this.safeExec("systemctl", ["daemon-reload"]);
+    const reloadResult = await this.runSystemctlElevated(["daemon-reload"]);
     if (!reloadResult.ok || reloadResult.result.exitCode !== 0) {
       this.logger.warn("systemctl daemon-reload failed after writing bot systemd units");
-      return;
+      for (const unit of changedUnits) {
+        failed.push({ name: unit.name, reason: "systemctl daemon-reload failed" });
+      }
+      return { applied, failed };
     }
 
     for (const unit of changedUnits) {
+      let unitOk = true;
       if (unit.desiredState.enabled) {
-        await this.safeExec("systemctl", ["enable", unit.name]);
+        const enableResult = await this.runSystemctlElevated(["enable", unit.name]);
+        if (!enableResult.ok || enableResult.result.exitCode !== 0) {
+          unitOk = false;
+          failed.push({ name: unit.name, reason: `systemctl enable ${unit.name} failed` });
+        }
       }
-      if (unit.desiredState.active) {
-        await this.safeExec("systemctl", ["restart", unit.name]);
+      if (unitOk && unit.desiredState.active) {
+        const restartResult = await this.runSystemctlElevated(["restart", unit.name]);
+        if (!restartResult.ok || restartResult.result.exitCode !== 0) {
+          unitOk = false;
+          failed.push({ name: unit.name, reason: `systemctl restart ${unit.name} failed` });
+        }
+      }
+      if (unitOk) {
+        applied.push(unit.name);
       }
     }
+    return { applied, failed };
+  }
+
+  /**
+   * Like applyCompiledSystemdResources, but any unit that could not be
+   * converged is a hard, structured failure. Used where a missing bot
+   * schedule must never pass silently: the install configure step and the
+   * update-path reconcile. A bot whose manifest declares a scan timer and
+   * whose host cannot realize it is not a working install (issue #224 — a
+   * device passed every check and never scanned mail).
+   */
+  private async applyCompiledSystemdResourcesOrThrow(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<{ applied: string[] }> {
+    const report = await this.applyCompiledSystemdResources(runtimeConfig);
+    if (report.failed.length > 0) {
+      throw {
+        code: "BOT_SYSTEMD_APPLY_FAILED",
+        message: `bot systemd units could not be applied: ${report.failed
+          .map((entry) => `${entry.name} (${entry.reason})`)
+          .join(", ")}`,
+        retryable: true,
+        details: { failed: report.failed, applied: report.applied },
+      };
+    }
+    return { applied: report.applied };
   }
 
   private resolveManagedAgentSessionsDir(runtimeConfig: RuntimeConfig, agentId: string): string {
@@ -6341,6 +7530,77 @@ export default function (api) {
     };
   }
 
+  // Fail-closed probe for relay TLS-passthrough: confirm the node's own Caddy
+  // has obtained a certificate and is terminating HTTPS on the local TLS port.
+  // Retries because DNS-01 issuance can take a few seconds after startup. A
+  // single successful TLS handshake that yields a peer certificate is enough —
+  // we do not validate the chain here (Let's Encrypt validity is the CA's job).
+  protected async probeRelayPassthroughTls(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<{ ok: boolean; message?: string }> {
+    const relay = runtimeConfig.relay;
+    if (relay === undefined) {
+      return { ok: true };
+    }
+    // Fail closed on a silent passthrough downgrade. A node whose tunnel is
+    // https-passthrough (tunnel.type === "https") MUST be terminating its own
+    // TLS via a dns01-backed Caddy. If the dns01 block went missing while the
+    // tunnel still advertises https — the re-enroll/upgrade reuse-path bug — the
+    // render fell back to plaintext but the tunnel still forwards encrypted
+    // bytes. Do NOT skip the probe in that case: report the mismatch so the
+    // install/upgrade fails instead of silently serving plaintext.
+    if (relay.dns01 === undefined) {
+      if (relay.tunnel.type === "https") {
+        return {
+          ok: false,
+          message:
+            "relay tunnel is https-passthrough but the persisted relay config has no dns01 block; " +
+            "the node would serve plaintext instead of terminating its own TLS",
+        };
+      }
+      return { ok: true };
+    }
+    const port = relay.tunnel.localPort;
+    const servername = relay.hostname;
+    let lastError = "no attempt";
+    // Poll for the cert across the full DNS-01-aware smoke window. The cert
+    // cannot exist until Caddy has waited out `propagation_delay` and the ACME
+    // CA has finalized, so a short window would spuriously fail every install
+    // (see RELAY_PASSTHROUGH_TLS_SMOKE_WINDOW_MS). Still fail closed: if no cert
+    // is presented within the whole budget we return ok:false.
+    const totalAttempts = this.relayPassthroughTlsProbeAttempts;
+    for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
+      const result = await new Promise<{ ok: boolean; message?: string }>((resolveProbe) => {
+        const socket = tlsConnect(
+          { host: "127.0.0.1", port, servername, rejectUnauthorized: false, timeout: 5000 },
+          () => {
+            const cert = socket.getPeerCertificate();
+            const hasCert = cert !== null && Object.keys(cert).length > 0;
+            socket.end();
+            resolveProbe(
+              hasCert ? { ok: true } : { ok: false, message: "no peer certificate presented" },
+            );
+          },
+        );
+        socket.on("timeout", () => {
+          socket.destroy();
+          resolveProbe({ ok: false, message: "tls handshake timed out" });
+        });
+        socket.on("error", (error: Error) => {
+          resolveProbe({ ok: false, message: error.message });
+        });
+      });
+      if (result.ok) {
+        return result;
+      }
+      lastError = result.message ?? "unknown";
+      if (attempt < totalAttempts) {
+        await delay(this.relayPassthroughTlsProbeIntervalMs);
+      }
+    }
+    return { ok: false, message: lastError };
+  }
+
   private async inspectGatewayViaSystemctl(candidates: string[]): Promise<{
     installed: boolean;
     state: GatewayState;
@@ -7044,6 +8304,14 @@ export default function (api) {
     };
   }
 
+  /**
+   * Dedicated, intentionally empty workspace used by OpenClaw's `llm-task`
+   * plugin (`agents.defaults.workspace`). Never seed bootstrap files here.
+   */
+  private getManagedLlmTaskWorkspaceDir(runtimeConfig: RuntimeConfig): string {
+    return join(dirname(runtimeConfig.openclaw.gatewayEnvPath), "llm-task-workspace");
+  }
+
   private getManagedOpenClawTempDir(runtimeConfig?: RuntimeConfig): string {
     const gatewayEnvPath =
       runtimeConfig?.openclaw.gatewayEnvPath ?? join(this.paths.openclawServiceHome, "gateway.env");
@@ -7198,7 +8466,7 @@ export default function (api) {
       },
       {
         id: "imap_validate",
-        label: "Validate IMAP",
+        label: "Validate mail connection",
         softFail: true,
         run: async () => {
           if (req.imap === undefined) {
@@ -7211,7 +8479,7 @@ export default function (api) {
           if (!result.ok) {
             throw {
               code: "IMAP_TEST_FAILED",
-              message: result.error?.message ?? "IMAP validation failed",
+              message: result.error?.message ?? "Mail connection validation failed",
               retryable: result.error?.retryable ?? true,
             };
           }
@@ -7227,7 +8495,7 @@ export default function (api) {
           }
           stepState.relayEnrollment = await this.resolveRelayEnrollment(req, ctx.installationId);
           const previousRuntimeConfig = await this.tryReadRuntimeConfig();
-          stepState.effectiveRequest = this.buildRelayProvisionRequest(
+          stepState.effectiveRequest = await this.buildRelayProvisionRequest(
             req,
             stepState.relayEnrollment,
             previousRuntimeConfig,
@@ -7406,6 +8674,10 @@ export default function (api) {
               force: req.openclaw?.forceReinstall ?? false,
             });
             await this.openclawGatewayServiceManager.start();
+            // The matrix extension downloads its E2EE crypto runtime into its
+            // own (root-owned) package dir on first gateway startup; hand that
+            // dir to the service user so the download can succeed (issue #207).
+            await this.ensureMatrixCryptoRuntimeWritable(stepState.runtimeConfig);
           } catch (error) {
             if (!isGatewayUserSystemdUnavailableError(error)) {
               throw error;
@@ -7506,7 +8778,11 @@ export default function (api) {
           if (topologyChanged) {
             await this.persistManagedAgentTopologyDocument(runtimeConfig);
           }
-          await this.applyCompiledSystemdResources(runtimeConfig);
+          // Hard failure by design: the install wizard runs unprivileged, and
+          // a bot whose declared scan schedule cannot be written/enabled here
+          // would otherwise complete as a healthy-looking node that never
+          // scans mail (issue #224).
+          await this.applyCompiledSystemdResourcesOrThrow(runtimeConfig);
           await this.writeOpenClawRuntimeArtifacts(runtimeConfig);
           stepState.runtimeConfig = runtimeConfig;
           this.setManagedOpenClawEnv(runtimeConfig);
@@ -7516,18 +8792,21 @@ export default function (api) {
                 "Exec runner unavailable; skipping Lobster CLI verification during OpenClaw configure",
               );
             } else {
-              await this.ensureLobsterCliInstalled();
+              await this.ensureLobsterCliInstalled(runtimeConfig);
             }
           }
           if (runtimeConfig.relay?.enabled === true) {
             stepState.relayTunnelServiceInstalled =
-              await this.ensureRelayTunnelService(runtimeConfig);
+              await this.installRelayTunnelServiceOrThrow(runtimeConfig);
           }
 
           if (stepState.gatewayServiceSkipped === true) {
             const fallbackStarted = await this.ensureSystemGatewayServiceFallback(runtimeConfig);
             if (fallbackStarted) {
               stepState.gatewayServiceSkipped = false;
+              // System-level gateway flow starts the gateway here rather than in
+              // the user-service step, so fix the crypto runtime dir now (#207).
+              await this.ensureMatrixCryptoRuntimeWritable(runtimeConfig);
               return;
             }
             this.logger.warn(
@@ -7551,6 +8830,7 @@ export default function (api) {
             }
             throw error;
           }
+          await this.ensureMatrixCryptoRuntimeWritable(runtimeConfig);
         },
       },
       {
@@ -7614,6 +8894,67 @@ export default function (api) {
     return isDefaultManagedRelayControlUrlFile(controlUrl);
   }
 
+  /**
+   * Resolve a STABLE installation identifier for managed (public) relay
+   * enrollment. The relay keys every assignment on `sha256(installationId)`, so
+   * this value MUST be identical across re-runs for the relay to recognise an
+   * already-enrolled node (and thus refresh it in place / preserve its slug)
+   * rather than minting a brand-new assignment with a new hostname.
+   *
+   * Order of preference:
+   *  1. `/etc/machine-id` (the value the pro `install.sh` enroller used on the
+   *     original fresh install, so it matches existing assignments).
+   *  2. `/var/lib/dbus/machine-id` (older / alternative location).
+   *  3. A locally generated id persisted under the state dir
+   *     (`relay/installation-id`), reused on every subsequent run.
+   *
+   * The result is memoised for the lifetime of the service so all relay calls in
+   * one install run share one identity.
+   */
+  private async resolveStableInstallationId(): Promise<string> {
+    if (this.stableInstallationId !== null) {
+      return this.stableInstallationId;
+    }
+
+    for (const path of this.machineIdCandidatePaths) {
+      try {
+        const value = (await readFile(path, "utf8")).trim();
+        if (value.length > 0) {
+          this.stableInstallationId = value;
+          return value;
+        }
+      } catch {
+        // Fall through to the next candidate / persisted fallback.
+      }
+    }
+
+    // No machine-id available (containers, minimal images). Persist a generated
+    // id once so it stays stable across re-runs on this host.
+    const persistedPath = join(this.paths.stateDir, "relay", "installation-id");
+    try {
+      const existing = (await readFile(persistedPath, "utf8")).trim();
+      if (existing.length > 0) {
+        this.stableInstallationId = existing;
+        return existing;
+      }
+    } catch {
+      // Not yet written; generate below.
+    }
+
+    const generated = `inst_${randomUUID()}`;
+    try {
+      await mkdir(dirname(persistedPath), { recursive: true });
+      await writeFile(persistedPath, `${generated}\n`, { encoding: "utf8", mode: 0o600 });
+    } catch (error) {
+      this.logger.warn(
+        { error: describeError(error), path: persistedPath },
+        "Could not persist generated relay installation id; it may not be stable across runs",
+      );
+    }
+    this.stableInstallationId = generated;
+    return generated;
+  }
+
   private async tryReuseExistingRelayEnrollment(
     relay: NonNullable<InstallRequest["relay"]>,
   ): Promise<RelayEnrollmentResult | null> {
@@ -7627,6 +8968,26 @@ export default function (api) {
 
     try {
       const token = await this.resolveSecretRef(runtimeConfig.relay.tunnel.tokenSecretRef);
+      // Reconstruct the dns01 block (TLS passthrough) from the persisted runtime
+      // config. The raw deSEC token is NOT persisted inline (only its
+      // tokenSecretRef is), so the reconstructed block omits `token`;
+      // buildRelayProvisionRequest resolves the concrete token from
+      // previousRuntimeConfig.relay.dns01.tokenSecretRef on this re-enroll path.
+      // Dropping dns01 here would collapse `passthrough` to false downstream and
+      // silently re-render the legacy plaintext Caddyfile on every upgrade.
+      const persistedDns01 = runtimeConfig.relay.dns01;
+      const dns01: RelayEnrollmentResult["dns01"] =
+        persistedDns01 === undefined
+          ? undefined
+          : {
+              provider: "desec",
+              apiBase: persistedDns01.apiBase,
+              zone: persistedDns01.zone,
+              subname: persistedDns01.subname,
+              ...(persistedDns01.acmeEmail === undefined
+                ? {}
+                : { acmeEmail: persistedDns01.acmeEmail }),
+            };
       return {
         controlUrl: runtimeConfig.relay.controlUrl,
         hostname: runtimeConfig.relay.hostname,
@@ -7643,6 +9004,7 @@ export default function (api) {
           localIp: runtimeConfig.relay.tunnel.localIp,
           localPort: runtimeConfig.relay.tunnel.localPort,
         },
+        ...(dns01 === undefined ? {} : { dns01 }),
       };
     } catch (error) {
       this.logger.warn(
@@ -7658,7 +9020,206 @@ export default function (api) {
   private tryUsePreEnrolledRelay(
     relay: NonNullable<InstallRequest["relay"]>,
   ): RelayEnrollmentResult | null {
-    return tryUsePreEnrolledRelayFile({ relay, localEdgePort: RELAY_LOCAL_EDGE_PORT });
+    return tryUsePreEnrolledRelayFile({
+      relay,
+      localEdgePort: RELAY_LOCAL_EDGE_PORT,
+      localTlsPort: RELAY_LOCAL_TLS_PORT,
+    });
+  }
+
+  /**
+   * Return the persisted relay runtime block when this host already has an
+   * enabled enrollment against the same control URL, else null. Used to detect
+   * an existing legacy enrollment that is a candidate for a passthrough refresh.
+   */
+  private async tryReadExistingRelayRuntimeConfig(
+    relay: NonNullable<InstallRequest["relay"]>,
+  ): Promise<RelayRuntimeConfig | null> {
+    const runtimeConfig = await this.tryReadRuntimeConfig();
+    if (runtimeConfig?.relay?.enabled !== true) {
+      return null;
+    }
+    if (runtimeConfig.relay.controlUrl !== relay.controlUrl) {
+      return null;
+    }
+    return runtimeConfig.relay;
+  }
+
+  /**
+   * Re-contact the relay for an already-enrolled, still-legacy node so a relay
+   * that now supports TLS passthrough can upgrade the existing assignment in
+   * place. Sends the node's EXISTING slug as requestedSlug (even on the public
+   * enroll path) plus the tls-passthrough capability, using the same stable
+   * identity the original enrollment used so the relay matches the existing
+   * assignment instead of minting a new one.
+   *
+   * Fail-closed / never-break-a-working-node semantics — returns "keep-legacy"
+   * (the caller then reuses the existing legacy enrollment) when:
+   *  - the relay returns a different hostname/slug (would change the public
+   *    hostname — never do that silently);
+   *  - the relay returns http / no dns01 (relay has no deSEC token = kill switch);
+   *  - the network call or response parse fails for any reason.
+   */
+  private async tryRefreshExistingEnrollmentToPassthrough(
+    relay: NonNullable<InstallRequest["relay"]>,
+    existing: RelayRuntimeConfig,
+  ): Promise<RelayEnrollmentResult | "keep-legacy"> {
+    const existingSlug = this.deriveRelaySlug(existing.hostname, existing.publicBaseUrl);
+    if (existingSlug.length === 0) {
+      this.logger.warn(
+        { hostname: existing.hostname },
+        "Cannot refresh relay enrollment to passthrough: existing slug could not be derived",
+      );
+      return "keep-legacy";
+    }
+
+    const enrollmentToken = relay.enrollmentToken?.trim();
+    const usesManagedPublicEnroll =
+      this.isDefaultManagedRelayControlUrl(relay.controlUrl) &&
+      (enrollmentToken === undefined || enrollmentToken.length === 0);
+    if (
+      !usesManagedPublicEnroll &&
+      (enrollmentToken === undefined || enrollmentToken.length === 0)
+    ) {
+      // Custom relay without a token cannot be re-enrolled; keep legacy.
+      return "keep-legacy";
+    }
+
+    const endpoint = new URL(
+      usesManagedPublicEnroll ? "/api/v1/enroll-public" : "/api/v1/enroll",
+      ensureTrailingSlash(relay.controlUrl),
+    ).toString();
+
+    // Present the per-node secret when this node already holds one; the relay
+    // requires it to touch an existing assignment.
+    const nodeSecret = await this.readRelayNodeSecret();
+    let response: Response;
+    try {
+      response = await this.fetchImpl(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          ...relayNodeSecretAuthHeaders(nodeSecret),
+        },
+        body: JSON.stringify({
+          ...(usesManagedPublicEnroll
+            ? { installationId: await this.resolveStableInstallationId() }
+            : { enrollmentToken }),
+          // Send the EXISTING slug so the relay refreshes this assignment in
+          // place and preserves the node's public hostname.
+          requestedSlug: existingSlug,
+          version: process.env.npm_package_version ?? "2.0.0",
+          capabilities: ["tls-passthrough"],
+          // This path only runs for a node that is still legacy (no dns01 yet),
+          // so it has no passthrough deSEC secret. Force the relay to (re)mint
+          // and return the token secret INLINE. Without this, a prior failed
+          // refresh that already persisted a `desecTokenId` on the relay
+          // assignment makes the relay reuse it WITHOUT returning the secret
+          // (needsMint=false), so the node can never obtain the token and the
+          // enroll fails closed on every retry. rotateDns01 breaks that trap.
+          rotateDns01: true,
+        }),
+      });
+    } catch (error) {
+      this.logger.warn(
+        { error: describeError(error), controlUrl: relay.controlUrl },
+        "Relay passthrough refresh request failed; keeping existing legacy enrollment",
+      );
+      return "keep-legacy";
+    }
+
+    const responseText = await response.text();
+    if (!response.ok) {
+      // Authentication / ownership rejections are never retried and carry an
+      // operator-facing message. The node keeps its working legacy enrollment
+      // (never break a running node), but the operator must act on this.
+      const authFailure = describeRelayNodeAuthFailure({
+        status: response.status,
+        responseText,
+        controlUrl: relay.controlUrl,
+        requestedSlug: existingSlug,
+        presentedNodeSecret: nodeSecret !== undefined,
+      });
+      if (authFailure !== null) {
+        this.logger.error(
+          { code: authFailure.code, ...authFailure.details },
+          `${authFailure.message} Keeping existing legacy enrollment.`,
+        );
+        return "keep-legacy";
+      }
+      this.logger.warn(
+        {
+          controlUrl: relay.controlUrl,
+          status: response.status,
+          body: summarizeText(responseText, 1200),
+        },
+        "Relay passthrough refresh was rejected; keeping existing legacy enrollment",
+      );
+      return "keep-legacy";
+    }
+
+    let enrollment: RelayEnrollmentResult;
+    try {
+      enrollment = await this.persistRelayNodeSecret(
+        parseManagedRelayEnrollmentResponse({
+          responseText,
+          controlUrl: relay.controlUrl,
+          requestedSlug: existingSlug,
+          localEdgePort: RELAY_LOCAL_EDGE_PORT,
+          localTlsPort: RELAY_LOCAL_TLS_PORT,
+        }),
+      );
+    } catch (error) {
+      this.logger.warn(
+        { error: describeError(error), controlUrl: relay.controlUrl },
+        "Relay passthrough refresh returned an unusable response; keeping existing legacy enrollment",
+      );
+      return "keep-legacy";
+    }
+
+    // Fail closed: never change a production node's public hostname. Compare by
+    // slug (the first label that determines the hostname) so this holds even when
+    // the persisted runtime config recorded the hostname only via publicBaseUrl.
+    const returnedSlug = this.deriveRelaySlug(enrollment.hostname, enrollment.publicBaseUrl);
+    if (returnedSlug !== existingSlug) {
+      this.logger.warn(
+        { existingSlug, returnedSlug, returnedHostname: enrollment.hostname },
+        "Relay passthrough refresh would change the node hostname; keeping existing legacy enrollment",
+      );
+      return "keep-legacy";
+    }
+
+    // Relay still legacy (no deSEC token configured = kill switch). Stay legacy.
+    if (enrollment.dns01 === undefined) {
+      this.logger.info(
+        { hostname: existing.hostname },
+        "Relay does not yet support TLS passthrough for this node; keeping legacy http enrollment",
+      );
+      return "keep-legacy";
+    }
+
+    return enrollment;
+  }
+
+  /** First DNS label of a host string (the part before the first dot), trimmed. */
+  private firstDnsLabel(host: string): string {
+    const trimmed = host.trim();
+    const dot = trimmed.indexOf(".");
+    return (dot === -1 ? trimmed : trimmed.slice(0, dot)).trim();
+  }
+
+  /** Derive a relay slug (first DNS label) from a hostname, falling back to the public base URL host. */
+  private deriveRelaySlug(hostname: string, publicBaseUrl: string): string {
+    const fromHostname = this.firstDnsLabel(hostname);
+    if (fromHostname.length > 0) {
+      return fromHostname;
+    }
+    try {
+      return this.firstDnsLabel(new URL(publicBaseUrl).hostname);
+    } catch {
+      return "";
+    }
   }
 
   private async resolveRelayEnrollment(
@@ -7668,6 +9229,30 @@ export default function (api) {
     const relay = this.getRelayRequest(req);
 
     const preEnrolled = this.tryUsePreEnrolledRelay(relay);
+    const reused = await this.tryReuseExistingRelayEnrollment(relay);
+
+    // Upgrade-time passthrough refresh: an already-enrolled node whose existing
+    // enrollment is legacy http (no dns01) should re-contact the relay so a
+    // relay that now supports TLS passthrough can flip it in place — preserving
+    // the node's slug/hostname. Without this, the two reuse short-circuits below
+    // would keep the node legacy forever on every upgrade. We only attempt this
+    // when neither reusable source already carries a dns01 block (i.e. the node
+    // is genuinely still legacy), and we NEVER let it break a working node:
+    // any failure (relay still http, slug not preservable, network/parse error)
+    // falls back to the existing legacy enrollment.
+    const runtimeRelay = await this.tryReadExistingRelayRuntimeConfig(relay);
+    const existingHasDns01 = preEnrolled?.dns01 !== undefined || reused?.dns01 !== undefined;
+    if (runtimeRelay !== null && !existingHasDns01) {
+      const refreshed = await this.tryRefreshExistingEnrollmentToPassthrough(relay, runtimeRelay);
+      if (refreshed !== "keep-legacy") {
+        this.logger.info(
+          { hostname: refreshed.hostname, publicBaseUrl: refreshed.publicBaseUrl },
+          "Refreshed existing relay enrollment to TLS passthrough",
+        );
+        return refreshed;
+      }
+    }
+
     if (preEnrolled !== null) {
       this.logger.info(
         { hostname: preEnrolled.hostname, publicBaseUrl: preEnrolled.publicBaseUrl },
@@ -7676,7 +9261,6 @@ export default function (api) {
       return preEnrolled;
     }
 
-    const reused = await this.tryReuseExistingRelayEnrollment(relay);
     if (reused !== null) {
       this.logger.info(
         {
@@ -7720,12 +9304,22 @@ export default function (api) {
     const callerSlug = relay.requestedSlug?.trim();
     const callerSlugEligible =
       !usesManagedPublicEnroll && typeof callerSlug === "string" && callerSlug.length > 0;
+    // Public enrollment keys the relay assignment on the installation id, so we
+    // send a STABLE machine-derived id (not the per-run random `installationId`
+    // used for job correlation). This keeps fresh public enrolls idempotent and
+    // lets a later refresh recognise the same node. See resolveStableInstallationId.
+    const publicEnrollInstallationId = usesManagedPublicEnroll
+      ? await this.resolveStableInstallationId()
+      : installationId;
+    // A node that already holds a per-node relay secret must present it, or the
+    // relay refuses to touch its existing assignment.
+    const nodeSecret = await this.readRelayNodeSecret();
     let lastFailure: { status?: number; responseText?: string; error?: unknown } | null = null;
     for (let attempt = 1; attempt <= 6; attempt += 1) {
-      const requestedSlug =
-        attempt === 1 && callerSlugEligible
-          ? (callerSlug as string)
-          : this.generateManagedRelayRequestedSlug();
+      const slugFromCaller = attempt === 1 && callerSlugEligible;
+      const requestedSlug = slugFromCaller
+        ? (callerSlug as string)
+        : this.generateManagedRelayRequestedSlug();
       let response: Response;
       try {
         response = await this.fetchImpl(endpoint, {
@@ -7733,11 +9327,18 @@ export default function (api) {
           headers: {
             "Content-Type": "application/json",
             Accept: "application/json",
+            ...relayNodeSecretAuthHeaders(nodeSecret),
           },
           body: JSON.stringify({
-            ...(usesManagedPublicEnroll ? { installationId } : { enrollmentToken }),
+            ...(usesManagedPublicEnroll
+              ? { installationId: publicEnrollInstallationId }
+              : { enrollmentToken }),
             requestedSlug,
             version: process.env.npm_package_version ?? "2.0.0",
+            // Advertise TLS-passthrough support. The relay only acts on this
+            // when it has a deSEC owner token configured; otherwise the node is
+            // enrolled in legacy http mode (backward compatible).
+            capabilities: ["tls-passthrough"],
           }),
         });
       } catch (error) {
@@ -7753,6 +9354,20 @@ export default function (api) {
           status: response.status,
           responseText,
         };
+        // 401 (node secret missing/invalid), 409 SLUG_TAKEN on an operator-chosen
+        // name, and 429 are terminal for this run: retrying cannot succeed and
+        // would only trip the relay's throttle. A 409 on a GENERATED name is a
+        // random collision and falls through to the existing regenerate loop.
+        const authFailure = describeRelayNodeAuthFailure({
+          status: response.status,
+          responseText,
+          controlUrl: relay.controlUrl,
+          requestedSlug,
+          presentedNodeSecret: nodeSecret !== undefined,
+        });
+        if (authFailure !== null && !(authFailure.code === "RELAY_SLUG_TAKEN" && !slugFromCaller)) {
+          throw authFailure;
+        }
         const responseTextLower = responseText.toLowerCase();
         const slugConflict =
           response.status === 409 ||
@@ -7785,12 +9400,15 @@ export default function (api) {
         };
       }
 
-      const enrollment = parseManagedRelayEnrollmentResponse({
-        responseText,
-        controlUrl: relay.controlUrl,
-        requestedSlug,
-        localEdgePort: RELAY_LOCAL_EDGE_PORT,
-      });
+      const enrollment = await this.persistRelayNodeSecret(
+        parseManagedRelayEnrollmentResponse({
+          responseText,
+          controlUrl: relay.controlUrl,
+          requestedSlug,
+          localEdgePort: RELAY_LOCAL_EDGE_PORT,
+          localTlsPort: RELAY_LOCAL_TLS_PORT,
+        }),
+      );
 
       this.logger.info(
         {
@@ -7820,25 +9438,152 @@ export default function (api) {
     };
   }
 
+  /**
+   * Read the persisted per-node relay secret, if this node already holds one.
+   * Checks the canonical secrets dir and, when the service fell back to a
+   * dev-local dir, that dir too. Absence simply means "not yet issued".
+   */
+  private async readRelayNodeSecret(): Promise<string | undefined> {
+    const candidates = [this.paths.secretsDir];
+    if (this.resolvedSecretsDir !== null && this.resolvedSecretsDir !== this.paths.secretsDir) {
+      candidates.push(this.resolvedSecretsDir);
+    }
+    return readRelayNodeSecretFile(candidates);
+  }
+
+  /**
+   * Persist a freshly issued per-node relay secret (0600, atomic, never logged)
+   * and return the enrollment WITHOUT it, so nothing downstream (runtime config,
+   * job records, install request snapshots) can capture the value.
+   */
+  private async persistRelayNodeSecret(
+    enrollment: RelayEnrollmentResult,
+  ): Promise<RelayEnrollmentResult> {
+    if (enrollment.nodeSecret === undefined) {
+      return enrollment;
+    }
+    const secretRef = await this.writeSecretFile(
+      RELAY_NODE_SECRET_FILE_NAME,
+      enrollment.nodeSecret,
+    );
+    this.logger.info(
+      { hostname: enrollment.hostname, secretRef },
+      "Stored per-node relay secret issued by the relay",
+    );
+    return stripRelayNodeSecret(enrollment);
+  }
+
   private generateManagedRelayRequestedSlug(): string {
     return generateManagedRelayRequestedSlugFile();
   }
 
-  private buildRelayProvisionRequest(
+  private async buildRelayProvisionRequest(
     req: InstallRequest,
     enrollment: RelayEnrollmentResult,
     previousRuntimeConfig?: RuntimeConfig | null,
-  ): InstallRequest {
+  ): Promise<InstallRequest> {
+    // Resolve the dns01 token (passthrough only) to a CONCRETE value for the
+    // provisioner. On first mint/rotation the relay sent it inline; on an
+    // unchanged re-enroll reuse the previously persisted secret.
+    let dns01: RelayDns01Input | undefined;
+    if (enrollment.dns01 !== undefined) {
+      const token =
+        enrollment.dns01.token ??
+        (previousRuntimeConfig?.relay?.dns01?.tokenSecretRef !== undefined
+          ? await this.resolveSecretRef(previousRuntimeConfig.relay.dns01.tokenSecretRef)
+          : undefined);
+      if (token === undefined || token.length === 0) {
+        throw {
+          code: "RELAY_ENROLL_INVALID",
+          message: "Relay passthrough requires a deSEC token but none was available",
+          retryable: false,
+          details: { hostname: enrollment.hostname },
+        };
+      }
+      dns01 = {
+        provider: "desec",
+        apiBase: enrollment.dns01.apiBase,
+        zone: enrollment.dns01.zone,
+        subname: enrollment.dns01.subname,
+        ...(enrollment.dns01.acmeEmail === undefined
+          ? {}
+          : { acmeEmail: enrollment.dns01.acmeEmail }),
+        token,
+      };
+    }
     return buildRelayProvisionRequestFile({
       req,
       hostname: enrollment.hostname,
       publicBaseUrl: enrollment.publicBaseUrl,
       previousRuntimeConfig,
+      ...(dns01 === undefined ? {} : { dns01 }),
     });
   }
 
   private getRelayTunnelConfigPath(): string {
     return join(this.paths.stateDir, "relay", "frpc.toml");
+  }
+
+  /**
+   * Write a systemd unit file to a root-owned directory. Tries a direct
+   * writeFile first (fast path when running as root, e.g. the bootstrap
+   * install context, or in unit tests where the test process owns the unit
+   * dir). On EACCES/EPERM — which is what the unprivileged runtime API service
+   * hits — falls back to `sudo -n tee` against the scoped sudoers fragment
+   * dropped by configure_system_hygiene at install time. Throws on failure.
+   */
+  private async writeSystemdUnitFileElevated(
+    unitPath: string,
+    unitContents: string,
+  ): Promise<void> {
+    await mkdir(dirname(unitPath), { recursive: true });
+    try {
+      await writeFile(unitPath, unitContents, "utf8");
+    } catch (writeError) {
+      const code = (writeError as NodeJS.ErrnoException).code;
+      if ((code !== "EACCES" && code !== "EPERM") || this.execRunner === null) {
+        throw writeError;
+      }
+      const teeResult = await this.execRunner.run({
+        command: "sudo",
+        args: ["-n", "tee", unitPath],
+        options: {
+          input: unitContents,
+          stdin: "pipe",
+          timeout: 5_000,
+        },
+      });
+      if (teeResult.exitCode !== 0) {
+        throw new Error(
+          `sudo tee ${unitPath} exited ${teeResult.exitCode}: ${truncateText(
+            teeResult.stderr,
+            400,
+          )}`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Run `systemctl <args>` and, when it fails with polkit's "interactive
+   * authentication required" (the runtime API service hits this from a service
+   * context as a non-root user), retry via `sudo -n systemctl`. The bootstrap
+   * install path runs as root and never needs the fallback.
+   */
+  private async runSystemctlElevated(
+    args: string[],
+  ): Promise<Awaited<ReturnType<typeof this.safeExec>>> {
+    const direct = await this.safeExec("systemctl", args);
+    if (
+      direct.ok &&
+      direct.result.exitCode !== 0 &&
+      /interactive authentication required|polkit|must be (root|run)/i.test(
+        `${direct.result.stderr} ${direct.result.stdout}`,
+      )
+    ) {
+      return await this.safeExec("sudo", ["-n", "systemctl", ...args]);
+    }
+    return direct;
   }
 
   private async ensureRelayTunnelService(runtimeConfig: RuntimeConfig): Promise<boolean> {
@@ -7848,7 +9593,9 @@ export default function (api) {
 
     const relay = runtimeConfig.relay;
     const configPath = relay.configPath;
-    const unitPath = join("/etc/systemd/system", relay.serviceName);
+    const systemdUnitDir =
+      process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR?.trim() || "/etc/systemd/system";
+    const unitPath = join(systemdUnitDir, relay.serviceName);
     const containerName = relay.serviceName.replace(/\.service$/, "");
     let token: string;
 
@@ -7878,8 +9625,7 @@ export default function (api) {
     });
 
     try {
-      await mkdir(dirname(unitPath), { recursive: true });
-      await writeFile(unitPath, unitContents, "utf8");
+      await this.writeSystemdUnitFileElevated(unitPath, unitContents);
     } catch (error) {
       this.logger.warn(
         {
@@ -7898,7 +9644,7 @@ export default function (api) {
       ["is-active", relay.serviceName],
     ];
     for (const args of commands) {
-      const result = await this.safeExec("systemctl", args);
+      const result = await this.runSystemctlElevated(args);
       if (!result.ok) {
         this.logger.warn(
           {
@@ -7934,6 +9680,29 @@ export default function (api) {
     return true;
   }
 
+  /**
+   * Install the managed relay tunnel and require success. Relay mode cannot
+   * function without the tunnel, so a failure (e.g. EACCES writing the unit, or
+   * the frpc service not starting) must abort the configure step with an
+   * actionable error instead of being swallowed and surfacing later as a
+   * misleading "service is not running" smoke-check failure. The underlying
+   * cause is carried in the warn logs emitted by ensureRelayTunnelService.
+   */
+  private async installRelayTunnelServiceOrThrow(runtimeConfig: RuntimeConfig): Promise<boolean> {
+    const installed = await this.ensureRelayTunnelService(runtimeConfig);
+    if (!installed) {
+      throw {
+        code: "RELAY_TUNNEL_INSTALL_FAILED",
+        message: "Managed relay tunnel service could not be installed or started",
+        retryable: true,
+        details: {
+          serviceName: runtimeConfig.relay?.serviceName,
+        },
+      };
+    }
+    return installed;
+  }
+
   private async persistJobSnapshot(input: {
     installationId: string;
     request: InstallRequest;
@@ -7944,23 +9713,42 @@ export default function (api) {
       ...(input.snapshot.error === undefined ? {} : { error: input.snapshot.error }),
     };
 
+    // Job records live on disk for the lifetime of the install (and are
+    // served back to the wizard), so inline credentials from the request must
+    // never be persisted — only their secretRef forms.
     const record: PersistedInstallJobRecord = {
       version: 1,
       installationId: input.installationId,
-      request: installRequestSchema.parse(input.request),
+      request: this.redactInstallRequest(installRequestSchema.parse(input.request)),
       response: installJobStatusResponseSchema.parse(response),
       updatedAt: now(),
     };
 
     await this.writeJobRecord(record);
+    if (TERMINAL_INSTALL_JOB_STATES.has(record.response.job.state)) {
+      await this.pruneInstallJobRecords(record.response.job.jobId);
+    }
+  }
+
+  private redactInstallRequest(request: InstallRequest): InstallRequest {
+    return redactInstallRequestSecrets(request, { secretsDir: this.paths.secretsDir });
   }
 
   private async writeJobRecord(record: PersistedInstallJobRecord): Promise<void> {
     const filePath = await this.getJobFilePath(record.response.job.jobId);
-    const tempPath = `${filePath}.${randomUUID()}.tmp`;
-    const payload = `${JSON.stringify(record, null, 2)}\n`;
-    await writeFile(tempPath, payload, "utf8");
-    await rename(tempPath, filePath);
+    await this.writeProtectedJsonFile(filePath, record);
+  }
+
+  private async pruneInstallJobRecords(protectJobId?: string): Promise<void> {
+    try {
+      const dir = await this.ensureInstallJobsDir();
+      const removed = await pruneInstallJobRecords(dir, { protectJobId });
+      if (removed.length > 0) {
+        this.logger.debug({ removed }, "Pruned finished install job records");
+      }
+    } catch (error) {
+      this.logger.warn({ error: describeError(error) }, "Failed to prune install job records");
+    }
   }
 
   private async readJobRecord(jobId: string): Promise<PersistedInstallJobRecord | null> {
@@ -8005,20 +9793,20 @@ export default function (api) {
 
     const override = process.env.SOVEREIGN_NODE_INSTALL_JOBS_DIR;
     if (override !== undefined && override.length > 0) {
-      await mkdir(override, { recursive: true });
+      await this.ensurePrivateDir(override);
       await access(override, fsConstants.W_OK);
       this.resolvedInstallJobsDir = override;
       return override;
     }
 
     try {
-      await mkdir(this.paths.installJobsDir, { recursive: true });
+      await this.ensurePrivateDir(this.paths.installJobsDir);
       await access(this.paths.installJobsDir, fsConstants.W_OK);
       this.resolvedInstallJobsDir = this.paths.installJobsDir;
       return this.resolvedInstallJobsDir;
     } catch (error) {
       const fallback = resolve(process.cwd(), ".sovereign-node-dev", "install-jobs");
-      await mkdir(fallback, { recursive: true });
+      await this.ensurePrivateDir(fallback);
       this.logger.debug(
         {
           preferredInstallJobsDir: this.paths.installJobsDir,
@@ -8030,6 +9818,13 @@ export default function (api) {
       this.resolvedInstallJobsDir = fallback;
       return fallback;
     }
+  }
+
+  // Install job records carry the (redacted) install request; keep the
+  // directory owner-only even when it pre-exists with a wider mode.
+  private async ensurePrivateDir(dir: string): Promise<void> {
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await chmod(dir, 0o700);
   }
 
   private async registerManagedBots(
@@ -8435,37 +10230,7 @@ export default function (api) {
       await chmod(managedTempDir, 0o700);
       await this.applyConfiguredRuntimeOwnership(this.paths.openclawServiceHome, runtimeConfig);
       await this.applyConfiguredRuntimeOwnership(managedTempDir, runtimeConfig);
-      await mkdir(dirname(unitPath), { recursive: true });
-      // Try a direct writeFile first (fast path when running as root, e.g.
-      // the bootstrap install context, or in unit tests where the test
-      // process owns the unit dir). On EACCES/EPERM, fall back to
-      // `sudo -n tee` against the scoped sudoers fragment dropped by
-      // configure_system_hygiene at install time.
-      try {
-        await writeFile(unitPath, unitContents, "utf8");
-      } catch (writeError) {
-        const code = (writeError as NodeJS.ErrnoException).code;
-        if ((code !== "EACCES" && code !== "EPERM") || this.execRunner === null) {
-          throw writeError;
-        }
-        const teeResult = await this.execRunner.run({
-          command: "sudo",
-          args: ["-n", "tee", unitPath],
-          options: {
-            input: unitContents,
-            stdin: "pipe",
-            timeout: 5_000,
-          },
-        });
-        if (teeResult.exitCode !== 0) {
-          throw new Error(
-            `sudo tee ${unitPath} exited ${teeResult.exitCode}: ${truncateText(
-              teeResult.stderr,
-              400,
-            )}`,
-          );
-        }
-      }
+      await this.writeSystemdUnitFileElevated(unitPath, unitContents);
     } catch (error) {
       this.logger.warn(
         {
@@ -8483,28 +10248,8 @@ export default function (api) {
       ["restart", unitName],
       ["is-active", unitName],
     ];
-    // Plain systemctl first; fall back to `sudo -n systemctl` when the
-    // call fails with polkit's "Interactive authentication required"
-    // (the runtime API service hits this when invoked from a service
-    // context as a non-root user). The bootstrap install path runs as
-    // root and never needs the fallback.
-    const runSystemctl = async (
-      args: string[],
-    ): Promise<Awaited<ReturnType<typeof this.safeExec>>> => {
-      const direct = await this.safeExec("systemctl", args);
-      if (
-        direct.ok &&
-        direct.result.exitCode !== 0 &&
-        /interactive authentication required|polkit|must be (root|run)/i.test(
-          `${direct.result.stderr} ${direct.result.stdout}`,
-        )
-      ) {
-        return await this.safeExec("sudo", ["-n", "systemctl", ...args]);
-      }
-      return direct;
-    };
     for (const args of commands) {
-      const result = await runSystemctl(args);
+      const result = await this.runSystemctlElevated(args);
       if (!result.ok) {
         this.logger.warn(
           {
@@ -8616,6 +10361,32 @@ export default function (api) {
             message: relay.message,
           },
         };
+      }
+      // Fail closed in TLS-passthrough mode: the node must have obtained its own
+      // certificate and be terminating HTTPS on the local TLS port. If not, we
+      // do NOT silently serve plaintext — the install/upgrade fails and alerts.
+      //
+      // Gate on EITHER the freshly-computed provision flag OR the persisted
+      // tunnel type. The latter guards the re-enroll/upgrade downgrade path: if
+      // the reuse step dropped dns01 and `passthrough` collapsed to false, the
+      // render would fall back to plaintext while the relay tunnel still expects
+      // https. The persisted tunnel.type === "https" forces the probe to run,
+      // and probeRelayPassthroughTls then fails closed on the mismatch.
+      const persistedTunnelIsHttps = runtimeConfig.relay?.tunnel.type === "https";
+      if (matrixProvision.passthrough || persistedTunnelIsHttps) {
+        const tls = await this.probeRelayPassthroughTls(runtimeConfig);
+        if (!tls.ok) {
+          throw {
+            code: "SMOKE_CHECKS_FAILED",
+            message: "Relay passthrough node did not obtain a TLS certificate",
+            retryable: true,
+            details: {
+              hostname: runtimeConfig.relay?.hostname,
+              localPort: runtimeConfig.relay?.tunnel.localPort,
+              reason: tls.message,
+            },
+          };
+        }
       }
     }
 
@@ -8895,7 +10666,7 @@ export default function (api) {
 
   private async writeSavedInstallRequest(request: InstallRequest): Promise<string> {
     const requestFile = this.getInstallRequestPath();
-    await this.writeInstallerJsonFile(requestFile, request, 0o640);
+    await this.writeInstallerJsonFile(requestFile, this.redactInstallRequest(request), 0o640);
     return requestFile;
   }
 
@@ -9027,6 +10798,9 @@ export default function (api) {
         ? {}
         : { alertRoomName: instance.matrix.alertRoom.roomName }),
       allowedUsers: instance.matrix?.allowedUsers ?? [],
+      ...(instance.config[MAIL_SENTINEL_IMAP_PROTOCOL_KEY] === "pop3"
+        ? { imapProtocol: "pop3" as const }
+        : { imapProtocol: "imap" as const }),
       ...(typeof instance.config[MAIL_SENTINEL_IMAP_HOST_KEY] === "string"
         ? { imapHost: instance.config[MAIL_SENTINEL_IMAP_HOST_KEY] }
         : {}),
@@ -9064,6 +10838,7 @@ export default function (api) {
       imapHost?: string;
       imapPort?: number;
       imapTls?: boolean;
+      imapProtocol?: MailProtocol;
       imapUsername?: string;
       imapPassword?: string;
       imapSecretRef?: string;
@@ -9172,6 +10947,8 @@ export default function (api) {
       config: {
         ...base.config,
         [MAIL_SENTINEL_IMAP_CONFIGURED_KEY]: true,
+        [MAIL_SENTINEL_IMAP_PROTOCOL_KEY]:
+          req.imapProtocol ?? String(base.config[MAIL_SENTINEL_IMAP_PROTOCOL_KEY] ?? "imap"),
         [MAIL_SENTINEL_IMAP_HOST_KEY]:
           req.imapHost ?? String(base.config[MAIL_SENTINEL_IMAP_HOST_KEY] ?? ""),
         [MAIL_SENTINEL_IMAP_PORT_KEY]:
@@ -9207,7 +10984,8 @@ export default function (api) {
     ) {
       throw {
         code: "MAIL_SENTINEL_IMAP_CONFIG_INVALID",
-        message: "Mail Sentinel IMAP host, port, tls, and username must be configured",
+        message:
+          "Mail Sentinel mail server host, port, TLS and email address / username must be configured",
         retryable: false,
       };
     }
@@ -9615,6 +11393,17 @@ export default function (api) {
       await this.resolveRequestedBots(input.req);
     const allBotPackages = await this.listBotPackages();
     const previousRuntimeConfig = await this.tryReadRuntimeConfig();
+    // Relay TLS-passthrough dns01 token. The relay sends the scoped deSEC token
+    // only on first mint / rotation; on an unchanged re-enroll we reuse the
+    // previously persisted secret ref so the node keeps its working credential.
+    const relayDns01 = input.relayEnrollment?.dns01;
+    const previousRelayDns01TokenRef = previousRuntimeConfig?.relay?.dns01?.tokenSecretRef;
+    const relayDns01TokenSecretRef =
+      relayDns01 === undefined
+        ? undefined
+        : relayDns01.token !== undefined && relayDns01.token.length > 0
+          ? await this.writeSecretFile("relay-desec-token", relayDns01.token)
+          : previousRelayDns01TokenRef;
     const allBotTemplateRefs = new Set(allBotPackages.map((entry) => entry.templateRef));
     const allManagedBotToolIds = new Set(
       allBotPackages.flatMap((entry) =>
@@ -9708,6 +11497,7 @@ export default function (api) {
       openrouter: {
         model: openrouterModel,
         apiKeySecretRef: openrouterSecretRef,
+        privacy: resolveOpenRouterPrivacy(input.req.openrouter.privacy),
       },
       openclawProfile: {
         plugins: {
@@ -9721,6 +11511,7 @@ export default function (api) {
       },
       imap: {
         status: imapConfig.status,
+        protocol: imapConfig.protocol,
         host: imapConfig.host,
         port: imapConfig.port,
         tls: imapConfig.tls,
@@ -9767,6 +11558,20 @@ export default function (api) {
                 localIp: input.relayEnrollment.tunnel.localIp,
                 localPort: input.relayEnrollment.tunnel.localPort,
               },
+              ...(relayDns01 === undefined || relayDns01TokenSecretRef === undefined
+                ? {}
+                : {
+                    dns01: {
+                      provider: "desec" as const,
+                      apiBase: relayDns01.apiBase,
+                      zone: relayDns01.zone,
+                      subname: relayDns01.subname,
+                      ...(relayDns01.acmeEmail === undefined
+                        ? {}
+                        : { acmeEmail: relayDns01.acmeEmail }),
+                      tokenSecretRef: relayDns01TokenSecretRef,
+                    },
+                  }),
             } satisfies RelayRuntimeConfig,
           }),
     };
@@ -10034,6 +11839,7 @@ export default function (api) {
         provider: "openrouter",
         model: runtimeConfig.openrouter.model,
         apiKeySecretRef: runtimeConfig.openrouter.apiKeySecretRef,
+        privacy: runtimeConfig.openrouter.privacy,
       },
       imap:
         runtimeConfig.imap.status === "configured" && input.req.imap !== undefined
@@ -10194,6 +12000,7 @@ export default function (api) {
       };
     }
     const managedPluginLoadPaths = await this.listManagedOpenClawPluginLoadPaths(runtimeConfig);
+    const llmTaskWorkspaceDir = this.getManagedLlmTaskWorkspaceDir(runtimeConfig);
     const matrixAccounts: Record<
       string,
       {
@@ -10424,6 +12231,21 @@ export default function (api) {
       agents: {
         defaults: {
           model: normalizeOpenClawAgentModel(runtimeConfig.openrouter.model),
+          // Dedicated EMPTY workspace for `llm-task`. OpenClaw's llm-task
+          // plugin runs the embedded runner with
+          // `workspaceDir: agents.defaults.workspace ?? process.cwd()`, and
+          // the runner prepends the workspace bootstrap files (AGENTS.md,
+          // SOUL.md, TOOLS.md, USER.md, MEMORY.md) to every call. Pointing it
+          // at a directory that contains none of them keeps bot instructions
+          // and memory out of mail-classification prompts.
+          workspace: llmTaskWorkspaceDir,
+          // OpenRouter privacy routing: OpenClaw forwards
+          // `models["openrouter/<model>"].params.provider` as the `provider`
+          // block of the request body (compat.openRouterRouting).
+          models: buildOpenClawOpenRouterModelParams(
+            runtimeConfig.openrouter.model,
+            runtimeConfig.openrouter.privacy,
+          ),
         },
         list: await Promise.all(
           managedAgents.map(async (entry) => {
@@ -10460,6 +12282,7 @@ export default function (api) {
       },
       imap: {
         status: runtimeConfig.imap.status,
+        protocol: runtimeConfig.imap.protocol,
         host: runtimeConfig.imap.host,
         mailbox: runtimeConfig.imap.mailbox,
       },
@@ -10469,6 +12292,9 @@ export default function (api) {
 
     try {
       await mkdir(this.paths.openclawServiceHome, { recursive: true });
+      await mkdir(llmTaskWorkspaceDir, { recursive: true });
+      await chmod(llmTaskWorkspaceDir, 0o750);
+      await this.applyConfiguredRuntimeOwnership(llmTaskWorkspaceDir, runtimeConfig);
       await mkdir(runtimeConfig.openclaw.openclawHome, { recursive: true });
       await mkdir(dirname(runtimeConfig.openclaw.runtimeProfilePath), { recursive: true });
       await mkdir(managedTempDir, { recursive: true });
@@ -10555,6 +12381,7 @@ export default function (api) {
     if (imap === undefined) {
       return {
         status: "pending",
+        protocol: "imap",
         host: "pending",
         port: 993,
         tls: true,
@@ -10574,6 +12401,7 @@ export default function (api) {
       });
       return {
         status: "configured",
+        protocol: imap.protocol ?? "imap",
         host: imap.host,
         port: imap.port,
         tls: imap.tls,
@@ -10586,6 +12414,7 @@ export default function (api) {
     if (imap.password !== undefined && imap.password.length > 0) {
       return {
         status: "configured",
+        protocol: imap.protocol ?? "imap",
         host: imap.host,
         port: imap.port,
         tls: imap.tls,
@@ -10597,6 +12426,7 @@ export default function (api) {
 
     return {
       status: "pending",
+      protocol: imap.protocol ?? "imap",
       host: imap.host,
       port: imap.port,
       tls: imap.tls,
@@ -10768,6 +12598,162 @@ export default function (api) {
       return false;
     }
     return true;
+  }
+
+  /**
+   * Resolve the npm global node_modules root that holds the OpenClaw
+   * installation. Honors SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT (used by tests to
+   * point at a tmp dir, mirroring SOVEREIGN_NODE_SYSTEMD_UNIT_DIR), then asks
+   * `npm root -g`, and finally falls back to the canonical global prefixes.
+   */
+  private async resolveOpenClawGlobalRoot(): Promise<string> {
+    const override = process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT?.trim();
+    if (override !== undefined && override.length > 0) {
+      return override;
+    }
+    const npmRoot = await this.safeExec("npm", ["root", "-g"]);
+    if (npmRoot.ok && npmRoot.result.exitCode === 0) {
+      const resolved = npmRoot.result.stdout.trim();
+      if (resolved.length > 0) {
+        return resolved;
+      }
+    }
+    return "/usr/lib/node_modules";
+  }
+
+  /**
+   * Reclaim ownership of a path for the configured SERVICE identity via the
+   * scoped sudoers fragment. Unlike sudoReclaimOwnership (which targets the
+   * current runtime uid), this targets the service uid:gid so a non-root
+   * runtime API re-install can hand a root-owned dir to the gateway user.
+   * No-op/false when sudo is unavailable or the runner is missing.
+   */
+  private async sudoChownToService(
+    path: string,
+    ownership: { uid: number; gid: number },
+  ): Promise<boolean> {
+    if (this.execRunner === null) return false;
+    const result = await this.execRunner.run({
+      command: "sudo",
+      args: ["-n", "chown", "-R", `${ownership.uid}:${ownership.gid}`, path],
+      options: { timeout: 30_000 },
+    });
+    if (result.exitCode !== 0) {
+      this.logger.warn(
+        {
+          path,
+          exitCode: result.exitCode,
+          stderr: truncateText(result.stderr, 400),
+        },
+        "sudo chown to service identity failed",
+      );
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Make the OpenClaw matrix extension's E2EE crypto runtime package dir
+   * writable to the configured service user. The matrix extension downloads
+   * its platform-native crypto binary (matrix-sdk-crypto.linux-x64-gnu.node)
+   * on demand at gateway startup, writing into its own package dir under the
+   * root-owned npm global prefix. The gateway runs as the service user, so that
+   * download fails ("Destination Folder must be writable") and managed Matrix
+   * bots crash-loop without ever logging in. Chowning the dir to the service
+   * identity after the gateway install lets the runtime download succeed.
+   *
+   * Best-effort: a missing dir is a no-op, and a failed chown only warns so a
+   * transient ownership issue never hard-fails the install.
+   */
+  private async ensureMatrixCryptoRuntimeWritable(runtimeConfig?: RuntimeConfig): Promise<void> {
+    const globalRoot = await this.resolveOpenClawGlobalRoot();
+    const cryptoDir = join(
+      globalRoot,
+      "openclaw",
+      "extensions",
+      "matrix",
+      "node_modules",
+      "@matrix-org",
+      "matrix-sdk-crypto-nodejs",
+    );
+
+    try {
+      const dirStat = await stat(cryptoDir);
+      if (!dirStat.isDirectory()) {
+        this.logger.debug(
+          { cryptoDir },
+          "Matrix crypto runtime path is not a directory; skipping ownership fix",
+        );
+        return;
+      }
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        this.logger.debug(
+          { cryptoDir },
+          "Matrix crypto runtime dir absent; skipping ownership fix",
+        );
+        return;
+      }
+      this.logger.warn(
+        { cryptoDir, error: describeError(error) },
+        "Failed to stat matrix crypto runtime dir; skipping ownership fix",
+      );
+      return;
+    }
+
+    // The installer/runtime API only runs on POSIX nodes, where getuid/getgid
+    // are always available; resolveServiceOwnership already guards the root vs
+    // non-root distinction the same way.
+    if (typeof process.getuid !== "function" || typeof process.getgid !== "function") {
+      this.logger.debug(
+        { cryptoDir },
+        "Process uid/gid unavailable; leaving matrix crypto runtime dir untouched",
+      );
+      return;
+    }
+
+    const ownership = await this.resolveServiceOwnership(runtimeConfig);
+    const runningAsRoot = process.getuid() === 0;
+
+    if (runningAsRoot) {
+      if (ownership === null) {
+        this.logger.debug(
+          { cryptoDir },
+          "Could not resolve service ownership; leaving matrix crypto runtime dir untouched",
+        );
+        return;
+      }
+      try {
+        await chown(cryptoDir, ownership.uid, ownership.gid);
+        this.logger.info(
+          { cryptoDir, uid: ownership.uid, gid: ownership.gid },
+          "Made matrix crypto runtime dir writable for the service user",
+        );
+      } catch (error) {
+        this.logger.warn(
+          { cryptoDir, error: describeError(error) },
+          "Failed to chown matrix crypto runtime dir; matrix E2EE may not bootstrap",
+        );
+      }
+      return;
+    }
+
+    // Non-root runtime API re-install: resolveServiceOwnership only resolves
+    // when running as root (it returned null above), so reclaim the (root-owned)
+    // dir for the runtime API user itself, which is the gateway service user.
+    const targetOwnership = { uid: process.getuid(), gid: process.getgid() };
+    const reclaimed = await this.sudoChownToService(cryptoDir, targetOwnership);
+    if (reclaimed) {
+      this.logger.info(
+        { cryptoDir, uid: targetOwnership.uid, gid: targetOwnership.gid },
+        "Made matrix crypto runtime dir writable for the service user via sudo",
+      );
+    } else {
+      this.logger.warn(
+        { cryptoDir },
+        "Could not make matrix crypto runtime dir writable; matrix E2EE may not bootstrap",
+      );
+    }
   }
 
   private async ensureSecretsDir(): Promise<string> {
@@ -11095,3 +13081,25 @@ export default function (api) {
     }
   }
 }
+
+const renderTemplateTransitionReport = (
+  transition: StagedTemplatePinTransition,
+  committed: boolean,
+): ReconcileTemplateTransitionReport => ({
+  botId: transition.botId,
+  templateRef: transition.templateRef,
+  kind: transition.kind,
+  previousManifestSha256: transition.previous.manifestSha256,
+  newManifestSha256: transition.next.manifestSha256,
+  previousKeyId: transition.previous.keyId,
+  newKeyId: transition.next.keyId,
+  classifications: [...transition.diff.classifications],
+  capabilitiesAdded: [...transition.diff.capabilitiesAdded],
+  capabilitiesRemoved: [...transition.diff.capabilitiesRemoved],
+  commandsAdded: [...transition.diff.commandsAdded],
+  commandsRemoved: [...transition.diff.commandsRemoved],
+  resourcesAdded: [...transition.diff.resourcesAdded],
+  resourcesRemoved: [...transition.diff.resourcesRemoved],
+  resourcesChanged: [...transition.diff.resourcesChanged],
+  committed,
+});

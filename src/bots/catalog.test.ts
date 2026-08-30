@@ -1,11 +1,16 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { execa } from "execa";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { DEFAULT_BOT_REPO_URL, FilesystemBotCatalog } from "./catalog.js";
+import {
+  DEFAULT_BOT_REPO_URL,
+  FilesystemBotCatalog,
+  tryParseBotPackageManifest,
+} from "./catalog.js";
 
 const tempRoots: string[] = [];
 const priorRepoDir = process.env.SOVEREIGN_BOTS_REPO_DIR;
@@ -149,6 +154,35 @@ describe("FilesystemBotCatalog", () => {
     expect(packages[0]?.manifest.matrixRouting).toBeUndefined();
     expect(packages[0]?.template.model).toBe("qwen/qwen-2.5-32b-instruct");
     expect(packages[0]?.manifest.hostResources).toHaveLength(2);
+
+    // The raw-byte manifest digest is the anchor a verified-release
+    // authorization binds to: it must equal a sha256 over the exact file
+    // bytes, so the updater (sha256sum on the bundle) and the catalog loader
+    // always agree.
+    const rawManifest = await readFile(
+      join(tempRoot, "bots", "mail-sentinel", "sovereign-bot.json"),
+      "utf8",
+    );
+    expect(packages[0]?.manifestFileSha256).toBe(
+      createHash("sha256").update(rawManifest, "utf8").digest("hex"),
+    );
+  });
+
+  it("tryParseBotPackageManifest parses valid documents and returns null for invalid ones", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-bot-catalog-test-"));
+    tempRoots.push(tempRoot);
+    await writeBotPackage(tempRoot, {
+      id: "mail-sentinel",
+      displayName: "Mail Sentinel",
+      defaultInstall: true,
+    });
+    const raw = await readFile(
+      join(tempRoot, "bots", "mail-sentinel", "sovereign-bot.json"),
+      "utf8",
+    );
+    expect(tryParseBotPackageManifest(raw)?.id).toBe("mail-sentinel");
+    expect(tryParseBotPackageManifest("{not json")).toBeNull();
+    expect(tryParseBotPackageManifest('{"kind":"something-else"}')).toBeNull();
   });
 
   it("returns default-selected IDs and resolves packages by template ref", async () => {

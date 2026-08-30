@@ -1,16 +1,20 @@
-import { chmod, mkdir, mkdtemp, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
 import { createLogger } from "../logging/logger.js";
 import type { ExecInput, ExecResult, ExecRunner } from "../system/exec.js";
 import {
+  resolveRequestedOpenClawVersion,
   ShellOpenClawBootstrapper,
   SOVEREIGN_PINNED_OPENCLAW_VERSION,
   SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
 } from "./bootstrap.js";
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 const writeBundledMatrixExtensionPackage = async (globalRoot: string): Promise<string> => {
   const openclawRoot = join(globalRoot, "openclaw");
@@ -631,5 +635,20 @@ describe("ShellOpenClawBootstrapper", () => {
       code: "OPENCLAW_INSTALL_FAILED",
     });
     expect(calls.some((call) => call.command === "bash")).toBe(true);
+  });
+});
+
+describe("deploy/install-request.example.json openclaw version", () => {
+  it("resolves to the currently pinned OpenClaw version without drift", async () => {
+    const examplePath = join(REPO_ROOT, "deploy", "install-request.example.json");
+    const example = JSON.parse(await readFile(examplePath, "utf8")) as {
+      openclaw?: { version?: string };
+    };
+
+    const requestedVersion = example.openclaw?.version;
+    expect(requestedVersion).toBeTruthy();
+    expect(resolveRequestedOpenClawVersion(requestedVersion)).toBe(
+      SOVEREIGN_PINNED_OPENCLAW_VERSION,
+    );
   });
 });

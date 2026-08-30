@@ -27,6 +27,12 @@ export const imapSearchMailResultSchema = z.object({
   totalMatches: z.number().int().nonnegative(),
   messages: z.array(imapMessageSummarySchema),
   uidValidity: z.string().min(1).optional(),
+  /**
+   * Non-fatal diagnostic about the mailbox view itself (e.g. a POP3 server
+   * whose visible window excludes recent mail). Consumers that predate the
+   * field ignore it.
+   */
+  note: z.string().min(1).optional(),
 });
 
 export const imapReadMailResultSchema = z.object({

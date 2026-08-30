@@ -396,11 +396,21 @@ Purpose:
 
 Purpose:
 
-- target contract: update IMAP settings/credentials and validate them before persisting
+- replace the Mail Sentinel mail connection after install (IMAP or POP3): server, port, TLS, email address / username, password, and — for IMAP — the folder to watch
+
+Current CLI flags:
+
+- `--protocol imap|pop3` (defaults to the current protocol)
+- `--host`, `--port`, `--tls` / `--no-tls`, `--username`, `--mailbox`
+- `--password` or `--secret-ref` (one of them is required so the new connection can be tested)
 
 Behavior:
 
-- current CLI surface is scaffold-only and invokes reconfigure with placeholder IMAP values
+- the order is **validate → persist → apply**: the new connection is tested with the submitted credentials first; a failed test returns a `ReconfigureResult` whose `mail-connection` check is `fail`, with `changed = []`, and leaves the previous configuration, secret file and bot bindings untouched
+- only after a successful test is the password written to the managed secret store (`/etc/sovereign-node/secrets/imap-password`, mode `0600`), the saved install request and runtime config updated, and the idempotent install job re-run so the mail-sentinel bot/tool bindings are regenerated; `result.job` carries the job summary for polling
+- a POP3 connection always records `mailbox = "INBOX"` (POP3 has no folders)
+- switching accounts or protocols changes the tool's `uidValidity`, so Mail Sentinel drops its UID watermark and does not inherit one from the previous account
+- the same implementation backs `POST /api/reconfigure/imap` (see the Settings API below)
 - for the legacy/default `mail-sentinel` instance, the top-level `imap` section is the authoritative source for the instance IMAP host, port, TLS mode, username, mailbox, and password secret ref
 - when the top-level `imap` section is configured, update/reconfigure flows MUST overwrite stale legacy/default per-instance IMAP values with the top-level values
 - this reconciliation rule applies to the legacy/default `mail-sentinel` instance and MUST NOT be generalized to unrelated multi-instance Mail Sentinel entries without an explicit operator action
@@ -434,7 +444,13 @@ Behavior:
 
 Purpose:
 
-- update OpenRouter model and/or secret reference for the bundled deployment profile
+- update OpenRouter model and/or API key for the bundled deployment profile
+
+Behavior:
+
+- a new `--api-key` is validated against OpenRouter's key endpoint (`GET /api/v1/auth/key`, no completion, no credit usage) before anything is written; a rejected key returns `changed = []` with an `openrouter-key` check of `fail` and keeps the previous key
+- the key is stored at `/etc/sovereign-node/secrets/openrouter-api-key` (mode `0600`); it is never logged and never echoed in results
+- the OpenClaw gateway is restarted so the new key takes effect
 
 `--json` result schema:
 
@@ -567,6 +583,15 @@ type InstallRequest = {
       token: string;
       proxyName: string;
       subdomain?: string;
+      type?: "http" | "https"; // "http": relay terminates TLS (legacy). "https": relay passes the encrypted stream through by SNI and the node terminates its own TLS (passthrough). Installer-managed; populated from the relay enroll response.
+    };
+    dns01?: { // present only for TLS-passthrough enrollments; the node obtains its own Let's Encrypt cert via deSEC DNS-01 and terminates TLS itself
+      provider: "desec";
+      apiBase: string;
+      zone: string;
+      subname: string;
+      acmeEmail?: string;
+      token?: string; // per-node scoped deSEC secret; returned only on first mint or rotation
     };
   };
   openclaw?: {
@@ -582,6 +607,13 @@ type InstallRequest = {
     // Exactly one of the following should be provided:
     apiKey?: string; // transient only
     secretRef?: string; // file:... or env:...
+    // OpenRouter provider routing / privacy controls (strict by default):
+    privacy?: {
+      zdr?: boolean; // default true: only zero-data-retention endpoints
+      dataCollection?: "deny" | "allow"; // default "deny": exclude providers that retain/train
+      allowFallbacks?: boolean; // default false: never fall back outside the filtered set
+      only?: string[]; // optional provider allowlist (OpenRouter provider slugs)
+    };
   };
   imap?: {
     host: string;
@@ -633,12 +665,27 @@ type InstallRequest = {
 
 Constraints:
 
+- `imap.protocol` is optional and defaults to `"imap"`; `"pop3"` selects the read-only POP3 backend (the surrounding `imap` key is kept for compatibility with existing saved requests and runtime configs)
 - `mode` is required and must be `bundled_matrix` in phase B
 - `openclaw.manageInstallation` defaults to `true`
 - `openclaw.installMethod` defaults to `"install_sh"`
 - `openclaw.runOnboard` defaults to `false` and should remain `false` in the default Sovereign flow
 - `openrouter` is required
 - `openrouter.apiKey` or `openrouter.secretRef` is required
+- `openrouter.privacy` is optional; omitted fields default to the strict profile
+  (`zdr: true`, `dataCollection: "deny"`, `allowFallbacks: false`). The resolved
+  block is persisted as `openrouter.privacy` in `sovereign-node.json5`, rendered into
+  the managed OpenClaw config as
+  `agents.defaults.models["openrouter/<model>"].params.provider`
+  (`{ data_collection, zdr, allow_fallbacks, only? }`) and sent by OpenClaw as the
+  `provider` routing block of every OpenRouter request, including `llm-task` mail
+  classification. Weakening it is an explicit opt-out. The configured model must have
+  at least one endpoint matching the profile (see
+  `https://openrouter.ai/api/v1/endpoints/zdr`), otherwise OpenRouter returns no
+  eligible provider. The managed OpenClaw config also sets `agents.defaults.workspace`
+  to a dedicated empty directory (`<service home>/llm-task-workspace`, `0750`,
+  service-owned) so `llm-task` calls never carry agent bootstrap files
+  (`AGENTS.md`, `SOUL.md`, `TOOLS.md`, `USER.md`, `MEMORY.md`).
 - `imap.password` MUST NOT be persisted if provided
 - `imap` may be omitted (pending IMAP mode)
 - `connectivity.mode = "relay"` requires a valid `relay` object
@@ -647,6 +694,29 @@ Constraints:
 - relay enrollment is skipped when `relay.hostname`, `relay.publicBaseUrl`, and `relay.tunnel` are already populated
 - relay hostname selection is installer-managed; user-provided relay slugs are not part of the public contract
 - `matrix.federationEnabled` defaults to `false`
+
+#### Relay TLS mode (legacy http vs. TLS-passthrough)
+
+The relay tunnel runs in one of two modes. The mode is **not** selected by the
+node and is **not** a function of the node version — it is decided by the relay
+at enrollment time and reflected back in the enroll response:
+
+- **Legacy http** — the relay terminates TLS at its edge and forwards plaintext
+  to the node over the tunnel. The enroll response carries `tunnel.type: "http"`
+  (or omits `type`) and no `dns01` block.
+- **TLS-passthrough** — the relay passes the encrypted stream through by SNI and
+  the node terminates its own TLS using a Let's Encrypt certificate obtained via
+  deSEC DNS-01. The enroll response carries `tunnel.type: "https"` and a `dns01`
+  block.
+
+Normative behaviour:
+
+- the installer MUST advertise `capabilities: ["tls-passthrough"]` on enroll/re-enroll; advertising the capability does NOT by itself put the node into passthrough mode
+- the relay grants passthrough ONLY when it has a deSEC owner token configured; otherwise it enrolls the node in legacy http mode, and a node advertising the capability against such a relay stays legacy
+- the **kill switch for passthrough is the relay's deSEC owner token, not the node version**: removing the token from the relay makes all subsequent enrollments fall back to legacy http
+- mode changes apply **per node on its next enroll/re-enroll**: an already-installed node keeps its current mode until it re-enrolls. After the relay gains a deSEC token, existing nodes flip to passthrough on their next re-enroll; they do not flip merely because a newer node version is released or installed
+- a passthrough enrollment (`tunnel.type: "https"` or `mode: "https-passthrough"`) MUST carry a usable `dns01` block; the installer fails closed (`RELAY_ENROLL_FAILED`) otherwise rather than silently serving plaintext
+- on re-enroll/upgrade the installer MUST preserve an existing `dns01` block; dropping it while the tunnel still advertises `https` is a fail-closed condition surfaced at the post-install passthrough probe (the node would otherwise forward plaintext under an https tunnel)
 
 ### `PreflightResult`
 
@@ -879,7 +949,7 @@ Response:
 
 Purpose:
 
-- validate IMAP connectivity/auth and optional mailbox access before persisting configuration
+- validate mail connectivity/auth (IMAP or POP3, per `imap.protocol`) and optional mailbox access before persisting configuration; POP3 tests authenticate and run `STAT` only — nothing is fetched or deleted
 
 Request body:
 
@@ -896,6 +966,7 @@ Response:
 ```ts
 type TestImapResult = {
   ok: boolean;
+  protocol?: "imap" | "pop3";
   host: string;
   port: number;
   tls: boolean;
@@ -905,6 +976,27 @@ type TestImapResult = {
   error?: ErrorDetail;
 };
 ```
+
+## `POST /api/install/test-openrouter`
+
+Purpose:
+
+- check an OpenRouter API key before it is persisted (install wizard and post-install key replacement)
+
+Request body: `{ openrouter: { apiKey: string } }`
+
+Response:
+
+- `result` MUST be `TestOpenrouterResult = { ok: boolean; label?: string; error?: ErrorDetail }`
+- the key is forwarded once in an `Authorization` header to `https://openrouter.ai/api/v1/auth/key` and never logged or echoed; `label` is OpenRouter's own free-form key label
+- responses carry `Cache-Control: no-store`
+
+## Settings API (post-install reconfiguration)
+
+- `GET /api/reconfigure/settings` → `SettingsSummary`: the non-secret view of installer-entered settings. Secrets are reported only as presence flags (`mail.passwordSet`, `openrouter.apiKeySet`); the existing values are never returned. `matrix` (homeserver identity) and `relay` (node name / slug) are reported with `editable: false` and a `reason`, because the homeserver identity, relay assignment and TLS certificate are all keyed to them — changing them is a migration, not a setting.
+- `POST /api/reconfigure/imap` → `ReconfigureResult` (see `sovereign-node reconfigure imap`); the body is `{ imap: InstallRequest["imap"] }` including the new password.
+- `POST /api/reconfigure/openrouter` → `ReconfigureResult` (see `sovereign-node reconfigure openrouter`).
+- All three are gated by the same operator authentication as the rest of `/api/`; secrets travel only in JSON request bodies, never in URLs.
 
 ## `POST /api/install/test-matrix`
 

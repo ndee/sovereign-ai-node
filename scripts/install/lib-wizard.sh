@@ -8,6 +8,55 @@
 #   prepare_request_file — synthesises or refreshes the install request,
 #                          dispatching by $ACTION.
 
+# Prompts for the Mail Sentinel mailbox connection (IMAP or POP3). Sets
+# imap_protocol/host/port/tls/username/mailbox, writes the password secret and
+# sets imap_secret_ref/imap_secret_mode. $1 is the TLS confirm default (y|n).
+prompt_mailbox_connection() {
+  local tls_default="$1"
+  local protocol_choice
+  protocol_choice="$(
+    ui_choice_menu \
+      "Mail protocol:" \
+      "$( [[ "$imap_protocol" == "pop3" ]] && printf '2' || printf '1' )" \
+      "IMAP (recommended; folders, server-side search)" \
+      "POP3 (read-only; no folders; see docs for limitations)"
+  )"
+  if [[ "$protocol_choice" == "2" ]]; then
+    if [[ "$imap_protocol" != "pop3" ]]; then
+      imap_port="995"
+    fi
+    imap_protocol="pop3"
+  else
+    if [[ "$imap_protocol" != "imap" ]]; then
+      imap_port="993"
+    fi
+    imap_protocol="imap"
+  fi
+  imap_host="$(prompt_value "Mail server host" "$imap_host")"
+  imap_port="$(prompt_value "Mail server port" "$imap_port")"
+  if ui_confirm "Use TLS for the mail connection? (strongly recommended)" "$tls_default"; then
+    imap_tls="1"
+  else
+    imap_tls="0"
+  fi
+  ui_info "Usually your full email address, depending on your mail provider."
+  imap_username="$(prompt_value "Email address / username" "$imap_username")"
+  imap_password="$(
+    prompt_required_secret \
+      "Mail password / app password" \
+      "A mail password is required when the mailbox connection is configured."
+  )"
+  if [[ "$imap_protocol" == "imap" ]]; then
+    imap_mailbox="$(prompt_value "IMAP folder to watch" "$imap_mailbox")"
+  else
+    imap_mailbox="INBOX"
+  fi
+  imap_secret_path="/etc/sovereign-node/secrets/imap-password"
+  write_secret_file "$imap_secret_path" "$imap_password"
+  imap_secret_ref="file:${imap_secret_path}"
+  imap_secret_mode="replaced"
+}
+
 resolve_action() {
   local default_choice selected_choice subtitle
 
@@ -202,6 +251,7 @@ run_install_wizard() {
   fi
 
   configure_imap="0"
+  imap_protocol="${DEFAULT_IMAP_PROTOCOL:-imap}"
   imap_host="$DEFAULT_IMAP_HOST"
   imap_port="$DEFAULT_IMAP_PORT"
   imap_tls="$DEFAULT_IMAP_TLS"
@@ -219,15 +269,15 @@ run_install_wizard() {
     poll_interval="$(prompt_value "Mail Sentinel poll interval" "$poll_interval")"
     lookback_window="$(prompt_value "Mail Sentinel lookback window" "$lookback_window")"
 
-    ui_section "IMAP (optional)"
+    ui_section "Mailbox connection (optional)"
     if [[ "$DEFAULT_IMAP_CONFIGURED" == "1" ]] && [[ "$EXISTING_REQUEST_VALID" == "1" ]]; then
       imap_choice="$(
         ui_choice_menu \
-          "Choose how to handle IMAP:" \
+          "Choose how to handle the mailbox connection:" \
           "1" \
-          "Keep current IMAP configuration" \
-          "Replace IMAP configuration" \
-          "Leave IMAP pending"
+          "Keep current mailbox configuration" \
+          "Replace mailbox configuration" \
+          "Leave mailbox pending"
       )"
       case "$imap_choice" in
         1)
@@ -235,7 +285,7 @@ run_install_wizard() {
             configure_imap="1"
             imap_secret_mode="kept"
           else
-            ui_warn "Existing IMAP secret is missing. Enter replacement IMAP credentials."
+            ui_warn "Existing mail secret is missing. Enter replacement mailbox credentials."
             imap_choice="2"
           fi
           ;;
@@ -247,46 +297,12 @@ run_install_wizard() {
       esac
       if [[ "$imap_choice" == "2" ]]; then
         configure_imap="1"
-        imap_host="$(prompt_value "IMAP host" "$imap_host")"
-        imap_port="$(prompt_value "IMAP port" "$imap_port")"
-        if ui_confirm "Use TLS for IMAP?" "$( [[ "$imap_tls" == "1" ]] && printf 'y' || printf 'n' )"; then
-          imap_tls="1"
-        else
-          imap_tls="0"
-        fi
-        imap_username="$(prompt_value "IMAP username" "$imap_username")"
-        imap_password="$(
-          prompt_required_secret \
-            "IMAP password/app password" \
-            "IMAP password is required when IMAP is configured."
-        )"
-        imap_mailbox="$(prompt_value "IMAP mailbox" "$imap_mailbox")"
-        imap_secret_path="/etc/sovereign-node/secrets/imap-password"
-        write_secret_file "$imap_secret_path" "$imap_password"
-        imap_secret_ref="file:${imap_secret_path}"
-        imap_secret_mode="replaced"
+        prompt_mailbox_connection "$( [[ "$imap_tls" == "1" ]] && printf 'y' || printf 'n' )"
       fi
     else
-      if ui_confirm "Configure IMAP now? (choose no to keep IMAP pending)" "n"; then
+      if ui_confirm "Configure the mailbox connection now? (choose no to keep it pending)" "n"; then
         configure_imap="1"
-        imap_host="$(prompt_value "IMAP host" "$imap_host")"
-        imap_port="$(prompt_value "IMAP port" "$imap_port")"
-        if ui_confirm "Use TLS for IMAP?" "y"; then
-          imap_tls="1"
-        else
-          imap_tls="0"
-        fi
-        imap_username="$(prompt_value "IMAP username" "$imap_username")"
-        imap_password="$(
-          prompt_required_secret \
-            "IMAP password/app password" \
-            "IMAP password is required when IMAP is configured."
-        )"
-        imap_mailbox="$(prompt_value "IMAP mailbox" "$imap_mailbox")"
-        imap_secret_path="/etc/sovereign-node/secrets/imap-password"
-        write_secret_file "$imap_secret_path" "$imap_password"
-        imap_secret_ref="file:${imap_secret_path}"
-        imap_secret_mode="replaced"
+        prompt_mailbox_connection "y"
       fi
     fi
   fi
@@ -311,6 +327,7 @@ run_install_wizard() {
   export SN_POLL_INTERVAL="$poll_interval"
   export SN_LOOKBACK_WINDOW="$lookback_window"
   export SN_IMAP_CONFIGURE="$configure_imap"
+  export SN_IMAP_PROTOCOL="$imap_protocol"
   export SN_IMAP_HOST="$imap_host"
   export SN_IMAP_PORT="$imap_port"
   export SN_IMAP_TLS="$imap_tls"

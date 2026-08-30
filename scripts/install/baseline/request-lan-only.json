@@ -12,7 +12,7 @@
     "runOnboard": false
   },
   "openrouter": {
-    "model": "qwen/qwen3.5-9b",
+    "model": "qwen/qwen-2.5-7b-instruct",
     "secretRef": "file:/etc/sovereign-node/secrets/openrouter-api-key"
   },
   "matrix": {

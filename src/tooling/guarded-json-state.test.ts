@@ -21,8 +21,9 @@ const buildRuntimeConfig = (input: {
   workspace?: string;
 }): RuntimeConfig => ({
   openrouter: {
-    model: "qwen/qwen3.5-9b",
+    model: "qwen/qwen-2.5-7b-instruct",
     apiKeySecretRef: "env:OPENROUTER_API_KEY",
+    privacy: { zdr: true, dataCollection: "deny", allowFallbacks: false },
   },
   openclaw: {
     managedInstallation: true,
@@ -55,6 +56,7 @@ const buildRuntimeConfig = (input: {
   },
   imap: {
     status: "pending",
+    protocol: "imap",
     host: "imap.example.org",
     port: 993,
     tls: true,

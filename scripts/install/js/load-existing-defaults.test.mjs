@@ -40,7 +40,7 @@ describe("loadExistingDefaults", () => {
     const requestPath = writeRequest({
       mode: "bundled_matrix",
       connectivity: { mode: "direct" },
-      openrouter: { model: "qwen/qwen3.5-9b", secretRef: "file:/secrets/or" },
+      openrouter: { model: "openai/gpt-4o-mini", secretRef: "file:/secrets/or" },
       matrix: {
         homeserverDomain: "matrix.example.com",
         publicBaseUrl: "https://matrix.example.com",
@@ -58,7 +58,7 @@ describe("loadExistingDefaults", () => {
       runtimePath: "/nonexistent/runtime.json5",
       env: baseEnv,
     }));
-    expect(map.DEFAULT_OPENROUTER_MODEL).toBe("qwen/qwen3.5-9b");
+    expect(map.DEFAULT_OPENROUTER_MODEL).toBe("openai/gpt-4o-mini");
     expect(map.EXISTING_OPENROUTER_SECRET_REF).toBe("file:/secrets/or");
     expect(map.DEFAULT_MATRIX_DOMAIN).toBe("matrix.example.com");
     expect(map.DEFAULT_MATRIX_PUBLIC_BASE_URL).toBe("https://matrix.example.com");
@@ -73,7 +73,7 @@ describe("loadExistingDefaults", () => {
     expect(map.DEFAULT_IMAP_CONFIGURED).toBeUndefined();
   });
 
-  it("upgrades a legacy openrouter model to the recommended one and flags it", () => {
+  it("upgrades the original claude legacy openrouter model to the recommended one and flags it", () => {
     const requestPath = writeRequest({
       openrouter: { model: "openrouter/anthropic/claude-sonnet-4-5" },
       matrix: { homeserverDomain: "matrix.example.com", publicBaseUrl: "https://matrix.example.com" },
@@ -83,7 +83,21 @@ describe("loadExistingDefaults", () => {
       runtimePath: "/nonexistent",
       env: baseEnv,
     }));
-    expect(map.DEFAULT_OPENROUTER_MODEL).toBe("qwen/qwen3.5-9b");
+    expect(map.DEFAULT_OPENROUTER_MODEL).toBe("qwen/qwen-2.5-7b-instruct");
+    expect(map.LEGACY_OPENROUTER_MODEL_DETECTED).toBe("1");
+  });
+
+  it("upgrades the reasoning-on qwen/qwen3.5-9b default onto the recommended one (issue #208)", () => {
+    const requestPath = writeRequest({
+      openrouter: { model: "qwen/qwen3.5-9b" },
+      matrix: { homeserverDomain: "matrix.example.com", publicBaseUrl: "https://matrix.example.com" },
+    });
+    const map = toMap(loadExistingDefaults({
+      requestPath,
+      runtimePath: "/nonexistent",
+      env: baseEnv,
+    }));
+    expect(map.DEFAULT_OPENROUTER_MODEL).toBe("qwen/qwen-2.5-7b-instruct");
     expect(map.LEGACY_OPENROUTER_MODEL_DETECTED).toBe("1");
   });
 

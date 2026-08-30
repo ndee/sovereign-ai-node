@@ -201,12 +201,71 @@ const LanPreconditionsCard = ({ wizardState }) => {
   `;
 };
 
+// Per-mode wait ceiling for the onboarding page coming online. relay-passthrough
+// nodes terminate their own TLS via deSEC DNS-01, which can take minutes to
+// issue; every other mode is reachable within seconds. Mirrors the CLI
+// `onboarding ready` deadlines.
+const READINESS_DEADLINE_MS = (mode) => (mode === "relay-passthrough" ? 12 * 60_000 : 60_000);
+const READINESS_POLL_INTERVAL_MS = 2_000;
+
 export const SuccessStep = ({ result, wizardState, onManageNode }) => {
   const [issued, setIssued] = useState(null);
   const [issueError, setIssueError] = useState(null);
   const [busy, setBusy] = useState(false);
+  // null = still checking; true once the onboarding page is reachable OR we gave
+  // up waiting (readyTimedOut). The issue effect is gated on this so we never
+  // reveal a URL/QR that doesn't load yet.
+  const [pageReady, setPageReady] = useState(false);
+  const [readyTimedOut, setReadyTimedOut] = useState(false);
 
+  // Gate 1: wait for the public onboarding page to actually serve before
+  // revealing anything. Polls /api/onboarding/ready; tolerates transient
+  // errors and config-not-found (keeps polling). Reveals-with-warning on
+  // timeout so the operator is never stranded on a spinner.
   useEffect(() => {
+    let cancelled = false;
+    let timer = null;
+    const startedAt = Date.now();
+    // The deadline can only grow as we learn the real mode. The first ticks
+    // often report mode "direct" with reason "config-not-found" (config still
+    // writing); we must NOT lock the short 60s deadline from that and then time
+    // out before a relay-passthrough cert finishes issuing. So we recompute the
+    // ceiling each tick from the longest deadline any real reading has implied.
+    let deadlineMs = READINESS_DEADLINE_MS();
+    const tick = async () => {
+      try {
+        const readiness = await apiGet("/api/onboarding/ready");
+        if (cancelled) return;
+        if (readiness?.ready) {
+          setPageReady(true);
+          return;
+        }
+        // config-not-found carries a placeholder mode; ignore it for sizing.
+        if (readiness?.mode && readiness.reason !== "config-not-found") {
+          deadlineMs = Math.max(deadlineMs, READINESS_DEADLINE_MS(readiness.mode));
+        }
+      } catch {
+        // Transient (e.g. API momentarily unavailable). Keep polling.
+        if (cancelled) return;
+      }
+      if (Date.now() - startedAt >= deadlineMs) {
+        setReadyTimedOut(true);
+        setPageReady(true);
+        return;
+      }
+      timer = window.setTimeout(tick, READINESS_POLL_INTERVAL_MS);
+    };
+    tick();
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, []);
+
+  // Gate 2: once the page is ready (or we timed out waiting), issue/reveal the
+  // one-time code exactly as before.
+  useEffect(() => {
+    if (!pageReady) return undefined;
     let cancelled = false;
     (async () => {
       setBusy(true);
@@ -229,7 +288,7 @@ export const SuccessStep = ({ result, wizardState, onManageNode }) => {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [pageReady]);
 
   const reissue = async () => {
     setBusy(true);
@@ -267,12 +326,26 @@ export const SuccessStep = ({ result, wizardState, onManageNode }) => {
     >
       <${HandoffBlock} result=${result} wizardState=${wizardState} />
 
+      ${!pageReady
+        ? html`<div class="alert alert--info">
+            Bringing your onboarding page online… on a public node this can take a
+            few minutes while the node obtains its certificate.
+          </div>`
+        : null}
+      ${readyTimedOut
+        ? html`<div class="alert alert--warn">
+            Your onboarding page may take a few more minutes to come online. The link
+            and code below are valid now — if the page doesn't load yet, wait a moment
+            and refresh.
+          </div>`
+        : null}
+
       ${issueError && benignIssue
         ? html`<div class="alert alert--warn">${benignIssue.body}</div>`
         : issueError
           ? html`<${ErrorBanner} error=${issueError} />`
           : null}
-      ${busy && issued === null
+      ${pageReady && busy && issued === null
         ? html`<p class="muted">Issuing your one-time onboarding code…</p>`
         : null}
       ${issued
@@ -296,7 +369,7 @@ export const SuccessStep = ({ result, wizardState, onManageNode }) => {
             </div>
           `
         : html`
-            ${!busy
+            ${pageReady && !busy
               ? html`
                   <div class="btn-row">
                     <button class="btn" type="button" onClick=${reissue} disabled=${busy}>

@@ -1,17 +1,29 @@
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
-
 import JSON5 from "json5";
-
 import type { BotConfigValue } from "../bots/catalog.js";
 import type { CheckResult, ComponentHealth } from "../contracts/common.js";
 import type { DoctorReport } from "../contracts/index.js";
 import { resolveRequestedOpenClawVersion } from "../openclaw/bootstrap.js";
 import { isSystemdBusUnavailableMessage } from "../openclaw/gateway-service.js";
+import {
+  type OpenRouterPrivacyConfig,
+  resolveOpenRouterPrivacy,
+} from "../openclaw/openrouter-routing.js";
 import { formatTemplateRef, parseTemplateRef } from "../templates/catalog.js";
 import type { SovereignTemplateKind } from "./service.js";
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
+
+export type RelayDns01Config = {
+  provider: "desec";
+  apiBase: string;
+  zone: string;
+  subname: string;
+  acmeEmail?: string;
+  /** Reference (file:/env: form) to the per-node scoped deSEC token secret. */
+  tokenSecretRef: string;
+};
 
 export type RelayTunnelConfig = {
   serverAddr: string;
@@ -19,7 +31,7 @@ export type RelayTunnelConfig = {
   token: string;
   proxyName: string;
   subdomain?: string;
-  type: "http";
+  type: "http" | "https";
   localIp: string;
   localPort: number;
 };
@@ -38,10 +50,13 @@ export type RelayRuntimeConfig = {
     tokenSecretRef: string;
     proxyName: string;
     subdomain?: string;
-    type: "http";
+    type: "http" | "https";
     localIp: string;
     localPort: number;
   };
+  // Present only in TLS-passthrough mode: the node terminates its own TLS via
+  // deSEC DNS-01 and frps forwards the encrypted stream by SNI.
+  dns01?: RelayDns01Config;
 };
 
 export type CompiledHostResourceCheck =
@@ -160,6 +175,7 @@ export type RuntimeConfig = {
   openrouter: {
     model: string;
     apiKeySecretRef: string;
+    privacy: OpenRouterPrivacyConfig;
   };
   openclaw: {
     managedInstallation: boolean;
@@ -209,6 +225,8 @@ export type RuntimeConfig = {
   };
   imap: {
     status: "configured" | "pending";
+    // "imap" when absent from older configs (see mailProtocolSchema).
+    protocol: "imap" | "pop3";
     host: string;
     port: number;
     tls: boolean;
@@ -384,7 +402,7 @@ export const NODE_OPERATOR_TOOL_INSTANCE_ID = "node-operator-cli";
 export const MAIL_SENTINEL_TOOL_INSTANCE_ID = "mail-sentinel-core";
 export const INSTALLER_EXEC_TIMEOUT_MS = 60_000;
 export const SOVEREIGN_GATEWAY_SYSTEMD_UNIT = "sovereign-openclaw-gateway.service";
-export const DEFAULT_OPENROUTER_MODEL = "qwen/qwen3.5-9b";
+export const DEFAULT_OPENROUTER_MODEL = "qwen/qwen-2.5-7b-instruct";
 export const MANAGED_OPENCLAW_DM_SCOPE = "per-channel-peer";
 export const DEFAULT_INSTALL_REQUEST_FILE = "/etc/sovereign-node/install-request.json";
 export const DEFAULT_HOST_RESOURCES_PLAN_FILE = "/etc/sovereign-node/host-resources.json";
@@ -399,7 +417,42 @@ export const DEFAULT_SERVICE_GROUP = "sovereign-node";
 export const RELAY_TUNNEL_SYSTEMD_UNIT = "sovereign-matrix-relay-tunnel.service";
 export const RELAY_TUNNEL_DEFAULT_IMAGE = "ghcr.io/fatedier/frpc:v0.61.1";
 export const RELAY_LOCAL_EDGE_PORT = 18080;
+// Local port the node's own TLS-terminating Caddy listens on in relay
+// passthrough mode (the frpc https proxy forwards the encrypted stream here).
+export const RELAY_LOCAL_TLS_PORT = 18443;
 export const RESERVED_AGENT_IDS = new Set<string>();
+
+// Parse a persisted relay dns01 block (TLS-passthrough mode). Requires the
+// deSEC provider + a token secret reference; returns undefined for legacy
+// (http) configs that have no dns01 block.
+const parseRelayDns01 = (value: unknown): RelayDns01Config | undefined => {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  if (value.provider !== "desec") {
+    return undefined;
+  }
+  if (typeof value.apiBase !== "string" || value.apiBase.length === 0) {
+    return undefined;
+  }
+  if (typeof value.zone !== "string" || value.zone.length === 0) {
+    return undefined;
+  }
+  if (typeof value.tokenSecretRef !== "string" || value.tokenSecretRef.length === 0) {
+    return undefined;
+  }
+  return {
+    provider: "desec",
+    apiBase: value.apiBase,
+    zone: value.zone,
+    subname: typeof value.subname === "string" ? value.subname : "",
+    ...(typeof value.acmeEmail === "string" && value.acmeEmail.length > 0
+      ? { acmeEmail: value.acmeEmail }
+      : {}),
+    tokenSecretRef: value.tokenSecretRef,
+  };
+};
+
 const now = () => new Date().toISOString();
 
 const defaultFetch: FetchLike = (input, init) => globalThis.fetch(input, init);
@@ -1038,6 +1091,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
     typeof imap.secretRef === "string" &&
     imap.secretRef.length > 0;
   const relayTunnel = isRecord(relay.tunnel) ? relay.tunnel : {};
+  const relayDns01 = parseRelayDns01(relay.dns01);
   const accessMode = matrix.accessMode === "relay" || relay.enabled === true ? "relay" : "direct";
   const relayConfig =
     relay.enabled === true &&
@@ -1075,7 +1129,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
             ...(typeof relayTunnel.subdomain === "string" && relayTunnel.subdomain.length > 0
               ? { subdomain: relayTunnel.subdomain }
               : {}),
-            type: "http" as const,
+            type: relayTunnel.type === "https" ? ("https" as const) : ("http" as const),
             localIp:
               typeof relayTunnel.localIp === "string" && relayTunnel.localIp.length > 0
                 ? relayTunnel.localIp
@@ -1083,8 +1137,11 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
             localPort:
               typeof relayTunnel.localPort === "number" && Number.isFinite(relayTunnel.localPort)
                 ? Math.trunc(relayTunnel.localPort)
-                : RELAY_LOCAL_EDGE_PORT,
+                : relayTunnel.type === "https"
+                  ? RELAY_LOCAL_TLS_PORT
+                  : RELAY_LOCAL_EDGE_PORT,
           },
+          ...(relayDns01 === undefined ? {} : { dns01: relayDns01 }),
         }
       : undefined;
 
@@ -1113,6 +1170,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
         typeof openrouter.apiKeySecretRef === "string" && openrouter.apiKeySecretRef.length > 0
           ? openrouter.apiKeySecretRef
           : "env:OPENROUTER_API_KEY",
+      privacy: resolveOpenRouterPrivacy(openrouter.privacy),
     },
     openclawProfile: {
       plugins: {
@@ -1143,6 +1201,7 @@ const parseRuntimeConfigDocument = (raw: string): RuntimeConfig | null => {
           : inferredImapConfigured
             ? "configured"
             : "pending",
+      protocol: imap.protocol === "pop3" ? "pop3" : "imap",
       host: typeof imap.host === "string" && imap.host.length > 0 ? imap.host : "unknown",
       port:
         typeof imap.port === "number" && Number.isFinite(imap.port) ? Math.trunc(imap.port) : 993,
@@ -1837,55 +1896,55 @@ const isNodeError = (error: unknown): error is NodeJS.ErrnoException =>
   typeof error === "object" && error !== null && "code" in error;
 
 export {
-  now,
-  defaultFetch,
-  ensureTrailingSlash,
-  parseJsonSafely,
-  parseJsonDocument,
-  parseRuntimeConfigDocument,
-  sanitizeExpectedMatrixLocalpart,
-  sanitizeManagedAgentId,
-  sanitizeToolInstanceId,
-  sanitizeOptionalTemplateRef,
-  sanitizeOptionalToolInstanceIds,
-  normalizeStringRecord,
-  areStringRecordsEqual,
-  areStringListsEqual,
-  sanitizeManagedWorkspace,
-  sanitizeManagedAgentLocalpart,
-  sanitizeMatrixLocalpartFromAgentId,
-  generateAgentPassword,
   areMatrixIdentitiesEqual,
-  isAlreadyJoinedOrInvitedRoomError,
-  ensureCoreManagedAgents,
-  isRateLimitedMatrixLoginFailure,
+  areStringListsEqual,
+  areStringRecordsEqual,
+  buildSuggestedCommands,
   check,
-  summarizeChecksOverall,
-  mapHealthToServiceState,
+  defaultFetch,
+  delay,
   deriveOpenClawHealth,
-  parseGatewayState,
-  looksLikeMissingGateway,
-  textContainsId,
+  describeError,
+  describeVersionPin,
+  ensureCoreManagedAgents,
+  ensureTrailingSlash,
   escapeRegExp,
-  parseEnvFile,
-  summarizeText,
-  isMissingBinaryError,
+  generateAgentPassword,
+  isAlreadyExistsOutput,
+  isAlreadyJoinedOrInvitedRoomError,
+  isCoreAgentBindingBestEffortSkippable,
   isGatewayUserSystemdUnavailableError,
   isMailSentinelGatewayUnavailableError,
-  isAlreadyExistsOutput,
-  isCoreAgentBindingBestEffortSkippable,
-  normalizeOpenClawAgentModel,
-  resolveVersionPinStatus,
-  describeVersionPin,
-  normalizeVersionToken,
-  buildSuggestedCommands,
-  summarizeUnknown,
-  truncateText,
-  delay,
-  describeError,
-  stripSingleTrailingNewline,
-  normalizeTestAlertError,
+  isMissingBinaryError,
+  isNodeError,
+  isRateLimitedMatrixLoginFailure,
   isRecord,
   isStructuredError,
-  isNodeError,
+  looksLikeMissingGateway,
+  mapHealthToServiceState,
+  normalizeOpenClawAgentModel,
+  normalizeStringRecord,
+  normalizeTestAlertError,
+  normalizeVersionToken,
+  now,
+  parseEnvFile,
+  parseGatewayState,
+  parseJsonDocument,
+  parseJsonSafely,
+  parseRuntimeConfigDocument,
+  resolveVersionPinStatus,
+  sanitizeExpectedMatrixLocalpart,
+  sanitizeManagedAgentId,
+  sanitizeManagedAgentLocalpart,
+  sanitizeManagedWorkspace,
+  sanitizeMatrixLocalpartFromAgentId,
+  sanitizeOptionalTemplateRef,
+  sanitizeOptionalToolInstanceIds,
+  sanitizeToolInstanceId,
+  stripSingleTrailingNewline,
+  summarizeChecksOverall,
+  summarizeText,
+  summarizeUnknown,
+  textContainsId,
+  truncateText,
 };

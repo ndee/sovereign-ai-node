@@ -203,6 +203,85 @@ describe("parseRuntimeConfigDocument avatarSha256 round-trip", () => {
   });
 });
 
+describe("parseRuntimeConfigDocument relay passthrough", () => {
+  const relayBase = (extra: Record<string, unknown>) => ({
+    matrix: {
+      accessMode: "relay",
+      homeserverDomain: "node-abc.relay.example.com",
+      federationEnabled: false,
+      publicBaseUrl: "https://node-abc.relay.example.com",
+      adminBaseUrl: "http://127.0.0.1:8008",
+      operator: { userId: "@op:node-abc.relay.example.com" },
+      bot: {
+        userId: "@bot:node-abc.relay.example.com",
+        accessTokenSecretRef: "file:/etc/sovereign-node/secrets/bot-token",
+      },
+      alertRoom: { roomId: "!abc:node-abc.relay.example.com", roomName: "Sovereign Alerts" },
+    },
+    openclawProfile: { agents: [] },
+    relay: {
+      enabled: true,
+      controlUrl: "https://relay.example.com",
+      hostname: "node-abc.relay.example.com",
+      publicBaseUrl: "https://node-abc.relay.example.com",
+      connected: false,
+      serviceName: "sovereign-matrix-relay-tunnel.service",
+      configPath: "/var/lib/sovereign-node/relay/frpc.toml",
+      tunnel: {
+        serverAddr: "relay.example.com",
+        serverPort: 7000,
+        tokenSecretRef: "file:/etc/sovereign-node/secrets/relay-tunnel-token",
+        proxyName: "relay-node-abc",
+        ...extra,
+      },
+    },
+  });
+
+  it("parses https tunnel type + dns01 and defaults localPort to the TLS port", () => {
+    const document = relayBase({ type: "https" }) as Record<string, unknown>;
+    (document.relay as Record<string, unknown>).dns01 = {
+      provider: "desec",
+      apiBase: "https://desec.io/api/v1",
+      zone: "_acme-challenge.relay.example.com",
+      subname: "node-abc",
+      acmeEmail: "ops@example.com",
+      tokenSecretRef: "file:/etc/sovereign-node/secrets/relay-desec-token",
+    };
+    const result = parseRuntimeConfigDocument(JSON.stringify(document));
+    expect(result).not.toBeNull();
+    if (result === null) throw new Error("unexpected null");
+    expect(result.relay?.tunnel.type).toBe("https");
+    expect(result.relay?.tunnel.localPort).toBe(18443);
+    expect(result.relay?.dns01?.provider).toBe("desec");
+    expect(result.relay?.dns01?.tokenSecretRef).toBe(
+      "file:/etc/sovereign-node/secrets/relay-desec-token",
+    );
+  });
+
+  it("defaults to http tunnel type + edge port for a legacy relay config (no type/dns01)", () => {
+    const result = parseRuntimeConfigDocument(JSON.stringify(relayBase({})));
+    expect(result).not.toBeNull();
+    if (result === null) throw new Error("unexpected null");
+    expect(result.relay?.tunnel.type).toBe("http");
+    expect(result.relay?.tunnel.localPort).toBe(18080);
+    expect(result.relay?.dns01).toBeUndefined();
+  });
+
+  it("drops a dns01 block that is missing its token secret ref", () => {
+    const document = relayBase({ type: "https" }) as Record<string, unknown>;
+    (document.relay as Record<string, unknown>).dns01 = {
+      provider: "desec",
+      apiBase: "https://desec.io/api/v1",
+      zone: "_acme-challenge.relay.example.com",
+      subname: "node-abc",
+    };
+    const result = parseRuntimeConfigDocument(JSON.stringify(document));
+    expect(result).not.toBeNull();
+    if (result === null) throw new Error("unexpected null");
+    expect(result.relay?.dns01).toBeUndefined();
+  });
+});
+
 describe("isGatewayUserSystemdUnavailableError", () => {
   it("treats a system-scope bus permission denial as systemd-unavailable", () => {
     const error = {

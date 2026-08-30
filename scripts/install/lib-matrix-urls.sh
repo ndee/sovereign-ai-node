@@ -116,14 +116,33 @@ NODE
 
 print_matrix_client_onboarding_guidance() {
   local guidance guidance_payload onboarding_json onboarding_url
+  # Default to the cautious "not confirmed reachable yet" state and only clear it
+  # on a positive ready reading. That way a missing/old `onboarding ready`
+  # subcommand (e.g. during an upgrade from a build without it) or any probe
+  # failure still prints the "may take a few minutes" note rather than implying
+  # the page is live when it was never actually checked.
+  local ready_json onboarding_timed_out="true"
   [[ -r "$REQUEST_FILE" ]] || return 0
+
+  # Wait for the public onboarding page to actually serve before printing its
+  # URL/QR. In relay-passthrough mode the node's TLS cert can take minutes to
+  # issue (deSEC DNS-01), so a freshly-printed link would otherwise be dead.
+  # `onboarding ready --wait` exits 0 even on timeout; we still print the
+  # URL/QR, just with a "may take a few minutes" note.
+  ready_json="$(sovereign-node onboarding ready --wait --json 2>/dev/null || true)"
+  if [[ -n "$ready_json" ]] \
+    && printf '%s' "$ready_json" \
+      | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const r=JSON.parse(s).result??{};process.exit(r.ready?0:1)}catch{process.exit(1)}})'; then
+    onboarding_timed_out="false"
+  fi
 
   onboarding_json="$(sovereign-node onboarding issue --json 2>/dev/null || true)"
   guidance_payload="$(
-    node - "$REQUEST_FILE" "$onboarding_json" <<'NODE'
+    node - "$REQUEST_FILE" "$onboarding_json" "$onboarding_timed_out" <<'NODE'
 const fs = require("node:fs");
 const requestPath = process.argv[2];
 const onboardingRaw = process.argv[3] ?? "";
+const onboardingTimedOut = process.argv[4] === "true";
 let req = {};
 try {
   req = JSON.parse(fs.readFileSync(requestPath, "utf8"));
@@ -183,6 +202,11 @@ const lines = [
   `- Element Web login: ${elementLink}`,
   "- Use a one-time onboarding code to unlock the password on the onboarding page.",
 ];
+if (onboardingTimedOut) {
+  lines.push(
+    "- Note: the onboarding page may take a few minutes to come online; if the link does not load yet, wait a moment and retry.",
+  );
+}
 if (typeof onboarding.code === "string" && onboarding.code.length > 0) {
   lines.push(`- One-time onboarding code: ${onboarding.code}`);
 }

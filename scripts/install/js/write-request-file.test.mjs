@@ -4,7 +4,7 @@ import { buildRequest, inferMatrixTlsMode } from "./write-request-file.mjs";
 
 const baseEnv = {
   SN_REQUEST_FILE: "/tmp/test-req.json",
-  SN_OPENROUTER_MODEL: "qwen/qwen3.5-9b",
+  SN_OPENROUTER_MODEL: "qwen/qwen-2.5-7b-instruct",
   SN_OPENROUTER_SECRET_REF: "file:/etc/sovereign-node/secrets/openrouter-api-key",
   SN_MATRIX_DOMAIN: "matrix.example.com",
   SN_MATRIX_PUBLIC_BASE_URL: "https://matrix.example.com",
@@ -66,7 +66,7 @@ describe("buildRequest", () => {
         runOnboard: false,
       },
       openrouter: {
-        model: "qwen/qwen3.5-9b",
+        model: "qwen/qwen-2.5-7b-instruct",
         secretRef: "file:/etc/sovereign-node/secrets/openrouter-api-key",
       },
       matrix: {
@@ -142,6 +142,7 @@ describe("buildRequest", () => {
       SN_IMAP_MAILBOX: "INBOX",
     });
     expect(on.imap).toEqual({
+      protocol: "imap",
       host: "imap.example.com",
       port: 993,
       tls: true,
@@ -149,6 +150,30 @@ describe("buildRequest", () => {
       secretRef: "file:/etc/sovereign-node/secrets/imap-password",
       mailbox: "INBOX",
     });
+  });
+
+  it("carries SN_IMAP_PROTOCOL=pop3 into imap.protocol and defaults anything else to imap", () => {
+    const pop3 = buildRequest({
+      ...baseEnv,
+      SN_IMAP_CONFIGURE: "1",
+      SN_IMAP_PROTOCOL: "pop3",
+      SN_IMAP_HOST: "pop.example.com",
+      SN_IMAP_PORT: "995",
+      SN_IMAP_TLS: "1",
+      SN_IMAP_USERNAME: "operator@example.com",
+      SN_IMAP_SECRET_REF: "file:/etc/sovereign-node/secrets/imap-password",
+    });
+    expect(pop3.imap.protocol).toBe("pop3");
+    const odd = buildRequest({
+      ...baseEnv,
+      SN_IMAP_CONFIGURE: "1",
+      SN_IMAP_PROTOCOL: "nntp",
+      SN_IMAP_HOST: "imap.example.com",
+      SN_IMAP_TLS: "1",
+      SN_IMAP_USERNAME: "operator@example.com",
+      SN_IMAP_SECRET_REF: "file:/etc/sovereign-node/secrets/imap-password",
+    });
+    expect(odd.imap.protocol).toBe("imap");
   });
 
   it("defaults imap.port to 993 and imap.mailbox to INBOX", () => {

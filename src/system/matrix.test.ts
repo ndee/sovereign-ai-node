@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -21,7 +21,7 @@ const buildInstallRequest = (): InstallRequest => ({
     runOnboard: false,
   },
   openrouter: {
-    model: "qwen/qwen3.5-9b",
+    model: "qwen/qwen-2.5-7b-instruct",
     apiKey: "sk-or-test",
   },
   imap: {
@@ -101,30 +101,32 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(composeText).toContain("postgres:16-alpine");
       expect(composeText).toContain('POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"');
       expect(composeText).toContain('"0.0.0.0:8008:8008"');
+      // The Synapse container is handed the project owner's uid/gid so its
+      // entrypoint chowns /data to that identity and drops privileges to it.
+      const uid = process.getuid?.() ?? 0;
+      const gid = process.getgid?.() ?? 0;
+      expect(composeText).toContain(`UID: "\${SOVEREIGN_MATRIX_UID}"`);
+      expect(composeText).toContain(`GID: "\${SOVEREIGN_MATRIX_GID}"`);
       const envText = await readFile(join(result.projectDir, ".env"), "utf8");
       expect(envText).toContain("SYNAPSE_CONFIG_PATH=/data/homeserver.yaml");
-      const synapseDirStat = await stat(join(result.projectDir, "synapse"));
-      const postgresDirStat = await stat(join(result.projectDir, "postgres-data"));
-      expect(synapseDirStat.mode & 0o777).toBe(0o777);
-      expect(postgresDirStat.mode & 0o777).toBe(0o777);
+      expect(envText).toContain(`SOVEREIGN_MATRIX_UID=${uid}`);
+      expect(envText).toContain(`SOVEREIGN_MATRIX_GID=${gid}`);
 
-      // Parent directories must be traversable by the Synapse and Postgres
-      // container UIDs (non-root) so they can reach their bind-mounts.
-      const baseDirStat = await stat(join(tempRoot, "state", "bundled-matrix"));
-      const projectDirStat = await stat(result.projectDir);
-      expect(baseDirStat.mode & 0o755).toBe(0o755);
-      expect(projectDirStat.mode & 0o755).toBe(0o755);
+      // Directories are private to the owner; nothing is world-writable.
+      const modeOf = async (path: string): Promise<number> => (await stat(path)).mode & 0o777;
+      expect(await modeOf(join(tempRoot, "state", "bundled-matrix"))).toBe(0o750);
+      expect(await modeOf(result.projectDir)).toBe(0o750);
+      expect(await modeOf(join(result.projectDir, "synapse"))).toBe(0o750);
+      expect(await modeOf(join(result.projectDir, "postgres-data"))).toBe(0o750);
 
-      // Synapse config files must be readable by the Synapse container's
-      // non-root user (UID 991 in the upstream image).
-      const homeserverStat = await stat(join(result.projectDir, "synapse", "homeserver.yaml"));
-      const signingKeyStat = await stat(
-        join(result.projectDir, "synapse", "matrix.local.test.signing.key"),
-      );
-      const logConfigStat = await stat(join(result.projectDir, "synapse", "log.config"));
-      expect(homeserverStat.mode & 0o644).toBe(0o644);
-      expect(signingKeyStat.mode & 0o644).toBe(0o644);
-      expect(logConfigStat.mode & 0o644).toBe(0o644);
+      // Credential-bearing files are never world-readable.
+      expect(await modeOf(join(result.projectDir, ".env"))).toBe(0o600);
+      expect(await modeOf(join(result.projectDir, "compose.yaml"))).toBe(0o640);
+      expect(await modeOf(join(result.projectDir, "synapse", "homeserver.yaml"))).toBe(0o640);
+      expect(
+        await modeOf(join(result.projectDir, "synapse", "matrix.local.test.signing.key")),
+      ).toBe(0o640);
+      expect(await modeOf(join(result.projectDir, "synapse", "log.config"))).toBe(0o640);
 
       const homeserverText = await readFile(
         join(result.projectDir, "synapse", "homeserver.yaml"),
@@ -145,6 +147,89 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(recordedExecCalls[0]?.command).toBe("docker");
       expect(recordedExecCalls[0]?.args).toContain("compose");
       expect(recordedExecCalls[0]?.args).toContain("config");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("tightens modes left behind by an earlier install on re-provision", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-test-"));
+    const fakeExecRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => ({
+        command: [input.command, ...(input.args ?? [])].join(" "),
+        exitCode: 0,
+        stdout: "services:\n  postgres: {}\n  synapse: {}\n",
+        stderr: "",
+      }),
+    };
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "state"),
+      logsDir: join(tempRoot, "logs"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+    const provisioner = new DockerComposeBundledMatrixProvisioner(
+      fakeExecRunner,
+      createLogger(),
+      paths,
+    );
+
+    try {
+      // Simulate a node provisioned by an earlier release: world-writable
+      // directories, world-readable secrets and an .env written under the
+      // default umask.
+      const projectDir = join(tempRoot, "state", "bundled-matrix", "matrix-local-test");
+      const synapseDir = join(projectDir, "synapse");
+      await mkdir(synapseDir, { recursive: true });
+      await mkdir(join(projectDir, "postgres-data"), { recursive: true });
+      await chmod(join(tempRoot, "state", "bundled-matrix"), 0o755);
+      await chmod(projectDir, 0o755);
+      await chmod(synapseDir, 0o777);
+      await chmod(join(projectDir, "postgres-data"), 0o777);
+      await writeFile(join(projectDir, ".env"), "POSTGRES_PASSWORD=pg_existing\n", {
+        encoding: "utf8",
+        mode: 0o644,
+      });
+      await writeFile(
+        join(synapseDir, "homeserver.yaml"),
+        [
+          'registration_shared_secret: "reg-existing"',
+          'macaroon_secret_key: "mac-existing"',
+          'form_secret: "form-existing"',
+        ].join("\n"),
+        { encoding: "utf8", mode: 0o644 },
+      );
+      await writeFile(join(synapseDir, "matrix.local.test.signing.key"), "ed25519 a_1 seed", {
+        encoding: "utf8",
+        mode: 0o644,
+      });
+
+      const result = await provisioner.provision(buildInstallRequest());
+      expect(result.projectDir).toBe(projectDir);
+
+      const modeOf = async (path: string): Promise<number> => (await stat(path)).mode & 0o777;
+      expect(await modeOf(join(tempRoot, "state", "bundled-matrix"))).toBe(0o750);
+      expect(await modeOf(projectDir)).toBe(0o750);
+      expect(await modeOf(synapseDir)).toBe(0o750);
+      expect(await modeOf(join(projectDir, "postgres-data"))).toBe(0o750);
+      expect(await modeOf(join(projectDir, ".env"))).toBe(0o600);
+      expect(await modeOf(join(synapseDir, "homeserver.yaml"))).toBe(0o640);
+      expect(await modeOf(join(synapseDir, "matrix.local.test.signing.key"))).toBe(0o640);
+
+      // Existing secrets are preserved, not regenerated.
+      const envText = await readFile(join(projectDir, ".env"), "utf8");
+      expect(envText).toContain("POSTGRES_PASSWORD=pg_existing");
+      const homeserverText = await readFile(join(synapseDir, "homeserver.yaml"), "utf8");
+      expect(homeserverText).toContain('registration_shared_secret: "reg-existing"');
+      expect(homeserverText).toContain('macaroon_secret_key: "mac-existing"');
+      expect(homeserverText).toContain('form_secret: "form-existing"');
+      expect(await readFile(join(synapseDir, "matrix.local.test.signing.key"), "utf8")).toBe(
+        "ed25519 a_1 seed\n",
+      );
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -314,6 +399,30 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(onboardPage).toContain("Mail Sentinel");
       expect(onboardPage).toContain("<svg");
       expect(onboardPage).not.toContain("/downloads/caddy-root-ca.crt");
+
+      // Reverse-proxy outputs follow the same private modes as the Synapse
+      // bundle; Caddy and onboarding-api read them as in-container root.
+      const modeOf = async (path: string): Promise<number> => (await stat(path)).mode & 0o777;
+      for (const dir of [
+        "reverse-proxy",
+        "reverse-proxy-data",
+        "reverse-proxy-config",
+        "well-known",
+        join("well-known", ".well-known"),
+        join("well-known", ".well-known", "matrix"),
+        join("well-known", "onboard"),
+        "onboarding",
+      ]) {
+        expect(await modeOf(join(result.projectDir, dir)), dir).toBe(0o750);
+      }
+      for (const file of [
+        join("reverse-proxy", "Caddyfile"),
+        join("well-known", ".well-known", "matrix", "client"),
+        join("well-known", ".well-known", "matrix", "server"),
+        join("well-known", "onboard", "index.html"),
+      ]) {
+        expect(await modeOf(join(result.projectDir, file)), file).toBe(0o640);
+      }
       expect(recordedExecCalls).toHaveLength(2);
       expect(recordedExecCalls.some((call) => call.command === "qrencode")).toBe(true);
       expect(recordedExecCalls.some((call) => call.command === "docker")).toBe(true);
@@ -623,6 +732,114 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(onboardPage).toContain("The username and password are not embedded in this page.");
       expect(onboardPage).not.toContain("/downloads/caddy-root-ca.crt");
       expect(recordedExecCalls).toHaveLength(2);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("writes a relay-passthrough TLS bundle when the relay returns a dns01 block", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-pt-"));
+    const fakeExecRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        if (input.command === "docker") {
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: "services:\n  postgres: {}\n  synapse: {}\n  reverse-proxy: {}\n",
+            stderr: "",
+          };
+        }
+        return {
+          command: [input.command, ...(input.args ?? [])].join(" "),
+          exitCode: 127,
+          stdout: "",
+          stderr: "command not found",
+        };
+      },
+    };
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "state"),
+      logsDir: join(tempRoot, "logs"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+    const provisioner = new DockerComposeBundledMatrixProvisioner(
+      fakeExecRunner,
+      createLogger(),
+      paths,
+    );
+
+    try {
+      const req = buildInstallRequest();
+      req.connectivity = { mode: "relay" };
+      req.relay = {
+        controlUrl: "https://relay.example.com",
+        enrollmentToken: "relay-token",
+        dns01: {
+          provider: "desec",
+          apiBase: "https://desec.io/api/v1",
+          zone: "_acme-challenge.relay.example.com",
+          subname: "node-abc",
+          acmeEmail: "ops@example.com",
+          token: "desec-secret-token",
+        },
+      };
+      req.matrix.homeserverDomain = "node-abc.relay.example.com";
+      req.matrix.publicBaseUrl = "https://node-abc.relay.example.com";
+      req.matrix.tlsMode = "auto";
+
+      const result = await provisioner.provision(req);
+      expect(result.accessMode).toBe("relay");
+      expect(result.passthrough).toBe(true);
+
+      const composeText = await readFile(result.composeFilePath, "utf8");
+      const caddyText = await readFile(
+        join(result.projectDir, "reverse-proxy", "Caddyfile"),
+        "utf8",
+      );
+      const envText = await readFile(join(result.projectDir, ".env"), "utf8");
+
+      // The node terminates its own TLS on the local TLS port, not the plaintext edge.
+      expect(composeText).toContain('"127.0.0.1:18443:443"');
+      expect(composeText).not.toContain('"127.0.0.1:18080:80"');
+      expect(composeText).not.toContain('"80:80"');
+      // Custom desec Caddy image + token wired via env (not inlined in compose).
+      expect(composeText).toContain("caddy-desec");
+      // Pinned by the multi-arch INDEX digest so `docker compose up` cannot reuse
+      // a stale cached tag (which broke ARM nodes: cached amd64 image → caddy
+      // "exec format error" → no cert).
+      expect(composeText).toContain(
+        "@sha256:370cd93ff12d1c3c691a5eaf64c06458b2c33100c481e0c6e56c0e91fd622bf6",
+      );
+      // The compose references the env var literally (compose interpolation),
+      // so the ${...} is intentional, not a JS template string.
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserting a literal compose env reference
+      expect(composeText).toContain("DESEC_TOKEN: ${DESEC_TOKEN}");
+      expect(envText).toContain("DESEC_TOKEN=desec-secret-token");
+
+      // Caddyfile: real HTTPS site with deSEC DNS-01, NO plaintext :80, shared handlers.
+      expect(caddyText).toContain("https://node-abc.relay.example.com {");
+      // deSEC DNS-01 must use the BLOCK form: caddy 2.10.2's desec module
+      // rejects the inline `dns desec {env.DESEC_TOKEN}` form during config
+      // adaptation. The token is passed via the nested `token` directive.
+      expect(caddyText).toContain("dns desec {");
+      expect(caddyText).toContain("token {env.DESEC_TOKEN}");
+      expect(caddyText).not.toContain("dns desec {env.DESEC_TOKEN}");
+      // deSEC enforces a 3600s minimum TTL; without a propagation delay LE
+      // validates before the TXT record is visible and negative-caches the
+      // NXDOMAIN, so the cert never issues within the smoke-check window.
+      expect(caddyText).toContain("propagation_delay 150s");
+      expect(caddyText).toContain("propagation_timeout 600s");
+      expect(caddyText).toContain("resolvers 1.1.1.1 8.8.8.8");
+      expect(caddyText).toContain("email ops@example.com");
+      expect(caddyText).toContain("reverse_proxy synapse:8008");
+      expect(caddyText).toContain("@onboardApi path /onboard/api /onboard/api/*");
+      expect(caddyText).not.toContain(":80 {");
+      expect(caddyText).not.toContain("tls internal");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -2231,6 +2448,10 @@ describe("DockerComposeBundledMatrixProvisioner cross-project conflict handling"
     psThrows?: boolean;
     upStderr?: string;
     upExitCode?: number;
+    // Simulate a failing (`pullExitCode`) or unavailable (`pullThrows`) image
+    // pull to assert the pull step is best-effort and never blocks `up`.
+    pullExitCode?: number;
+    pullThrows?: boolean;
     portOwnerStdout?: string;
     portOwnerExitCode?: number;
     // `docker inspect --format '{{.State.Error}}' <name>` output (the port-bind
@@ -2252,6 +2473,13 @@ describe("DockerComposeBundledMatrixProvisioner cross-project conflict handling"
         // MATRIX_COMPOSE_UNAVAILABLE and inspectComposeServiceStates hits its catch.
         if (input.psThrows && args.includes("ps") && args.includes("--format")) {
           throw new Error("docker compose ps unavailable");
+        }
+        // Both the `docker compose pull` and legacy `docker-compose pull` fallback
+        // must throw so runComposeCommand surfaces MATRIX_COMPOSE_UNAVAILABLE and
+        // ensureStackRunning's best-effort pull catch is exercised.
+        if (input.pullThrows && args.includes("pull")) {
+          composeSubcommands.push("pull");
+          throw new Error("docker compose pull unavailable");
         }
         if (execInput.command !== "docker") {
           return { command, exitCode: 127, stdout: "", stderr: "command not found" };
@@ -2276,6 +2504,10 @@ describe("DockerComposeBundledMatrixProvisioner cross-project conflict handling"
         }
         if (args.includes("config")) {
           return { command, exitCode: 0, stdout: "services:\n  synapse: {}\n", stderr: "" };
+        }
+        if (args.includes("pull")) {
+          composeSubcommands.push("pull");
+          return { command, exitCode: input.pullExitCode ?? 0, stdout: "", stderr: "" };
         }
         if (args.includes("up")) {
           composeSubcommands.push("up");
@@ -2345,6 +2577,51 @@ describe("DockerComposeBundledMatrixProvisioner cross-project conflict handling"
       expect(harness.composeSubcommands).toContain("down");
     } finally {
       await harness.cleanup();
+    }
+  });
+
+  it("pulls images before `up`, and a failing/unavailable pull never blocks the start", async () => {
+    // All services report running so the start path succeeds on the first `up`.
+    const runningPs = [
+      JSON.stringify({ Service: "postgres", State: "running", Status: "Up" }),
+      JSON.stringify({ Service: "synapse", State: "running", Status: "Up (healthy)" }),
+      JSON.stringify({ Service: "reverse-proxy", State: "running", Status: "Up" }),
+    ].join("\n");
+
+    // Happy path: pull is issued, and it happens before `up`.
+    const ok = await buildHarness({ psStdout: runningPs });
+    try {
+      const req = buildInstallRequest();
+      const provision = await ok.provisioner.provision(req);
+      await ok.provisioner.bootstrapAccounts(req, provision);
+      expect(ok.composeSubcommands).toContain("pull");
+      expect(ok.composeSubcommands.indexOf("pull")).toBeLessThan(
+        ok.composeSubcommands.indexOf("up"),
+      );
+    } finally {
+      await ok.cleanup();
+    }
+
+    // A non-zero pull exit must be swallowed — the stack still comes up.
+    const pullFails = await buildHarness({ psStdout: runningPs, pullExitCode: 1 });
+    try {
+      const req = buildInstallRequest();
+      const provision = await pullFails.provisioner.provision(req);
+      await pullFails.provisioner.bootstrapAccounts(req, provision);
+      expect(pullFails.composeSubcommands).toContain("up");
+    } finally {
+      await pullFails.cleanup();
+    }
+
+    // A pull that throws (e.g. registry/binary unavailable) must be swallowed too.
+    const pullThrows = await buildHarness({ psStdout: runningPs, pullThrows: true });
+    try {
+      const req = buildInstallRequest();
+      const provision = await pullThrows.provisioner.provision(req);
+      await pullThrows.provisioner.bootstrapAccounts(req, provision);
+      expect(pullThrows.composeSubcommands).toContain("up");
+    } finally {
+      await pullThrows.cleanup();
     }
   });
 

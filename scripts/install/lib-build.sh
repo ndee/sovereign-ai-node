@@ -198,19 +198,46 @@ configure_system_hygiene() {
   install -d -m 0755 /etc/sudoers.d
   cat > "$sudoers_path" <<EOF
 # Managed by sovereign-ai-node installer. Scoped sudo for the runtime
-# API service to manage the OpenClaw gateway systemd unit and the
-# bundled-Matrix project directory.
+# API service to manage the OpenClaw gateway and managed relay tunnel
+# systemd units and the bundled-Matrix project directory.
 ${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/tee /etc/systemd/system/sovereign-openclaw-gateway.service
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl daemon-reload
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl restart sovereign-openclaw-gateway, /bin/systemctl restart sovereign-openclaw-gateway.service
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl enable --now sovereign-openclaw-gateway, /bin/systemctl enable --now sovereign-openclaw-gateway.service
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl is-active sovereign-openclaw-gateway, /bin/systemctl is-active sovereign-openclaw-gateway.service
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl status sovereign-openclaw-gateway, /bin/systemctl status sovereign-openclaw-gateway.service
+# Managed relay tunnel unit: the runtime API installs/starts this the same
+# way (sudo -n tee + sudo -n systemctl) when relay mode is enabled.
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/tee /etc/systemd/system/sovereign-matrix-relay-tunnel.service
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl restart sovereign-matrix-relay-tunnel, /bin/systemctl restart sovereign-matrix-relay-tunnel.service
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl enable --now sovereign-matrix-relay-tunnel, /bin/systemctl enable --now sovereign-matrix-relay-tunnel.service
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl is-active sovereign-matrix-relay-tunnel, /bin/systemctl is-active sovereign-matrix-relay-tunnel.service
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl status sovereign-matrix-relay-tunnel, /bin/systemctl status sovereign-matrix-relay-tunnel.service
+# Mail Sentinel scan schedule units: the runtime API's configure step
+# compiles these from the bot manifest and installs them the same elevated
+# way (sudo -n tee + sudo -n systemctl). Without these rules the wizard's
+# unprivileged install could never schedule the bot, leaving a device that
+# looks healthy and never scans mail (issue #224). Exact unit names only —
+# no wildcards, so no path-traversal surface.
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/tee /etc/systemd/system/sovereign-mail-sentinel-scan.service
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/tee /etc/systemd/system/sovereign-mail-sentinel-scan.timer
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl enable sovereign-mail-sentinel-scan.service, /bin/systemctl enable sovereign-mail-sentinel-scan.timer
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl restart sovereign-mail-sentinel-scan.service, /bin/systemctl restart sovereign-mail-sentinel-scan.timer
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl is-active sovereign-mail-sentinel-scan.service, /bin/systemctl is-active sovereign-mail-sentinel-scan.timer
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl is-enabled sovereign-mail-sentinel-scan.service, /bin/systemctl is-enabled sovereign-mail-sentinel-scan.timer
 # Allow re-claiming ownership of bundled-matrix project subdirectories
 # after docker-compose has touched them as root. Restricted to that
 # path; the *:* in the chown spec keeps it bounded to numeric uid:gid.
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/chown -R [0-9]*\:[0-9]* /var/lib/sovereign-node/bundled-matrix/*
 ${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/chown -R [0-9]*\:[0-9]* /var/lib/sovereign-node/bundled-matrix/*
+# Allow handing the OpenClaw matrix extension's E2EE crypto runtime package
+# dir to the SERVICE_USER so the gateway can download matrix-sdk-crypto on
+# first start (issue #207). The dir lives under the root-owned npm global
+# prefix; cover both global prefixes. Bounded to numeric uid:gid + that path.
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/chown -R [0-9]*\:[0-9]* /usr/lib/node_modules/openclaw/extensions/matrix/node_modules/@matrix-org/matrix-sdk-crypto-nodejs
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/chown -R [0-9]*\:[0-9]* /usr/lib/node_modules/openclaw/extensions/matrix/node_modules/@matrix-org/matrix-sdk-crypto-nodejs
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/chown -R [0-9]*\:[0-9]* /usr/local/lib/node_modules/openclaw/extensions/matrix/node_modules/@matrix-org/matrix-sdk-crypto-nodejs
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/chown -R [0-9]*\:[0-9]* /usr/local/lib/node_modules/openclaw/extensions/matrix/node_modules/@matrix-org/matrix-sdk-crypto-nodejs
 # Allow re-claiming ownership of /etc/sovereign-node/secrets and its
 # entries when a previous run left them root-owned.
 ${SERVICE_USER} ALL=(root) NOPASSWD: /bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets, /bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets/*

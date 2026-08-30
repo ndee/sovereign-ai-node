@@ -70,7 +70,14 @@ export const openclawInstallRequestSchema = z.object({
   runOnboard: z.literal(false).optional(),
 });
 
+// Mail connection protocol. Absent means IMAP: every install that predates
+// POP3 support keeps working without a migration step. The surrounding
+// `imap` key name is kept for backwards compatibility with saved install
+// requests and runtime configs.
+export const mailProtocolSchema = z.enum(["imap", "pop3"]);
+
 export const imapInstallInputSchema = z.object({
+  protocol: mailProtocolSchema.optional(),
   host: z.string().min(1),
   port: z.number().int().positive(),
   tls: z.boolean(),
@@ -80,11 +87,19 @@ export const imapInstallInputSchema = z.object({
   mailbox: z.string().min(1).optional(),
 });
 
+export const openrouterPrivacyInputSchema = z.object({
+  zdr: z.boolean().optional(),
+  dataCollection: z.enum(["deny", "allow"]).optional(),
+  allowFallbacks: z.boolean().optional(),
+  only: z.array(z.string().min(1)).optional(),
+});
+
 export const openrouterInstallInputSchema = z
   .object({
     model: z.string().min(1).optional(),
     apiKey: z.string().min(1).optional(),
     secretRef: z.string().min(1).optional(),
+    privacy: openrouterPrivacyInputSchema.optional(),
   })
   .refine(
     (value: {
@@ -108,6 +123,21 @@ export const relayTunnelInputSchema = z.object({
   token: z.string().min(1),
   proxyName: z.string().min(1),
   subdomain: z.string().min(1).optional(),
+  // frpc proxy type: "http" (relay terminates TLS) or "https" (relay passes the
+  // encrypted stream through by SNI; the node terminates its own TLS).
+  type: z.enum(["http", "https"]).optional(),
+});
+
+// DNS-01 material for relay TLS passthrough: the node obtains its own
+// Let's Encrypt cert via deSEC and terminates TLS itself. `token` is the
+// per-node scoped deSEC secret, present only on first mint or rotation.
+export const relayDns01InputSchema = z.object({
+  provider: z.literal("desec"),
+  apiBase: z.string().min(1),
+  zone: z.string().min(1),
+  subname: z.string(),
+  acmeEmail: z.string().min(1).optional(),
+  token: z.string().min(1).optional(),
 });
 
 export const relayInstallInputSchema = z.object({
@@ -118,6 +148,7 @@ export const relayInstallInputSchema = z.object({
   hostname: z.string().min(1).optional(),
   publicBaseUrl: z.string().min(1).optional(),
   tunnel: relayTunnelInputSchema.optional(),
+  dns01: relayDns01InputSchema.optional(),
 });
 
 export const matrixInstallInputSchema = z.object({
@@ -346,6 +377,7 @@ export const sovereignStatusSchema = z.object({
   imap: z.object({
     lastCredentialTestAt: isoTimestampSchema.optional(),
     authStatus: z.enum(["ok", "failed", "unknown"]),
+    protocol: mailProtocolSchema.optional(),
     host: z.string().min(1).optional(),
     mailbox: z.string().min(1).optional(),
   }),
@@ -382,6 +414,57 @@ export const reconfigureResultSchema = z.object({
   changed: z.array(z.string()),
   restartRequiredServices: z.array(z.string()),
   validation: z.array(checkResultSchema),
+  // Present when the change is applied through a background install job
+  // (mail reconfiguration re-runs the idempotent install to regenerate the
+  // bot/tool bindings). Clients poll it like an install job.
+  job: installJobSummarySchema.optional(),
+});
+
+// Non-secret view of the installer-entered settings that can be changed after
+// install. Secrets are reported as presence flags only and are never echoed.
+export const settingsSummarySchema = z.object({
+  mail: z.object({
+    configured: z.boolean(),
+    protocol: mailProtocolSchema,
+    host: z.string(),
+    port: z.number().int().positive(),
+    tls: z.boolean(),
+    username: z.string(),
+    mailbox: z.string(),
+    passwordSet: z.boolean(),
+    editable: z.literal(true),
+  }),
+  openrouter: z.object({
+    model: z.string(),
+    apiKeySet: z.boolean(),
+    editable: z.literal(true),
+  }),
+  matrix: z.object({
+    accessMode: z.string(),
+    homeserverDomain: z.string(),
+    publicBaseUrl: z.string(),
+    federationEnabled: z.boolean(),
+    alertRoomName: z.string(),
+    // Homeserver identity is immutable after install (Synapse server_name,
+    // relay assignment and the TLS certificate are all keyed to it).
+    editable: z.literal(false),
+    reason: z.string(),
+  }),
+  relay: z
+    .object({
+      slug: z.string().optional(),
+      hostname: z.string().optional(),
+      editable: z.literal(false),
+      reason: z.string(),
+    })
+    .optional(),
+});
+
+export const testOpenrouterResultSchema = z.object({
+  ok: z.boolean(),
+  // Free-form label OpenRouter attaches to the key (never the key itself).
+  label: z.string().optional(),
+  error: errorDetailSchema.optional(),
 });
 
 export const matrixOnboardingIssueResultSchema = z.object({
@@ -402,8 +485,23 @@ export const matrixOnboardingPublicStateSchema = z.object({
   homeserverUrl: z.string().min(1),
 });
 
+// Reachability of the public onboarding page, used by the CLI and web
+// installers to gate the reveal of the onboarding URL/QR until the page is
+// actually serving (relevant for relay-passthrough, where the node's TLS cert
+// can take minutes to issue via DNS-01). `ready` is the only field a client
+// must act on; `mode`/`status`/`reason` are diagnostic. `url` is empty while
+// the runtime config has not been written yet.
+export const matrixOnboardingReadinessSchema = z.object({
+  ready: z.boolean(),
+  url: z.string(),
+  mode: z.enum(["internal", "relay", "relay-passthrough", "direct"]),
+  status: z.number().int().optional(),
+  reason: z.string().optional(),
+});
+
 export const testImapResultSchema = z.object({
   ok: z.boolean(),
+  protocol: mailProtocolSchema.optional(),
   host: z.string().min(1),
   port: z.number().int().positive(),
   tls: z.boolean(),
@@ -438,6 +536,7 @@ export const startInstallResultSchema = z.object({
 export type JobStepId = z.infer<typeof jobStepIdSchema>;
 export type JobStep = z.infer<typeof jobStepSchema>;
 export type InstallRequest = z.infer<typeof installRequestSchema>;
+export type RelayDns01Input = z.infer<typeof relayDns01InputSchema>;
 export type PreflightResult = z.infer<typeof preflightResultSchema>;
 export type InstallJobSummary = z.infer<typeof installJobSummarySchema>;
 export type InstallResult = z.infer<typeof installResultSchema>;
@@ -447,7 +546,11 @@ export type DoctorReport = z.infer<typeof doctorReportSchema>;
 export type TestAlertResult = z.infer<typeof testAlertResultSchema>;
 export type ReconfigureResult = z.infer<typeof reconfigureResultSchema>;
 export type TestImapResult = z.infer<typeof testImapResultSchema>;
+export type MailProtocol = z.infer<typeof mailProtocolSchema>;
+export type SettingsSummary = z.infer<typeof settingsSummarySchema>;
+export type TestOpenrouterResult = z.infer<typeof testOpenrouterResultSchema>;
 export type TestMatrixResult = z.infer<typeof testMatrixResultSchema>;
 export type StartInstallResult = z.infer<typeof startInstallResultSchema>;
 export type MatrixOnboardingIssueResult = z.infer<typeof matrixOnboardingIssueResultSchema>;
 export type MatrixOnboardingPublicState = z.infer<typeof matrixOnboardingPublicStateSchema>;
+export type MatrixOnboardingReadiness = z.infer<typeof matrixOnboardingReadinessSchema>;

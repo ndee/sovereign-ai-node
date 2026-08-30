@@ -16,6 +16,7 @@ const DEFAULT_STATE = {
     username: "operator",
   },
   imap: {
+    protocol: "imap",
     host: "",
     port: 993,
     tls: true,
@@ -134,6 +135,7 @@ export const buildInstallRequest = (state, secrets) => {
   }
 
   const imap = {
+    protocol: state.imap.protocol === "pop3" ? "pop3" : "imap",
     host: state.imap.host.trim(),
     port: state.imap.port,
     tls: state.imap.tls === true,
@@ -192,10 +194,11 @@ export const summarizeRequest = (state) => [
   {
     title: "Mailbox",
     rows: [
+      { label: "Protocol", value: state.imap.protocol === "pop3" ? "POP3" : "IMAP" },
       { label: "Host", value: state.imap.host || "—" },
       { label: "Port", value: String(state.imap.port ?? 993) },
       { label: "TLS", value: state.imap.tls ? "on" : "off" },
-      { label: "Username", value: state.imap.username || "—" },
+      { label: "Email address / username", value: state.imap.username || "—" },
       { label: "Folder", value: state.imap.mailbox || "INBOX" },
     ],
   },

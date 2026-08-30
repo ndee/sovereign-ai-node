@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { InstallRequest } from "../contracts/index.js";
+import type { InstallRequest, RelayDns01Input } from "../contracts/index.js";
 
 import type { RuntimeConfig } from "./real-service-shared.js";
 
@@ -92,6 +92,11 @@ export const buildRelayProvisionRequest = (input: {
   hostname: string;
   publicBaseUrl: string;
   previousRuntimeConfig?: RuntimeConfig | null | undefined;
+  // Resolved dns01 block (TLS passthrough) with a CONCRETE token, so the
+  // provisioner can render the node's TLS-terminating Caddy. The caller resolves
+  // the token from enrollment or the previously persisted secret on rotation-absent
+  // re-enrolls. Omitted ⇒ legacy http (relay-terminated) provisioning.
+  dns01?: RelayDns01Input;
 }): InstallRequest => {
   const homeserverDomain =
     input.previousRuntimeConfig?.matrix.accessMode === "direct"
@@ -109,5 +114,13 @@ export const buildRelayProvisionRequest = (input: {
       publicBaseUrl: input.publicBaseUrl,
       federationEnabled: input.req.matrix.federationEnabled ?? false,
     },
+    ...(input.dns01 === undefined
+      ? {}
+      : {
+          relay: {
+            ...(input.req.relay ?? { controlUrl: DEFAULT_MANAGED_RELAY_CONTROL_URL }),
+            dns01: input.dns01,
+          },
+        }),
   };
 };

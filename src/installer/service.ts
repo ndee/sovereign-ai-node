@@ -6,15 +6,19 @@ import type {
   TestAlertRequest,
   TestImapRequest,
   TestMatrixRequest,
+  TestOpenrouterRequest,
 } from "../contracts/api.js";
 import type {
   DoctorReport,
   InstallJobStatusResponse,
   InstallRequest,
+  MailProtocol,
   MatrixOnboardingIssueResult,
   MatrixOnboardingPublicState,
+  MatrixOnboardingReadiness,
   PreflightResult,
   ReconfigureResult,
+  SettingsSummary,
   SetupUiBootstrapIssueResult,
   SetupUiBootstrapPublicState,
   SovereignStatus,
@@ -22,6 +26,7 @@ import type {
   TestAlertResult,
   TestImapResult,
   TestMatrixResult,
+  TestOpenrouterResult,
 } from "../contracts/index.js";
 
 export type ManagedAgent = {
@@ -31,6 +36,49 @@ export type ManagedAgent = {
   templateRef?: string;
   toolInstanceIds?: string[];
   model?: string;
+};
+
+export type ReconcileAgentWorkspacesOptions = {
+  /** Path to a root-owned verified-release authorization attestation. */
+  releaseAuthorizationPath?: string;
+};
+
+/** One template pin transitioned under verified-release authorization. */
+export type ReconcileTemplateTransitionReport = {
+  botId: string;
+  templateRef: string;
+  kind: "tool" | "agent";
+  previousManifestSha256: string;
+  newManifestSha256: string;
+  previousKeyId: string;
+  newKeyId: string;
+  classifications: string[];
+  capabilitiesAdded: string[];
+  capabilitiesRemoved: string[];
+  commandsAdded: string[];
+  commandsRemoved: string[];
+  resourcesAdded: string[];
+  resourcesRemoved: string[];
+  resourcesChanged: string[];
+  committed: boolean;
+};
+
+export type ReconcileAgentWorkspacesResult = {
+  reconciled: string[];
+  /**
+   * Compiled bot systemd units (scan service/timer) that were written and
+   * enabled by this reconcile. Empty when every unit already matched. A unit
+   * that cannot be converged makes the reconcile throw
+   * BOT_SYSTEMD_APPLY_FAILED — a bot that is installed but never scheduled
+   * must not pass as reconciled (issue #224).
+   */
+  systemdUnits: { applied: string[] };
+  templateTransitions: ReconcileTemplateTransitionReport[];
+  releaseAuthorization: {
+    releaseId: string;
+    artifactSha256: string;
+    runId: string;
+  } | null;
 };
 
 export type ManagedAgentListResult = {
@@ -144,6 +192,7 @@ export type MailSentinelSummary = {
   alertRoomId?: string;
   alertRoomName?: string;
   allowedUsers: string[];
+  imapProtocol?: MailProtocol;
   imapHost?: string;
   imapUsername?: string;
   mailbox?: string;
@@ -175,6 +224,8 @@ export type MailSentinelDeleteResult = {
 export interface InstallerService {
   preflight(input?: PreflightRequest): Promise<PreflightResult>;
   testImap(req: TestImapRequest): Promise<TestImapResult>;
+  testOpenrouter(req: TestOpenrouterRequest): Promise<TestOpenrouterResult>;
+  getSettings(): Promise<SettingsSummary>;
   testMatrix(req: TestMatrixRequest): Promise<TestMatrixResult>;
   startInstall(req: InstallRequest): Promise<StartInstallResult>;
   getInstallJob(jobId: string): Promise<InstallJobStatusResponse>;
@@ -186,6 +237,7 @@ export interface InstallerService {
   reconfigureOpenrouter(req: ReconfigureOpenrouterRequest): Promise<ReconfigureResult>;
   issueMatrixOnboardingCode(req?: { ttlMinutes?: number }): Promise<MatrixOnboardingIssueResult>;
   getMatrixOnboardingState(): Promise<MatrixOnboardingPublicState | null>;
+  getMatrixOnboardingReadiness(): Promise<MatrixOnboardingReadiness>;
   getAuthStage(): Promise<{ stage: "needs-bootstrap" | "needs-password"; username?: string }>;
   issueSetupUiBootstrapToken(req?: { ttlMinutes?: number }): Promise<SetupUiBootstrapIssueResult>;
   getSetupUiBootstrapState(): Promise<SetupUiBootstrapPublicState | null>;
@@ -221,6 +273,7 @@ export interface InstallerService {
     imapHost: string;
     imapPort: number;
     imapTls: boolean;
+    imapProtocol?: MailProtocol;
     imapUsername: string;
     imapPassword?: string;
     imapSecretRef?: string;
@@ -240,6 +293,7 @@ export interface InstallerService {
     imapHost?: string;
     imapPort?: number;
     imapTls?: boolean;
+    imapProtocol?: MailProtocol;
     imapUsername?: string;
     imapPassword?: string;
     imapSecretRef?: string;
@@ -269,6 +323,19 @@ export interface InstallerService {
     toolInstanceIds?: string[];
   }): Promise<ManagedAgentUpsertResult>;
   deleteManagedAgent(req: { id: string }): Promise<ManagedAgentDeleteResult>;
+  /**
+   * Re-apply every managed agent's workspace files from the installed bot
+   * catalog. Used after an update replaces the catalog, so the code systemd
+   * runs matches the code that was installed. Does not restart the gateway.
+   *
+   * With `releaseAuthorizationPath` set (root-owned attestation written by
+   * the verified updater), a template pin whose trusted manifest changed as
+   * part of that exact verified release is transitioned; without it, any pin
+   * mismatch stays a hard TEMPLATE_PIN_MISMATCH failure.
+   */
+  reconcileAgentWorkspaces(
+    options?: ReconcileAgentWorkspacesOptions,
+  ): Promise<ReconcileAgentWorkspacesResult>;
   listSovereignBots(): Promise<SovereignBotListResult>;
   instantiateSovereignBot(req: {
     id: string;

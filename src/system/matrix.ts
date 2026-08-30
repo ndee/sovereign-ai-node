@@ -5,11 +5,19 @@ import { join, resolve } from "node:path";
 import type { SovereignPaths } from "../config/paths.js";
 import type { TestMatrixRequest } from "../contracts/api.js";
 import type { CheckResult } from "../contracts/common.js";
-import type { InstallRequest, TestMatrixResult } from "../contracts/index.js";
+import type { InstallRequest, RelayDns01Input, TestMatrixResult } from "../contracts/index.js";
 import type { Logger } from "../logging/logger.js";
 import type { ExecResult, ExecRunner } from "./exec.js";
 import { detectLanIPv4 } from "./lan-ips.js";
 import type { MatrixAvatarResolver } from "./matrix-avatars.js";
+import {
+  BUNDLED_MATRIX_CONFIG_FILE_MODE,
+  BUNDLED_MATRIX_ENV_FILE_MODE,
+  type BundledMatrixOwner,
+  hardenDirectory,
+  hardenFile,
+  resolveBundledMatrixOwner,
+} from "./matrix-file-modes.js";
 import {
   buildOnboardingPageUrl,
   normalizeEmbeddedSvg,
@@ -36,8 +44,37 @@ const MATRIX_COMPOSE_COMMAND_TIMEOUT_MS = resolveDurationFromEnv(
 );
 const DEFAULT_SYNAPSE_IMAGE = "matrixdotorg/synapse:v1.125.0";
 const DEFAULT_CADDY_IMAGE = "caddy:2.10.2-alpine";
+// Custom Caddy image built with the deSEC DNS-01 plugin (xcaddy). Used ONLY in
+// relay TLS-passthrough mode, where the node terminates its own TLS via
+// DNS-01. Published separately (see deploy/caddy-desec/Dockerfile); overridable
+// via SOVEREIGN_MATRIX_CADDY_DESEC_IMAGE.
+//
+// Pinned by digest, not tag alone: `docker compose up` reuses a locally cached
+// tag without re-pulling, so an ARM node that once cached the amd64-only build
+// keeps running it (caddy crash-loops "exec format error", no cert). A digest
+// reference cannot be satisfied by a stale cached tag, forcing the correct
+// image to be fetched. This is the multi-arch INDEX (manifest-list) digest, so
+// per-arch selection is preserved. To refresh after republishing the image, use
+// the CI "Report published digest" step or:
+//   docker buildx imagetools inspect ghcr.io/ndee/sovereign-caddy-desec:2.10.2
+const DEFAULT_CADDY_DESEC_IMAGE =
+  "ghcr.io/ndee/sovereign-caddy-desec:2.10.2@sha256:370cd93ff12d1c3c691a5eaf64c06458b2c33100c481e0c6e56c0e91fd622bf6";
 const DEFAULT_ONBOARDING_API_IMAGE = "node:22-alpine";
 const RELAY_LOCAL_EDGE_PORT = 18080;
+// Local port the node's own TLS-terminating Caddy listens on in passthrough mode.
+const RELAY_LOCAL_TLS_PORT = 18443;
+// DNS-01 challenge timing for the node's own TLS-terminating Caddy in relay
+// TLS-passthrough mode. Exported so the post-install smoke check can size its
+// cert-poll window from the SAME numbers the Caddyfile is rendered with — the
+// two must never drift apart, or the smoke check would either give up before
+// the cert can exist (false-negative install) or wait longer than necessary.
+//
+// `propagation_delay` is how long Caddy waits after publishing the DNS-01 TXT
+// record before asking the ACME CA to validate it (gives the authoritative
+// nameserver time to serve the new record). `propagation_timeout` bounds how
+// long Caddy will keep polling for that record to propagate before failing.
+export const RELAY_PASSTHROUGH_DNS01_PROPAGATION_DELAY_SECONDS = 150;
+export const RELAY_PASSTHROUGH_DNS01_PROPAGATION_TIMEOUT_SECONDS = 600;
 const MATRIX_ONBOARDING_DIR = "onboarding";
 const MATRIX_ONBOARDING_STATE_FILE = "state.json";
 const MATRIX_ONBOARDING_API_PORT = 8090;
@@ -59,7 +96,10 @@ type ComposeServiceState = {
 
 type BundledMatrixTlsMode = "auto" | "internal" | "local-dev";
 type BundledMatrixAccessMode = "direct" | "relay";
-type BundledMatrixOnboardingMode = Exclude<BundledMatrixTlsMode, "local-dev"> | "relay";
+type BundledMatrixOnboardingMode =
+  | Exclude<BundledMatrixTlsMode, "local-dev">
+  | "relay"
+  | "relay-passthrough";
 type RequestedBundledMatrixTlsMode = BundledMatrixTlsMode | "manual";
 
 export type BundledMatrixProvisionResult = {
@@ -71,6 +111,9 @@ export type BundledMatrixProvisionResult = {
   adminBaseUrl: string;
   federationEnabled: boolean;
   tlsMode: BundledMatrixTlsMode;
+  // Relay TLS-passthrough: the node terminates its own TLS (deSEC DNS-01) and
+  // the relay forwards the encrypted stream by SNI. false for all legacy modes.
+  passthrough: boolean;
 };
 
 type MatrixBootstrapAccount = {
@@ -166,6 +209,10 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     const requestedTlsMode: RequestedBundledMatrixTlsMode = req.matrix.tlsMode ?? "auto";
     const tlsMode = normalizeBundledTlsMode(accessMode, requestedTlsMode);
     const usesReverseProxy = shouldUseReverseProxy(accessMode, tlsMode);
+    // TLS passthrough activates only when the relay enrolled this node with a
+    // dns01 block. Otherwise every relay/direct path is byte-for-byte unchanged.
+    const dns01 = accessMode === "relay" ? req.relay?.dns01 : undefined;
+    const passthrough = dns01 !== undefined;
 
     const homeserverDomain = req.matrix.homeserverDomain;
     const publicBaseUrl = normalizePublicBaseUrl(req.matrix.publicBaseUrl);
@@ -226,22 +273,32 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       await mkdir(proxyConfigDir, { recursive: true });
       await mkdir(onboardingDir, { recursive: true });
     }
-    // The Synapse and Postgres containers run as non-root users (UID 991 and
-    // 70 respectively). They need to traverse baseDir and projectDir to reach
-    // their bind-mounted /data, so force those parents to 0o755 even if the
-    // installer was invoked under a restrictive umask.
-    await chmodIgnoreMissing(baseDir, 0o755);
-    await chmodIgnoreMissing(projectDir, 0o755);
-    await ensureDirectoryTreesWritable([synapseDir, postgresDir]);
-    if (usesReverseProxy) {
-      await ensureDirectoryTreesWritable([
-        wellKnownDir,
-        proxyDir,
-        proxyDataDir,
-        proxyConfigDir,
-        onboardingDir,
-      ]);
-    }
+    // Project files carry credentials, so the tree is private to the owner
+    // (the runtime service user, or the current user when unprivileged).
+    // Synapse is handed the same uid/gid through the compose UID/GID
+    // variables, Postgres/Caddy/onboarding-api run as root inside their
+    // containers, and Docker resolves bind mounts as root, so nothing needs
+    // to be world- or group-accessible. See matrix-file-modes.ts.
+    const owner = await this.resolveOwner();
+    const projectDirs = [
+      baseDir,
+      projectDir,
+      synapseDir,
+      postgresDir,
+      ...(usesReverseProxy
+        ? [
+            wellKnownDir,
+            join(wellKnownDir, ".well-known"),
+            join(wellKnownDir, ".well-known", "matrix"),
+            join(wellKnownDir, "onboard"),
+            proxyDir,
+            proxyDataDir,
+            proxyConfigDir,
+            onboardingDir,
+          ]
+        : []),
+    ];
+    await this.hardenDirectories(projectDirs, owner);
 
     const existingEnv = await this.readExistingEnv(projectDir);
     const existingPostgresPassword = existingEnv.POSTGRES_PASSWORD?.trim();
@@ -262,12 +319,13 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
 
     const composeYaml = renderComposeYaml({
       synapseImage: resolveSynapseImage(),
-      caddyImage: DEFAULT_CADDY_IMAGE,
+      caddyImage: passthrough ? resolveCaddyDesecImage() : DEFAULT_CADDY_IMAGE,
       onboardingApiImage: DEFAULT_ONBOARDING_API_IMAGE,
       appDistDir: resolveOnboardingApiDistDir(),
       secretsDir: this.paths.secretsDir,
       accessMode,
       tlsMode,
+      passthrough,
       localSynapsePortBinding: usesReverseProxy
         ? "127.0.0.1:8008:8008"
         : resolveLocalDevSynapsePortBinding(publicBaseUrl),
@@ -275,7 +333,11 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         ? { httpsProxyPortBinding: resolveAutoHttpsProxyPortBinding(publicBaseUrl) }
         : {}),
       ...(accessMode === "relay"
-        ? { relayEdgePortBinding: `127.0.0.1:${RELAY_LOCAL_EDGE_PORT}:80` }
+        ? {
+            relayEdgePortBinding: passthrough
+              ? `127.0.0.1:${RELAY_LOCAL_TLS_PORT}:443`
+              : `127.0.0.1:${RELAY_LOCAL_EDGE_PORT}:80`,
+          }
         : {}),
     });
     const envFile = renderEnvFile({
@@ -284,6 +346,11 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       federationEnabled,
       postgresPassword: generated.postgresPassword,
       synapseConfigPath: "/data/homeserver.yaml",
+      ownerUid: owner.uid,
+      ownerGid: owner.gid,
+      ...(passthrough && dns01?.token !== undefined && dns01.token.length > 0
+        ? { desecToken: dns01.token }
+        : {}),
     });
     const homeserverYaml = renderSynapseConfig({
       homeserverDomain,
@@ -313,7 +380,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         homeserverDomain,
         publicBaseUrl,
       });
-      const onboardingMode = resolveOnboardingMode(accessMode, tlsMode);
+      const onboardingMode = resolveOnboardingMode(accessMode, tlsMode, passthrough);
       // For Local LAN (tls internal), include this host's LAN IPv4
       // addresses in the cert so operators can reach the homeserver via
       // https://<lan-ip>/ without needing DNS or /etc/hosts entries on
@@ -326,7 +393,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       writes.push(
         writeFile(
           join(proxyDir, "Caddyfile"),
-          `${renderCaddyfile(new URL(publicBaseUrl).hostname, onboardingMode, lanIPv4)}\n`,
+          `${renderCaddyfile(new URL(publicBaseUrl).hostname, onboardingMode, lanIPv4, dns01)}\n`,
           "utf8",
         ),
         writeFile(
@@ -343,39 +410,42 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     }
 
     await Promise.all(writes);
-    // Make the bind-mounted Synapse config files readable by the Synapse
-    // container's non-root user. homeserver.yaml and the signing key already
-    // contain Postgres credentials and shared secrets, so 0o644 does not
-    // weaken the existing threat model — anyone with shell access to baseDir
-    // can already read them.
+    // Every rendered file is re-hardened on each run so upgrades of nodes
+    // installed with the former world-readable modes converge too.
+    const configFiles = [
+      composeFilePath,
+      join(synapseDir, "homeserver.yaml"),
+      join(synapseDir, generated.signingKeyFile),
+      join(synapseDir, "log.config"),
+      ...(usesReverseProxy
+        ? [
+            join(proxyDir, "Caddyfile"),
+            join(wellKnownDir, ".well-known", "matrix", "client"),
+            join(wellKnownDir, ".well-known", "matrix", "server"),
+          ]
+        : []),
+    ];
     await Promise.all([
-      chmodIgnoreMissing(join(synapseDir, "homeserver.yaml"), 0o644),
-      chmodIgnoreMissing(join(synapseDir, generated.signingKeyFile), 0o644),
-      chmodIgnoreMissing(join(synapseDir, "log.config"), 0o644),
+      hardenFile(envFilePath, BUNDLED_MATRIX_ENV_FILE_MODE, owner),
+      ...configFiles.map((file) => hardenFile(file, BUNDLED_MATRIX_CONFIG_FILE_MODE, owner)),
     ]);
     if (usesReverseProxy) {
       await this.writeOnboardingPage({
         projectDir,
         publicBaseUrl,
         homeserverDomain,
-        tlsMode: resolveOnboardingMode(accessMode, tlsMode),
+        tlsMode: resolveOnboardingMode(accessMode, tlsMode, passthrough),
         ...(req.matrix.alertRoomName?.trim()
           ? { alertRoomName: req.matrix.alertRoomName.trim() }
           : {}),
       });
+      await hardenFile(
+        join(wellKnownDir, "onboard", "index.html"),
+        BUNDLED_MATRIX_CONFIG_FILE_MODE,
+        owner,
+      );
     }
-    await chmodIgnoreMissing(baseDir, 0o755);
-    await chmodIgnoreMissing(projectDir, 0o755);
-    await ensureDirectoryTreesWritable([synapseDir, postgresDir]);
-    if (usesReverseProxy) {
-      await ensureDirectoryTreesWritable([
-        wellKnownDir,
-        proxyDir,
-        proxyDataDir,
-        proxyConfigDir,
-        onboardingDir,
-      ]);
-    }
+    await this.hardenDirectories(projectDirs, owner);
 
     const composeConfigCheck = await this.runComposeCommand(projectDir, composeFilePath, [
       "config",
@@ -415,6 +485,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       adminBaseUrl: MATRIX_INTERNAL_BASE_URL,
       federationEnabled,
       tlsMode,
+      passthrough,
     };
   }
 
@@ -707,7 +778,11 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
             projectDir: provision.projectDir,
             publicBaseUrl: provision.publicBaseUrl,
             homeserverDomain: provision.homeserverDomain,
-            tlsMode: resolveOnboardingMode(provision.accessMode, provision.tlsMode),
+            tlsMode: resolveOnboardingMode(
+              provision.accessMode,
+              provision.tlsMode,
+              provision.passthrough,
+            ),
             alertRoomName: previousRoom.roomName,
             alertRoomId: previousRoom.roomId,
           });
@@ -786,7 +861,11 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         projectDir: provision.projectDir,
         publicBaseUrl: provision.publicBaseUrl,
         homeserverDomain: provision.homeserverDomain,
-        tlsMode: resolveOnboardingMode(provision.accessMode, provision.tlsMode),
+        tlsMode: resolveOnboardingMode(
+          provision.accessMode,
+          provision.tlsMode,
+          provision.passthrough,
+        ),
         alertRoomName: roomName,
         alertRoomId: roomId,
       });
@@ -1006,6 +1085,32 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     if (provision.accessMode === "relay" || provision.tlsMode !== "local-dev") {
       services.push("reverse-proxy");
     }
+    // Refresh images before starting. The digest-pinned passthrough Caddy image
+    // is already correctness-safe on its own, but pulling here also keeps
+    // tag-referenced images (synapse, postgres, legacy caddy) fresh and repairs
+    // a node that cached an image whose tag was later re-published. Best-effort:
+    // a pull failure (offline, registry hiccup, missing compose binary) must NOT
+    // block a node that already has the images locally — log and continue to up.
+    await emitProgress(onProgress, "Pulling latest bundled Matrix images (docker compose pull)");
+    try {
+      const composePull = await this.runComposeCommand(
+        provision.projectDir,
+        provision.composeFilePath,
+        ["pull", ...services],
+      );
+      if (composePull.exitCode !== 0) {
+        this.logger.warn(
+          { projectDir: provision.projectDir, exitCode: composePull.exitCode },
+          "docker compose pull did not succeed; continuing with locally available images",
+        );
+      }
+    } catch (error) {
+      this.logger.warn(
+        { projectDir: provision.projectDir, error: describeError(error) },
+        "docker compose pull failed; continuing with locally available images",
+      );
+    }
+
     const upArgs = ["up", "-d", "--remove-orphans", "--force-recreate", ...services];
     await emitProgress(onProgress, "Starting bundled Matrix containers (docker compose up)");
     const composeUp = await this.runComposeCommand(
@@ -1664,7 +1769,17 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     await this.reclaimOwnership(postgresDir);
     await rm(postgresDir, { recursive: true, force: true });
     await mkdir(postgresDir, { recursive: true });
-    await ensureDirectoryTreeWritable(postgresDir);
+    await hardenDirectory(postgresDir, await this.resolveOwner(), { logger: this.logger });
+  }
+
+  private async resolveOwner(): Promise<BundledMatrixOwner> {
+    return resolveBundledMatrixOwner({ execRunner: this.execRunner, logger: this.logger });
+  }
+
+  private async hardenDirectories(dirs: string[], owner: BundledMatrixOwner): Promise<void> {
+    for (const dir of dirs) {
+      await hardenDirectory(dir, owner, { logger: this.logger });
+    }
   }
 
   private async collectComposeDiagnostics(
@@ -2220,7 +2335,10 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     const onboardingPage = renderOnboardingPage({
       publicBaseUrl: input.publicBaseUrl,
       homeserverDomain: input.homeserverDomain,
-      tlsMode: input.tlsMode,
+      // The onboarding page is identical for relay and relay-passthrough (same
+      // Element links, no local-CA section); the page renderer only models
+      // "auto" | "internal" | "relay", so collapse passthrough to "relay".
+      tlsMode: input.tlsMode === "relay-passthrough" ? "relay" : input.tlsMode,
       onboardingPageUrl,
       onboardingQrSvg,
       ...(input.alertRoomName === undefined ? {} : { alertRoomName: input.alertRoomName }),
@@ -2240,6 +2358,12 @@ type EnvTemplateInput = {
   federationEnabled: boolean;
   postgresPassword: string;
   synapseConfigPath: string;
+  // uid/gid the Synapse container runs as (and that owns the project files).
+  ownerUid: number;
+  ownerGid: number;
+  // Per-node scoped deSEC token, injected into the reverse-proxy container for
+  // the Caddy DNS-01 challenge. Present only in relay TLS-passthrough mode.
+  desecToken?: string;
 };
 
 type ComposeTemplateInput = {
@@ -2250,6 +2374,7 @@ type ComposeTemplateInput = {
   secretsDir: string;
   accessMode: BundledMatrixAccessMode;
   tlsMode: BundledMatrixTlsMode;
+  passthrough?: boolean;
   localSynapsePortBinding: string;
   httpsProxyPortBinding?: string;
   relayEdgePortBinding?: string;
@@ -2276,6 +2401,10 @@ services:
       - postgres
     environment:
       SYNAPSE_CONFIG_PATH: \${SYNAPSE_CONFIG_PATH}
+      # start.py (root) chowns /data to UID:GID and drops privileges via gosu,
+      # so the 0640 config files are readable by their owner only.
+      UID: "\${SOVEREIGN_MATRIX_UID}"
+      GID: "\${SOVEREIGN_MATRIX_GID}"
     ports:
       - "${input.localSynapsePortBinding}"
     volumes:
@@ -2313,7 +2442,13 @@ ${
     restart: unless-stopped
     depends_on:
       - synapse
-      - onboarding-api
+      - onboarding-api${
+        input.passthrough === true
+          ? `
+    environment:
+      DESEC_TOKEN: \${DESEC_TOKEN}`
+          : ""
+      }
     ports:
 ${
   input.accessMode === "relay"
@@ -2333,9 +2468,12 @@ const renderEnvFile = (input: EnvTemplateInput): string =>
   [
     `POSTGRES_PASSWORD=${input.postgresPassword}`,
     `SYNAPSE_CONFIG_PATH=${input.synapseConfigPath}`,
+    `SOVEREIGN_MATRIX_UID=${input.ownerUid}`,
+    `SOVEREIGN_MATRIX_GID=${input.ownerGid}`,
     `MATRIX_HOMESERVER_DOMAIN=${input.homeserverDomain}`,
     `MATRIX_PUBLIC_BASE_URL=${input.publicBaseUrl}`,
     `MATRIX_FEDERATION_ENABLED=${input.federationEnabled ? "true" : "false"}`,
+    ...(input.desecToken !== undefined ? [`DESEC_TOKEN=${input.desecToken}`] : []),
   ].join("\n");
 
 type SynapseConfigInput = {
@@ -2421,6 +2559,14 @@ const resolveSynapseImage = (): string => {
   return DEFAULT_SYNAPSE_IMAGE;
 };
 
+const resolveCaddyDesecImage = (): string => {
+  const configured = process.env.SOVEREIGN_MATRIX_CADDY_DESEC_IMAGE?.trim();
+  if (configured !== undefined && configured.length > 0) {
+    return configured;
+  }
+  return DEFAULT_CADDY_DESEC_IMAGE;
+};
+
 const resolveOnboardingApiDistDir = (): string => {
   const configured = process.env.SOVEREIGN_NODE_APP_DIR?.trim();
   if (configured !== undefined && configured.length > 0) {
@@ -2470,9 +2616,10 @@ const shouldUseReverseProxy = (
 const resolveOnboardingMode = (
   accessMode: BundledMatrixAccessMode,
   tlsMode: BundledMatrixTlsMode,
+  passthrough = false,
 ): BundledMatrixOnboardingMode => {
   if (accessMode === "relay") {
-    return "relay";
+    return passthrough ? "relay-passthrough" : "relay";
   }
   if (tlsMode === "local-dev") {
     throw new Error("Onboarding mode is unavailable when tlsMode=local-dev");
@@ -2585,6 +2732,7 @@ const renderCaddyfile = (
   siteHostname: string,
   tlsMode: BundledMatrixOnboardingMode,
   extraSiteNames: ReadonlyArray<string> = [],
+  dns01?: RelayDns01Input,
 ): string => {
   // For Local LAN (tls internal), include the LAN IPs as additional site
   // names so Caddy issues a single internal cert that's valid for both
@@ -2595,15 +2743,38 @@ const renderCaddyfile = (
   const allNames = [siteHostname, ...additionalNames]
     .map((name) => name.trim())
     .filter((name) => name.length > 0);
-  const siteDirective = tlsMode === "relay" ? ":80" : allNames.join(", ");
+  const passthrough = tlsMode === "relay-passthrough";
+  // relay-passthrough: the node terminates its OWN TLS (deSEC DNS-01) and
+  // serves HTTPS only — never plaintext :80. Legacy relay stays :80 (relay
+  // terminates). Other modes terminate on the named host(s).
+  const siteDirective = passthrough
+    ? `https://${siteHostname}`
+    : tlsMode === "relay"
+      ? ":80"
+      : allNames.join(", ");
   return [
     "{",
     "  admin off",
+    ...(passthrough && dns01?.acmeEmail !== undefined ? [`  email ${dns01.acmeEmail}`] : []),
     ...(tlsMode === "internal" ? [`  default_sni ${siteHostname}`] : []),
     "}",
     "",
     `${siteDirective} {`,
     ...(tlsMode === "internal" ? ["  tls internal"] : []),
+    // deSEC DNS-01: the token is provided to the container via the DESEC_TOKEN
+    // env var (from the compose .env, 0600) and never written into this file.
+    ...(passthrough
+      ? [
+          "  tls {",
+          "    dns desec {",
+          "      token {env.DESEC_TOKEN}",
+          "    }",
+          `    propagation_delay ${RELAY_PASSTHROUGH_DNS01_PROPAGATION_DELAY_SECONDS}s`,
+          `    propagation_timeout ${RELAY_PASSTHROUGH_DNS01_PROPAGATION_TIMEOUT_SECONDS}s`,
+          "    resolvers 1.1.1.1 8.8.8.8",
+          "  }",
+        ]
+      : []),
     "  @wellKnown path /.well-known/matrix/client /.well-known/matrix/server",
     "  handle @wellKnown {",
     "    root * /srv",
@@ -2680,46 +2851,6 @@ const renderWellKnownFiles = (input: {
       2,
     ),
   };
-};
-
-const ensureDirectoryTreeWritable = async (root: string): Promise<void> => {
-  const queue: string[] = [root];
-  while (queue.length > 0) {
-    const current = queue.shift();
-    if (current === undefined) {
-      break;
-    }
-    await chmod(current, 0o777);
-    const entries = await readdir(current, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory()) {
-        continue;
-      }
-      queue.push(join(current, entry.name));
-    }
-  }
-};
-
-const ensureDirectoryTreesWritable = async (dirs: string[]): Promise<void> => {
-  for (const dir of dirs) {
-    await ensureDirectoryTreeWritable(dir);
-  }
-};
-
-const chmodIgnoreMissing = async (path: string, mode: number): Promise<void> => {
-  try {
-    await chmod(path, mode);
-  } catch (error) {
-    if (
-      error !== null &&
-      typeof error === "object" &&
-      "code" in error &&
-      (error as NodeJS.ErrnoException).code === "ENOENT"
-    ) {
-      return;
-    }
-    throw error;
-  }
 };
 
 const allServicesRunning = (states: ComposeServiceState[]): boolean =>

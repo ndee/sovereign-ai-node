@@ -41,16 +41,32 @@ jobs:
               if (d) { cur.description = d[1]; continue; }
             }
             core.info(`Parsed ${labels.length} lifecycle labels.`);
+            // GitHub caps label descriptions at 100 chars; validate ALL up front so a
+            // single bad entry fails the run loudly instead of half-applying the set.
+            const tooLong = labels.filter(l => (l.description || '').length > 100);
+            if (tooLong.length) {
+              core.setFailed(`Label description(s) exceed 100 chars: ${tooLong.map(l => `${l.name} (${l.description.length})`).join(', ')}`);
+              return;
+            }
+            let failed = 0;
             for (const l of labels) {
               const color = (l.color || '').replace(/^#/, '');
               try {
-                await github.rest.issues.getLabel({ ...context.repo, name: l.name });
-                await github.rest.issues.updateLabel({ ...context.repo, name: l.name,
-                  new_name: l.name, color, description: l.description || '' });
-                core.info(`Updated '${l.name}'.`);
+                let exists = true;
+                try { await github.rest.issues.getLabel({ ...context.repo, name: l.name }); }
+                catch (e) { exists = false; }
+                if (exists) {
+                  await github.rest.issues.updateLabel({ ...context.repo, name: l.name,
+                    new_name: l.name, color, description: l.description || '' });
+                  core.info(`Updated '${l.name}'.`);
+                } else {
+                  await github.rest.issues.createLabel({ ...context.repo, name: l.name,
+                    color, description: l.description || '' });
+                  core.info(`Created '${l.name}'.`);
+                }
               } catch (e) {
-                await github.rest.issues.createLabel({ ...context.repo, name: l.name,
-                  color, description: l.description || '' });
-                core.info(`Created '${l.name}'.`);
+                failed++;
+                core.error(`Failed to sync '${l.name}': ${e.message}`);
               }
             }
+            if (failed) core.setFailed(`${failed} label(s) failed to sync.`);

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { installRequestSchema } from "./install.js";
+import { installRequestSchema, matrixOnboardingReadinessSchema } from "./install.js";
 
 describe("installRequestSchema", () => {
   it("accepts managed relay requests without an enrollment token", () => {
@@ -44,6 +44,76 @@ describe("installRequestSchema", () => {
     });
   });
 
+  it("accepts a relay request with a dns01 passthrough block and https tunnel type", () => {
+    const base = {
+      mode: "bundled_matrix" as const,
+      connectivity: { mode: "relay" as const },
+      openrouter: { secretRef: "file:/etc/sovereign-node/secrets/openrouter-api-key" },
+      matrix: {
+        homeserverDomain: "node-abc.relay.example.com",
+        publicBaseUrl: "https://node-abc.relay.example.com",
+        federationEnabled: false,
+        tlsMode: "auto" as const,
+      },
+      operator: { username: "operator" },
+    };
+
+    // With a token (first mint / rotation).
+    const withToken = installRequestSchema.parse({
+      ...base,
+      relay: {
+        controlUrl: "https://relay.example.com",
+        tunnel: {
+          serverAddr: "relay.example.com",
+          token: "frp-token",
+          proxyName: "relay-node-abc",
+          type: "https",
+        },
+        dns01: {
+          provider: "desec",
+          apiBase: "https://desec.io/api/v1",
+          zone: "_acme-challenge.relay.example.com",
+          subname: "node-abc",
+          acmeEmail: "ops@example.com",
+          token: "scoped-desec-token",
+        },
+      },
+    });
+    expect(withToken.relay?.dns01?.provider).toBe("desec");
+    expect(withToken.relay?.tunnel?.type).toBe("https");
+
+    // Without a token (rotation-absent re-enroll) is still valid.
+    const withoutToken = installRequestSchema.parse({
+      ...base,
+      relay: {
+        controlUrl: "https://relay.example.com",
+        dns01: {
+          provider: "desec",
+          apiBase: "https://desec.io/api/v1",
+          zone: "_acme-challenge.relay.example.com",
+          subname: "node-abc",
+        },
+      },
+    });
+    expect(withoutToken.relay?.dns01?.token).toBeUndefined();
+
+    // A non-deSEC provider is rejected.
+    expect(() =>
+      installRequestSchema.parse({
+        ...base,
+        relay: {
+          controlUrl: "https://relay.example.com",
+          dns01: {
+            provider: "route53",
+            apiBase: "https://example",
+            zone: "z",
+            subname: "s",
+          },
+        },
+      }),
+    ).toThrow();
+  });
+
   it("accepts the wizard-generated install request shape", () => {
     // This payload mirrors exactly what
     // public/setup-ui/screens/wizard/state.js#buildInstallRequest emits.
@@ -62,7 +132,7 @@ describe("installRequestSchema", () => {
         password: "operator-password",
       },
       openrouter: {
-        model: "qwen/qwen3.5-9b",
+        model: "qwen/qwen-2.5-7b-instruct",
         apiKey: "sk-or-test",
       },
       imap: {
@@ -115,5 +185,36 @@ describe("installRequestSchema", () => {
       openrouter: { apiKey: "sk-or-test" },
     });
     expect(parsed.matrix.tlsMode).toBe("internal");
+  });
+});
+
+describe("matrixOnboardingReadinessSchema", () => {
+  it("accepts a ready reading with optional status/reason", () => {
+    const parsed = matrixOnboardingReadinessSchema.parse({
+      ready: true,
+      url: "https://node.relay.example.com/onboard",
+      mode: "relay-passthrough",
+      status: 200,
+      reason: "public-200",
+    });
+    expect(parsed.ready).toBe(true);
+    expect(parsed.mode).toBe("relay-passthrough");
+  });
+
+  it("accepts a not-ready reading with an empty url and no status", () => {
+    const parsed = matrixOnboardingReadinessSchema.parse({
+      ready: false,
+      url: "",
+      mode: "direct",
+      reason: "config-not-found",
+    });
+    expect(parsed.ready).toBe(false);
+    expect(parsed.status).toBeUndefined();
+  });
+
+  it("rejects an unknown mode", () => {
+    expect(() =>
+      matrixOnboardingReadinessSchema.parse({ ready: false, url: "", mode: "carrier-pigeon" }),
+    ).toThrow();
   });
 });

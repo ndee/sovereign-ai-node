@@ -20,7 +20,7 @@ const buildInstallRequest = (): InstallRequest => ({
     runOnboard: false,
   },
   openrouter: {
-    model: "qwen/qwen3.5-9b",
+    model: "qwen/qwen-2.5-7b-instruct",
     apiKey: "sk-or-test",
   },
   imap: {

@@ -24,6 +24,7 @@ reset_request_defaults() {
   DEFAULT_RELAY_REQUESTED_SLUG=""
   DEFAULT_RELAY_HOSTNAME=""
   DEFAULT_IMAP_CONFIGURED="0"
+  DEFAULT_IMAP_PROTOCOL="imap"
   DEFAULT_IMAP_HOST="imap.example.org"
   DEFAULT_IMAP_PORT="993"
   DEFAULT_IMAP_TLS="1"
@@ -39,10 +40,14 @@ migrate_legacy_openrouter_model_request() {
   [[ -r "$REQUEST_FILE" ]] || return 0
 
   if ! status="$(
-    node - "$REQUEST_FILE" "$LEGACY_OPENROUTER_MODEL" "$RECOMMENDED_OPENROUTER_MODEL" <<'NODE'
+    node - "$REQUEST_FILE" "$LEGACY_OPENROUTER_MODELS" "$RECOMMENDED_OPENROUTER_MODEL" <<'NODE'
 const fs = require("node:fs");
 const requestPath = process.argv[2];
-const legacyModel = process.argv[3];
+// argv[3] is a newline-separated list of legacy models to migrate away from.
+const legacyModels = String(process.argv[3] || "")
+  .split("\n")
+  .map((entry) => entry.trim())
+  .filter((entry) => entry.length > 0);
 const nextModel = process.argv[4];
 
 const raw = fs.readFileSync(requestPath, "utf8");
@@ -58,7 +63,7 @@ if (!openrouter || typeof openrouter !== "object" || Array.isArray(openrouter)) 
   process.exit(0);
 }
 
-if (openrouter.model !== legacyModel) {
+if (!legacyModels.includes(openrouter.model)) {
   process.stdout.write("0");
   process.exit(0);
 }
@@ -151,6 +156,9 @@ load_existing_defaults() {
         ;;
       DEFAULT_IMAP_CONFIGURED)
         DEFAULT_IMAP_CONFIGURED="$value"
+        ;;
+      DEFAULT_IMAP_PROTOCOL)
+        DEFAULT_IMAP_PROTOCOL="$value"
         ;;
       DEFAULT_IMAP_HOST)
         DEFAULT_IMAP_HOST="$value"
@@ -301,16 +309,19 @@ review_install_request() {
     ui_info "Mail Sentinel poll interval: ${SN_POLL_INTERVAL}"
     ui_info "Mail Sentinel lookback window: ${SN_LOOKBACK_WINDOW}"
     if [[ "${SN_IMAP_CONFIGURE}" == "1" ]]; then
-      ui_info "IMAP: configured (${SN_IMAP_SECRET_MODE})"
-      ui_info "IMAP host: ${SN_IMAP_HOST}"
-      ui_info "IMAP username: ${SN_IMAP_USERNAME}"
-      ui_info "IMAP mailbox: ${SN_IMAP_MAILBOX}"
+      ui_info "Mail: configured (${SN_IMAP_SECRET_MODE})"
+      ui_info "Mail protocol: ${SN_IMAP_PROTOCOL:-imap}"
+      ui_info "Mail server: ${SN_IMAP_HOST}"
+      ui_info "Email address / username: ${SN_IMAP_USERNAME}"
+      if [[ "${SN_IMAP_PROTOCOL:-imap}" == "imap" ]]; then
+        ui_info "IMAP folder: ${SN_IMAP_MAILBOX}"
+      fi
     else
-      ui_info "IMAP: pending"
+      ui_info "Mail: pending"
     fi
   else
     ui_info "Mail Sentinel: not selected"
-    ui_info "IMAP: not required"
+    ui_info "Mail: not required"
   fi
 }
 

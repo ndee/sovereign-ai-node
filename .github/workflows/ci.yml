@@ -3,8 +3,12 @@ name: CI
 on:
   pull_request:
     branches: [main]
+    # ready_for_review is included so the installer e2e jobs (skipped on
+    # drafts) run the moment a PR is marked ready.
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -47,6 +51,35 @@ jobs:
             deps
             setup-ui
           requireScope: false
+
+  # Path awareness: the three installer e2e jobs (~16 job-minutes) run only
+  # when something that can change an installed node changed — i.e. anything
+  # except docs, markdown, unit tests and unrelated workflow files. Lint,
+  # typecheck, unit, integration and smoke always run. Skipped jobs satisfy
+  # required status checks, so the merge gate keeps working.
+  changes:
+    name: Detect install-relevant changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      install_relevant: ${{ steps.filter.outputs.install_relevant }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            install_relevant:
+              - '**'
+              - '!docs/**'
+              - '!**/*.md'
+              - '!**/*.test.ts'
+              - '!**/__tests__/**'
+              - '!.github/**'
+              - '.github/workflows/ci.yml'
+              - '!LICENSE'
 
   lint:
     name: Lint
@@ -115,6 +148,20 @@ jobs:
       - name: CLI --help exits cleanly
         run: pnpm dev:cli --help
 
+      - name: sovereign-tool reports a verifiable version
+        # sovereign-tool is a REQUIRED product dependency (issue node-pro#324);
+        # `--version` must work so a deployed binary's identity is checkable.
+        run: |
+          VERSION="$(pnpm --silent dev:tool --version)"
+          echo "sovereign-tool --version => $VERSION"
+          test -n "$VERSION"
+          test "$VERSION" != "unknown"
+
+      - name: package.json bin ↔ installer wrapper parity
+        # Fails if a bin entry lacks a /usr/local/bin wrapper in
+        # scripts/install/lib-build.sh or the exec targets drift (node-pro#324).
+        run: bash scripts/ci/test-wrapper-bin-parity.sh
+
       - name: API starts and responds on /healthz
         run: |
           pnpm dev:api &
@@ -136,7 +183,11 @@ jobs:
     name: E2E Install (non-interactive)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [test]
+    needs: [test, changes]
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (needs.changes.outputs.install_relevant == 'true' &&
+       (github.event_name != 'pull_request' || github.event.pull_request.draft == false))
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -205,7 +256,11 @@ jobs:
     name: E2E Install (interactive)
     runs-on: ubuntu-latest
     timeout-minutes: 35
-    needs: [test]
+    needs: [test, changes]
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (needs.changes.outputs.install_relevant == 'true' &&
+       (github.event_name != 'pull_request' || github.event.pull_request.draft == false))
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -282,7 +337,11 @@ jobs:
     name: E2E Install (rerun after partial failure)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [test]
+    needs: [test, changes]
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (needs.changes.outputs.install_relevant == 'true' &&
+       (github.event_name != 'pull_request' || github.event.pull_request.draft == false))
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
