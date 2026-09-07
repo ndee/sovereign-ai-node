@@ -3,15 +3,16 @@
 
 set -euo pipefail
 
-if [[ $# -lt 4 ]]; then
-  printf 'usage: %s <draft|published> <tag> <commit-sha> <asset>...\n' "$0" >&2
+if [[ $# -lt 5 ]]; then
+  printf 'usage: %s <draft|published> <tag> <commit-sha> <release-id> <asset>...\n' "$0" >&2
   exit 2
 fi
 
 EXPECTED_STATE="$1"
 TAG="$2"
 EXPECTED_SHA="$3"
-shift 3
+EXPECTED_RELEASE_ID="$4"
+shift 4
 
 case "$EXPECTED_STATE" in
   draft|published) ;;
@@ -27,6 +28,10 @@ esac
 }
 [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || {
   printf 'invalid release commit SHA: %s\n' "$EXPECTED_SHA" >&2
+  exit 1
+}
+[[ "$EXPECTED_RELEASE_ID" =~ ^[1-9][0-9]*$ ]] || {
+  printf 'invalid GitHub Release ID: %s\n' "$EXPECTED_RELEASE_ID" >&2
   exit 1
 }
 
@@ -58,16 +63,18 @@ done
   exit 1
 }
 
-release_json="$(gh api \
-  -H 'Accept: application/vnd.github+json' \
-  -H 'X-GitHub-Api-Version: 2026-03-10' \
-  "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+release_json="$(bash "$SCRIPT_DIR/find-github-release.sh" "$TAG")"
 
 jq -e \
   --arg state "$EXPECTED_STATE" \
   --arg tag "$TAG" \
+  --arg target_commitish "$EXPECTED_SHA" \
+  --argjson release_id "$EXPECTED_RELEASE_ID" \
   --argjson expected "$expected" '
+    .id == $release_id and
     .tag_name == $tag and
+    .target_commitish == $target_commitish and
     (if $state == "draft" then
       .draft == true and .immutable == false
     else
