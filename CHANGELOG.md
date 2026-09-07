@@ -9,6 +9,20 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 From this point forward, GitHub Release notes are auto-generated from commit history
 by the `.github/workflows/release.yml` workflow.
 
+## [2.4.0](https://github.com/ndee/sovereign-ai-node/compare/v2.3.10...v2.4.0) (2026-09-07)
+
+
+### Features
+
+* add immutable release artifact automation ([#248](https://github.com/ndee/sovereign-ai-node/issues/248)) ([2e92fe2](https://github.com/ndee/sovereign-ai-node/commit/2e92fe20942d0bb2dd440efc750d5208bf1e5039))
+
+
+### Bug Fixes
+
+* **bots:** classify transient POP3 login refusals instead of blaming credentials ([#244](https://github.com/ndee/sovereign-ai-node/issues/244)) ([c8c39b3](https://github.com/ndee/sovereign-ai-node/commit/c8c39b3c8b5548ac5f99e80f129c76e4846542cf))
+* **deploy:** resolve example install-request openclaw version through the pin alias ([#246](https://github.com/ndee/sovereign-ai-node/issues/246)) ([3269e63](https://github.com/ndee/sovereign-ai-node/commit/3269e63a95ce744dbfd772c9bf7c1a0a1d768f1b))
+* **pop3:** report a stuck POP3 window instead of a silent quiet mailbox ([#243](https://github.com/ndee/sovereign-ai-node/issues/243)) ([5d862a4](https://github.com/ndee/sovereign-ai-node/commit/5d862a460af9097fb64695e183a32177ff373294))
+
 ## [Unreleased]
 
 ## [2.3.10] - 2026-08-24
