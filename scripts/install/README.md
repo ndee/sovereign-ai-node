@@ -17,6 +17,7 @@ scripts/
     ├── lib-log.sh              # log, die, usage
     ├── lib-args.sh             # parse_args, normalize_service_identity
     ├── lib-os.sh               # OS detection, apt helpers
+    ├── lib-bots-artifact.sh    # verify and stage a prebuilt Bots release
     ├── lib-runtime-deps.sh     # apt/docker/node bootstrap
     ├── lib-runtime-paths.sh    # service account, runtime dirs, source sync, provenance
     ├── lib-build.sh            # app/bot package build, systemd unit, CLI wrappers, hygiene
@@ -48,6 +49,22 @@ sudo bash scripts/install.sh --source-dir "$(pwd)"
 ```
 
 CI exercises this path on every PR (`.github/workflows/ci.yml` E2E install jobs).
+
+**Verified prebuilt bot catalog.** A caller that has downloaded the Bots `.tgz`
+and its `component-release.json` from the same immutable release can avoid an
+on-device dependency install and build:
+
+```bash
+sudo bash scripts/install.sh \
+  --source-dir "$(pwd)" \
+  --bots-artifact /path/to/sovereign-ai-bots-X.Y.Z.tgz \
+  --bots-artifact-manifest /path/to/component-release.json
+```
+
+The installer verifies the manifest schema, file size, and SHA-256 before
+extracting into a staging directory, validates the catalog payload, then moves
+it into place. The existing `--bots-source-dir` and `--bots-repo-url` paths
+retain their build behavior.
 
 **Building the bundle locally.** To verify the release artefact looks right, or to test changes without cutting a release:
 

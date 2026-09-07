@@ -38,6 +38,17 @@ parse_args() {
         BOTS_REF="$2"
         shift 2
         ;;
+      --bots-artifact)
+        if [[ -n "$BOTS_SOURCE_DIR" ]]; then
+          die "--bots-artifact cannot be combined with --bots-source-dir"
+        fi
+        BOTS_ARTIFACT="$2"
+        shift 2
+        ;;
+      --bots-artifact-manifest)
+        BOTS_ARTIFACT_MANIFEST="$2"
+        shift 2
+        ;;
       --install-root)
         INSTALL_ROOT="$2"
         APP_DIR="${INSTALL_ROOT}/app"
@@ -103,4 +114,11 @@ parse_args() {
       die "Unsupported action '${ACTION}'. Use install or update."
       ;;
   esac
+
+  if [[ -n "$BOTS_ARTIFACT" && -n "$BOTS_SOURCE_DIR" ]]; then
+    die "--bots-artifact cannot be combined with --bots-source-dir"
+  fi
+  if [[ -n "$BOTS_ARTIFACT_MANIFEST" && -z "$BOTS_ARTIFACT" ]]; then
+    die "--bots-artifact-manifest requires --bots-artifact"
+  fi
 }

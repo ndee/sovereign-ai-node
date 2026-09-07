@@ -1,117 +1,272 @@
-name: Release
+name: Release Please
 
 on:
   push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
-      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing draft or published tag to recover/verify (defaults to package version)
+        required: false
+        type: string
 
 permissions:
   contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
   release:
-    name: Create GitHub Release
+    name: Prepare and publish release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Verify tag is on main
+      - name: Require release automation token
+        env:
+          RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
         run: |
-          if ! git merge-base --is-ancestor "${{ github.sha }}" origin/main; then
-            echo "::error::Tag ${{ github.ref_name }} points to a commit not on main."
-            echo "Tags must be created from commits already merged to main (which have passed PR CI)."
+          if [[ -z "$RELEASE_PLEASE_TOKEN" ]]; then
+            echo "::error::RELEASE_PLEASE_TOKEN is required so generated PRs trigger required CI."
             exit 1
           fi
-          echo "Tag ${{ github.ref_name }} (${{ github.sha }}) is reachable from main."
 
-      - name: Verify package.json version matches tag
-        run: |
-          TAG="${{ github.ref_name }}"
-          TAG_VERSION="${TAG#v}"
-          PKG_VERSION="$(jq -r .version package.json)"
-          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
-            echo "::error::Tag version ($TAG_VERSION) does not match package.json version ($PKG_VERSION)."
-            exit 1
-          fi
-          echo "Tag version matches package.json: $PKG_VERSION"
+      - name: Open or advance the release PR
+        id: release
+        if: github.event_name == 'push'
+        uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
 
-      - name: Generate changelog
-        id: changelog
+      # A failed build leaves a draft. Later main pushes may repair that draft,
+      # while workflow_dispatch can also re-verify an already-published release.
+      - name: Resolve release state and immutable tag
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          RECOVERY_TAG: ${{ inputs.tag }}
+          RELEASE_CREATED: ${{ steps.release.outputs.release_created }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
         run: |
           set -euo pipefail
-          TAG="${{ github.ref_name }}"
-          PREV_TAG="$(git describe --tags --abbrev=0 --match='v[0-9]*.[0-9]*.[0-9]*' "${TAG}^" 2>/dev/null || true)"
-          if [ -z "$PREV_TAG" ]; then
-            RANGE="HEAD"
-            echo "No previous v-tag; including full history."
+          if [[ "$RELEASE_CREATED" == "true" ]]; then
+            TAG="$RELEASE_TAG"
+          elif [[ -n "$RECOVERY_TAG" ]]; then
+            TAG="$RECOVERY_TAG"
           else
-            RANGE="${PREV_TAG}..HEAD"
-            echo "Including commits in ${PREV_TAG}..HEAD"
+            VERSION="$(jq -r '.version' package.json)"
+            TAG="v$VERSION"
           fi
 
-          # Collect commits grouped by Conventional Commits type.
-          awk_script='
-            BEGIN {
-              n_break=0; n_added=0; n_fixed=0; n_changed=0; n_docs=0; n_chore=0; n_other=0;
-            }
-            {
-              hash=$1
-              rest=$0; sub(/^[^ ]+ /,"",rest)
-              # Match Conventional Commits header: "type", "type(scope)", "type!", "type(scope)!".
-              if (match(rest, /^[a-zA-Z]+(\([^)]+\))?!?:/)) {
-                header=substr(rest,1,RLENGTH)
-                msg=substr(rest,RLENGTH+1); sub(/^ +/,"",msg)
-                is_breaking = (index(header,"!")>0) ? 1 : 0
-                type=header; sub(/[(!:].*/,"",type)
-                entry="- " msg " (" hash ")"
-                if (is_breaking==1) { breaks[n_break++]=entry }
-                if (type=="feat")      { added[n_added++]=entry }
-                else if (type=="fix")  { fixed[n_fixed++]=entry }
-                else if (type=="refactor" || type=="perf") { changed[n_changed++]=entry }
-                else if (type=="docs") { docs[n_docs++]=entry }
-                else if (type=="chore" || type=="ci" || type=="build" || type=="test" || type=="style") { chore[n_chore++]=entry }
-                else { other[n_other++]=entry }
-              } else {
-                other[n_other++]="- " rest " (" hash ")"
-              }
-            }
-            END {
-              if (n_break>0)   { print "### Breaking Changes"; for (i=0;i<n_break;i++)   print breaks[i];  print "" }
-              if (n_added>0)   { print "### Added";            for (i=0;i<n_added;i++)   print added[i];   print "" }
-              if (n_fixed>0)   { print "### Fixed";            for (i=0;i<n_fixed;i++)   print fixed[i];   print "" }
-              if (n_changed>0) { print "### Changed";          for (i=0;i<n_changed;i++) print changed[i]; print "" }
-              if (n_docs>0)    { print "### Docs";             for (i=0;i<n_docs;i++)    print docs[i];    print "" }
-              if (n_chore>0)   { print "### Internal";         for (i=0;i<n_chore;i++)   print chore[i];   print "" }
-              if (n_other>0)   { print "### Other";            for (i=0;i<n_other;i++)   print other[i];   print "" }
-            }
-          '
-          BODY="$(git log --no-merges --pretty='%h %s' $RANGE | awk "$awk_script")"
-          if [ -z "$BODY" ]; then
-            BODY="_No notable changes._"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid release tag: $TAG"
+            exit 1
           fi
 
-          if [ -n "$PREV_TAG" ]; then
-            BODY="$(printf '%s\n\n**Full changelog:** https://github.com/%s/compare/%s...%s' \
-              "$BODY" "${{ github.repository }}" "$PREV_TAG" "$TAG")"
+          if ! RELEASE_JSON="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" 2>/dev/null)"; then
+            if [[ "$RELEASE_CREATED" == "true" || "$EVENT_NAME" == "workflow_dispatch" ]]; then
+              echo "::error::Release $TAG does not exist."
+              exit 1
+            fi
+            echo 'process=false' >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-          {
-            echo "body<<CHANGELOG_EOF"
-            echo "$BODY"
-            echo "CHANGELOG_EOF"
-          } >> "$GITHUB_OUTPUT"
+          IS_DRAFT="$(jq -r '.draft' <<<"$RELEASE_JSON")"
+          if [[ "$RELEASE_CREATED" == "true" && "$IS_DRAFT" != "true" ]]; then
+            echo "::error::Release Please did not create $TAG as a draft."
+            exit 1
+          fi
+          if [[ "$EVENT_NAME" == "push" && "$RELEASE_CREATED" != "true" && "$IS_DRAFT" != "true" ]]; then
+            echo 'process=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
-      - name: Bundle installer
-        run: |
-          bash scripts/install/build.sh dist/install.sh
+          git fetch origin main --tags --force
+          TAG_SHA="$(git rev-list -n 1 "$TAG")"
+          if ! git merge-base --is-ancestor "$TAG_SHA" origin/main; then
+            echo "::error::Release tag $TAG ($TAG_SHA) is not an ancestor of main."
+            exit 1
+          fi
+          if [[ "$RELEASE_CREATED" == "true" && "$TAG_SHA" != "$RELEASE_SHA" ]]; then
+            echo "::error::Release Please reported $RELEASE_SHA but $TAG resolves to $TAG_SHA."
+            exit 1
+          fi
+          printf 'process=true\ndraft=%s\ntag=%s\nsha=%s\n' \
+            "$IS_DRAFT" "$TAG" "$TAG_SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Check out the release commit
+        if: steps.resolve.outputs.process == 'true'
+        uses: actions/checkout@v4
         with:
-          name: ${{ github.ref_name }}
-          body: ${{ steps.changelog.outputs.body }}
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          files: dist/install.sh
+          ref: ${{ steps.resolve.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up pnpm
+        if: steps.resolve.outputs.process == 'true'
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js
+        if: steps.resolve.outputs.process == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Frozen dependency install
+        if: steps.resolve.outputs.process == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Build exact release assets
+        if: steps.resolve.outputs.process == 'true' && steps.resolve.outputs.draft == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
+          RELEASE_SHA: ${{ steps.resolve.outputs.sha }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          ARTIFACT_DIR="$RUNNER_TEMP/sovereign-node-release"
+          bash scripts/release/build-node-artifacts.sh "$ARTIFACT_DIR" "$RELEASE_TAG" "$RELEASE_SHA"
+
+      - name: Download published assets for recovery verification
+        if: steps.resolve.outputs.process == 'true' && steps.resolve.outputs.draft != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          ARTIFACT_DIR="$RUNNER_TEMP/sovereign-node-release"
+          install -d -m 0755 "$ARTIFACT_DIR"
+          gh release download "$RELEASE_TAG" --dir "$ARTIFACT_DIR"
+          EXPECTED_NAMES=(
+            component-release.json
+            install.sh
+            "sovereign-ai-node-${RELEASE_TAG#v}.tgz"
+          )
+          mapfile -t ACTUAL_NAMES < <(
+            find "$ARTIFACT_DIR" -mindepth 1 -maxdepth 1 -printf '%f\n' |
+              LC_ALL=C sort
+          )
+          if [[ "$(printf '%s\n' "${ACTUAL_NAMES[@]}")" != "$(printf '%s\n' "${EXPECTED_NAMES[@]}")" ]]; then
+            echo "::error::Published release asset names do not match the required set."
+            printf 'expected: %s\n' "${EXPECTED_NAMES[*]}" >&2
+            printf 'actual: %s\n' "${ACTUAL_NAMES[*]}" >&2
+            exit 1
+          fi
+          [[ -f "$ARTIFACT_DIR/install.sh" ]] || {
+            echo "::error::Published release is missing install.sh."
+            exit 1
+          }
+          chmod 0755 "$ARTIFACT_DIR/install.sh"
+
+      - name: Test exact release assets
+        if: steps.resolve.outputs.process == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
+          RELEASE_SHA: ${{ steps.resolve.outputs.sha }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          bash scripts/release/test-node-artifacts.sh \
+            "$RUNNER_TEMP/sovereign-node-release" "$RELEASE_TAG" "$RELEASE_SHA"
+
+      - name: Require immutable releases
+        if: steps.resolve.outputs.process == 'true' && steps.resolve.outputs.draft == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: |
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/immutable-releases" \
+            --jq 'select(.enabled == true) | .enabled' |
+            grep -qx true
+
+      - name: Attach all assets to the draft
+        if: steps.resolve.outputs.process == 'true' && steps.resolve.outputs.draft == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            "$RUNNER_TEMP/sovereign-node-release"/* --clobber
+
+      - name: Verify complete draft on GitHub
+        if: steps.resolve.outputs.process == 'true' && steps.resolve.outputs.draft == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
+          RELEASE_SHA: ${{ steps.resolve.outputs.sha }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          ARTIFACT_DIR="$RUNNER_TEMP/sovereign-node-release"
+          bash scripts/release/verify-github-assets.sh \
+            draft "$RELEASE_TAG" "$RELEASE_SHA" \
+            "$ARTIFACT_DIR/component-release.json" \
+            "$ARTIFACT_DIR/install.sh" \
+            "$ARTIFACT_DIR/sovereign-ai-node-${RELEASE_TAG#v}.tgz"
+
+      - name: Publish the immutable release
+        if: steps.resolve.outputs.process == 'true' && steps.resolve.outputs.draft == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            gh release edit "$RELEASE_TAG" --draft=false --prerelease
+          else
+            gh release edit "$RELEASE_TAG" --draft=false --latest
+          fi
+
+      - name: Verify published release metadata and assets
+        if: steps.resolve.outputs.process == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
+          RELEASE_SHA: ${{ steps.resolve.outputs.sha }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          ARTIFACT_DIR="$RUNNER_TEMP/sovereign-node-release"
+          bash scripts/release/verify-github-assets.sh \
+            published "$RELEASE_TAG" "$RELEASE_SHA" \
+            "$ARTIFACT_DIR/component-release.json" \
+            "$ARTIFACT_DIR/install.sh" \
+            "$ARTIFACT_DIR/sovereign-ai-node-${RELEASE_TAG#v}.tgz"
+
+      - name: Verify release attestation and assets
+        if: steps.resolve.outputs.process == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          ARTIFACT_DIR="$RUNNER_TEMP/sovereign-node-release"
+          for attempt in $(seq 1 12); do
+            if gh release verify "$RELEASE_TAG"; then
+              break
+            fi
+            if [[ "$attempt" == "12" ]]; then
+              echo "::error::Immutable release attestation was not available."
+              exit 1
+            fi
+            sleep 5
+          done
+          for asset in "$ARTIFACT_DIR"/*; do
+            gh release verify-asset "$RELEASE_TAG" "$asset"
+          done
