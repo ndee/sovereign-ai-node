@@ -29,6 +29,7 @@ Out: every feature change discussed in the parent conversation (zero-input insta
 | `scripts/install/lib-args.sh` | `normalize_service_identity`, `parse_args` | 114–213 |
 | `scripts/install/lib-os.sh` | `require_root`, `ensure_supported_os`, `wait_for_apt_lock`, `apt_get_locked` | 214–270 |
 | `scripts/install/lib-runtime-deps.sh` | `install_base_packages`, `ansible_playbook_available`, `install_ansible_if_needed`, `docker_*`, `configure_docker_apt_repo`, `install_docker_if_needed`, `node_major_version`, `install_node22_if_needed` | 237–402 |
+| `scripts/install/lib-bots-artifact.sh` | `sync_prebuilt_bots_artifact` | New prebuilt-catalog path |
 | `scripts/install/lib-runtime-paths.sh` | `ensure_service_account`, `ensure_runtime_directories`, `resolve_source_mode`, `find_local_bots_source_dir`, `sync_app_source`, `sync_bots_source`, `write_install_provenance` | 405–630 |
 | `scripts/install/lib-build.sh` | `build_app`, `build_bots`, `install_wrappers`, `install_systemd_unit`, `configure_system_hygiene`, `install_request_template`, `detect_installation_state` | 632–845 |
 | `scripts/install/lib-ui.sh` | All `ui_*` functions and TTY helpers (`has_tty`, `supports_color`) | 846–1340 |
@@ -43,11 +44,12 @@ Each `recoverJsonObject` JS heredoc (currently at lines 3170, 3246, 3348, 3411, 
 
 Top-level global-variable declarations and `DEFAULT_*` constants (lines 1–79 ish) stay in `install.sh` because they are read by multiple libraries; document them in a short comment block.
 
-**Curl-pipe — release-artefact model.** The repo holds `scripts/install.sh` (a thin orchestrator) and `scripts/install/lib-*.sh` (the libraries it sources at runtime). For curl-pipe installs, `release.yml` runs `scripts/install/build.sh` on tag push to concatenate the orchestrator + libraries into a self-contained `install.sh` that ships as the GitHub Release asset.
+**Curl-pipe — release-artefact model.** The repo holds `scripts/install.sh` (a thin orchestrator) and `scripts/install/lib-*.sh` (the libraries it sources at runtime). Release Please creates a tag and draft release only when its release PR merges; `release.yml` then builds and contract-tests the npm package and self-contained `install.sh`, attaches them with `component-release.json`, and publishes only after all assets are present.
 
 - README's curl command points at `https://github.com/ndee/sovereign-ai-node/releases/latest/download/install.sh` (tag-pinned). The previous `raw.githubusercontent.com/.../main/scripts/install.sh` URL is intentionally broken — the orchestrator on `main` cannot run via curl-pipe because the libs aren't reachable that way. Migration is documented in release notes.
 - Local-checkout installs (`sudo bash scripts/install.sh --source-dir "$(pwd)"`) keep working unchanged — the orchestrator finds `scripts/install/lib-*.sh` next to itself.
-- CI (`ci.yml` E2E jobs) runs the orchestrator from a local checkout, exercising the multi-file path. The release workflow validates the bundled output is syntactically valid bash and that the bundled file contains no leftover `source` statements.
+- CI (`ci.yml` E2E jobs) runs the orchestrator from a local checkout, exercising the multi-file path. Its artifact-contract job also builds the exact release files and validates their contents and recorded digests.
+- A verified Bots release artifact can be supplied with `--bots-artifact` plus `--bots-artifact-manifest`. That mode preserves the prebuilt root and workspace entrypoints and deliberately skips the Bots dependency install/build; source and repository modes remain unchanged.
 
 Benefits: no committed-bundle freshness check (no sync risk on `main`), release workflow already has tag-pinning, users get a versioned install URL. Cost: any third-party scripts/automation pinned to the old `main`-served URL break; this is documented and accepted.
 

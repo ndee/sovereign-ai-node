@@ -33,6 +33,11 @@ build_app() {
 }
 
 build_bots() {
+  if [[ -n "$BOTS_ARTIFACT" ]]; then
+    log "Using verified prebuilt bot catalog; skipping dependency install and bot build"
+    return 0
+  fi
+
   if [[ ! -f "${BOTS_DIR}/package.json" ]]; then
     log "No package.json under ${BOTS_DIR}; skipping bot build"
     return 0

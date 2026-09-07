@@ -3,8 +3,8 @@
 # install-provenance writer.
 #
 # Depends on lib-log (log, die). Reads SERVICE_USER, SERVICE_GROUP, INSTALL_ROOT,
-# APP_DIR, BOTS_DIR, SOURCE_DIR, BOTS_SOURCE_DIR, REPO_URL, REF, BOTS_REPO_URL,
-# BOTS_REF, PROVENANCE_FILE.
+# APP_DIR, BOTS_DIR, SOURCE_DIR, BOTS_SOURCE_DIR, BOTS_ARTIFACT,
+# BOTS_ARTIFACT_MANIFEST, REPO_URL, REF, BOTS_REPO_URL, BOTS_REF, PROVENANCE_FILE.
 
 ensure_service_account() {
   if [[ "$SERVICE_USER" == "root" ]]; then
@@ -85,6 +85,15 @@ resolve_source_mode() {
     die "Missing source. Provide --source-dir <path> or --repo-url <url>."
   fi
 
+  if [[ -n "$BOTS_ARTIFACT" ]]; then
+    [[ -f "$BOTS_ARTIFACT" ]] || die "Bot artifact does not exist: $BOTS_ARTIFACT"
+    [[ -n "$BOTS_ARTIFACT_MANIFEST" ]] || \
+      die "A prebuilt bot artifact requires --bots-artifact-manifest <path>."
+    [[ -f "$BOTS_ARTIFACT_MANIFEST" ]] || \
+      die "Bot artifact manifest does not exist: $BOTS_ARTIFACT_MANIFEST"
+    return
+  fi
+
   if [[ -n "$BOTS_SOURCE_DIR" ]]; then
     [[ -d "$BOTS_SOURCE_DIR" ]] || die "Bot source directory does not exist: $BOTS_SOURCE_DIR"
     return
@@ -101,7 +110,7 @@ resolve_source_mode() {
     return
   fi
 
-  die "Missing bot source. Provide --bots-source-dir <path> or --bots-repo-url <url>."
+  die "Missing bot source. Provide --bots-source-dir <path>, --bots-repo-url <url>, or --bots-artifact <path>."
 }
 
 find_local_bots_source_dir() {
@@ -148,6 +157,12 @@ sync_app_source() {
 
 sync_bots_source() {
   log "Syncing bot packages into $BOTS_DIR"
+
+  if [[ -n "$BOTS_ARTIFACT" ]]; then
+    sync_prebuilt_bots_artifact
+    return
+  fi
+
   rm -rf "$BOTS_DIR"
   install -d -m 0755 "$BOTS_DIR"
 
@@ -172,6 +187,8 @@ write_install_provenance() {
   local bots_ref_resolved="$BOTS_REF"
   local bots_repo="$BOTS_REPO_URL"
   local install_source="git-clone"
+  local bots_artifact_name=""
+  local bots_artifact_sha256=""
 
   if [[ -n "$SOURCE_DIR" ]]; then
     install_source="local-copy"
@@ -184,7 +201,13 @@ write_install_provenance() {
     node_commit_sha="$(git -C "$APP_DIR" rev-parse HEAD 2>/dev/null || echo "unknown")"
   fi
 
-  if [[ -n "$BOTS_SOURCE_DIR" ]]; then
+  if [[ -n "$BOTS_ARTIFACT" ]]; then
+    bots_repo="release-artifact"
+    bots_ref_resolved="$(jq -r '.tag' "$BOTS_ARTIFACT_MANIFEST")"
+    bots_commit_sha="$(jq -r '.commitSha' "$BOTS_ARTIFACT_MANIFEST")"
+    bots_artifact_name="$(basename "$BOTS_ARTIFACT")"
+    bots_artifact_sha256="$(sha256sum "$BOTS_ARTIFACT" | awk '{print $1}')"
+  elif [[ -n "$BOTS_SOURCE_DIR" ]]; then
     bots_repo="local-copy"
     if [[ -d "${BOTS_SOURCE_DIR}/.git" ]]; then
       bots_commit_sha="$(git -C "$BOTS_SOURCE_DIR" rev-parse HEAD 2>/dev/null || echo "unknown")"
@@ -223,6 +246,8 @@ write_install_provenance() {
   "botsRef": "${bots_ref_resolved}",
   "botsVersion": "${bots_version}",
   "botsCommitSha": "${bots_commit_sha}",
+  "botsArtifact": "${bots_artifact_name}",
+  "botsArtifactSha256": "${bots_artifact_sha256}",
   "installedAt": "${installed_at}",
   "installSource": "${install_source}"
 }

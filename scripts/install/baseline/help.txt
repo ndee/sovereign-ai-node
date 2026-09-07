@@ -7,6 +7,9 @@ Options:
   --bots-repo-url <url>    Git URL for sovereign-ai-bots (default: https://github.com/ndee/sovereign-ai-bots)
   --bots-source-dir <path> Local bot repo source directory (alternative to --bots-repo-url)
   --bots-ref <ref>         Bot repo Git ref (default: main)
+  --bots-artifact <path>   Verified prebuilt sovereign-ai-bots .tgz (skips the bot build)
+  --bots-artifact-manifest <path>
+                           component-release.json for --bots-artifact
   --install-root <path>    Install root (default: /opt/sovereign-ai-node)
   --service-user <user>    systemd service user (default: sovereign-node)
   --service-group <group>  systemd service group (default: same as service user)
