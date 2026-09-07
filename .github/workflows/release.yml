@@ -1,7 +1,9 @@
 name: Release Please
 
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
     inputs:
@@ -11,6 +13,7 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: write
   issues: write
   pull-requests: write
@@ -22,11 +25,84 @@ concurrency:
 jobs:
   release:
     name: Prepare and publish release
+    if: >-
+      (github.event_name == 'workflow_dispatch' &&
+       github.ref == 'refs/heads/main') ||
+      (github.event.workflow_run.name == 'CI' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve successful main CI context
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+          TRIGGER_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+            RUN_ID="$TRIGGER_RUN_ID"
+            HEAD_SHA="$TRIGGER_HEAD_SHA"
+          else
+            HEAD_SHA="$(gh api \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/git/ref/heads/main" \
+              --jq '.object.sha')"
+            RUN_ID="$(gh api --paginate \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&status=completed&per_page=100" \
+              --jq '.workflow_runs[]' |
+              jq -sr \
+                --arg repo "$GITHUB_REPOSITORY" \
+                --arg sha "$HEAD_SHA" '
+                  map(select(
+                    .name == "CI" and
+                    .path == ".github/workflows/ci.yml" and
+                    .event == "push" and
+                    .head_branch == "main" and
+                    .head_sha == $sha and
+                    .head_repository.full_name == $repo and
+                    .status == "completed" and
+                    .conclusion == "success"
+                  )) |
+                  if length == 0 then empty
+                  else max_by([.run_attempt, .id]) | .id
+                  end
+                ')"
+            [[ -n "$RUN_ID" ]] || {
+              echo "::error::Current main $HEAD_SHA has no successful completed push CI run."
+              exit 1
+            }
+          fi
+
+          [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::Invalid CI workflow run ID: $RUN_ID"
+            exit 1
+          }
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::Invalid CI head SHA: $HEAD_SHA"
+            exit 1
+          }
+          printf 'run_id=%s\nsha=%s\n' "$RUN_ID" "$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
         with:
+          ref: ${{ steps.ci.outputs.sha }}
           fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require successful CI for the exact current main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ steps.ci.outputs.run_id }}
+          CI_HEAD_SHA: ${{ steps.ci.outputs.sha }}
+        run: bash scripts/release/require-successful-main-ci.sh "$CI_RUN_ID" "$CI_HEAD_SHA"
 
       - name: Require release automation token
         env:
@@ -37,14 +113,28 @@ jobs:
             exit 1
           fi
 
+      - name: Revalidate current main before release automation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ steps.ci.outputs.run_id }}
+          CI_HEAD_SHA: ${{ steps.ci.outputs.sha }}
+        run: bash scripts/release/require-successful-main-ci.sh "$CI_RUN_ID" "$CI_HEAD_SHA"
+
       - name: Open or advance the release PR
         id: release
-        if: github.event_name == 'push'
+        if: github.event_name == 'workflow_run'
         uses: googleapis/release-please-action@v5
         with:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      - name: Revalidate current main after release automation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ steps.ci.outputs.run_id }}
+          CI_HEAD_SHA: ${{ steps.ci.outputs.sha }}
+        run: bash scripts/release/require-successful-main-ci.sh "$CI_RUN_ID" "$CI_HEAD_SHA"
 
       # A failed build leaves a draft. Later main pushes may repair that draft,
       # while workflow_dispatch can also re-verify an already-published release.
@@ -53,6 +143,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           EVENT_NAME: ${{ github.event_name }}
+          CI_HEAD_SHA: ${{ steps.ci.outputs.sha }}
           RECOVERY_TAG: ${{ inputs.tag }}
           RELEASE_CREATED: ${{ steps.release.outputs.release_created }}
           RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
@@ -110,7 +201,11 @@ jobs:
             echo "::error::Release Please did not create $TAG as a draft."
             exit 1
           fi
-          if [[ "$EVENT_NAME" == "push" && "$RELEASE_CREATED" != "true" && "$IS_DRAFT" != "true" ]]; then
+          if [[ "$RELEASE_CREATED" == "true" && "$RELEASE_SHA" != "$CI_HEAD_SHA" ]]; then
+            echo "::error::Release Please created $TAG for $RELEASE_SHA, not validated main $CI_HEAD_SHA."
+            exit 1
+          fi
+          if [[ "$EVENT_NAME" == "workflow_run" && "$RELEASE_CREATED" != "true" && "$IS_DRAFT" != "true" ]]; then
             echo 'process=false' >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -143,6 +238,7 @@ jobs:
           install -d -m 0755 "$TOOL_DIR"
           install -m 0755 \
             scripts/release/find-github-release.sh \
+            scripts/release/require-successful-main-ci.sh \
             scripts/release/verify-github-assets.sh \
             "$TOOL_DIR/"
 
@@ -237,11 +333,16 @@ jobs:
       - name: Attach all assets to the draft
         if: steps.resolve.outputs.process == 'true' && steps.resolve.outputs.draft == 'true'
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          CI_RUN_ID: ${{ steps.ci.outputs.run_id }}
+          CI_HEAD_SHA: ${{ steps.ci.outputs.sha }}
           RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
           RUNNER_TEMP: ${{ runner.temp }}
         run: |
-          gh release upload "$RELEASE_TAG" \
+          bash "$RUNNER_TEMP/release-tooling/require-successful-main-ci.sh" \
+            "$CI_RUN_ID" "$CI_HEAD_SHA"
+          GH_TOKEN="$RELEASE_PLEASE_TOKEN" gh release upload "$RELEASE_TAG" \
             "$RUNNER_TEMP/sovereign-node-release"/* --clobber
 
       - name: Verify complete draft on GitHub
@@ -263,13 +364,23 @@ jobs:
       - name: Publish the immutable release
         if: steps.resolve.outputs.process == 'true' && steps.resolve.outputs.draft == 'true'
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          CI_RUN_ID: ${{ steps.ci.outputs.run_id }}
+          CI_HEAD_SHA: ${{ steps.ci.outputs.sha }}
           RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
+          RUNNER_TEMP: ${{ runner.temp }}
         run: |
+          # Keep this check in the publishing step so no queued stale run can
+          # cross a step boundary and make an immutable release public.
+          bash "$RUNNER_TEMP/release-tooling/require-successful-main-ci.sh" \
+            "$CI_RUN_ID" "$CI_HEAD_SHA"
           if [[ "$RELEASE_TAG" == *-* ]]; then
-            gh release edit "$RELEASE_TAG" --draft=false --prerelease
+            GH_TOKEN="$RELEASE_PLEASE_TOKEN" gh release edit \
+              "$RELEASE_TAG" --draft=false --prerelease
           else
-            gh release edit "$RELEASE_TAG" --draft=false --latest
+            GH_TOKEN="$RELEASE_PLEASE_TOKEN" gh release edit \
+              "$RELEASE_TAG" --draft=false --latest
           fi
 
       - name: Verify published release metadata and assets

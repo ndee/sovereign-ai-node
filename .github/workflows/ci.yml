@@ -53,11 +53,10 @@ jobs:
             setup-ui
           requireScope: false
 
-  # Path awareness: the three installer e2e jobs (~16 job-minutes) run only
-  # when something that can change an installed node changed — i.e. anything
-  # except docs, markdown, unit tests and unrelated workflow files. Lint,
-  # typecheck, unit, integration and smoke always run. Skipped jobs satisfy
-  # required status checks, so the merge gate keeps working.
+  # Path awareness keeps the three installer e2e jobs (~16 job-minutes) off
+  # draft or install-irrelevant pull requests. Every main push runs all three:
+  # a successful CI workflow is the release publication gate, so none of its
+  # installer coverage may be skipped on a release-capable commit.
   changes:
     name: Detect install-relevant changes
     runs-on: ubuntu-latest
@@ -199,6 +198,9 @@ jobs:
       - name: Verify draft-aware GitHub Release lookup
         run: bash scripts/release/test-find-github-release.sh
 
+      - name: Verify CI-gated release publication
+        run: bash scripts/release/test-release-workflow-gate.sh
+
       - name: Build and test exact Node release assets
         env:
           RUNNER_TEMP: ${{ runner.temp }}
@@ -214,8 +216,9 @@ jobs:
     needs: [test, changes]
     if: >-
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
       (needs.changes.outputs.install_relevant == 'true' &&
-       (github.event_name != 'pull_request' || github.event.pull_request.draft == false))
+       github.event.pull_request.draft == false)
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -287,8 +290,9 @@ jobs:
     needs: [test, changes]
     if: >-
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
       (needs.changes.outputs.install_relevant == 'true' &&
-       (github.event_name != 'pull_request' || github.event.pull_request.draft == false))
+       github.event.pull_request.draft == false)
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -368,8 +372,9 @@ jobs:
     needs: [test, changes]
     if: >-
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
       (needs.changes.outputs.install_relevant == 'true' &&
-       (github.event_name != 'pull_request' || github.event.pull_request.draft == false))
+       github.event.pull_request.draft == false)
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -468,3 +473,35 @@ jobs:
           docker ps -a || true
           echo "=== request file ==="
           cat /tmp/ci-install-request.json 2>/dev/null | jq . || true
+
+  # The release workflow consumes only successful push runs whose sentinel
+  # passed. Keep this explicit instead of relying on the workflow's aggregate
+  # conclusion: skipped jobs otherwise count as a successful workflow.
+  release_gate:
+    name: Release Gate
+    if: always() && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    needs:
+      - changes
+      - lint
+      - typecheck
+      - test
+      - integration_coverage
+      - smoke
+      - artifact_contract
+      - e2e_noninteractive
+      - e2e_interactive
+      - e2e_rerun_after_partial_failure
+    env:
+      REQUIRED_RESULTS: ${{ toJSON(needs) }}
+    steps:
+      - name: Require every main validation job to pass
+        run: |
+          jq -e '
+            length == 10 and
+            all(.[]; .result == "success")
+          ' <<<"$REQUIRED_RESULTS" >/dev/null || {
+            echo "::error::A required main CI job failed, was cancelled, or was skipped."
+            jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$REQUIRED_RESULTS"
+            exit 1
+          }
