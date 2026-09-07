@@ -73,19 +73,39 @@ jobs:
             exit 1
           fi
 
-          if ! RELEASE_JSON="$(gh api \
-            -H 'Accept: application/vnd.github+json' \
-            -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" 2>/dev/null)"; then
-            if [[ "$RELEASE_CREATED" == "true" || "$EVENT_NAME" == "workflow_dispatch" ]]; then
+          set +e
+          RELEASE_JSON="$(bash scripts/release/find-github-release.sh "$TAG")"
+          LOOKUP_STATUS=$?
+          set -e
+          if [[ "$LOOKUP_STATUS" != "0" ]]; then
+            if [[ "$LOOKUP_STATUS" == "4" && \
+                  ("$RELEASE_CREATED" == "true" || "$EVENT_NAME" == "workflow_dispatch") ]]; then
               echo "::error::Release $TAG does not exist."
               exit 1
             fi
-            echo 'process=false' >> "$GITHUB_OUTPUT"
-            exit 0
+            if [[ "$LOOKUP_STATUS" == "4" ]]; then
+              echo 'process=false' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::Failed to resolve release $TAG (lookup exit $LOOKUP_STATUS)."
+            exit "$LOOKUP_STATUS"
           fi
 
+          RELEASE_ID="$(jq -r '.id' <<<"$RELEASE_JSON")"
           IS_DRAFT="$(jq -r '.draft' <<<"$RELEASE_JSON")"
+          TARGET_COMMITISH="$(jq -r '.target_commitish' <<<"$RELEASE_JSON")"
+          if [[ "$IS_DRAFT" != "true" && "$IS_DRAFT" != "false" ]]; then
+            echo "::error::Invalid draft state for $TAG: $IS_DRAFT"
+            exit 1
+          fi
+          if [[ ! "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Invalid GitHub Release ID for $TAG: $RELEASE_ID"
+            exit 1
+          fi
+          if [[ ! "$TARGET_COMMITISH" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Invalid release target for $TAG: $TARGET_COMMITISH"
+            exit 1
+          fi
           if [[ "$RELEASE_CREATED" == "true" && "$IS_DRAFT" != "true" ]]; then
             echo "::error::Release Please did not create $TAG as a draft."
             exit 1
@@ -97,6 +117,10 @@ jobs:
 
           git fetch origin main --tags --force
           TAG_SHA="$(git rev-list -n 1 "$TAG")"
+          if [[ "$TARGET_COMMITISH" != "$TAG_SHA" ]]; then
+            echo "::error::Release $TAG targets $TARGET_COMMITISH but its tag resolves to $TAG_SHA."
+            exit 1
+          fi
           if ! git merge-base --is-ancestor "$TAG_SHA" origin/main; then
             echo "::error::Release tag $TAG ($TAG_SHA) is not an ancestor of main."
             exit 1
@@ -105,8 +129,22 @@ jobs:
             echo "::error::Release Please reported $RELEASE_SHA but $TAG resolves to $TAG_SHA."
             exit 1
           fi
-          printf 'process=true\ndraft=%s\ntag=%s\nsha=%s\n' \
-            "$IS_DRAFT" "$TAG" "$TAG_SHA" >> "$GITHUB_OUTPUT"
+          printf 'process=true\ndraft=%s\ntag=%s\nsha=%s\nrelease_id=%s\n' \
+            "$IS_DRAFT" "$TAG" "$TAG_SHA" "$RELEASE_ID" >> "$GITHUB_OUTPUT"
+
+      # Recovery checks out the older release commit below. Preserve the current
+      # draft-aware control scripts so verification does not regress with it.
+      - name: Stage current release verification tooling
+        if: steps.resolve.outputs.process == 'true'
+        env:
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          TOOL_DIR="$RUNNER_TEMP/release-tooling"
+          install -d -m 0755 "$TOOL_DIR"
+          install -m 0755 \
+            scripts/release/find-github-release.sh \
+            scripts/release/verify-github-assets.sh \
+            "$TOOL_DIR/"
 
       - name: Check out the release commit
         if: steps.resolve.outputs.process == 'true'
@@ -212,11 +250,12 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
           RELEASE_SHA: ${{ steps.resolve.outputs.sha }}
+          RELEASE_ID: ${{ steps.resolve.outputs.release_id }}
           RUNNER_TEMP: ${{ runner.temp }}
         run: |
           ARTIFACT_DIR="$RUNNER_TEMP/sovereign-node-release"
-          bash scripts/release/verify-github-assets.sh \
-            draft "$RELEASE_TAG" "$RELEASE_SHA" \
+          bash "$RUNNER_TEMP/release-tooling/verify-github-assets.sh" \
+            draft "$RELEASE_TAG" "$RELEASE_SHA" "$RELEASE_ID" \
             "$ARTIFACT_DIR/component-release.json" \
             "$ARTIFACT_DIR/install.sh" \
             "$ARTIFACT_DIR/sovereign-ai-node-${RELEASE_TAG#v}.tgz"
@@ -239,11 +278,12 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
           RELEASE_SHA: ${{ steps.resolve.outputs.sha }}
+          RELEASE_ID: ${{ steps.resolve.outputs.release_id }}
           RUNNER_TEMP: ${{ runner.temp }}
         run: |
           ARTIFACT_DIR="$RUNNER_TEMP/sovereign-node-release"
-          bash scripts/release/verify-github-assets.sh \
-            published "$RELEASE_TAG" "$RELEASE_SHA" \
+          bash "$RUNNER_TEMP/release-tooling/verify-github-assets.sh" \
+            published "$RELEASE_TAG" "$RELEASE_SHA" "$RELEASE_ID" \
             "$ARTIFACT_DIR/component-release.json" \
             "$ARTIFACT_DIR/install.sh" \
             "$ARTIFACT_DIR/sovereign-ai-node-${RELEASE_TAG#v}.tgz"

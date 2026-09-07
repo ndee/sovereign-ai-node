@@ -38,6 +38,7 @@ jobs:
             build
             style
           scopes: |
+            release
             installer
             cli
             api
@@ -194,6 +195,9 @@ jobs:
 
       - name: Verify prebuilt Bots installer artifact
         run: bash scripts/ci/test-prebuilt-bots-artifact.sh
+
+      - name: Verify draft-aware GitHub Release lookup
+        run: bash scripts/release/test-find-github-release.sh
 
       - name: Build and test exact Node release assets
         env:
