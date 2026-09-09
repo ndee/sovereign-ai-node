@@ -19,11 +19,25 @@ parse_args() {
         shift 2
         ;;
       --source-dir)
+        if [[ -n "$NODE_ARTIFACT" ]]; then
+          die "--source-dir cannot be combined with --node-artifact"
+        fi
         SOURCE_DIR="$2"
         shift 2
         ;;
       --ref)
         REF="$2"
+        shift 2
+        ;;
+      --node-artifact)
+        if [[ -n "$SOURCE_DIR" ]]; then
+          die "--node-artifact cannot be combined with --source-dir"
+        fi
+        NODE_ARTIFACT="$2"
+        shift 2
+        ;;
+      --node-artifact-manifest)
+        NODE_ARTIFACT_MANIFEST="$2"
         shift 2
         ;;
       --bots-repo-url)
@@ -117,6 +131,12 @@ parse_args() {
 
   if [[ -n "$BOTS_ARTIFACT" && -n "$BOTS_SOURCE_DIR" ]]; then
     die "--bots-artifact cannot be combined with --bots-source-dir"
+  fi
+  if [[ -n "$NODE_ARTIFACT" && -n "$SOURCE_DIR" ]]; then
+    die "--node-artifact cannot be combined with --source-dir"
+  fi
+  if [[ -n "$NODE_ARTIFACT_MANIFEST" && -z "$NODE_ARTIFACT" ]]; then
+    die "--node-artifact-manifest requires --node-artifact"
   fi
   if [[ -n "$BOTS_ARTIFACT_MANIFEST" && -z "$BOTS_ARTIFACT" ]]; then
     die "--bots-artifact-manifest requires --bots-artifact"

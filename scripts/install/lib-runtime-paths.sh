@@ -3,8 +3,9 @@
 # install-provenance writer.
 #
 # Depends on lib-log (log, die). Reads SERVICE_USER, SERVICE_GROUP, INSTALL_ROOT,
-# APP_DIR, BOTS_DIR, SOURCE_DIR, BOTS_SOURCE_DIR, BOTS_ARTIFACT,
-# BOTS_ARTIFACT_MANIFEST, REPO_URL, REF, BOTS_REPO_URL, BOTS_REF, PROVENANCE_FILE.
+# APP_DIR, BOTS_DIR, SOURCE_DIR, NODE_ARTIFACT, NODE_ARTIFACT_MANIFEST,
+# BOTS_SOURCE_DIR, BOTS_ARTIFACT, BOTS_ARTIFACT_MANIFEST, REPO_URL, REF,
+# BOTS_REPO_URL, BOTS_REF, PROVENANCE_FILE.
 
 ensure_service_account() {
   if [[ "$SERVICE_USER" == "root" ]]; then
@@ -74,7 +75,13 @@ ensure_runtime_directories() {
 resolve_source_mode() {
   local detected_bots_source
 
-  if [[ -n "$SOURCE_DIR" ]]; then
+  if [[ -n "$NODE_ARTIFACT" ]]; then
+    [[ -f "$NODE_ARTIFACT" ]] || die "Node artifact does not exist: $NODE_ARTIFACT"
+    [[ -n "$NODE_ARTIFACT_MANIFEST" ]] || \
+      die "A prebuilt Node artifact requires --node-artifact-manifest <path>."
+    [[ -f "$NODE_ARTIFACT_MANIFEST" ]] || \
+      die "Node artifact manifest does not exist: $NODE_ARTIFACT_MANIFEST"
+  elif [[ -n "$SOURCE_DIR" ]]; then
     [[ -d "$SOURCE_DIR" ]] || die "Source directory does not exist: $SOURCE_DIR"
   elif [[ -n "$REPO_URL" ]]; then
     :
@@ -138,6 +145,12 @@ find_local_bots_source_dir() {
 }
 
 sync_app_source() {
+  if [[ -n "$NODE_ARTIFACT" ]]; then
+    log "Syncing verified prebuilt application runtime into $APP_DIR"
+    sync_prebuilt_node_artifact
+    return
+  fi
+
   log "Syncing application source into $APP_DIR"
   rm -rf "$APP_DIR"
   install -d -m 0755 "$APP_DIR"
@@ -187,10 +200,19 @@ write_install_provenance() {
   local bots_ref_resolved="$BOTS_REF"
   local bots_repo="$BOTS_REPO_URL"
   local install_source="git-clone"
+  local node_artifact_name=""
+  local node_artifact_sha256=""
   local bots_artifact_name=""
   local bots_artifact_sha256=""
 
-  if [[ -n "$SOURCE_DIR" ]]; then
+  if [[ -n "$NODE_ARTIFACT" ]]; then
+    install_source="release-artifact"
+    node_repo="release-artifact"
+    node_ref_resolved="$(jq -r '.tag' "$NODE_ARTIFACT_MANIFEST")"
+    node_commit_sha="$(jq -r '.commitSha' "$NODE_ARTIFACT_MANIFEST")"
+    node_artifact_name="$(basename "$NODE_ARTIFACT")"
+    node_artifact_sha256="$(sha256sum "$NODE_ARTIFACT" | awk '{print $1}')"
+  elif [[ -n "$SOURCE_DIR" ]]; then
     install_source="local-copy"
     node_repo="local-copy"
     if [[ -d "${SOURCE_DIR}/.git" ]]; then
@@ -218,7 +240,7 @@ write_install_provenance() {
   fi
 
   # Detect curl-installer mode: when piped from stdin there is no SOURCE_DIR
-  if [[ -z "$SOURCE_DIR" && "$REPO_URL" == *"github.com"* ]]; then
+  if [[ -z "$NODE_ARTIFACT" && -z "$SOURCE_DIR" && "$REPO_URL" == *"github.com"* ]]; then
     install_source="curl-installer"
   fi
 
@@ -242,6 +264,8 @@ write_install_provenance() {
   "nodeRef": "${node_ref_resolved}",
   "nodeVersion": "${node_version}",
   "nodeCommitSha": "${node_commit_sha}",
+  "nodeArtifact": "${node_artifact_name}",
+  "nodeArtifactSha256": "${node_artifact_sha256}",
   "botsRepoUrl": "${bots_repo}",
   "botsRef": "${bots_ref_resolved}",
   "botsVersion": "${bots_version}",

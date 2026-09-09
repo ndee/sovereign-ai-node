@@ -15,6 +15,16 @@
   "files": [
     "dist",
     "public",
+    "deploy/ansible",
+    "deploy/config",
+    "deploy/install-request.example.json",
+    "deploy/scripts",
+    "deploy/systemd",
+    "scripts/install-docker.sh",
+    "scripts/install/lib-log.sh",
+    "scripts/install/lib-os.sh",
+    "scripts/install/lib-runtime-deps.sh",
+    "deploy/runtime/pnpm-lock.yaml",
     "README.md",
     "CHANGELOG.md"
   ],
