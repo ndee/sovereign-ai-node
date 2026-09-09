@@ -192,6 +192,9 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
 
+      - name: Verify prebuilt Node installer artifact
+        run: bash scripts/ci/test-prebuilt-node-artifact.sh
+
       - name: Verify prebuilt Bots installer artifact
         run: bash scripts/ci/test-prebuilt-bots-artifact.sh
 

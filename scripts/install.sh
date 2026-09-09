@@ -18,6 +18,8 @@ REF="${SOVEREIGN_NODE_REF:-main}"
 BOTS_REPO_URL="${SOVEREIGN_BOTS_REPO_URL:-https://github.com/ndee/sovereign-ai-bots}"
 BOTS_SOURCE_DIR="${SOVEREIGN_BOTS_SOURCE_DIR:-}"
 BOTS_REF="${SOVEREIGN_BOTS_REF:-main}"
+NODE_ARTIFACT="${SOVEREIGN_NODE_ARTIFACT:-}"
+NODE_ARTIFACT_MANIFEST="${SOVEREIGN_NODE_ARTIFACT_MANIFEST:-}"
 BOTS_ARTIFACT="${SOVEREIGN_BOTS_ARTIFACT:-}"
 BOTS_ARTIFACT_MANIFEST="${SOVEREIGN_BOTS_ARTIFACT_MANIFEST:-}"
 INSTALL_ROOT="${SOVEREIGN_NODE_INSTALL_ROOT:-/opt/sovereign-ai-node}"
@@ -112,6 +114,9 @@ source "${INSTALL_LIB_DIR}/lib-os.sh"
 
 # shellcheck source=install/lib-runtime-deps.sh
 source "${INSTALL_LIB_DIR}/lib-runtime-deps.sh"
+
+# shellcheck source=install/lib-node-artifact.sh
+source "${INSTALL_LIB_DIR}/lib-node-artifact.sh"
 
 # shellcheck source=install/lib-bots-artifact.sh
 source "${INSTALL_LIB_DIR}/lib-bots-artifact.sh"

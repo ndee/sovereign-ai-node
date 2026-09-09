@@ -20,6 +20,9 @@ Options:
   --repo-url <url>         Git URL for sovereign-ai-node (default: https://github.com/ndee/sovereign-ai-node)
   --source-dir <path>      Local source directory (alternative to --repo-url)
   --ref <ref>              Git ref (default: main)
+  --node-artifact <path>   Verified prebuilt sovereign-ai-node .tgz (skips source clone/build)
+  --node-artifact-manifest <path>
+                           component-release.json for --node-artifact
   --bots-repo-url <url>    Git URL for sovereign-ai-bots (default: https://github.com/ndee/sovereign-ai-bots)
   --bots-source-dir <path> Local bot repo source directory (alternative to --bots-repo-url)
   --bots-ref <ref>         Bot repo Git ref (default: main)

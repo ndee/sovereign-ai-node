@@ -17,6 +17,7 @@ scripts/
     ├── lib-log.sh              # log, die, usage
     ├── lib-args.sh             # parse_args, normalize_service_identity
     ├── lib-os.sh               # OS detection, apt helpers
+    ├── lib-node-artifact.sh    # verify, install dependencies, and stage a prebuilt Node runtime
     ├── lib-bots-artifact.sh    # verify and stage a prebuilt Bots release
     ├── lib-runtime-deps.sh     # apt/docker/node bootstrap
     ├── lib-runtime-paths.sh    # service account, runtime dirs, source sync, provenance
@@ -49,6 +50,24 @@ sudo bash scripts/install.sh --source-dir "$(pwd)"
 ```
 
 CI exercises this path on every PR (`.github/workflows/ci.yml` E2E install jobs).
+
+**Verified prebuilt Node runtime.** A caller that has downloaded the Node `.tgz`
+and its `component-release.json` from the same immutable release can install
+compiled runtime files without a source checkout or on-device build:
+
+```bash
+sudo bash scripts/install.sh \
+  --node-artifact /path/to/sovereign-ai-node-X.Y.Z.tgz \
+  --node-artifact-manifest /path/to/component-release.json \
+  --bots-artifact /path/to/sovereign-ai-bots-X.Y.Z.tgz \
+  --bots-artifact-manifest /path/to/bots-component-release.json
+```
+
+The installer validates the manifest, filename, size, SHA-256, archive paths and
+types, package identity, and required runtime payload. It stages the archive,
+performs only a frozen production dependency install with lifecycle scripts
+disabled, and atomically activates it. The existing `--source-dir` and
+`--repo-url` modes retain their source-build behavior.
 
 **Verified prebuilt bot catalog.** A caller that has downloaded the Bots `.tgz`
 and its `component-release.json` from the same immutable release can avoid an

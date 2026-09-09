@@ -103,6 +103,7 @@ jq -e '((.bundledDependencies // .bundleDependencies // []) | length) == 0' \
 
 for required in \
   package.json \
+  deploy/runtime/pnpm-lock.yaml \
   README.md \
   CHANGELOG.md \
   dist/sovereign-node.js \
@@ -110,6 +111,23 @@ for required in \
   dist/sovereign-node-onboarding-api.js \
   dist/sovereign-tool.js \
   dist/lib/index.js \
+  deploy/ansible/ansible.cfg \
+  deploy/ansible/playbooks/post-install-local.yml \
+  deploy/ansible/roles/sovereign_host_resources_apply/tasks/main.yml \
+  deploy/ansible/roles/sovereign_host_resources_verify/tasks/main.yml \
+  deploy/install-request.example.json \
+  deploy/config/journald-sovereign-node.conf \
+  deploy/config/logrotate-sovereign-node \
+  deploy/scripts/sovereign-node-disk-check.sh \
+  deploy/systemd/sovereign-node-api.service \
+  deploy/systemd/sovereign-node-disk-check.service \
+  deploy/systemd/sovereign-node-disk-check.timer \
+  deploy/systemd/sovereign-node-docker-prune.service \
+  deploy/systemd/sovereign-node-docker-prune.timer \
+  scripts/install-docker.sh \
+  scripts/install/lib-log.sh \
+  scripts/install/lib-os.sh \
+  scripts/install/lib-runtime-deps.sh \
   public/setup-ui/index.html; do
   [[ -f "$PACKAGE_DIR/$required" ]] || fail "required package payload is missing: $required"
 done
@@ -155,14 +173,10 @@ fi
 bash -n "$INSTALLER"
 bash "$INSTALLER" --help >/dev/null
 
-# Exercise the packed entrypoints with only production dependencies. Reusing the
-# checkout's pnpm store keeps this fast while ensuring no devDependency can mask
-# a missing runtime dependency.
-RUNTIME_DEPS="$WORK_DIR/runtime-deps"
-mkdir -p "$RUNTIME_DEPS"
-cp "$REPO_ROOT/package.json" "$REPO_ROOT/pnpm-lock.yaml" "$RUNTIME_DEPS/"
-pnpm --dir "$RUNTIME_DEPS" install --prod --frozen-lockfile --ignore-scripts
-ln -s "$RUNTIME_DEPS/node_modules" "$PACKAGE_DIR/node_modules"
+# Exercise the packed entrypoints with the archive's own locked production graph.
+cp "$PACKAGE_DIR/deploy/runtime/pnpm-lock.yaml" "$PACKAGE_DIR/pnpm-lock.yaml"
+pnpm --dir "$PACKAGE_DIR" install --prod --frozen-lockfile --ignore-scripts
+[[ ! -e "$PACKAGE_DIR/node_modules/typescript" ]] || fail "packed runtime installed a development dependency"
 "$PACKAGE_DIR/dist/sovereign-node.js" --help >/dev/null
 "$PACKAGE_DIR/dist/sovereign-tool.js" --version >/dev/null
 

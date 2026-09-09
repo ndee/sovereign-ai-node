@@ -3,11 +3,16 @@
 # hygiene, request-file template, installation detection.
 #
 # Depends on lib-log (log, die) and expects base apt packages + Docker + Node
-# already installed. Reads APP_DIR, BOTS_DIR, SERVICE_USER, SERVICE_GROUP,
+# already installed. Reads NODE_ARTIFACT, APP_DIR, BOTS_DIR, SERVICE_USER, SERVICE_GROUP,
 # SERVICE_NAME, INSTALL_ROOT, API_HOST, API_PORT, ENV_FILE, REQUEST_FILE,
 # RUNTIME_CONFIG_FILE, INSTALLATION_DETECTED, CONFIGURED_INSTALLATION.
 
 build_app() {
+  if [[ -n "$NODE_ARTIFACT" ]]; then
+    log "Using verified prebuilt Node runtime; skipping source dependency install and application build"
+    return 0
+  fi
+
   log "Installing dependencies and building app"
   (
     cd "$APP_DIR"

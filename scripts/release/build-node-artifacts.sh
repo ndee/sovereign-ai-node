@@ -33,6 +33,19 @@ rm -f "$ARCHIVE_PATH" "$INSTALLER_PATH" "$MANIFEST_PATH"
 (
   cd "$REPO_ROOT"
   SOURCE_COMMIT="$COMMIT_SHA" pnpm run build
+
+  # npm pack always excludes root package-manager lockfiles, even when they
+  # are allowlisted in package.json. Materialize the repository lock under a
+  # runtime-only packaged path, then remove it when packing finishes.
+  runtime_lock_dir="$REPO_ROOT/deploy/runtime"
+  runtime_lock_path="$runtime_lock_dir/pnpm-lock.yaml"
+  [[ ! -e "$runtime_lock_path" ]] || {
+    printf 'runtime lock staging path already exists: %s\n' "$runtime_lock_path" >&2
+    exit 1
+  }
+  install -d -m 0755 "$runtime_lock_dir"
+  trap 'rm -f "$runtime_lock_path"; rmdir "$runtime_lock_dir" 2>/dev/null || true' EXIT
+  cp "$REPO_ROOT/pnpm-lock.yaml" "$runtime_lock_path"
   packed_name="$(npm pack --pack-destination "$OUT_DIR" --silent)"
   [[ "$packed_name" == "$ARCHIVE_NAME" ]] || {
     printf 'npm pack produced %s; expected %s\n' "$packed_name" "$ARCHIVE_NAME" >&2
