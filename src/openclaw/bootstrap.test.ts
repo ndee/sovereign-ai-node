@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import { createLogger } from "../logging/logger.js";
 import type { ExecInput, ExecResult, ExecRunner } from "../system/exec.js";
 import {
+  resolveOpenClawNpmPrefix,
   resolveRequestedOpenClawVersion,
   ShellOpenClawBootstrapper,
   SOVEREIGN_PINNED_OPENCLAW_VERSION,
@@ -635,6 +636,187 @@ describe("ShellOpenClawBootstrapper", () => {
       code: "OPENCLAW_INSTALL_FAILED",
     });
     expect(calls.some((call) => call.command === "bash")).toBe(true);
+  });
+});
+
+// Regression coverage for the EACCES install failure: the API service runs
+// unprivileged (deploy/systemd/sovereign-node-api.service, User=__SERVICE_USER__),
+// so an OpenClaw `npm install -g` that leaves npm's default prefix alone targets
+// the root-owned /usr/lib/node_modules and fails with
+// "EACCES: permission denied, mkdir '/usr/lib/node_modules/openclaw'".
+describe("openclaw install prefix under an unprivileged service user", () => {
+  const withUid = async (uid: number, action: () => Promise<void>): Promise<void> => {
+    const original = process.getuid;
+    Object.defineProperty(process, "getuid", {
+      value: () => uid,
+      configurable: true,
+    });
+    try {
+      await action();
+    } finally {
+      Object.defineProperty(process, "getuid", {
+        value: original,
+        configurable: true,
+      });
+    }
+  };
+
+  const runInstall = async (serviceHome?: string): Promise<ExecInput[]> => {
+    const calls: ExecInput[] = [];
+    const execRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        calls.push(input);
+        if (input.command === "openclaw") {
+          // Not installed on the first probe; installed after the install step.
+          const installed = calls.some(
+            (call) => call.command === "bash" || call.args?.[0] === "install",
+          );
+          return {
+            command: "openclaw --version",
+            exitCode: installed ? 0 : 1,
+            stdout: installed ? SOVEREIGN_PINNED_OPENCLAW_VERSION : "",
+            stderr: "",
+          };
+        }
+        return {
+          command: [input.command, ...(input.args ?? [])].join(" "),
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        };
+      },
+    };
+
+    const bootstrapper = new ShellOpenClawBootstrapper(
+      execRunner,
+      createLogger(),
+      ...(serviceHome === undefined ? [] : [serviceHome]),
+    );
+    await bootstrapper.ensureInstalled({
+      version: SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
+      noOnboard: true,
+      noPrompt: true,
+      skipIfCompatibleInstalled: true,
+    });
+    return calls;
+  };
+
+  it("resolves a writable prefix inside the service home when not root", () => {
+    const original = process.getuid;
+    Object.defineProperty(process, "getuid", { value: () => 1001, configurable: true });
+    try {
+      expect(resolveOpenClawNpmPrefix("/var/lib/sovereign-node")).toBe(
+        "/var/lib/sovereign-node/.npm-global",
+      );
+    } finally {
+      Object.defineProperty(process, "getuid", { value: original, configurable: true });
+    }
+  });
+
+  it("leaves npm's default prefix alone when running as root", () => {
+    const original = process.getuid;
+    Object.defineProperty(process, "getuid", { value: () => 0, configurable: true });
+    try {
+      expect(resolveOpenClawNpmPrefix("/var/lib/sovereign-node")).toBeUndefined();
+    } finally {
+      Object.defineProperty(process, "getuid", { value: original, configurable: true });
+    }
+  });
+
+  it("falls back to undefined when no home can be resolved", () => {
+    const originalUid = process.getuid;
+    const originalHome = process.env.HOME;
+    Object.defineProperty(process, "getuid", { value: () => 1001, configurable: true });
+    delete process.env.HOME;
+    try {
+      expect(resolveOpenClawNpmPrefix(undefined)).toBeUndefined();
+      expect(resolveOpenClawNpmPrefix("   ")).toBeUndefined();
+    } finally {
+      Object.defineProperty(process, "getuid", { value: originalUid, configurable: true });
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+    }
+  });
+
+  it("never targets the root-owned system prefix from an unprivileged install", async () => {
+    await withUid(1001, async () => {
+      const calls = await runInstall("/var/lib/sovereign-node");
+      const expectedPrefix = "/var/lib/sovereign-node/.npm-global";
+
+      // install.sh path: the generated script must pin the prefix before it
+      // pipes into the upstream installer, which shells out to `npm install -g`.
+      const bashCall = calls.find((call) => call.command === "bash");
+      expect(bashCall?.args?.[1]).toContain(`export npm_config_prefix='${expectedPrefix}'`);
+
+      // `npm root -g` must resolve against the same prefix, or the post-install
+      // extension repair silently inspects the wrong tree.
+      const rootCall = calls.find((call) => call.command === "npm" && call.args?.[0] === "root");
+      expect(
+        (rootCall?.options?.env as Record<string, string> | undefined)?.npm_config_prefix,
+      ).toBe(expectedPrefix);
+    });
+  });
+
+  it("pins the direct npm fallback to the writable prefix when unprivileged", async () => {
+    await withUid(1001, async () => {
+      const calls: ExecInput[] = [];
+      const execRunner: ExecRunner = {
+        run: async (input): Promise<ExecResult> => {
+          calls.push(input);
+          if (input.command === "openclaw") {
+            const installed = calls.some(
+              (call) => call.command === "npm" && call.args?.[0] === "install",
+            );
+            return {
+              command: "openclaw --version",
+              exitCode: installed ? 0 : 1,
+              stdout: installed ? SOVEREIGN_PINNED_OPENCLAW_VERSION : "",
+              stderr: "",
+            };
+          }
+          if (input.command === "bash") {
+            // Force the direct-npm fallback path.
+            return { command: "bash", exitCode: 1, stdout: "", stderr: "install.sh failed" };
+          }
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          };
+        },
+      };
+
+      const bootstrapper = new ShellOpenClawBootstrapper(
+        execRunner,
+        createLogger(),
+        "/var/lib/sovereign-node",
+      );
+      await bootstrapper.ensureInstalled({
+        version: SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
+        noOnboard: true,
+        noPrompt: true,
+        skipIfCompatibleInstalled: true,
+      });
+
+      const installCall = calls.find(
+        (call) => call.command === "npm" && call.args?.[0] === "install" && call.args?.[1] === "-g",
+      );
+      expect(
+        (installCall?.options?.env as Record<string, string> | undefined)?.npm_config_prefix,
+      ).toBe("/var/lib/sovereign-node/.npm-global");
+    });
+  });
+
+  it("keeps the root install on npm's default prefix", async () => {
+    await withUid(0, async () => {
+      const calls = await runInstall("/var/lib/sovereign-node");
+      const bashCall = calls.find((call) => call.command === "bash");
+      expect(bashCall?.args?.[1]).not.toContain("npm_config_prefix");
+    });
   });
 });
 

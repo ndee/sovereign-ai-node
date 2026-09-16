@@ -46,10 +46,44 @@ export interface OpenClawBootstrapper {
   ensureInstalled(opts: OpenClawInstallOptions): Promise<OpenClawInstallInfo>;
 }
 
+/**
+ * The npm prefix subdirectory OpenClaw (like lobster, see
+ * real-service-lobster.ts) is installed into when the install runs
+ * unprivileged. `<serviceHome>/.npm-global/bin` is already on the API
+ * unit's PATH (deploy/systemd/sovereign-node-api.service) and on bot unit
+ * PATHs (#232), so the CLI stays resolvable by bare name afterwards.
+ */
+const NPM_GLOBAL_SUBDIR = ".npm-global";
+
+const isRunningAsRoot = (): boolean => process.getuid?.() === 0;
+
+/**
+ * Resolve the npm global prefix the OpenClaw install must target.
+ *
+ * A root install keeps the system prefix (npm's default, /usr/lib/node_modules)
+ * so nothing changes for the curl installer. An unprivileged install — the web
+ * installer, where sovereign-node-api.service runs as the non-root service user
+ * — cannot write there and must target a prefix inside a home it owns.
+ *
+ * Returning `undefined` means "leave npm's default prefix alone".
+ */
+export const resolveOpenClawNpmPrefix = (serviceHome?: string): string | undefined => {
+  if (isRunningAsRoot()) {
+    return undefined;
+  }
+  const home = serviceHome?.trim();
+  const base = home !== undefined && home.length > 0 ? home : process.env.HOME;
+  if (base === undefined || base.length === 0) {
+    return undefined;
+  }
+  return join(base, NPM_GLOBAL_SUBDIR);
+};
+
 export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
   constructor(
     private readonly execRunner: ExecRunner,
     private readonly logger: Logger,
+    private readonly serviceHome?: string,
   ) {}
 
   async detectInstalled(): Promise<DetectedOpenClaw | null> {
@@ -110,6 +144,7 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
     const shellScript = buildInstallShellScript({
       noPrompt: opts.noPrompt ?? true,
       noOnboard: opts.noOnboard ?? true,
+      npmPrefix: resolveOpenClawNpmPrefix(this.serviceHome),
       ...(installVersion === undefined ? {} : { version: installVersion }),
     });
     this.logger.info(
@@ -189,7 +224,10 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
   }
 
   private async repairBundledExtensionRuntimeDependencies(): Promise<void> {
-    const packageRoot = await resolveInstalledOpenClawPackageRoot(this.execRunner);
+    const packageRoot = await resolveInstalledOpenClawPackageRoot(
+      this.execRunner,
+      resolveOpenClawNpmPrefix(this.serviceHome),
+    );
     if (packageRoot === null) {
       this.logger.warn(
         "OpenClaw package root could not be resolved after install; skipping bundled extension dependency repair",
@@ -284,6 +322,13 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
         ? SOVEREIGN_PINNED_OPENCLAW_VERSION
         : desiredVersion;
     const cacheDir = process.env.NPM_CONFIG_CACHE ?? join(process.env.HOME ?? "/root", ".npm");
+    const prefix = resolveOpenClawNpmPrefix(this.serviceHome);
+    if (prefix !== undefined) {
+      this.logger.info(
+        { npmPrefix: prefix },
+        "Installing OpenClaw into the service user's npm prefix (install is running unprivileged)",
+      );
+    }
     const installResult = await this.execRunner.run({
       command: "npm",
       args: ["install", "-g", `openclaw@${installTarget}`],
@@ -293,6 +338,7 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
           CI: "1",
           HOME: process.env.HOME ?? "/root",
           NPM_CONFIG_CACHE: cacheDir,
+          ...(prefix === undefined ? {} : { npm_config_prefix: prefix }),
         },
       },
     });
@@ -316,6 +362,7 @@ type InstallShellArgs = {
   version?: string;
   noPrompt: boolean;
   noOnboard: boolean;
+  npmPrefix?: string | undefined;
 };
 
 type PackageJsonWithDependencies = {
@@ -346,11 +393,24 @@ const buildInstallShellScript = (args: InstallShellArgs): string => {
   }
   const dollar = "$";
 
+  const prefixLines =
+    args.npmPrefix === undefined
+      ? []
+      : [
+          // Unprivileged install: the upstream install.sh shells out to
+          // `npm install -g`, which would target the root-owned system prefix
+          // and EACCES. Anchor it to a prefix the invoking user owns.
+          `export npm_config_prefix=${shellQuote(args.npmPrefix)}`,
+          'mkdir -p "$npm_config_prefix"',
+          `export PATH="${dollar}{npm_config_prefix}/bin:${dollar}PATH"`,
+        ];
+
   return [
     "set -euo pipefail",
     `if [ "$(id -u)" = "0" ] && [ -z "${dollar}{HOME:-}" ]; then export HOME=/root; fi`,
     `export NPM_CONFIG_CACHE="${dollar}{NPM_CONFIG_CACHE:-${dollar}{HOME:-/root}/.npm}"`,
     'mkdir -p "$NPM_CONFIG_CACHE"',
+    ...prefixLines,
     "curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install.sh \\",
     `  | bash ${installArgs.map(shellQuote).join(" ")}`,
   ].join("\n");
@@ -369,6 +429,7 @@ const parseVersionToken = (value: string): string | null => {
 
 const resolveInstalledOpenClawPackageRoot = async (
   execRunner: ExecRunner,
+  npmPrefix?: string | undefined,
 ): Promise<string | null> => {
   const candidates: string[] = [];
   const npmRootResult = await execRunner.run({
@@ -378,6 +439,10 @@ const resolveInstalledOpenClawPackageRoot = async (
       timeout: OPENCLAW_DETECT_TIMEOUT_MS,
       env: {
         CI: "1",
+        // Resolve against the same prefix the install targeted; otherwise
+        // `npm root -g` reports the system prefix and the post-install
+        // extension repair silently skips an unprivileged install.
+        ...(npmPrefix === undefined ? {} : { npm_config_prefix: npmPrefix }),
       },
     },
   });
@@ -389,6 +454,9 @@ const resolveInstalledOpenClawPackageRoot = async (
     if (npmRoot !== undefined) {
       candidates.push(join(npmRoot, "openclaw"));
     }
+  }
+  if (npmPrefix !== undefined) {
+    candidates.push(join(npmPrefix, "lib", "node_modules", "openclaw"));
   }
   candidates.push("/usr/lib/node_modules/openclaw", "/usr/local/lib/node_modules/openclaw");
 
