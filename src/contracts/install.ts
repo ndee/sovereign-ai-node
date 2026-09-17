@@ -120,7 +120,20 @@ export const connectivityInstallInputSchema = z.object({
 export const relayTunnelInputSchema = z.object({
   serverAddr: z.string().min(1),
   serverPort: z.number().int().positive().optional(),
-  token: z.string().min(1),
+  // The frp tunnel secret, present ONLY while the request is in flight — the
+  // same lifecycle as `dns01.token` and `enrollmentToken` below, which are
+  // optional for the same reason. A request is persisted (install job records,
+  // the saved install request) only after `redactInstallRequestSecrets` has
+  // stripped every inline credential, and this token has no secretRef sibling
+  // to be swapped for, so it is dropped outright. A required `token` would
+  // therefore describe a shape that only the wire ever satisfies, and every
+  // read-back of a persisted request would fail validation.
+  //
+  // Absence means "no usable pre-enrollment material in this request", NOT
+  // "invalid": `tryUsePreEnrolledRelay` falls through to the enrollment-reuse
+  // path, which resolves the real token from the runtime config's
+  // `relay.tunnel.tokenSecretRef`.
+  token: z.string().min(1).optional(),
   proxyName: z.string().min(1),
   subdomain: z.string().min(1).optional(),
   // frpc proxy type: "http" (relay terminates TLS) or "https" (relay passes the
