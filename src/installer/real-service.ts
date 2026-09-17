@@ -8718,8 +8718,9 @@ export default function (api) {
             };
           }
 
+          const appliedRequest = stepState.effectiveRequest ?? req;
           let runtimeConfig = await this.writeSovereignConfig({
-            req: stepState.effectiveRequest ?? req,
+            req: appliedRequest,
             matrixProvision: stepState.matrixProvision,
             matrixAccounts: stepState.matrixAccounts,
             matrixRoom: stepState.matrixRoom,
@@ -8727,6 +8728,13 @@ export default function (api) {
               ? {}
               : { relayEnrollment: stepState.relayEnrollment }),
           });
+          // Persist the canonical, redacted repair input only after runtime
+          // config and its referenced managed secrets are durably written.
+          // Awaiting this write keeps a job from reporting configuration
+          // success when later reconfiguration would have no request to load.
+          await this.writeSavedInstallRequest(
+            this.buildCanonicalInstallRequest(appliedRequest, runtimeConfig),
+          );
           await this.ensureManagedMatrixAccessTokens(runtimeConfig);
           if (stepState.selectedBots === undefined) {
             stepState.selectedBots = (
@@ -10664,6 +10672,19 @@ export default function (api) {
     };
   }
 
+  private buildCanonicalInstallRequest(
+    request: InstallRequest,
+    runtimeConfig: RuntimeConfig,
+  ): InstallRequest {
+    const canonicalRequest = structuredClone(request);
+    canonicalRequest.bots = {
+      ...(canonicalRequest.bots ?? {}),
+      instances: structuredClone(runtimeConfig.bots.instances),
+    };
+    this.syncSelectedBotsWithInstances(canonicalRequest);
+    return canonicalRequest;
+  }
+
   private async writeSavedInstallRequest(request: InstallRequest): Promise<string> {
     const requestFile = this.getInstallRequestPath();
     await this.writeInstallerJsonFile(requestFile, this.redactInstallRequest(request), 0o640);
@@ -11845,6 +11866,7 @@ export default function (api) {
         runtimeConfig.imap.status === "configured" && input.req.imap !== undefined
           ? {
               status: "configured",
+              protocol: runtimeConfig.imap.protocol,
               host: runtimeConfig.imap.host,
               port: runtimeConfig.imap.port,
               tls: runtimeConfig.imap.tls,
@@ -11854,6 +11876,7 @@ export default function (api) {
             }
           : {
               status: "pending",
+              protocol: runtimeConfig.imap.protocol,
               host: runtimeConfig.imap.host,
               port: runtimeConfig.imap.port,
               tls: runtimeConfig.imap.tls,
