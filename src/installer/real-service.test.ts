@@ -2201,6 +2201,7 @@ describe("RealInstallerService", () => {
     };
 
     let matrixProvisionCalls = 0;
+    let failMatrixProvision = false;
     let matrixBootstrapAccountCalls = 0;
     let matrixBootstrapRoomCalls = 0;
     let gatewayInstallCalls = 0;
@@ -2256,6 +2257,9 @@ describe("RealInstallerService", () => {
       matrixProvisioner: {
         provision: async (req) => {
           matrixProvisionCalls += 1;
+          if (failMatrixProvision) {
+            throw new Error("simulated pre-config failure");
+          }
           return {
             projectDir: join(tempRoot, "matrix"),
             composeFilePath: join(tempRoot, "matrix", "compose.yaml"),
@@ -2301,11 +2305,37 @@ describe("RealInstallerService", () => {
     });
 
     try {
-      const started = await service.startInstall(buildInstallRequest());
+      const requestPath = join(dirname(paths.configPath), "install-request.json");
+      await mkdir(dirname(requestPath), { recursive: true });
+      const priorRequest = `${JSON.stringify(buildInstallRequest(), null, 2)}\n`;
+      await writeFile(requestPath, priorRequest, "utf8");
+      failMatrixProvision = true;
+      const earlyFailure = await service.startInstall(buildInstallRequest());
+      const failedEarly = await waitForJob(service, earlyFailure.job.jobId);
+      expect(failedEarly.job.state).toBe("failed");
+      expect(failedEarly.job.currentStepId).toBe("matrix_provision");
+      expect(await readFile(requestPath, "utf8")).toBe(priorRequest);
+      failMatrixProvision = false;
+
+      const installRequest = buildInstallRequest();
+      installRequest.imap = {
+        protocol: "pop3",
+        host: "pop.example.org",
+        port: 995,
+        tls: true,
+        username: "operator@example.org",
+        password: "imap-inline-password",
+        mailbox: "INBOX",
+      };
+      installRequest.operator = {
+        username: "operator",
+        password: "operator-inline-password",
+      };
+      const started = await service.startInstall(installRequest);
       const finished = await waitForJob(service, started.job.jobId);
 
       expect(finished.job.state).toBe("failed");
-      expect(matrixProvisionCalls).toBe(1);
+      expect(matrixProvisionCalls).toBe(2);
       expect(matrixBootstrapAccountCalls).toBe(1);
       expect(matrixBootstrapRoomCalls).toBe(1);
       expect(gatewayInstallCalls).toBe(1);
@@ -2342,6 +2372,50 @@ describe("RealInstallerService", () => {
       expect(writtenConfig.openclaw?.requestedVersion).toBe(SOVEREIGN_PINNED_OPENCLAW_VERSION);
       expect(writtenConfig.matrix?.alertRoom?.roomId).toBe("!alerts:matrix.example.org");
       expect(writtenConfig.matrix?.bot?.accessTokenSecretRef?.startsWith("file:")).toBe(true);
+      expect((writtenConfig as { imap?: { protocol?: string } }).imap?.protocol).toBe("pop3");
+
+      const savedRequestRaw = await readFile(requestPath, "utf8");
+      expect(savedRequestRaw).not.toContain("imap-inline-password");
+      expect(savedRequestRaw).not.toContain("sk-or-test");
+      expect(savedRequestRaw).not.toContain("operator-inline-password");
+      const savedRequest = JSON.parse(savedRequestRaw) as InstallRequest;
+      const imapSecretRef = `file:${join(paths.secretsDir, "imap-password")}`;
+      const openrouterSecretRef = `file:${join(paths.secretsDir, "openrouter-api-key")}`;
+      expect(savedRequest.imap?.secretRef).toBe(imapSecretRef);
+      expect(savedRequest.openrouter.secretRef).toBe(openrouterSecretRef);
+      expect(savedRequest.operator).toEqual({ username: "operator" });
+      expect(
+        savedRequest.bots?.instances?.some((entry) => entry.packageId === "mail-sentinel"),
+      ).toBe(true);
+      expect(await readFile(imapSecretRef.slice("file:".length), "utf8")).toBe(
+        "imap-inline-password\n",
+      );
+      expect(await readFile(openrouterSecretRef.slice("file:".length), "utf8")).toBe(
+        "sk-or-test\n",
+      );
+      const requestStat = await stat(requestPath);
+      const configStat = await stat(paths.configPath);
+      expect(requestStat.mode & 0o777).toBe(0o640);
+      expect({ uid: requestStat.uid, gid: requestStat.gid }).toEqual({
+        uid: configStat.uid,
+        gid: configStat.gid,
+      });
+
+      const previousRequest = savedRequestRaw;
+      const requestWriter = vi
+        .spyOn(
+          service as unknown as {
+            writeSavedInstallRequest: (request: InstallRequest) => Promise<string>;
+          },
+          "writeSavedInstallRequest",
+        )
+        .mockRejectedValueOnce(new Error("simulated canonical request write failure"));
+      const retry = await service.startInstall(installRequest);
+      const failedRetry = await waitForJob(service, retry.job.jobId);
+      expect(failedRetry.job.state).toBe("failed");
+      expect(failedRetry.job.currentStepId).toBe("openclaw_configure");
+      expect(await readFile(requestPath, "utf8")).toBe(previousRequest);
+      requestWriter.mockRestore();
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -2703,6 +2777,32 @@ describe("RealInstallerService", () => {
       );
       expect(mailSentinelToolsRaw).toContain("openclaw-tool: `lobster`");
       expect(mailSentinelToolsRaw).toContain("openclaw-tool: `llm-task`");
+      expect((await service.getPendingMigrations()).pending).toEqual([]);
+      const reconfigured = await service.reconfigureImap({
+        imap: {
+          protocol: "pop3",
+          host: "pop.example.org",
+          port: 995,
+          tls: true,
+          username: "operator@example.org",
+          password: "new-password",
+        },
+      });
+      expect(reconfigured.job).toBeDefined();
+      if (reconfigured.job === undefined) {
+        throw new Error("Reconfiguration did not start an install job");
+      }
+      const reapplied = await waitForJob(service, reconfigured.job.jobId);
+      expect(reapplied.job.state).toBe("succeeded");
+      const reconfiguredRuntime = JSON.parse(await readFile(paths.configPath, "utf8")) as {
+        imap?: { protocol?: string };
+      };
+      expect(reconfiguredRuntime.imap?.protocol).toBe("pop3");
+      const canonicalRequest = JSON.parse(
+        await readFile(join(dirname(paths.configPath), "install-request.json"), "utf8"),
+      ) as InstallRequest;
+      expect(canonicalRequest.imap?.protocol).toBe("pop3");
+      expect((await service.getPendingMigrations()).pending).toEqual([]);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -9798,6 +9898,32 @@ describe("RealInstallerService", () => {
     } as InstallRequest["bots"];
     return request;
   };
+
+  it("reconfigureImap fails closed when the canonical request is missing", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths = buildReconfigurePaths(tempRoot);
+    await writeRuntimeArtifacts(paths);
+    const testImap = vi.fn();
+    const service = await buildReconfigureService(paths, {
+      imapTester: { test: testImap },
+    });
+    try {
+      await expect(
+        service.reconfigureImap({
+          imap: {
+            host: "imap.example.org",
+            port: 993,
+            tls: true,
+            username: "operator",
+            password: "password",
+          },
+        }),
+      ).rejects.toMatchObject({ code: "REQUEST_NOT_FOUND", retryable: false });
+      expect(testImap).not.toHaveBeenCalled();
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
 
   it("reconfigureImap leaves the working configuration untouched when the new connection fails", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
