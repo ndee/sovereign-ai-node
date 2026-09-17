@@ -9,6 +9,14 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 From this point forward, GitHub Release notes are auto-generated from commit history
 by the `.github/workflows/release.yml` workflow.
 
+## [2.5.2](https://github.com/ndee/sovereign-ai-node/compare/v2.5.1...v2.5.2) (2026-09-17)
+
+
+### Bug Fixes
+
+* **installer:** persist canonical web install request ([#256](https://github.com/ndee/sovereign-ai-node/issues/256)) ([a295420](https://github.com/ndee/sovereign-ai-node/commit/a2954203375cbcc2076a5ddb755b38046fb1d49c))
+* **installer:** redact relay tokens from persisted install requests ([#257](https://github.com/ndee/sovereign-ai-node/issues/257)) ([4228f14](https://github.com/ndee/sovereign-ai-node/commit/4228f14d4e1a8e6c33d6c99907f58a7721fc82b2))
+
 ## [2.5.1](https://github.com/ndee/sovereign-ai-node/compare/v2.5.0...v2.5.1) (2026-09-16)
 
 
