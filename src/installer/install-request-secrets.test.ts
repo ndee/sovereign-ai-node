@@ -5,7 +5,12 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import type { InstallRequest } from "../contracts/index.js";
-import { pruneInstallJobRecords, redactInstallRequestSecrets } from "./install-request-secrets.js";
+import { installRequestSchema } from "../contracts/index.js";
+import {
+  INSTALL_REQUEST_SECRET_FIELDS,
+  pruneInstallJobRecords,
+  redactInstallRequestSecrets,
+} from "./install-request-secrets.js";
 
 const buildRequest = (): InstallRequest => ({
   mode: "bundled_matrix",
@@ -88,6 +93,222 @@ describe("redactInstallRequestSecrets", () => {
       { secretsDir: "/secrets" },
     );
     expect(withoutImap.imap).toBeUndefined();
+  });
+
+  it("strips every relay credential and keeps the non-secret relay shape", () => {
+    const request = {
+      ...buildRequest(),
+      connectivity: { mode: "relay" },
+      relay: {
+        controlUrl: "https://relay.example.org",
+        enrollmentToken: "enroll-token-test-value",
+        requestedSlug: "node-slug",
+        hostname: "node-slug.relay.example.org",
+        publicBaseUrl: "https://node-slug.relay.example.org",
+        tunnel: {
+          serverAddr: "relay.example.org",
+          serverPort: 7000,
+          token: "frp-tunnel-token-test-value",
+          proxyName: "node-slug",
+          type: "https",
+        },
+        dns01: {
+          provider: "desec",
+          apiBase: "https://desec.example.org/api/v1",
+          zone: "relay.example.org",
+          subname: "node-slug",
+          acmeEmail: "operator@example.org",
+          token: "desec-dns01-token-test-value",
+        },
+      },
+    } as unknown as InstallRequest;
+
+    const redacted = redactInstallRequestSecrets(request, { secretsDir: "/secrets" });
+    const serialized = JSON.stringify(redacted);
+
+    // No relay credential value may survive into the persisted request.
+    expect(serialized).not.toContain("enroll-token-test-value");
+    expect(serialized).not.toContain("frp-tunnel-token-test-value");
+    expect(serialized).not.toContain("desec-dns01-token-test-value");
+
+    // Relay tokens have no secretRef sibling in the request contract, so they
+    // are dropped outright rather than replaced with a `file:` ref that no
+    // consumer would resolve.
+    expect(redacted.relay).toEqual({
+      controlUrl: "https://relay.example.org",
+      requestedSlug: "node-slug",
+      hostname: "node-slug.relay.example.org",
+      publicBaseUrl: "https://node-slug.relay.example.org",
+      tunnel: {
+        serverAddr: "relay.example.org",
+        serverPort: 7000,
+        proxyName: "node-slug",
+        type: "https",
+      },
+      dns01: {
+        provider: "desec",
+        apiBase: "https://desec.example.org/api/v1",
+        zone: "relay.example.org",
+        subname: "node-slug",
+        acmeEmail: "operator@example.org",
+      },
+    });
+
+    // The caller's request object is left untouched, so the in-flight install
+    // still has the live tokens it needs.
+    expect(request.relay?.enrollmentToken).toBe("enroll-token-test-value");
+    expect(request.relay?.tunnel?.token).toBe("frp-tunnel-token-test-value");
+    expect(request.relay?.dns01?.token).toBe("desec-dns01-token-test-value");
+  });
+
+  it("leaves a relay request without optional tunnel/dns01 blocks intact", () => {
+    const request = {
+      ...buildRequest(),
+      relay: { controlUrl: "https://relay.example.org", enrollmentToken: "enroll-token-value" },
+    } as unknown as InstallRequest;
+
+    const redacted = redactInstallRequestSecrets(request, { secretsDir: "/secrets" });
+
+    expect(redacted.relay).toEqual({ controlUrl: "https://relay.example.org" });
+    expect(JSON.stringify(redacted)).not.toContain("enroll-token-value");
+  });
+});
+
+/**
+ * Fail-closed guard. `redactInstallRequestSecrets` is an allowlist: it handles
+ * exactly the fields named in `INSTALL_REQUEST_SECRET_FIELDS`. This suite walks
+ * the real `installRequestSchema` and fails when the contract grows a
+ * secret-bearing field that the allowlist does not name — which is how the
+ * relay tokens came to be persisted in cleartext in the first place.
+ *
+ * If this test fails because you added a field:
+ *  - if it carries a credential, handle it in `redactInstallRequestSecrets`
+ *    and add it to `INSTALL_REQUEST_SECRET_FIELDS`;
+ *  - if it does not, add it to `NON_SECRET_MATCHES` below with a reason.
+ */
+describe("INSTALL_REQUEST_SECRET_FIELDS covers the install contract", () => {
+  /** Leaf paths whose name looks secret-ish but which carry no secret value. */
+  const NON_SECRET_MATCHES = new Set([
+    // Pointers to a secret, not the secret itself — persisting these is the
+    // whole point of redaction.
+    "imap.secretRef",
+    "openrouter.secretRef",
+    "bots.instances.[].secretRefs",
+  ]);
+
+  /** Matches field names that plausibly carry a credential value. */
+  const SECRET_NAME_PATTERN = /password|token|apikey|secret|credential|passphrase/i;
+
+  type ZodLike = { _zod?: { def?: Record<string, unknown> } };
+
+  const unwrap = (schema: unknown): unknown => {
+    let current = schema;
+    // Peel optional/nullable/default/pipe wrappers to reach the inner type.
+    for (let depth = 0; depth < 20; depth += 1) {
+      const def = (current as ZodLike)?._zod?.def;
+      const type = def?.type;
+      if (type === "optional" || type === "nullable" || type === "default") {
+        current = def?.innerType;
+        continue;
+      }
+      if (type === "pipe") {
+        current = def?.in;
+        continue;
+      }
+      break;
+    }
+    return current;
+  };
+
+  const collectLeafPaths = (schema: unknown, path: string[], out: string[]): void => {
+    const node = unwrap(schema);
+    const def = (node as ZodLike)?._zod?.def;
+    if (def?.type === "object") {
+      for (const [key, value] of Object.entries(def.shape as Record<string, unknown>)) {
+        collectLeafPaths(value, [...path, key], out);
+      }
+      return;
+    }
+    if (def?.type === "array") {
+      collectLeafPaths(def.element, [...path, "[]"], out);
+      return;
+    }
+    out.push(path.join("."));
+  };
+
+  it("names every secret-bearing field in the InstallRequest schema", () => {
+    const leaves: string[] = [];
+    collectLeafPaths(installRequestSchema, [], leaves);
+
+    // Guard the guard: if the walker stops seeing the contract, it would pass
+    // vacuously and this whole suite would stop protecting anything.
+    expect(leaves).toContain("openrouter.apiKey");
+    expect(leaves).toContain("relay.dns01.token");
+    expect(leaves.length).toBeGreaterThan(30);
+
+    const secretish = leaves.filter(
+      (leaf) =>
+        SECRET_NAME_PATTERN.test(leaf.split(".").pop() ?? "") && !NON_SECRET_MATCHES.has(leaf),
+    );
+    const allowlisted = Object.keys(INSTALL_REQUEST_SECRET_FIELDS);
+
+    expect(secretish.sort()).toEqual([...allowlisted].sort());
+  });
+
+  it("redacts every allowlisted field out of a fully populated request", () => {
+    // One canary value per allowlisted field, so a field that is listed but
+    // not actually handled by the redactor fails here instead of leaking.
+    const canaries: Record<string, string> = {
+      "imap.password": "canary-imap-password",
+      "openrouter.apiKey": "canary-openrouter-key",
+      "operator.password": "canary-operator-password",
+      "relay.enrollmentToken": "canary-enrollment-token",
+      "relay.tunnel.token": "canary-tunnel-token",
+      "relay.dns01.token": "canary-dns01-token",
+    };
+    expect(Object.keys(canaries).sort()).toEqual(Object.keys(INSTALL_REQUEST_SECRET_FIELDS).sort());
+
+    const request = {
+      mode: "bundled_matrix",
+      openrouter: { model: "m", apiKey: canaries["openrouter.apiKey"] },
+      imap: {
+        host: "imap.example.org",
+        port: 993,
+        tls: true,
+        username: "operator@example.org",
+        password: canaries["imap.password"],
+      },
+      matrix: {
+        homeserverDomain: "matrix.example.org",
+        publicBaseUrl: "https://matrix.example.org",
+      },
+      operator: { username: "operator", password: canaries["operator.password"] },
+      relay: {
+        controlUrl: "https://relay.example.org",
+        enrollmentToken: canaries["relay.enrollmentToken"],
+        tunnel: {
+          serverAddr: "relay.example.org",
+          token: canaries["relay.tunnel.token"],
+          proxyName: "node",
+        },
+        dns01: {
+          provider: "desec",
+          apiBase: "https://desec.example.org/api/v1",
+          zone: "relay.example.org",
+          subname: "node",
+          token: canaries["relay.dns01.token"],
+        },
+      },
+    } as unknown as InstallRequest;
+
+    const serialized = JSON.stringify(
+      redactInstallRequestSecrets(request, { secretsDir: "/secrets" }),
+    );
+    const leaked = Object.entries(canaries)
+      .filter(([, value]) => serialized.includes(value))
+      .map(([field]) => field);
+
+    expect(leaked).toEqual([]);
   });
 });
 
