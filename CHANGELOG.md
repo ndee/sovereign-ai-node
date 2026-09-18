@@ -9,6 +9,13 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 From this point forward, GitHub Release notes are auto-generated from commit history
 by the `.github/workflows/release.yml` workflow.
 
+## [2.5.3](https://github.com/ndee/sovereign-ai-node/compare/v2.5.2...v2.5.3) (2026-09-18)
+
+
+### Bug Fixes
+
+* **contracts:** let a redacted relay request survive read-back ([#259](https://github.com/ndee/sovereign-ai-node/issues/259)) ([b4370b7](https://github.com/ndee/sovereign-ai-node/commit/b4370b71377599c9a8bec9d341f83563e37fe76a)), closes [#257](https://github.com/ndee/sovereign-ai-node/issues/257)
+
 ## [2.5.2](https://github.com/ndee/sovereign-ai-node/compare/v2.5.1...v2.5.2) (2026-09-17)
 
 
