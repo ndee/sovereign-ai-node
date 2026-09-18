@@ -148,6 +148,22 @@ describe("ExecaExecRunner", () => {
     expect(result.stderr).toBe("");
   });
 
+  it("keeps stderr unchanged when execa supplies no shortMessage at all", async () => {
+    execaMock.mockResolvedValueOnce({
+      exitCode: undefined,
+      stdout: "",
+      stderr: "only stderr",
+      signal: "SIGKILL",
+    });
+    const runner = new ExecaExecRunner();
+
+    const result = await runner.run({ command: "node" });
+
+    expect(result.exitCode).toBe(127);
+    expect(result.failureReason).toBe("signal");
+    expect(result.stderr).toBe("only stderr");
+  });
+
   it("treats a null exitCode the same as a missing one", async () => {
     execaMock.mockResolvedValueOnce({
       exitCode: null,

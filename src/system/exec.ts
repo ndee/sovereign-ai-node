@@ -86,9 +86,7 @@ type MissingExitStatusSubprocess = {
   shortMessage?: string | undefined;
 };
 
-const classifyMissingExitStatus = (
-  subprocess: MissingExitStatusSubprocess,
-): ExecFailureReason => {
+const classifyMissingExitStatus = (subprocess: MissingExitStatusSubprocess): ExecFailureReason => {
   if (subprocess.timedOut === true) {
     return "timed_out";
   }
