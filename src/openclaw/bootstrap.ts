@@ -112,6 +112,50 @@ const isRunningAsRoot = (): boolean => process.getuid?.() === 0;
  *
  * Returning `undefined` means "leave npm's default prefix alone".
  */
+/**
+ * Resolve a working directory every spawned helper can legally start in.
+ *
+ * A child process inherits the parent's cwd, and the kernel resolves that cwd
+ * for the CHILD's credentials. When the parent was started in a directory the
+ * child's user cannot traverse — `/root` is mode 0700, and a CLI invoked as
+ * `runuser -u <service-user> -- sovereign-node ...` from a root shell inherits
+ * exactly that — the spawn is refused with EACCES before the binary is ever
+ * consulted. The failure names the command (`spawn npm EACCES`), which reads
+ * like npm is unexecutable; it is not, and the same npm runs fine for the same
+ * user from a traversable cwd.
+ *
+ * This only bites when the process is NOT root: root traverses 0700 regardless,
+ * which is why the identical step succeeds during a root install and fails when
+ * it is re-entered unprivileged.
+ *
+ * `/` is the fallback because it is world-traversable on every supported
+ * system; the service home is preferred so npm's own relative lookups land
+ * somewhere the service user owns.
+ */
+/**
+ * Decide whether a failed exec is worth retrying.
+ *
+ * `spawn_failed` is deterministic — the command could not be started at all
+ * (EACCES/ENOENT), and nothing about a second attempt changes that. A timeout
+ * or a signal can genuinely be transient (a slow registry, a killed child), so
+ * those stay retryable, as does a plain non-zero exit, which is the network-blip
+ * case the retry was originally written for.
+ */
+export const isRetryableExecFailure = (failureReason?: ExecFailureReason): boolean =>
+  failureReason !== "spawn_failed";
+
+export const resolveOpenClawSpawnCwd = (serviceHome?: string): string | undefined => {
+  if (isRunningAsRoot()) {
+    return undefined;
+  }
+  const home = serviceHome?.trim();
+  if (home !== undefined && home.length > 0) {
+    return home;
+  }
+  const envHome = process.env.HOME?.trim();
+  return envHome !== undefined && envHome.length > 0 ? envHome : "/";
+};
+
 export const resolveOpenClawNpmPrefix = (serviceHome?: string): string | undefined => {
   if (isRunningAsRoot()) {
     return undefined;
@@ -175,6 +219,7 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
   private async probeInstalled(): Promise<OpenClawDetectionProbe> {
     const npmPrefix = resolveOpenClawNpmPrefix(this.serviceHome);
     const lookupPath = resolveOpenClawLookupPath(npmPrefix);
+    const spawnCwd = resolveOpenClawSpawnCwd(this.serviceHome);
     let result: Awaited<ReturnType<ExecRunner["run"]>>;
     try {
       result = await this.execRunner.run({
@@ -182,6 +227,7 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
         args: ["--version"],
         options: {
           timeout: OPENCLAW_DETECT_TIMEOUT_MS,
+          ...(spawnCwd === undefined ? {} : { cwd: spawnCwd }),
           env: {
             CI: "1",
             ...(lookupPath === undefined ? {} : { PATH: lookupPath }),
@@ -246,12 +292,14 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
   private async resolveOpenClawCommandLocation(
     lookupPath: string | undefined,
   ): Promise<string | null> {
+    const spawnCwd = resolveOpenClawSpawnCwd(this.serviceHome);
     try {
       const result = await this.execRunner.run({
         command: "sh",
         args: ["-c", "command -v openclaw"],
         options: {
           timeout: OPENCLAW_DETECT_TIMEOUT_MS,
+          ...(spawnCwd === undefined ? {} : { cwd: spawnCwd }),
           env: {
             CI: "1",
             ...(lookupPath === undefined ? {} : { PATH: lookupPath }),
@@ -338,11 +386,13 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
       "Installing OpenClaw via official install.sh",
     );
 
+    const shellCwd = resolveOpenClawSpawnCwd(this.serviceHome);
     const installResult = await this.execRunner.run({
       command: "bash",
       args: ["-lc", shellScript],
       options: {
         timeout: OPENCLAW_INSTALL_TIMEOUT_MS,
+        ...(shellCwd === undefined ? {} : { cwd: shellCwd }),
         env: {
           CI: "1",
         },
@@ -411,6 +461,7 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
     const packageRoot = await resolveInstalledOpenClawPackageRoot(
       this.execRunner,
       resolveOpenClawNpmPrefix(this.serviceHome),
+      resolveOpenClawSpawnCwd(this.serviceHome),
     );
     if (packageRoot === null) {
       this.logger.warn(
@@ -513,11 +564,13 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
         "Installing OpenClaw into the service user's npm prefix (install is running unprivileged)",
       );
     }
+    const spawnCwd = resolveOpenClawSpawnCwd(this.serviceHome);
     const installResult = await this.execRunner.run({
       command: "npm",
       args: ["install", "-g", `openclaw@${installTarget}`],
       options: {
         timeout: OPENCLAW_INSTALL_TIMEOUT_MS,
+        ...(spawnCwd === undefined ? {} : { cwd: spawnCwd }),
         env: {
           CI: "1",
           HOME: process.env.HOME ?? "/root",
@@ -530,10 +583,20 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
       throw {
         code: "OPENCLAW_INSTALL_FAILED",
         message: "OpenClaw direct npm fallback install exited with a non-zero status",
-        retryable: true,
+        // A process that never started will never start on a retry: the cwd is
+        // untraversable or the binary is unexecutable for this user, and
+        // neither heals with time. Retrying one costs a full release cycle to
+        // relearn the same thing, so only failures that CAN change are marked
+        // retryable.
+        retryable: isRetryableExecFailure(installResult.failureReason),
         details: {
           command: installResult.command,
           exitCode: installResult.exitCode,
+          ...(installResult.failureReason === undefined
+            ? {}
+            : { failureReason: installResult.failureReason }),
+          ...(installResult.errorCode === undefined ? {} : { errorCode: installResult.errorCode }),
+          ...(spawnCwd === undefined ? {} : { cwd: spawnCwd }),
           stderr: truncateText(installResult.stderr, 4000),
           stdout: truncateText(installResult.stdout, 2000),
         },
@@ -660,6 +723,7 @@ const parseVersionToken = (value: string): string | null => {
 const resolveInstalledOpenClawPackageRoot = async (
   execRunner: ExecRunner,
   npmPrefix?: string | undefined,
+  spawnCwd?: string | undefined,
 ): Promise<string | null> => {
   const candidates: string[] = [];
   const npmRootResult = await execRunner.run({
@@ -667,6 +731,7 @@ const resolveInstalledOpenClawPackageRoot = async (
     args: ["root", "-g"],
     options: {
       timeout: OPENCLAW_DETECT_TIMEOUT_MS,
+      ...(spawnCwd === undefined ? {} : { cwd: spawnCwd }),
       env: {
         CI: "1",
         // Resolve against the same prefix the install targeted; otherwise

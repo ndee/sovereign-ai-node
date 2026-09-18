@@ -8,8 +8,10 @@ import { describe, expect, it } from "vitest";
 import { createLogger } from "../logging/logger.js";
 import type { ExecInput, ExecResult, ExecRunner } from "../system/exec.js";
 import {
+  isRetryableExecFailure,
   resolveOpenClawLookupPath,
   resolveOpenClawNpmPrefix,
+  resolveOpenClawSpawnCwd,
   resolveRequestedOpenClawVersion,
   ShellOpenClawBootstrapper,
   SOVEREIGN_PINNED_OPENCLAW_VERSION,
@@ -1325,5 +1327,220 @@ describe("openclaw detection resolves the npm prefix the install targeted", () =
     const resolved = resolveOpenClawLookupPath(join(SERVICE_HOME, ".npm-global"));
     expect(resolved?.startsWith(`${PREFIX_BIN}:`)).toBe(true);
     expect(resolved?.endsWith(process.env.PATH ?? "")).toBe(true);
+  });
+});
+
+/**
+ * Regression coverage for `spawn npm EACCES`.
+ *
+ * A child inherits the parent's cwd and the kernel resolves it for the CHILD's
+ * credentials. The install path runs as root, which traverses a 0700 directory
+ * regardless, so it never noticed. The same step re-entered unprivileged (the
+ * CLI invoked via `runuser -u <service-user>` from a root shell, cwd /root)
+ * cannot traverse it and every spawn is refused before the binary is consulted.
+ *
+ * These assertions pin the CONTEXT difference, not just the fix: root must keep
+ * inheriting (no behaviour change for the curl installer) while the
+ * unprivileged re-entry must pin a traversable cwd on every spawn.
+ */
+describe("openclaw spawn cwd across install and reconfigure contexts", () => {
+  const SERVICE_HOME = "/var/lib/sovereign-node";
+
+  const withUid = async (uid: number, action: () => Promise<void>): Promise<void> => {
+    const original = process.getuid;
+    Object.defineProperty(process, "getuid", { value: () => uid, configurable: true });
+    try {
+      await action();
+    } finally {
+      Object.defineProperty(process, "getuid", { value: original, configurable: true });
+    }
+  };
+
+  const collectCalls = async (serviceHome?: string): Promise<ExecInput[]> => {
+    const calls: ExecInput[] = [];
+    const execRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        calls.push(input);
+        if (input.command === "openclaw") {
+          const installed = calls.some(
+            (call) => call.command === "bash" || call.args?.[0] === "install",
+          );
+          return {
+            command: "openclaw --version",
+            exitCode: installed ? 0 : 1,
+            stdout: installed ? SOVEREIGN_PINNED_OPENCLAW_VERSION : "",
+            stderr: "",
+          };
+        }
+        return {
+          command: [input.command, ...(input.args ?? [])].join(" "),
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        };
+      },
+    };
+    const bootstrapper = new ShellOpenClawBootstrapper(
+      execRunner,
+      createLogger(),
+      ...(serviceHome === undefined ? [] : [serviceHome]),
+    );
+    await bootstrapper.ensureInstalled({
+      version: SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
+      noOnboard: true,
+      noPrompt: true,
+      skipIfCompatibleInstalled: true,
+    });
+    return calls;
+  };
+
+  it("pins a traversable cwd for an unprivileged service user", () => {
+    const original = process.getuid;
+    Object.defineProperty(process, "getuid", { value: () => 1001, configurable: true });
+    try {
+      expect(resolveOpenClawSpawnCwd(SERVICE_HOME)).toBe(SERVICE_HOME);
+    } finally {
+      Object.defineProperty(process, "getuid", { value: original, configurable: true });
+    }
+  });
+
+  it("leaves the inherited cwd alone when running as root", () => {
+    const original = process.getuid;
+    Object.defineProperty(process, "getuid", { value: () => 0, configurable: true });
+    try {
+      expect(resolveOpenClawSpawnCwd(SERVICE_HOME)).toBeUndefined();
+    } finally {
+      Object.defineProperty(process, "getuid", { value: original, configurable: true });
+    }
+  });
+
+  it("falls back to a world-traversable cwd when no home is known", () => {
+    const originalUid = process.getuid;
+    const originalHome = process.env.HOME;
+    Object.defineProperty(process, "getuid", { value: () => 1001, configurable: true });
+    delete process.env.HOME;
+    try {
+      expect(resolveOpenClawSpawnCwd(undefined)).toBe("/");
+      expect(resolveOpenClawSpawnCwd("   ")).toBe("/");
+    } finally {
+      Object.defineProperty(process, "getuid", { value: originalUid, configurable: true });
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+    }
+  });
+
+  it("prefers $HOME over the bare root fallback when no service home is given", () => {
+    const originalUid = process.getuid;
+    const originalHome = process.env.HOME;
+    Object.defineProperty(process, "getuid", { value: () => 1001, configurable: true });
+    process.env.HOME = SERVICE_HOME;
+    try {
+      expect(resolveOpenClawSpawnCwd(undefined)).toBe(SERVICE_HOME);
+    } finally {
+      Object.defineProperty(process, "getuid", { value: originalUid, configurable: true });
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+    }
+  });
+
+  it("never inherits an untraversable cwd on any spawn when unprivileged", async () => {
+    await withUid(1001, async () => {
+      const calls = await collectCalls(SERVICE_HOME);
+
+      // Every spawn must name a cwd. A single one that inherits is enough to
+      // reproduce the EACCES, so assert across the whole set rather than
+      // spot-checking the npm install that happened to fail first.
+      expect(calls.length).toBeGreaterThan(0);
+      for (const call of calls) {
+        expect(call.options?.cwd, `${call.command} inherited its cwd`).toBeDefined();
+      }
+
+      // The detection probe is the one that runs on the reconfigure re-entry
+      // even when OpenClaw is already installed, so it must be covered too.
+      const detectCall = calls.find((call) => call.command === "openclaw");
+      expect(detectCall?.options?.cwd).toBe(SERVICE_HOME);
+    });
+  });
+
+  it("keeps the root install path inheriting its cwd", async () => {
+    await withUid(0, async () => {
+      const calls = await collectCalls(SERVICE_HOME);
+
+      // Root traverses 0700 regardless; pinning a cwd here would be an
+      // unnecessary behaviour change for the curl installer.
+      expect(calls.length).toBeGreaterThan(0);
+      for (const call of calls) {
+        if (call.args?.[0] === "install" && call.args?.[1] === "--omit=dev") {
+          // The bundled-extension repair legitimately pins the extension dir.
+          continue;
+        }
+        expect(call.options?.cwd, `${call.command} should inherit as root`).toBeUndefined();
+      }
+    });
+  });
+
+  it("treats a failed spawn as non-retryable and everything else as retryable", () => {
+    // A spawn that never started will not start on a retry: the cwd is
+    // untraversable or the binary is unexecutable, and neither heals with time.
+    expect(isRetryableExecFailure("spawn_failed")).toBe(false);
+    expect(isRetryableExecFailure("timed_out")).toBe(true);
+    expect(isRetryableExecFailure("signal")).toBe(true);
+    expect(isRetryableExecFailure(undefined)).toBe(true);
+  });
+
+  it("reports a spawn failure as non-retryable with a machine-readable cause", async () => {
+    const execRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        if (input.command === "openclaw") {
+          return { command: "openclaw --version", exitCode: 1, stdout: "", stderr: "" };
+        }
+        if (input.command === "npm" && input.args?.[0] === "install") {
+          // Exactly what execa reports when the cwd is untraversable.
+          return {
+            command: "npm install -g openclaw",
+            exitCode: 127,
+            stdout: "",
+            stderr: "Command failed with EACCES: npm install -g 'openclaw'\nspawn npm EACCES",
+            failureReason: "spawn_failed",
+            errorCode: "EACCES",
+          };
+        }
+        if (input.command === "bash") {
+          return { command: "bash", exitCode: 1, stdout: "", stderr: "install.sh unavailable" };
+        }
+        return {
+          command: [input.command, ...(input.args ?? [])].join(" "),
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        };
+      },
+    };
+    const bootstrapper = new ShellOpenClawBootstrapper(execRunner, createLogger(), SERVICE_HOME);
+
+    const failure = await bootstrapper
+      .ensureInstalled({
+        version: SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
+        noOnboard: true,
+        noPrompt: true,
+        skipIfCompatibleInstalled: true,
+      })
+      .then(
+        () => null,
+        (error: unknown) => error as { retryable?: boolean; details?: Record<string, unknown> },
+      );
+
+    expect(failure).not.toBeNull();
+    // Retrying a deterministic spawn failure burns a whole release cycle to
+    // relearn the same thing.
+    expect(failure?.retryable).toBe(false);
+    expect(failure?.details?.failureReason).toBe("spawn_failed");
+    expect(failure?.details?.errorCode).toBe("EACCES");
   });
 });

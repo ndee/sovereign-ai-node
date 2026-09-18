@@ -25,6 +25,15 @@ export type ExecResult = {
   failureReason?: ExecFailureReason;
   /** The signal that terminated the process, when one did. */
   signal?: string;
+  /**
+   * The OS error code when the process could not be started (EACCES, ENOENT).
+   *
+   * `failureReason: "spawn_failed"` says a spawn failed; this says WHY, and it
+   * is the difference between "the binary is missing" and "this user may not
+   * start it from here". Without it the cause survives only inside execa's
+   * human-readable `shortMessage`, which nothing can branch on.
+   */
+  errorCode?: string;
 };
 
 export type ExecFailureReason = "spawn_failed" | "timed_out" | "signal";
@@ -67,6 +76,10 @@ export class ExecaExecRunner implements ExecRunner {
       typeof subprocess.signal === "string" && subprocess.signal.length > 0
         ? subprocess.signal
         : undefined;
+    const errorCode =
+      typeof subprocess.code === "string" && subprocess.code.length > 0
+        ? subprocess.code
+        : undefined;
     return {
       command,
       exitCode: EXEC_NO_EXIT_STATUS_CODE,
@@ -76,6 +89,7 @@ export class ExecaExecRunner implements ExecRunner {
       stderr: mergeFailureMessage(stderr, subprocess.shortMessage),
       failureReason,
       ...(signal === undefined ? {} : { signal }),
+      ...(errorCode === undefined ? {} : { errorCode }),
     };
   }
 }
@@ -84,6 +98,7 @@ type MissingExitStatusSubprocess = {
   timedOut?: boolean | undefined;
   signal?: string | undefined;
   shortMessage?: string | undefined;
+  code?: string | undefined;
 };
 
 const classifyMissingExitStatus = (subprocess: MissingExitStatusSubprocess): ExecFailureReason => {

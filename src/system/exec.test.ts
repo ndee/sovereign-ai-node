@@ -65,6 +65,41 @@ describe("ExecaExecRunner", () => {
     expect(result.stderr).toBe("Command failed with ENOENT: openclaw --version");
   });
 
+  // An EACCES spawn (untraversable cwd, unexecutable binary) previously
+  // surfaced its cause only inside execa's human-readable shortMessage, so
+  // nothing could branch on "permission" versus "missing".
+  it("surfaces the OS error code when a spawn is refused", async () => {
+    execaMock.mockResolvedValueOnce({
+      exitCode: undefined,
+      stdout: "",
+      stderr: "",
+      failed: true,
+      code: "EACCES",
+      shortMessage: "Command failed with EACCES: npm install -g 'openclaw'\nspawn npm EACCES",
+    });
+    const runner = new ExecaExecRunner();
+
+    const result = await runner.run({ command: "npm", args: ["install", "-g", "openclaw"] });
+
+    expect(result.failureReason).toBe("spawn_failed");
+    expect(result.errorCode).toBe("EACCES");
+  });
+
+  it("omits the error code when execa reports none", async () => {
+    execaMock.mockResolvedValueOnce({
+      exitCode: undefined,
+      stdout: "",
+      stderr: "",
+      failed: true,
+      shortMessage: "Command failed: npm",
+    });
+    const runner = new ExecaExecRunner();
+
+    const result = await runner.run({ command: "npm" });
+
+    expect(result.errorCode).toBeUndefined();
+  });
+
   it("reports a timeout kill as a non-zero exit and preserves partial stdout", async () => {
     execaMock.mockResolvedValueOnce({
       exitCode: undefined,
