@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import { createLogger } from "../logging/logger.js";
 import type { ExecInput, ExecResult, ExecRunner } from "../system/exec.js";
 import {
+  resolveOpenClawLookupPath,
   resolveOpenClawNpmPrefix,
   resolveRequestedOpenClawVersion,
   ShellOpenClawBootstrapper,
@@ -832,5 +833,326 @@ describe("deploy/install-request.example.json openclaw version", () => {
     expect(resolveRequestedOpenClawVersion(requestedVersion)).toBe(
       SOVEREIGN_PINNED_OPENCLAW_VERSION,
     );
+  });
+});
+
+// Regression coverage for the release-blocking detection failure: the upstream
+// install.sh publishes the `openclaw` bin link inside the npm prefix
+// (`<serviceHome>/.npm-global/bin/openclaw`, verified on a dev VM), but the
+// `export PATH=...` that makes it resolvable lives only inside the
+// `bash -lc` install subshell. A detection that inherits just the parent PATH
+// gets ENOENT, so install.sh exits 0 and the CLI is still "not detected".
+describe("openclaw detection resolves the npm prefix the install targeted", () => {
+  const withUid = async (uid: number, action: () => Promise<void>): Promise<void> => {
+    const original = process.getuid;
+    Object.defineProperty(process, "getuid", {
+      configurable: true,
+      value: () => uid,
+    });
+    try {
+      await action();
+    } finally {
+      Object.defineProperty(process, "getuid", {
+        configurable: true,
+        value: original,
+      });
+    }
+  };
+
+  const SERVICE_HOME = "/var/lib/sovereign-node";
+  const PREFIX_BIN = join(SERVICE_HOME, ".npm-global", "bin");
+  // A PATH that does NOT contain the prefix bin dir, mirroring the systemd
+  // default the installer process actually inherits.
+  const PARENT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin";
+
+  /**
+   * An exec runner where `openclaw` exists ONLY under the prefix bin dir:
+   * it resolves when PATH contains PREFIX_BIN and throws ENOENT otherwise,
+   * exactly like the real filesystem after a successful install.
+   */
+  const createPrefixOnlyRunner = (calls: ExecInput[]): ExecRunner => ({
+    run: async (input): Promise<ExecResult> => {
+      calls.push(input);
+      const env = (input.options?.env ?? {}) as Record<string, string>;
+      const effectivePath = env.PATH ?? PARENT_PATH;
+      const resolvable = effectivePath.split(":").includes(PREFIX_BIN);
+      if (input.command === "openclaw") {
+        if (!resolvable) {
+          throw new Error("spawn openclaw ENOENT");
+        }
+        return {
+          command: "openclaw --version",
+          exitCode: 0,
+          stdout: `OpenClaw ${SOVEREIGN_PINNED_OPENCLAW_VERSION} (61d171a)`,
+          stderr: "",
+        };
+      }
+      if (input.command === "sh") {
+        return {
+          command: "sh -c command -v openclaw",
+          exitCode: resolvable ? 0 : 1,
+          stdout: resolvable ? join(PREFIX_BIN, "openclaw") : "",
+          stderr: "",
+        };
+      }
+      if (input.command === "npm" && input.args?.[0] === "root") {
+        return {
+          command: "npm root -g",
+          exitCode: 0,
+          stdout: join(SERVICE_HOME, ".npm-global", "lib", "node_modules"),
+          stderr: "",
+        };
+      }
+      // install.sh itself succeeds — this is the exit-0 branch.
+      return {
+        command: [input.command, ...(input.args ?? [])].join(" "),
+        exitCode: 0,
+        stdout: "OpenClaw installed successfully",
+        stderr: "",
+      };
+    },
+  });
+
+  it("detects the CLI that install.sh published into the service npm prefix", async () => {
+    await withUid(1001, async () => {
+      const calls: ExecInput[] = [];
+      const bootstrapper = new ShellOpenClawBootstrapper(
+        createPrefixOnlyRunner(calls),
+        createLogger(),
+        SERVICE_HOME,
+      );
+
+      const info = await bootstrapper.ensureInstalled({
+        version: SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
+        noOnboard: true,
+        noPrompt: true,
+        forceReinstall: true,
+      });
+
+      expect(info.version).toBe(SOVEREIGN_PINNED_OPENCLAW_VERSION);
+      expect(info.installMethod).toBe("install_sh");
+
+      const detectCall = calls.find((call) => call.command === "openclaw");
+      const detectPath = (detectCall?.options?.env as Record<string, string> | undefined)?.PATH;
+      expect(detectPath?.split(":")).toContain(PREFIX_BIN);
+    });
+  });
+
+  it("attaches the failure evidence when detection still cannot find the CLI", async () => {
+    await withUid(1001, async () => {
+      const execRunner: ExecRunner = {
+        run: async (input): Promise<ExecResult> => {
+          if (input.command === "openclaw") {
+            throw new Error("spawn openclaw ENOENT");
+          }
+          if (input.command === "sh") {
+            return {
+              command: "sh -c command -v openclaw",
+              exitCode: 1,
+              stdout: "",
+              stderr: "",
+            };
+          }
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: "installer said success",
+            stderr: "installer warnings",
+          };
+        },
+      };
+
+      const bootstrapper = new ShellOpenClawBootstrapper(execRunner, createLogger(), SERVICE_HOME);
+
+      await expect(
+        bootstrapper.ensureInstalled({
+          version: SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
+          noOnboard: true,
+          noPrompt: true,
+          forceReinstall: true,
+        }),
+      ).rejects.toMatchObject({
+        code: "OPENCLAW_INSTALL_FAILED",
+        details: {
+          detectionOutcome: "spawn_failed",
+          npmPrefix: join(SERVICE_HOME, ".npm-global"),
+          commandLocation: null,
+          installStdout: "installer said success",
+          installStderr: "installer warnings",
+        },
+      });
+    });
+  });
+
+  it("reports a non-zero detect exit distinctly from a missing binary", async () => {
+    await withUid(1001, async () => {
+      const execRunner: ExecRunner = {
+        run: async (input): Promise<ExecResult> => {
+          if (input.command === "openclaw") {
+            return {
+              command: "openclaw --version",
+              exitCode: 3,
+              stdout: "",
+              stderr: "cannot load module",
+            };
+          }
+          if (input.command === "sh") {
+            return {
+              command: "sh -c command -v openclaw",
+              exitCode: 0,
+              stdout: join(PREFIX_BIN, "openclaw"),
+              stderr: "",
+            };
+          }
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          };
+        },
+      };
+
+      const bootstrapper = new ShellOpenClawBootstrapper(execRunner, createLogger(), SERVICE_HOME);
+
+      await expect(
+        bootstrapper.ensureInstalled({
+          version: SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
+          noOnboard: true,
+          noPrompt: true,
+          forceReinstall: true,
+        }),
+      ).rejects.toMatchObject({
+        code: "OPENCLAW_INSTALL_FAILED",
+        details: {
+          detectionOutcome: "non_zero_exit",
+          detectExitCode: 3,
+          detectStderr: "cannot load module",
+          commandLocation: join(PREFIX_BIN, "openclaw"),
+        },
+      });
+    });
+  });
+
+  it("reports unparsable version output distinctly", async () => {
+    await withUid(1001, async () => {
+      const execRunner: ExecRunner = {
+        run: async (input): Promise<ExecResult> => {
+          if (input.command === "openclaw") {
+            return {
+              command: "openclaw --version",
+              exitCode: 0,
+              stdout: "   ",
+              stderr: "",
+            };
+          }
+          if (input.command === "sh") {
+            return {
+              command: "sh -c command -v openclaw",
+              exitCode: 0,
+              stdout: join(PREFIX_BIN, "openclaw"),
+              stderr: "",
+            };
+          }
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          };
+        },
+      };
+
+      const bootstrapper = new ShellOpenClawBootstrapper(execRunner, createLogger(), SERVICE_HOME);
+
+      await expect(
+        bootstrapper.ensureInstalled({
+          version: SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
+          noOnboard: true,
+          noPrompt: true,
+          forceReinstall: true,
+        }),
+      ).rejects.toMatchObject({
+        code: "OPENCLAW_INSTALL_FAILED",
+        details: {
+          detectionOutcome: "unparsable_version",
+        },
+      });
+    });
+  });
+
+  it("leaves the inherited PATH untouched for a root install", async () => {
+    expect(resolveOpenClawLookupPath(undefined, PARENT_PATH)).toBe(PARENT_PATH);
+  });
+
+  it("carries the evidence when the npm fallback path also fails detection", async () => {
+    await withUid(1001, async () => {
+      const execRunner: ExecRunner = {
+        run: async (input): Promise<ExecResult> => {
+          if (input.command === "openclaw") {
+            throw new Error("spawn openclaw ENOENT");
+          }
+          if (input.command === "bash") {
+            // install.sh fails, forcing the direct npm fallback branch.
+            return {
+              command: "bash -lc <install>",
+              exitCode: 1,
+              stdout: "install stdout",
+              stderr: "install stderr",
+            };
+          }
+          if (input.command === "sh") {
+            // `command -v` itself blows up, exercising the catch path.
+            throw new Error("spawn sh ENOENT");
+          }
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          };
+        },
+      };
+
+      const bootstrapper = new ShellOpenClawBootstrapper(execRunner, createLogger(), SERVICE_HOME);
+
+      await expect(
+        bootstrapper.ensureInstalled({
+          version: SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
+          noOnboard: true,
+          noPrompt: true,
+          forceReinstall: true,
+        }),
+      ).rejects.toMatchObject({
+        code: "OPENCLAW_INSTALL_FAILED",
+        message: "OpenClaw install fallback completed but the openclaw CLI was not detected",
+        details: {
+          detectionOutcome: "spawn_failed",
+          // `command -v` threw, so the location is reported as unknown
+          // rather than crashing the error path.
+          commandLocation: null,
+          installStdout: "install stdout",
+          installStderr: "install stderr",
+        },
+      });
+    });
+  });
+
+  it("prepends the prefix bin dir exactly once", () => {
+    const withPrefix = resolveOpenClawLookupPath(join(SERVICE_HOME, ".npm-global"), PARENT_PATH);
+    expect(withPrefix).toBe(`${PREFIX_BIN}:${PARENT_PATH}`);
+    expect(resolveOpenClawLookupPath(join(SERVICE_HOME, ".npm-global"), withPrefix)).toBe(
+      withPrefix,
+    );
+  });
+
+  it("falls back to the bare prefix bin dir when the base PATH is empty", () => {
+    expect(resolveOpenClawLookupPath(join(SERVICE_HOME, ".npm-global"), "")).toBe(PREFIX_BIN);
+  });
+
+  it("defaults the base PATH to the current process PATH", () => {
+    const resolved = resolveOpenClawLookupPath(join(SERVICE_HOME, ".npm-global"));
+    expect(resolved?.startsWith(`${PREFIX_BIN}:`)).toBe(true);
+    expect(resolved?.endsWith(process.env.PATH ?? "")).toBe(true);
   });
 });
