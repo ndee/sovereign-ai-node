@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import type { Logger } from "../logging/logger.js";
+import { isRetryableExecFailure } from "../openclaw/bootstrap.js";
 import type { ExecRunner } from "../system/exec.js";
 import { isRecord, parseJsonSafely, truncateText } from "./real-service-shared.js";
 
@@ -160,10 +161,20 @@ export const ensureLobsterCliInstalled = async (input: {
     throw {
       code: "LOBSTER_INSTALL_FAILED",
       message: "npm install for Lobster CLI exited with non-zero status",
-      retryable: true,
+      // A spawn that never started (EACCES/ENOENT) is deterministic: retrying
+      // it just burns the retry budget and reports the same failure later.
+      // Shares bootstrap.ts's rule so both installers agree on what is worth
+      // a second attempt.
+      retryable: isRetryableExecFailure(installResult.failureReason),
       details: {
         command: installResult.command,
         exitCode: installResult.exitCode,
+        ...(installResult.failureReason === undefined
+          ? {}
+          : { failureReason: installResult.failureReason }),
+        ...(installResult.errorCode === undefined
+          ? {}
+          : { errorCode: installResult.errorCode }),
         stdout: truncateText(installResult.stdout, 2000),
         stderr: truncateText(installResult.stderr, 4000),
       },
