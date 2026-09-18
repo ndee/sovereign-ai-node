@@ -47,6 +47,35 @@ export interface OpenClawBootstrapper {
 }
 
 /**
+ * Why a detection attempt produced no version.
+ *
+ * `spawn_failed` — the exec threw (CLI not on the PATH used / ENOENT).
+ * `non_zero_exit` — the CLI ran and exited non-zero.
+ * `unparsable_version` — it exited 0 but printed nothing version-shaped.
+ */
+export type OpenClawDetectionOutcome =
+  | "detected"
+  | "spawn_failed"
+  | "non_zero_exit"
+  | "unparsable_version";
+
+type OpenClawDetectionProbe = {
+  detected: DetectedOpenClaw | null;
+  outcome: OpenClawDetectionOutcome;
+  lookupPath: string | undefined;
+  npmPrefix: string | undefined;
+  exitCode?: number;
+  stdout?: string;
+  stderr?: string;
+  error?: string;
+};
+
+type ExecResultLike = {
+  stdout: string;
+  stderr: string;
+};
+
+/**
  * The npm prefix subdirectory OpenClaw (like lobster, see
  * real-service-lobster.ts) is installed into when the install runs
  * unprivileged. `<serviceHome>/.npm-global/bin` is already on the API
@@ -79,6 +108,35 @@ export const resolveOpenClawNpmPrefix = (serviceHome?: string): string | undefin
   return join(base, NPM_GLOBAL_SUBDIR);
 };
 
+/**
+ * Build the PATH that OpenClaw must be looked up on.
+ *
+ * The install runs `bash -lc` with `<prefix>/bin` prepended to PATH, but that
+ * export dies with the subshell. `openclaw` is published as a bin link inside
+ * `<prefix>/bin` (verified against the upstream install.sh npm path), so a
+ * detection that inherits only the parent PATH cannot see it and the exec
+ * fails with ENOENT — the installer reports success and detection still
+ * returns null. Prepend the same prefix bin dir the install targeted so both
+ * halves agree on where the CLI lives.
+ */
+export const resolveOpenClawLookupPath = (
+  npmPrefix: string | undefined,
+  basePath: string | undefined = process.env.PATH,
+): string | undefined => {
+  if (npmPrefix === undefined) {
+    return basePath;
+  }
+  const binDir = join(npmPrefix, "bin");
+  if (basePath === undefined || basePath.length === 0) {
+    return binDir;
+  }
+  const segments = basePath.split(":");
+  if (segments.includes(binDir)) {
+    return basePath;
+  }
+  return `${binDir}:${basePath}`;
+};
+
 export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
   constructor(
     private readonly execRunner: ExecRunner,
@@ -87,6 +145,20 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
   ) {}
 
   async detectInstalled(): Promise<DetectedOpenClaw | null> {
+    return (await this.probeInstalled()).detected;
+  }
+
+  /**
+   * Run the detection probe and keep the evidence.
+   *
+   * `detectInstalled()` collapses every failure to `null`, which is the right
+   * shape for callers but destroys the reason. The probe records which of the
+   * three null-conditions fired plus the raw exec result, so a failing install
+   * can report why instead of only that.
+   */
+  private async probeInstalled(): Promise<OpenClawDetectionProbe> {
+    const npmPrefix = resolveOpenClawNpmPrefix(this.serviceHome);
+    const lookupPath = resolveOpenClawLookupPath(npmPrefix);
     let result: Awaited<ReturnType<ExecRunner["run"]>>;
     try {
       result = await this.execRunner.run({
@@ -96,23 +168,104 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
           timeout: OPENCLAW_DETECT_TIMEOUT_MS,
           env: {
             CI: "1",
+            ...(lookupPath === undefined ? {} : { PATH: lookupPath }),
           },
         },
       });
+    } catch (error) {
+      return {
+        detected: null,
+        outcome: "spawn_failed",
+        lookupPath,
+        npmPrefix,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    const versionOutput = `${result.stdout}\n${result.stderr}`.trim();
+    if (result.exitCode !== 0) {
+      return {
+        detected: null,
+        outcome: "non_zero_exit",
+        lookupPath,
+        npmPrefix,
+        exitCode: result.exitCode,
+        stdout: truncateText(result.stdout, 2000),
+        stderr: truncateText(result.stderr, 2000),
+      };
+    }
+    const parsedVersion = parseVersionToken(versionOutput);
+    if (parsedVersion === null) {
+      return {
+        detected: null,
+        outcome: "unparsable_version",
+        lookupPath,
+        npmPrefix,
+        exitCode: result.exitCode,
+        stdout: truncateText(result.stdout, 2000),
+        stderr: truncateText(result.stderr, 2000),
+      };
+    }
+    return {
+      detected: {
+        binaryPath: "openclaw",
+        version: parsedVersion,
+      },
+      outcome: "detected",
+      lookupPath,
+      npmPrefix,
+      exitCode: result.exitCode,
+    };
+  }
+
+  /**
+   * Resolve the CLI's on-disk location for diagnostics only.
+   *
+   * Never used to decide success — it exists so a failure report can say
+   * whether the binary is absent or merely unreachable on the PATH used.
+   */
+  private async resolveOpenClawCommandLocation(
+    lookupPath: string | undefined,
+  ): Promise<string | null> {
+    try {
+      const result = await this.execRunner.run({
+        command: "sh",
+        args: ["-c", "command -v openclaw"],
+        options: {
+          timeout: OPENCLAW_DETECT_TIMEOUT_MS,
+          env: {
+            CI: "1",
+            ...(lookupPath === undefined ? {} : { PATH: lookupPath }),
+          },
+        },
+      });
+      if (result.exitCode !== 0) {
+        return null;
+      }
+      const resolved = result.stdout.trim();
+      return resolved.length === 0 ? null : resolved;
     } catch {
       return null;
     }
-    if (result.exitCode !== 0) {
-      return null;
-    }
-    const versionOutput = `${result.stdout}\n${result.stderr}`.trim();
-    const parsedVersion = parseVersionToken(versionOutput);
-    if (parsedVersion === null) {
-      return null;
-    }
+  }
+
+  /**
+   * Assemble the evidence bundle attached to OPENCLAW_INSTALL_FAILED.
+   */
+  private async buildDetectionFailureDetails(
+    probe: OpenClawDetectionProbe,
+    installResult: Pick<ExecResultLike, "stdout" | "stderr">,
+  ): Promise<Record<string, unknown>> {
     return {
-      binaryPath: "openclaw",
-      version: parsedVersion,
+      detectionOutcome: probe.outcome,
+      npmPrefix: probe.npmPrefix ?? null,
+      lookupPath: probe.lookupPath ?? null,
+      commandLocation: await this.resolveOpenClawCommandLocation(probe.lookupPath),
+      ...(probe.exitCode === undefined ? {} : { detectExitCode: probe.exitCode }),
+      ...(probe.stdout === undefined ? {} : { detectStdout: probe.stdout }),
+      ...(probe.stderr === undefined ? {} : { detectStderr: probe.stderr }),
+      ...(probe.error === undefined ? {} : { detectError: probe.error }),
+      installStdout: truncateText(installResult.stdout, 2000),
+      installStderr: truncateText(installResult.stderr, 4000),
     };
   }
 
@@ -179,12 +332,14 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
         "OpenClaw install.sh failed; attempting direct npm fallback install",
       );
       await this.installViaDirectNpmFallback(desiredVersion);
-      const installed = await this.detectInstalled();
+      const fallbackProbe = await this.probeInstalled();
+      const installed = fallbackProbe.detected;
       if (installed === null) {
         throw {
           code: "OPENCLAW_INSTALL_FAILED",
           message: "OpenClaw install fallback completed but the openclaw CLI was not detected",
           retryable: true,
+          details: await this.buildDetectionFailureDetails(fallbackProbe, installResult),
         };
       }
       await this.repairBundledExtensionRuntimeDependencies();
@@ -195,12 +350,14 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
       };
     }
 
-    const installed = await this.detectInstalled();
+    const probe = await this.probeInstalled();
+    const installed = probe.detected;
     if (installed === null) {
       throw {
         code: "OPENCLAW_INSTALL_FAILED",
         message: "OpenClaw installer completed but the openclaw CLI was not detected",
         retryable: true,
+        details: await this.buildDetectionFailureDetails(probe, installResult),
       };
     }
 
