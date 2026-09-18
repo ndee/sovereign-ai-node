@@ -595,9 +595,7 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
           ...(installResult.failureReason === undefined
             ? {}
             : { failureReason: installResult.failureReason }),
-          ...(installResult.errorCode === undefined
-            ? {}
-            : { errorCode: installResult.errorCode }),
+          ...(installResult.errorCode === undefined ? {} : { errorCode: installResult.errorCode }),
           ...(spawnCwd === undefined ? {} : { cwd: spawnCwd }),
           stderr: truncateText(installResult.stderr, 4000),
           stdout: truncateText(installResult.stdout, 2000),
