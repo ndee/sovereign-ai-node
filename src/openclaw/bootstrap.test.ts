@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1076,6 +1076,177 @@ describe("openclaw detection resolves the npm prefix the install targeted", () =
         code: "OPENCLAW_INSTALL_FAILED",
         details: {
           detectionOutcome: "unparsable_version",
+        },
+      });
+    });
+  });
+
+  // Regression: the exec runner reports a failed spawn as exitCode 127 with a
+  // spawn_failed reason, never as a throw and never as exit 0. With the old
+  // `exitCode ?? 0` coercion this arrived as "exit 0, no output" and was
+  // misfiled as unparsable_version — a CLI that never ran looked like a CLI
+  // that ran and printed nothing.
+  it("classifies a non-throwing ENOENT spawn failure as spawn_failed, not unparsable_version", async () => {
+    await withUid(1001, async () => {
+      const execRunner: ExecRunner = {
+        run: async (input): Promise<ExecResult> => {
+          if (input.command === "openclaw") {
+            // Exactly what ExecaExecRunner returns for an ENOENT.
+            return {
+              command: "openclaw --version",
+              exitCode: 127,
+              stdout: "",
+              stderr: "Command failed with ENOENT: openclaw --version",
+              failureReason: "spawn_failed",
+            };
+          }
+          if (input.command === "sh") {
+            // `command -v` really does exit 127 when the CLI is absent.
+            return {
+              command: "sh -c command -v openclaw",
+              exitCode: 127,
+              stdout: "",
+              stderr: "",
+            };
+          }
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          };
+        },
+      };
+
+      const bootstrapper = new ShellOpenClawBootstrapper(execRunner, createLogger(), SERVICE_HOME);
+
+      await expect(
+        bootstrapper.ensureInstalled({
+          version: SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
+          noOnboard: true,
+          noPrompt: true,
+          forceReinstall: true,
+        }),
+      ).rejects.toMatchObject({
+        code: "OPENCLAW_INSTALL_FAILED",
+        details: {
+          detectionOutcome: "spawn_failed",
+          detectFailureReason: "spawn_failed",
+          detectExitCode: 127,
+          // The binary is genuinely absent, so there is nothing to describe.
+          commandLocation: null,
+          resolvedBinary: null,
+        },
+      });
+    });
+  });
+
+  it("describes the resolved binary when the CLI runs but prints no version", async () => {
+    await withUid(1001, async () => {
+      const binDir = await mkdtemp(join(tmpdir(), "openclaw-bin-"));
+      const binaryPath = join(binDir, "openclaw");
+      await writeFile(binaryPath, "#!/usr/bin/env node\nconsole.log('nothing useful');\n", "utf8");
+
+      const execRunner: ExecRunner = {
+        run: async (input): Promise<ExecResult> => {
+          if (input.command === "openclaw") {
+            return { command: "openclaw --version", exitCode: 0, stdout: "   ", stderr: "" };
+          }
+          if (input.command === "sh") {
+            return {
+              command: "sh -c command -v openclaw",
+              exitCode: 0,
+              stdout: binaryPath,
+              stderr: "",
+            };
+          }
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          };
+        },
+      };
+
+      const bootstrapper = new ShellOpenClawBootstrapper(execRunner, createLogger(), SERVICE_HOME);
+
+      await expect(
+        bootstrapper.ensureInstalled({
+          version: SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
+          noOnboard: true,
+          noPrompt: true,
+          forceReinstall: true,
+        }),
+      ).rejects.toMatchObject({
+        code: "OPENCLAW_INSTALL_FAILED",
+        details: {
+          detectionOutcome: "unparsable_version",
+          resolvedBinary: {
+            path: binaryPath,
+            size: 51,
+            firstLine: "#!/usr/bin/env node",
+          },
+        },
+      });
+    });
+  });
+
+  it("records the symlink target and reports a read failure instead of throwing", async () => {
+    await withUid(1001, async () => {
+      const binDir = await mkdtemp(join(tmpdir(), "openclaw-link-"));
+      const realBinary = join(binDir, "openclaw.mjs");
+      const linkPath = join(binDir, "openclaw");
+      await writeFile(realBinary, "#!/usr/bin/env node\n", "utf8");
+      await symlink(realBinary, linkPath);
+
+      const missingPath = join(binDir, "gone");
+      let resolvedTo = linkPath;
+      const execRunner: ExecRunner = {
+        run: async (input): Promise<ExecResult> => {
+          if (input.command === "openclaw") {
+            return { command: "openclaw --version", exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (input.command === "sh") {
+            return {
+              command: "sh -c command -v openclaw",
+              exitCode: 0,
+              stdout: resolvedTo,
+              stderr: "",
+            };
+          }
+          return {
+            command: [input.command, ...(input.args ?? [])].join(" "),
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          };
+        },
+      };
+
+      const bootstrapper = new ShellOpenClawBootstrapper(execRunner, createLogger(), SERVICE_HOME);
+      const install = {
+        version: SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
+        noOnboard: true,
+        noPrompt: true,
+        forceReinstall: true,
+      } as const;
+
+      await expect(bootstrapper.ensureInstalled(install)).rejects.toMatchObject({
+        details: {
+          resolvedBinary: {
+            path: linkPath,
+            symlinkTarget: realBinary,
+            firstLine: "#!/usr/bin/env node",
+          },
+        },
+      });
+
+      // A path that cannot be stat'd is reported, not thrown.
+      resolvedTo = missingPath;
+      await expect(bootstrapper.ensureInstalled(install)).rejects.toMatchObject({
+        details: {
+          resolvedBinary: { path: missingPath, error: expect.stringContaining("ENOENT") },
         },
       });
     });

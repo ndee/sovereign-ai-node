@@ -1,10 +1,10 @@
 import { type Dirent, constants as fsConstants } from "node:fs";
-import { access, chmod, readdir, readFile, stat } from "node:fs/promises";
+import { access, chmod, lstat, open, readdir, readFile, readlink, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 
 import type { Logger } from "../logging/logger.js";
-import type { ExecRunner } from "../system/exec.js";
+import type { ExecFailureReason, ExecRunner } from "../system/exec.js";
 
 const OPENCLAW_DETECT_TIMEOUT_MS = 20_000;
 const OPENCLAW_INSTALL_TIMEOUT_MS = 15 * 60_000;
@@ -67,6 +67,22 @@ type OpenClawDetectionProbe = {
   exitCode?: number;
   stdout?: string;
   stderr?: string;
+  error?: string;
+  failureReason?: ExecFailureReason;
+};
+
+/**
+ * What the resolved `openclaw` command actually is on disk.
+ *
+ * `unparsable_version` says the CLI ran and printed nothing usable, but says
+ * nothing about what was run. Without this, an empty install log leaves no way
+ * to tell a truncated download from a wrapper script from a dangling symlink.
+ */
+type OpenClawBinaryEvidence = {
+  path: string;
+  size?: number;
+  firstLine?: string;
+  symlinkTarget?: string;
   error?: string;
 };
 
@@ -185,12 +201,16 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
     if (result.exitCode !== 0) {
       return {
         detected: null,
-        outcome: "non_zero_exit",
+        // A process that never started is a spawn failure, not a CLI that ran
+        // and failed. Before the exec runner reported this, an ENOENT arrived
+        // here as "exit 0, no output" and was misfiled as unparsable_version.
+        outcome: result.failureReason === "spawn_failed" ? "spawn_failed" : "non_zero_exit",
         lookupPath,
         npmPrefix,
         exitCode: result.exitCode,
         stdout: truncateText(result.stdout, 2000),
         stderr: truncateText(result.stderr, 2000),
+        ...(result.failureReason === undefined ? {} : { failureReason: result.failureReason }),
       };
     }
     const parsedVersion = parseVersionToken(versionOutput);
@@ -255,12 +275,19 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
     probe: OpenClawDetectionProbe,
     installResult: Pick<ExecResultLike, "stdout" | "stderr">,
   ): Promise<Record<string, unknown>> {
+    const commandLocation = await this.resolveOpenClawCommandLocation(probe.lookupPath);
+    const binaryEvidence =
+      commandLocation === null ? null : await describeOpenClawBinary(commandLocation);
     return {
       detectionOutcome: probe.outcome,
       npmPrefix: probe.npmPrefix ?? null,
       lookupPath: probe.lookupPath ?? null,
-      commandLocation: await this.resolveOpenClawCommandLocation(probe.lookupPath),
+      commandLocation,
+      // What the resolved command actually is. An empty install log plus an
+      // unparsable version leaves the installer otherwise unexplained.
+      resolvedBinary: binaryEvidence,
       ...(probe.exitCode === undefined ? {} : { detectExitCode: probe.exitCode }),
+      ...(probe.failureReason === undefined ? {} : { detectFailureReason: probe.failureReason }),
       ...(probe.stdout === undefined ? {} : { detectStdout: probe.stdout }),
       ...(probe.stderr === undefined ? {} : { detectStderr: probe.stderr }),
       ...(probe.error === undefined ? {} : { detectError: probe.error }),
@@ -574,6 +601,52 @@ const buildInstallShellScript = (args: InstallShellArgs): string => {
 };
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
+
+/** How much of the resolved binary to read for the `firstLine` evidence. */
+const OPENCLAW_BINARY_HEAD_BYTES = 200;
+
+/**
+ * Describe the resolved `openclaw` command for a failure report.
+ *
+ * Diagnostics only — never used to decide success. Reports the real file's
+ * size and first line (the shebang, for the published `openclaw.mjs` bin
+ * link), plus the symlink target when the command is a link, so a zero-byte
+ * file, a wrapper script, or a dangling link is visible in the error itself.
+ */
+const describeOpenClawBinary = async (path: string): Promise<OpenClawBinaryEvidence> => {
+  const evidence: OpenClawBinaryEvidence = { path };
+  try {
+    const linkInfo = await lstat(path);
+    if (linkInfo.isSymbolicLink()) {
+      evidence.symlinkTarget = await readlink(path);
+    }
+    // stat() follows the link, so this is the size of what actually runs.
+    evidence.size = (await stat(path)).size;
+    evidence.firstLine = await readFirstLine(path);
+  } catch (error) {
+    evidence.error = error instanceof Error ? error.message : String(error);
+  }
+  return evidence;
+};
+
+/**
+ * Read the first line of a file without loading the whole thing.
+ *
+ * The target may be a multi-megabyte bundle, so read a small head window and
+ * keep only up to the first newline.
+ */
+const readFirstLine = async (path: string): Promise<string> => {
+  const handle = await open(path, "r");
+  try {
+    const buffer = Buffer.alloc(OPENCLAW_BINARY_HEAD_BYTES);
+    const { bytesRead } = await handle.read(buffer, 0, OPENCLAW_BINARY_HEAD_BYTES, 0);
+    const head = buffer.subarray(0, bytesRead).toString("utf8");
+    const newlineIndex = head.indexOf("\n");
+    return (newlineIndex === -1 ? head : head.slice(0, newlineIndex)).trim();
+  } finally {
+    await handle.close();
+  }
+};
 
 const parseVersionToken = (value: string): string | null => {
   const trimmed = value.trim();
