@@ -88,12 +88,12 @@ export function redactInstallRequestSecrets(
 
   if (redacted.relay !== undefined) {
     const { enrollmentToken: _enrollmentToken, tunnel, dns01, ...relay } = redacted.relay;
-    // `tunnel.token` is required by the request contract, so a redacted tunnel
-    // is deliberately not a valid `relay.tunnel` any more: a consumer that
-    // needs the token must resolve it from the runtime config's
-    // `tokenSecretRef`, not from the persisted request. `tryUsePreEnrolledRelay`
-    // already treats a tunnel without a token as "not pre-enrolled" and falls
-    // through to that path.
+    // `tunnel.token` is optional in the request contract precisely so that a
+    // redacted tunnel is still a VALID `relay.tunnel` and the persisted request
+    // survives read-back (see `relayTunnelInputSchema`). A consumer that needs
+    // the token must resolve it from the runtime config's `tokenSecretRef`, not
+    // from the persisted request: `tryUsePreEnrolledRelay` treats a tunnel
+    // without a token as "not pre-enrolled" and falls through to that path.
     const redactedRelay: InstallRequest["relay"] & Record<string, unknown> = { ...relay };
     if (tunnel !== undefined) {
       const { token: _tunnelToken, ...tunnelWithoutToken } = tunnel;

@@ -11,6 +11,16 @@ import {
   pruneInstallJobRecords,
   redactInstallRequestSecrets,
 } from "./install-request-secrets.js";
+import { tryUsePreEnrolledRelay } from "./real-service-relay-enrollment.js";
+
+/** Narrows `request.relay` for the relay round-trip tests, failing loudly if absent. */
+const relayOf = (request: InstallRequest): NonNullable<InstallRequest["relay"]> => {
+  const relay = request.relay;
+  if (relay === undefined) {
+    throw new Error("expected the test request to carry a relay block");
+  }
+  return relay;
+};
 
 const buildRequest = (): InstallRequest => ({
   mode: "bundled_matrix",
@@ -171,6 +181,122 @@ describe("redactInstallRequestSecrets", () => {
 
     expect(redacted.relay).toEqual({ controlUrl: "https://relay.example.org" });
     expect(JSON.stringify(redacted)).not.toContain("enroll-token-value");
+  });
+
+  /**
+   * Regression guard for the read-back half of redaction.
+   *
+   * Redaction is only half a contract: a redacted request is written to disk
+   * (install job records, the saved install request) and later read back and
+   * re-validated with `installRequestSchema`. If redaction removes a field the
+   * schema still demands, every such read-back fails — the install job status
+   * endpoint 400s and the saved-request consumers reject the file as invalid,
+   * even though nothing is actually wrong with the install.
+   *
+   * Asserting the redacted *shape* (as the tests above do) does not catch that;
+   * only feeding the redacted value back through the real schema does. This
+   * round-trip is that check, and it runs over the maximal relay request so
+   * every dropped credential field is exercised at once.
+   */
+  it("produces a request that still validates against the real schema (persist/read-back round-trip)", () => {
+    const request = {
+      ...buildRequest(),
+      connectivity: { mode: "relay" },
+      relay: {
+        controlUrl: "https://relay.example.org",
+        enrollmentToken: "enroll-token-test-value",
+        requestedSlug: "node-slug",
+        hostname: "node-slug.relay.example.org",
+        publicBaseUrl: "https://node-slug.relay.example.org",
+        tunnel: {
+          serverAddr: "relay.example.org",
+          serverPort: 7000,
+          token: "frp-tunnel-token-test-value",
+          proxyName: "node-slug",
+          type: "https",
+        },
+        dns01: {
+          provider: "desec",
+          apiBase: "https://desec.example.org/api/v1",
+          zone: "relay.example.org",
+          subname: "node-slug",
+          acmeEmail: "operator@example.org",
+          token: "desec-dns01-token-test-value",
+        },
+      },
+    } as unknown as InstallRequest;
+
+    const redacted = redactInstallRequestSecrets(request, { secretsDir: "/secrets" });
+
+    // Round-trip through JSON exactly as persistence does, so a field that was
+    // dropped is genuinely absent rather than an `undefined` property.
+    const persisted: unknown = JSON.parse(JSON.stringify(redacted));
+    const reread = installRequestSchema.safeParse(persisted);
+
+    expect(reread.error?.issues ?? []).toEqual([]);
+    expect(reread.success).toBe(true);
+
+    // The re-read request is still recognizably the same install, minus the
+    // credentials: redaction must not have damaged the non-secret shape.
+    expect(reread.data?.relay?.tunnel).toEqual({
+      serverAddr: "relay.example.org",
+      serverPort: 7000,
+      proxyName: "node-slug",
+      type: "https",
+    });
+    expect(reread.data?.relay?.tunnel?.token).toBeUndefined();
+    expect(reread.data?.relay?.dns01?.token).toBeUndefined();
+    expect(reread.data?.relay?.enrollmentToken).toBeUndefined();
+    expect(JSON.stringify(reread.data)).not.toContain("test-value");
+  });
+
+  /**
+   * The other half of the same contract: a tunnel whose token redaction removed
+   * must read as "not pre-enrolled", never as a usable enrollment. Making
+   * `tunnel.token` optional would be a security regression if any consumer
+   * treated an absent token as acceptable and went on to build a tunnel config
+   * from it; `tryUsePreEnrolledRelay` must keep falling through instead.
+   */
+  it("leaves a redacted relay request unusable as a pre-enrollment", () => {
+    const request = {
+      ...buildRequest(),
+      connectivity: { mode: "relay" },
+      relay: {
+        controlUrl: "https://relay.example.org",
+        hostname: "node-slug.relay.example.org",
+        publicBaseUrl: "https://node-slug.relay.example.org",
+        tunnel: {
+          serverAddr: "relay.example.org",
+          serverPort: 7000,
+          token: "frp-tunnel-token-test-value",
+          proxyName: "node-slug",
+          type: "https",
+        },
+      },
+    } as unknown as InstallRequest;
+
+    // Before redaction the request IS a usable pre-enrollment.
+    expect(
+      tryUsePreEnrolledRelay({
+        relay: relayOf(request),
+        localEdgePort: 8080,
+        localTlsPort: 8443,
+      }),
+    ).not.toBeNull();
+
+    const redacted = redactInstallRequestSecrets(request, { secretsDir: "/secrets" });
+    const reread = installRequestSchema.parse(JSON.parse(JSON.stringify(redacted)));
+
+    // After redaction it validates, but must NOT be mistaken for one: the
+    // caller falls through to the enrollment-reuse path, which resolves the
+    // real token from the runtime config's tokenSecretRef.
+    expect(
+      tryUsePreEnrolledRelay({
+        relay: relayOf(reread),
+        localEdgePort: 8080,
+        localTlsPort: 8443,
+      }),
+    ).toBeNull();
   });
 });
 
