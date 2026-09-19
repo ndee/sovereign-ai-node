@@ -4,6 +4,7 @@ import { delimiter, join } from "node:path";
 
 import type { Logger } from "../logging/logger.js";
 import { type ExecResult, type ExecRunner, PRIVILEGE_DROP_SPAWN_CWD } from "../system/exec.js";
+import { resolveOpenClawSpawnLookupPath } from "./bootstrap.js";
 
 const OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS = 90_000;
 // 20 × 90s was pathological when combined with the 45-minute CI job budget:
@@ -68,7 +69,21 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
   constructor(
     private readonly execRunner: ExecRunner,
     private readonly logger: Logger,
+    private readonly serviceHome?: string,
   ) {}
+
+  /**
+   * The PATH every OpenClaw spawn from this registrar must be looked up on.
+   *
+   * An unprivileged install puts the CLI in `<npmPrefix>/bin`, which is NOT on
+   * the inherited `process.env.PATH`. Resolving it with the same helpers the
+   * bootstrapper uses keeps the place the install writes to and the place the
+   * spawn looks in a single definition. Undefined means "inherit": a root
+   * install keeps npm's default prefix and needs nothing prepended.
+   */
+  private resolveLookupPath(): string | undefined {
+    return resolveOpenClawSpawnLookupPath(this.serviceHome);
+  }
 
   async register(input: ManagedAgentRegistrationInput): Promise<ManagedAgentRegistrationResult> {
     const agentCommandResult = await this.runCommandAlternatives({
@@ -153,6 +168,7 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
       (job, index, all) => all.findIndex((entry) => entry.id === job.id) === index,
     );
     for (const job of uniqueStaleJobs) {
+      const cronRmLookupPath = this.resolveLookupPath();
       const result = await this.execRunner.run({
         command: "openclaw",
         args: ["cron", "rm", job.id],
@@ -160,6 +176,7 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
           timeout: OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS,
           env: {
             CI: "1",
+            ...(cronRmLookupPath === undefined ? {} : { PATH: cronRmLookupPath }),
           },
         },
       });
@@ -258,6 +275,7 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
           return delegatedResult;
         }
       } else {
+        const primaryLookupPath = this.resolveLookupPath();
         const primaryResult = await this.execRunner.run({
           command: "openclaw",
           args,
@@ -265,6 +283,7 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
             timeout: OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS,
             env: {
               CI: "1",
+              ...(primaryLookupPath === undefined ? {} : { PATH: primaryLookupPath }),
             },
           },
         });
@@ -351,16 +370,20 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
     args: string[],
     preferredUser: PreferredManagedOpenClawUser,
   ): Promise<ExecResult> {
-    const sudoGatewayCommand = (await resolveExecutablePath("openclaw")) ?? "openclaw";
+    const lookupPath = this.resolveLookupPath();
+    const sudoGatewayCommand =
+      (await resolveExecutablePath("openclaw", lookupPath ?? process.env.PATH)) ?? "openclaw";
+    const pathEnvArg = lookupPath === undefined ? [] : [`PATH=${lookupPath}`];
     const sudoGatewayEnv =
       preferredUser.mode === "sudo-user-bus"
         ? [
             "CI=1",
+            ...pathEnvArg,
             `XDG_RUNTIME_DIR=/run/user/${preferredUser.uid}`,
             `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${preferredUser.uid}/bus`,
             ...resolveManagedOpenClawEnvArgs(),
           ]
-        : ["CI=1", ...resolveManagedOpenClawEnvArgs()];
+        : ["CI=1", ...pathEnvArg, ...resolveManagedOpenClawEnvArgs()];
     return await this.execRunner.run({
       command: "sudo",
       args: [
@@ -428,12 +451,15 @@ const isGatewayUnavailableOutput = (value: string): boolean =>
     value.toLowerCase(),
   );
 
-const resolveExecutablePath = async (command: string): Promise<string | null> => {
+const resolveExecutablePath = async (
+  command: string,
+  searchPath: string | undefined = process.env.PATH,
+): Promise<string | null> => {
   if (command.includes("/")) {
     return command;
   }
 
-  const pathValue = process.env.PATH ?? "";
+  const pathValue = searchPath ?? "";
   for (const entry of pathValue.split(delimiter)) {
     if (entry.length === 0) {
       continue;

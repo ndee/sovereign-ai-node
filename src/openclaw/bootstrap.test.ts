@@ -12,6 +12,7 @@ import {
   resolveOpenClawLookupPath,
   resolveOpenClawNpmPrefix,
   resolveOpenClawSpawnCwd,
+  resolveOpenClawSpawnLookupPath,
   resolveRequestedOpenClawVersion,
   ShellOpenClawBootstrapper,
   SOVEREIGN_PINNED_OPENCLAW_VERSION,
@@ -1481,6 +1482,53 @@ describe("openclaw spawn cwd across install and reconfigure contexts", () => {
           continue;
         }
         expect(call.options?.cwd, `${call.command} should inherit as root`).toBeUndefined();
+      }
+    });
+  });
+
+  describe("resolveOpenClawSpawnLookupPath", () => {
+    const withUid = (uid: number, run: () => void): void => {
+      const priorGetuid = process.getuid;
+      Object.defineProperty(process, "getuid", { configurable: true, value: () => uid });
+      try {
+        run();
+      } finally {
+        Object.defineProperty(process, "getuid", { configurable: true, value: priorGetuid });
+      }
+    };
+
+    it("returns undefined as root so the spawn just inherits the ambient PATH", () => {
+      // A root install keeps npm's default prefix, so there is nothing to
+      // prepend and setting PATH would only duplicate what is inherited.
+      withUid(0, () => {
+        expect(resolveOpenClawSpawnLookupPath("/var/lib/sovereign-node")).toBeUndefined();
+      });
+    });
+
+    it("prepends the service npm prefix bin dir when unprivileged", () => {
+      withUid(1000, () => {
+        const resolved = resolveOpenClawSpawnLookupPath("/var/lib/sovereign-node");
+        // This is exactly where an unprivileged install puts the bin link.
+        expect(resolved).toContain("/var/lib/sovereign-node/.npm-global/bin");
+        expect(resolved?.startsWith("/var/lib/sovereign-node/.npm-global/bin:")).toBe(true);
+      });
+    });
+
+    it("returns undefined when the prefix bin dir is already on PATH", () => {
+      const priorPath = process.env.PATH;
+      const binDir = "/var/lib/sovereign-node/.npm-global/bin";
+      process.env.PATH = `${binDir}:/usr/bin`;
+      try {
+        withUid(1000, () => {
+          // Nothing to add: the spawn would receive a byte-identical PATH.
+          expect(resolveOpenClawSpawnLookupPath("/var/lib/sovereign-node")).toBeUndefined();
+        });
+      } finally {
+        if (priorPath === undefined) {
+          delete process.env.PATH;
+        } else {
+          process.env.PATH = priorPath;
+        }
       }
     });
   });

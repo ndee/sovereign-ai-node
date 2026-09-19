@@ -203,6 +203,29 @@ export const resolveOpenClawLookupPath = (
   return `${binDir}:${basePath}`;
 };
 
+/**
+ * The PATH an OpenClaw CLI spawn must be looked up on, or undefined when the
+ * ambient PATH already suffices.
+ *
+ * This is the consumer-facing form of `resolveOpenClawLookupPath`. That helper
+ * returns the base PATH unchanged when there is no npm prefix to prepend,
+ * which is the right shape for a lookup but the wrong one for a spawn `env`:
+ * setting `PATH` to a copy of the inherited value is pure noise, and on a
+ * privilege drop it adds a redundant `PATH=` to the `env` argument list.
+ *
+ * Returning undefined in that case lets every call site use the same
+ * `...(lookupPath === undefined ? {} : { PATH: lookupPath })` spread and get
+ * "inherit" for free.
+ */
+export const resolveOpenClawSpawnLookupPath = (serviceHome?: string): string | undefined => {
+  const npmPrefix = resolveOpenClawNpmPrefix(serviceHome);
+  if (npmPrefix === undefined) {
+    return undefined;
+  }
+  const lookupPath = resolveOpenClawLookupPath(npmPrefix);
+  return lookupPath === process.env.PATH ? undefined : lookupPath;
+};
+
 export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
   constructor(
     private readonly execRunner: ExecRunner,
