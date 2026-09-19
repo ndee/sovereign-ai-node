@@ -9,6 +9,13 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 From this point forward, GitHub Release notes are auto-generated from commit history
 by the `.github/workflows/release.yml` workflow.
 
+## [2.5.11](https://github.com/ndee/sovereign-ai-node/compare/v2.5.10...v2.5.11) (2026-09-19)
+
+
+### Bug Fixes
+
+* **installer:** fail closed when declared bot systemd units compile to nothing ([#277](https://github.com/ndee/sovereign-ai-node/issues/277)) ([b5a5884](https://github.com/ndee/sovereign-ai-node/commit/b5a58842b709fe351e45a3a03725c83550f79ef4))
+
 ## [2.5.10](https://github.com/ndee/sovereign-ai-node/compare/v2.5.9...v2.5.10) (2026-09-19)
 
 
