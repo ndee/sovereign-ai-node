@@ -1,0 +1,127 @@
+name: Auto-merge release PR
+
+# Removes the human merge from the release half of the chain: Release Please
+# opens the version-bump PR, and this arms GitHub's native auto-merge on it so
+# it lands as soon as the required checks pass.
+#
+# WHY NATIVE AUTO-MERGE HERE, AND NOT THE POLLING GUARD PRO NEEDS.
+# The two forges are not symmetric, and the difference is the whole design:
+#
+#   * Pro's Forgejo `main` is UNPROTECTED (enable_status_check:false,
+#     status_check_contexts:[]), so nothing on that side would stop a red
+#     merge and the automation has to poll CI itself.
+#   * THIS repo has an active ruleset ("sovereign-rules") with
+#     required_status_checks, `bypass_actors: []` and
+#     `current_user_can_bypass: "never"`. GitHub itself refuses to merge until
+#     every required context passes, for everyone, with no exceptions.
+#
+# So here the correct move is to hand the decision to the platform rather than
+# reimplement it. `--auto` QUEUES the merge; GitHub performs it only when the
+# ruleset is satisfied. If a required check fails, the PR simply stays open.
+# That is strictly safer than any status polling this workflow could do,
+# because it cannot race: there is no window between "we checked" and "we
+# merged" for a new push to slip through.
+#
+# Crucially, `--admin` is NOT used. That flag is exactly the one that bypasses
+# the required checks, and using it would turn this from "merge when green"
+# into "merge regardless".
+#
+# SCOPE. Only the Release Please branch, matched by its exact head ref
+# (`release-please--branches--main--components--sovereign-ai-node`). The title
+# is not used as a signal, and neither is the author: Release Please
+# authenticates with RELEASE_PLEASE_TOKEN, which acts as `ndee` — the same
+# identity a human PR carries — so author cannot distinguish generated from
+# hand-written. Every other PR in this repo is untouched by this workflow.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: auto-merge-release-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  arm:
+    name: Arm auto-merge on the release PR
+    # Belt and braces: the ref is asserted here AND re-asserted from the API in
+    # the step below. This `if` is the cheap filter; the step is the one that
+    # actually decides, because it reads the ref back from the API rather than
+    # trusting event payload fields.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.ref ==
+        'release-please--branches--main--components--sovereign-ai-node' &&
+      github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify this really is the generated release PR
+        id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          EXPECT_REF: release-please--branches--main--components--sovereign-ai-node
+        run: |
+          set -euo pipefail
+          # Re-read from the API. pull_request_target runs with a writable
+          # token, so nothing here may depend on attacker-influenced payload
+          # fields without confirming them against the server's own view.
+          read -r head_ref base_ref same_repo draft state <<<"$(
+            gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" \
+              --jq '[.head.ref, .base.ref,
+                     (.head.repo.full_name == "'"${GITHUB_REPOSITORY}"'"),
+                     .draft, .state] | @tsv'
+          )"
+          [[ "$head_ref" == "$EXPECT_REF" ]] || {
+            echo "::notice::PR #${PR} head '${head_ref}' is not the release branch; nothing to do."
+            echo 'proceed=false' >> "$GITHUB_OUTPUT"; exit 0; }
+          [[ "$base_ref" == "main" ]] || {
+            echo "::error::release PR targets '${base_ref}', not main."; exit 1; }
+          [[ "$same_repo" == "true" ]] || {
+            echo "::error::release branch is not from this repository."; exit 1; }
+          [[ "$draft" == "false" && "$state" == "open" ]] || {
+            echo "::notice::PR #${PR} is draft or not open; nothing to do."
+            echo 'proceed=false' >> "$GITHUB_OUTPUT"; exit 0; }
+
+          # A release PR only ever moves the version bump. Anything else on this
+          # branch means something other than Release Please wrote to it, and it
+          # must not merge itself.
+          mapfile -t files < <(
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files" \
+              --jq '.[].filename'
+          )
+          (( ${#files[@]} > 0 )) || { echo "::error::no files reported."; exit 1; }
+          for f in "${files[@]}"; do
+            case "$f" in
+              .release-please-manifest.json|CHANGELOG.md|package.json) ;;
+              *) echo "::error::release PR changes '${f}', which a version bump never touches."
+                 exit 1 ;;
+            esac
+          done
+          printf 'files: %s\n' "${files[*]}"
+          echo 'proceed=true' >> "$GITHUB_OUTPUT"
+
+      - name: Enable auto-merge
+        if: steps.verify.outputs.proceed == 'true'
+        env:
+          # A PAT, not the built-in token: a merge performed by GITHUB_TOKEN
+          # does not emit the push event that the Release Please workflow's
+          # `workflow_run` trigger keys on, so the release would never publish.
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # NO --admin. The ruleset's required status checks are the gate, and
+          # --admin is precisely the flag that bypasses them. --auto queues the
+          # merge for GitHub to perform once those checks pass; if they fail,
+          # the PR stays open.
+          gh pr merge "$PR" -R "$GITHUB_REPOSITORY" --squash --auto
+          gh pr view "$PR" -R "$GITHUB_REPOSITORY" \
+            --json autoMergeRequest,mergeStateStatus \
+            --jq '"auto-merge armed: \(.autoMergeRequest != null), state: \(.mergeStateStatus)"'
