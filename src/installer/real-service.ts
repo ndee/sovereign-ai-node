@@ -83,6 +83,7 @@ import {
 } from "../onboarding/setup-ui-bootstrap.js";
 import {
   type OpenClawBootstrapper,
+  resolveOpenClawSpawnLookupPath,
   resolveRequestedOpenClawVersion,
 } from "../openclaw/bootstrap.js";
 import type { OpenClawGatewayServiceManager } from "../openclaw/gateway-service.js";
@@ -1396,16 +1397,21 @@ export class RealInstallerService implements InstallerService {
     const cliInstalled = detectedOpenClaw !== null;
     const managedBySovereign = runtimeConfig?.openclaw.managedInstallation ?? true;
     const pluginIds = runtimeConfig?.openclawProfile.plugins.allow;
+    // A probe that could not run proves nothing. Treating `!verified` as
+    // satisfied turned every CLI spawn failure — including the ENOENT an
+    // unprivileged install produces — into a green "healthy" status, because
+    // `every()` short-circuits to true for the whole set. Require a positive
+    // signal instead: either the probe ran and found the id, or the managed
+    // runtime JSON independently confirms it. The JSON fallback is what keeps
+    // a legitimately unverifiable-but-registered node from being downgraded.
     const agentPresent = expectedAgentIds.every(
       (id, index) =>
-        !(agentProbes[index]?.verified ?? false) ||
-        agentProbes[index]?.present === true ||
+        (agentProbes[index]?.verified === true && agentProbes[index]?.present === true) ||
         this.managedOpenClawRuntimeHasAgent(managedRuntimeJson, id),
     );
     const cronPresent = expectedCronIds.every(
       (id, index) =>
-        !(cronProbes[index]?.verified ?? false) ||
-        cronProbes[index]?.present === true ||
+        (cronProbes[index]?.verified === true && cronProbes[index]?.present === true) ||
         this.managedOpenClawRuntimeHasCron(managedRuntimeJson, id),
     );
     const openclawHealth = deriveOpenClawHealth({
@@ -1564,16 +1570,20 @@ export class RealInstallerService implements InstallerService {
     );
     const managedRuntimeJson =
       runtimeConfig === null ? null : await this.readManagedOpenClawRuntimeJson(runtimeConfig);
+    // Same polarity fix as the status path: an unverifiable probe is not
+    // evidence of presence. The surrounding check already distinguishes
+    // "nothing could be verified" (warn) from "verified and missing" (fail)
+    // via `agentProbes.some((probe) => probe.verified)`, so this only sharpens
+    // the failing case and cannot turn a fully unverifiable node into a hard
+    // failure.
     const agentPresent = expectedAgentIds.every(
       (id, index) =>
-        !(agentProbes[index]?.verified ?? false) ||
-        agentProbes[index]?.present === true ||
+        (agentProbes[index]?.verified === true && agentProbes[index]?.present === true) ||
         this.managedOpenClawRuntimeHasAgent(managedRuntimeJson, id),
     );
     const cronPresent = expectedCronIds.every(
       (id, index) =>
-        !(cronProbes[index]?.verified ?? false) ||
-        cronProbes[index]?.present === true ||
+        (cronProbes[index]?.verified === true && cronProbes[index]?.present === true) ||
         this.managedOpenClawRuntimeHasCron(managedRuntimeJson, id),
     );
     const wiringCheck = await this.inspectOpenClawRuntimeWiring(runtimeConfig);
@@ -8247,8 +8257,20 @@ export default function (api) {
             ? {
                 env: {
                   CI: "1",
-                  PATH: process.env.PATH ?? "",
                   ...(openclawEnv ?? {}),
+                  // An unprivileged install cannot write npm's root-owned
+                  // global prefix, so the CLI lands in
+                  // `<serviceHome>/.npm-global/bin` (#254), which is NOT on
+                  // the ambient PATH. Handing the spawn a bare copy of
+                  // `process.env.PATH` therefore resolves `openclaw` to
+                  // nothing and dies ENOENT while the binary sits on disk.
+                  // Resolve through the shared helper so this file agrees
+                  // with the gateway and managed-agent spawns about where
+                  // the CLI lives, rather than hardcoding a fourth copy.
+                  PATH:
+                    resolveOpenClawSpawnLookupPath(this.paths.openclawServiceHome) ??
+                    process.env.PATH ??
+                    "",
                 },
               }
             : {}),
