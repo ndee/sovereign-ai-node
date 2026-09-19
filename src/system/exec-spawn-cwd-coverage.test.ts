@@ -37,6 +37,12 @@ const collectSourceFiles = async (dir: string): Promise<string[]> => {
     entries.map(async (entry) => {
       const full = join(dir, entry.name);
       if (entry.isDirectory()) {
+        // Sibling worktrees carry their own full copy of src/. Collecting them
+        // makes this guard grade a stale snapshot of the tree and report green
+        // for code that is not the code under test.
+        if (entry.name === ".worktrees" || entry.name === "node_modules") {
+          return [];
+        }
         return collectSourceFiles(full);
       }
       if (!entry.name.endsWith(".ts") || entry.name.endsWith(".test.ts")) {
@@ -92,28 +98,65 @@ describe("spawn cwd coverage across src/", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("pins an explicit cwd at every privilege-dropping spawn", async () => {
+  it("pins an explicit cwd at every privilege-dropping spawn site", async () => {
     const files = await collectSourceFiles(SRC_DIR);
-    const offenders: { file: string; snippet: string }[] = [];
+    const offenders: { site: string; snippet: string }[] = [];
+    let siteCount = 0;
+
+    /**
+     * A privilege drop is recognisable by the sudo/runuser argument pattern.
+     *
+     * Matching only the bare literal `"sudo"` is not enough: the installer
+     * COMPUTES the command (`shouldRunAsServiceUser ? "sudo" : command`), so
+     * the literal appears in a ternary rather than at a spawn's `command:`.
+     * That site matched the old file-level check only incidentally — the file
+     * happened to contain the word. Recognise the computed form explicitly.
+     */
+    const DROP_PATTERNS = [
+      /command:\s*"(?:sudo|runuser)"/g,
+      /\?\s*"(?:sudo|runuser)"\s*:/g,
+      /=\s*"(?:sudo|runuser)"\s*;/g,
+    ];
 
     for (const file of files) {
       const source = await readFile(file, "utf8");
-      // A privilege drop is recognisable by the sudo/runuser -u argument
-      // pattern the installer uses to become the service user.
-      const dropsPrivilege = /"(sudo|runuser)"/.test(source) && /"-u"/.test(source);
-      if (!dropsPrivilege) {
+      if (!/"-u"/.test(source)) {
         continue;
       }
-      // Such a file must name a cwd somewhere: either a literal `cwd:` option
-      // or the shared constant for privilege drops.
-      const pinsCwd = /cwd:/.test(source) || /PRIVILEGE_DROP_SPAWN_CWD/.test(source);
-      if (!pinsCwd) {
-        offenders.push({
-          file: file.replace(SRC_DIR, "src/"),
-          snippet: "drops privilege via sudo/runuser -u without pinning a cwd",
-        });
+      const lines = source.split("\n");
+      for (const pattern of DROP_PATTERNS) {
+        pattern.lastIndex = 0;
+        let match = pattern.exec(source);
+        while (match !== null) {
+          const line = source.slice(0, match.index).split("\n").length;
+          // Judge the site, not the file: look only at the enclosing member,
+          // so one correct drop cannot vouch for a second, broken one.
+          const start = Math.max(0, line - 40);
+          const scope = lines.slice(start, Math.min(lines.length, line + 60)).join("\n");
+          // Only a DROP is in scope here. `sudo -n chown` / `sudo -n tee` are
+          // privilege ESCALATIONS: the child runs as root, which can traverse
+          // anything, so the untraversable-cwd class cannot apply. The `-u`
+          // must therefore belong to THIS site, not merely to the file.
+          if (!/"-u"/.test(scope)) {
+            match = pattern.exec(source);
+            continue;
+          }
+          siteCount += 1;
+          const pinsCwd = /cwd:/.test(scope) || /PRIVILEGE_DROP_SPAWN_CWD/.test(scope);
+          if (!pinsCwd) {
+            offenders.push({
+              site: `${file.replace(SRC_DIR, "src/")}:${line}`,
+              snippet: "drops privilege via sudo/runuser -u without pinning a cwd",
+            });
+          }
+          match = pattern.exec(source);
+        }
       }
     }
+
+    // If the detector stops finding drops, it has gone blind rather than the
+    // tree having become safe.
+    expect(siteCount).toBeGreaterThanOrEqual(2);
 
     // `sudo` and `runuser` both PRESERVE the caller's cwd, so a drop performed
     // from /root hands the unprivileged child a directory it cannot traverse

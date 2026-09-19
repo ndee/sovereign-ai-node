@@ -8456,7 +8456,17 @@ describe("RealInstallerService", () => {
       const status = await service.getStatus();
 
       expect(status.openclaw.health).toBe("degraded");
-      expect(status.openclaw.agentPresent).toBe(true);
+      // A probe that timed out observed nothing, so it cannot assert presence.
+      // These previously read `true`, which is the defect this test now pins:
+      // an unrunnable probe was scored as a positive result, and because
+      // `every()` short-circuits, that turned a wholly unverifiable node into
+      // a green one. `health` was already "degraded" here only because the
+      // health probe failed independently.
+      expect(status.openclaw.agentPresent).toBe(false);
+      // `cronPresent` stays true, and that is correct rather than an
+      // oversight: this runtime configures no crons, so the set is empty and
+      // there is nothing a probe could have failed to confirm. The fix must
+      // not turn a legitimately "not applicable" case into a false alarm.
       expect(status.openclaw.cronPresent).toBe(true);
       expect(status.services.find((entry) => entry.name === "openclaw-gateway")?.state).toBe(
         "running",
@@ -8591,6 +8601,555 @@ describe("RealInstallerService", () => {
       expect(status.openclaw.agentPresent).toBe(true);
       expect(status.openclaw.cronPresent).toBe(true);
       expect(status.openclaw.health).toBe("healthy");
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reports the agent present when the OpenClaw probe runs and finds it", async () => {
+    const openclawSpawnPaths: (string | undefined)[] = [];
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+    await writeRuntimeArtifacts(paths);
+    await writeNoCronManagedAgentRuntime(paths);
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert",
+          cronCommand: "openclaw cron add",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async (input): Promise<ExecResult> => {
+          const serialized = [input.command, ...(input.args ?? [])].join(" ");
+          if (serialized.startsWith("openclaw ")) {
+            openclawSpawnPaths.push(
+              (input.options?.env as Record<string, string> | undefined)?.PATH,
+            );
+          }
+          if (serialized.startsWith("systemctl is-active")) {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "active",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw health") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw agents list") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "node-operator",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw cron list") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+            };
+          }
+          return {
+            command: serialized,
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          };
+        },
+      },
+    });
+
+    try {
+      const status = await service.getStatus();
+      // The probe RAN (exit 0) and the id appeared in its output.
+      expect(status.openclaw.agentPresent).toBe(true);
+      expect(status.openclaw.health).toBe("healthy");
+      // Every OpenClaw spawn must be handed a concrete lookup PATH. Passing
+      // undefined/"" is what let the CLI go unresolved and die ENOENT.
+      expect(openclawSpawnPaths.length).toBeGreaterThan(0);
+      for (const spawnPath of openclawSpawnPaths) {
+        expect(typeof spawnPath).toBe("string");
+        expect(spawnPath).not.toBe("");
+      }
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("scores a configured cron by its probe result rather than by unverifiability", async () => {
+    const openclawSpawnPaths: (string | undefined)[] = [];
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+    await writeRuntimeArtifacts(paths);
+    await writeDedicatedBotRuntimeArtifacts(paths);
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert",
+          cronCommand: "openclaw cron add",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async (input): Promise<ExecResult> => {
+          const serialized = [input.command, ...(input.args ?? [])].join(" ");
+          if (serialized.startsWith("openclaw ")) {
+            openclawSpawnPaths.push(
+              (input.options?.env as Record<string, string> | undefined)?.PATH,
+            );
+          }
+          if (serialized.startsWith("systemctl is-active")) {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "active",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw health") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+          if (serialized.startsWith("openclaw agents list")) {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "mail-sentinel",
+              stderr: "",
+            };
+          }
+          if (serialized.startsWith("openclaw cron list")) {
+            // The cron probe cannot run; the agent probe can.
+            throw new Error("spawn openclaw ENOENT");
+          }
+          return {
+            command: serialized,
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          };
+        },
+      },
+    });
+
+    try {
+      const status = await service.getStatus();
+      // This runtime DOES configure a cron, so the cron set is non-empty and
+      // the probe arm is actually evaluated. The probe could not run, yet
+      // `cronPresent` stays true because the managed runtime JSON confirms
+      // the job independently — the deliberate escape hatch that keeps a
+      // legitimately unverifiable-but-registered node from being downgraded.
+      // That fallback is the ONLY reason it is true here; without it an
+      // unrunnable probe scores nothing.
+      expect(status.openclaw.cronPresent).toBe(true);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reports managed bot registration in the doctor report from probe results", async () => {
+    const openclawSpawnPaths: (string | undefined)[] = [];
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+    await writeRuntimeArtifacts(paths);
+    await writeLegacyCorePinnedMailSentinelTemplate(paths);
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert",
+          cronCommand: "openclaw cron add",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async (input): Promise<ExecResult> => {
+          const serialized = [input.command, ...(input.args ?? [])].join(" ");
+          if (serialized.startsWith("openclaw ")) {
+            openclawSpawnPaths.push(
+              (input.options?.env as Record<string, string> | undefined)?.PATH,
+            );
+          }
+          if (serialized.startsWith("systemctl is-active")) {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "active",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw health") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+          if (serialized.startsWith("openclaw agents list")) {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "mail-sentinel",
+              stderr: "",
+            };
+          }
+          if (serialized.startsWith("openclaw cron list")) {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "mail-sentinel-poll",
+              stderr: "",
+            };
+          }
+          return {
+            command: serialized,
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          };
+        },
+      },
+    });
+
+    try {
+      const report = await service.getDoctorReport();
+      const registration = report.checks.find((entry) => entry.id === "managed-bot-registration");
+      // Both probes RAN and found their ids, so the doctor passes this check
+      // on evidence rather than on the absence of it.
+      expect(registration?.status).toBe("pass");
+      const status = await service.getStatus();
+      // Both probes ran and confirmed their ids.
+      expect(status.openclaw.cronPresent).toBe(true);
+      expect(status.openclaw.agentPresent).toBe(true);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does not score an OpenClaw agent probe that could not run as present", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+    await writeRuntimeArtifacts(paths);
+    await writeNoCronManagedAgentRuntime(paths);
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert",
+          cronCommand: "openclaw cron add",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async (input): Promise<ExecResult> => {
+          const serialized = [input.command, ...(input.args ?? [])].join(" ");
+          if (serialized.startsWith("systemctl is-active")) {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "active",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw health") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "ok",
+              stderr: "",
+            };
+          }
+          if (serialized.startsWith("openclaw agents list")) {
+            // Exactly what defect A produced: the CLI could not be resolved on
+            // the spawn PATH, so the probe never observed anything at all.
+            throw new Error("spawn openclaw ENOENT");
+          }
+          if (serialized === "openclaw cron list") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+            };
+          }
+          return {
+            command: serialized,
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+          };
+        },
+      },
+    });
+
+    try {
+      const status = await service.getStatus();
+      // An unverifiable probe is not evidence of presence, and must not be
+      // laundered into a green install.
+      expect(status.openclaw.agentPresent).toBe(false);
+      expect(status.openclaw.health).not.toBe("healthy");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
