@@ -371,7 +371,8 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
     preferredUser: PreferredManagedOpenClawUser,
   ): Promise<ExecResult> {
     const lookupPath = this.resolveLookupPath();
-    const sudoGatewayCommand = (await resolveExecutablePath("openclaw", lookupPath ?? process.env.PATH)) ?? "openclaw";
+    const sudoGatewayCommand =
+      (await resolveExecutablePath("openclaw", lookupPath ?? process.env.PATH)) ?? "openclaw";
     const pathEnvArg = lookupPath === undefined ? [] : [`PATH=${lookupPath}`];
     const sudoGatewayEnv =
       preferredUser.mode === "sudo-user-bus"

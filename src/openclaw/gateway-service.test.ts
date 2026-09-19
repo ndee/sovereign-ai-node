@@ -12,7 +12,6 @@ import {
   ShellOpenClawGatewayServiceManager,
 } from "./gateway-service.js";
 
-
 describe("ShellOpenClawGatewayServiceManager", () => {
   it("runs openclaw gateway install with optional --force", async () => {
     const calls: ExecInput[] = [];
@@ -362,5 +361,76 @@ describe("isSystemdBusUnavailableMessage", () => {
     "",
   ])("does not match unrelated failures: %s", (message) => {
     expect(isSystemdBusUnavailableMessage(message)).toBe(false);
+  });
+});
+
+describe("ShellOpenClawGatewayServiceManager failure classification", () => {
+  const spawnFailureRunner = (): ExecRunner => ({
+    run: async (input): Promise<ExecResult> => ({
+      command: [input.command, ...(input.args ?? [])].join(" "),
+      exitCode: 127,
+      stdout: "",
+      stderr: "Command failed with ENOENT: openclaw gateway install\nspawn openclaw ENOENT",
+      failureReason: "spawn_failed",
+      errorCode: "ENOENT",
+    }),
+  });
+
+  it("marks an ENOENT spawn failure as non-retryable", async () => {
+    const manager = new ShellOpenClawGatewayServiceManager(spawnFailureRunner(), createLogger());
+
+    // A retry re-resolves the same PATH and fails identically, so retrying is
+    // pure latency. Only genuinely transient failures stay retryable.
+    await expect(manager.install()).rejects.toMatchObject({
+      code: "OPENCLAW_GATEWAY_INSTALL_FAILED",
+      retryable: false,
+    });
+  });
+
+  it("keeps a plain non-zero exit retryable", async () => {
+    const execRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => ({
+        command: [input.command, ...(input.args ?? [])].join(" "),
+        exitCode: 1,
+        stdout: "",
+        stderr: "gateway install failed: transient registry error",
+      }),
+    };
+    const manager = new ShellOpenClawGatewayServiceManager(execRunner, createLogger());
+
+    await expect(manager.start()).rejects.toMatchObject({
+      code: "OPENCLAW_GATEWAY_START_FAILED",
+      retryable: true,
+    });
+  });
+
+  it("looks the CLI up on the service npm prefix when one applies", async () => {
+    const calls: ExecInput[] = [];
+    const execRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        calls.push(input);
+        return {
+          command: [input.command, ...(input.args ?? [])].join(" "),
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        };
+      },
+    };
+    const serviceHome = "/var/lib/sovereign-node";
+    const manager = new ShellOpenClawGatewayServiceManager(execRunner, createLogger(), serviceHome);
+
+    await manager.restart();
+
+    const env = calls[0]?.options?.env as Record<string, string> | undefined;
+    const expected = resolveOpenClawSpawnLookupPath(serviceHome);
+    if (expected === undefined) {
+      // Running as root: npm's default prefix stands, nothing to prepend.
+      expect(env?.PATH).toBeUndefined();
+    } else {
+      // The install writes the bin link here, so the spawn must look here.
+      expect(expected).toContain("/var/lib/sovereign-node/.npm-global/bin");
+      expect(env?.PATH).toBe(expected);
+    }
   });
 });

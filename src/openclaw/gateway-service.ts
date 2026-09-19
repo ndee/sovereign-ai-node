@@ -93,7 +93,8 @@ export class ShellOpenClawGatewayServiceManager implements OpenClawGatewayServic
       return primary;
     }
 
-    const sudoGatewayCommand = (await resolveExecutablePath("openclaw", lookupPath ?? process.env.PATH)) ?? "openclaw";
+    const sudoGatewayCommand =
+      (await resolveExecutablePath("openclaw", lookupPath ?? process.env.PATH)) ?? "openclaw";
     const sudoGatewayEnv = [
       "CI=1",
       ...(lookupPath === undefined ? [] : [`PATH=${lookupPath}`]),
