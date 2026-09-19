@@ -9,6 +9,13 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 From this point forward, GitHub Release notes are auto-generated from commit history
 by the `.github/workflows/release.yml` workflow.
 
+## [2.5.9](https://github.com/ndee/sovereign-ai-node/compare/v2.5.8...v2.5.9) (2026-09-19)
+
+
+### Bug Fixes
+
+* **installer:** resolve OpenClaw CLI spawns and stop scoring unverifiable probes as present ([#272](https://github.com/ndee/sovereign-ai-node/issues/272)) ([f073b74](https://github.com/ndee/sovereign-ai-node/commit/f073b74f53a26ee984b218e442bc131b97e51a71))
+
 ## [2.5.8](https://github.com/ndee/sovereign-ai-node/compare/v2.5.7...v2.5.8) (2026-09-19)
 
 
