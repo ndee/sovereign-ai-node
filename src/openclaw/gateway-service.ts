@@ -4,6 +4,11 @@ import { delimiter, join } from "node:path";
 
 import type { Logger } from "../logging/logger.js";
 import { type ExecResult, type ExecRunner, PRIVILEGE_DROP_SPAWN_CWD } from "../system/exec.js";
+import {
+  isRetryableExecFailure,
+  resolveOpenClawLookupPath,
+  resolveOpenClawNpmPrefix,
+} from "./bootstrap.js";
 
 const OPENCLAW_GATEWAY_COMMAND_TIMEOUT_MS = 120_000;
 const MANAGED_OPENCLAW_ENV_KEYS = [
@@ -27,7 +32,20 @@ export class ShellOpenClawGatewayServiceManager implements OpenClawGatewayServic
   constructor(
     private readonly execRunner: ExecRunner,
     private readonly logger: Logger,
+    private readonly serviceHome?: string,
   ) {}
+
+  /**
+   * The PATH every OpenClaw spawn from this manager must be looked up on.
+   *
+   * An unprivileged install puts the CLI in `<npmPrefix>/bin`, which is NOT on
+   * the inherited `process.env.PATH`. Resolving it here — with the same
+   * helpers the bootstrapper uses — keeps the place the install writes to and
+   * the place the spawn looks in a single definition.
+   */
+  private resolveLookupPath(): string | undefined {
+    return resolveOpenClawLookupPath(resolveOpenClawNpmPrefix(this.serviceHome));
+  }
 
   async install(options?: GatewayInstallOptions): Promise<void> {
     const args = ["gateway", "install"];
@@ -54,6 +72,7 @@ export class ShellOpenClawGatewayServiceManager implements OpenClawGatewayServic
   }
 
   private async runGatewayCommandWithFallback(args: string[]): Promise<ExecResult> {
+    const lookupPath = this.resolveLookupPath();
     const primary = await this.execRunner.run({
       command: "openclaw",
       args,
@@ -61,6 +80,7 @@ export class ShellOpenClawGatewayServiceManager implements OpenClawGatewayServic
         timeout: OPENCLAW_GATEWAY_COMMAND_TIMEOUT_MS,
         env: {
           CI: "1",
+          ...(lookupPath === undefined ? {} : { PATH: lookupPath }),
         },
       },
     });
@@ -73,9 +93,10 @@ export class ShellOpenClawGatewayServiceManager implements OpenClawGatewayServic
       return primary;
     }
 
-    const sudoGatewayCommand = (await resolveExecutablePath("openclaw")) ?? "openclaw";
+    const sudoGatewayCommand = (await resolveExecutablePath("openclaw", lookupPath)) ?? "openclaw";
     const sudoGatewayEnv = [
       "CI=1",
+      ...(lookupPath === undefined ? [] : [`PATH=${lookupPath}`]),
       `XDG_RUNTIME_DIR=/run/user/${fallback.uid}`,
       `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${fallback.uid}/bus`,
       ...resolveManagedOpenClawEnvArgs(),
@@ -125,7 +146,10 @@ const ensureSuccess = (result: ExecResult, code: string): void => {
   throw {
     code,
     message: "OpenClaw gateway command exited with non-zero status",
-    retryable: true,
+    // A spawn that never started (ENOENT: the CLI is not on the PATH used) is
+    // deterministic — a retry looks up the same empty PATH and fails the same
+    // way. Only genuinely transient failures stay retryable.
+    retryable: isRetryableExecFailure(result.failureReason),
     details: {
       command: result.command,
       exitCode: result.exitCode,
@@ -164,12 +188,15 @@ export const isSystemdBusUnavailableMessage = (message: string): boolean =>
     message,
   );
 
-const resolveExecutablePath = async (command: string): Promise<string | null> => {
+const resolveExecutablePath = async (
+  command: string,
+  searchPath: string | undefined = process.env.PATH,
+): Promise<string | null> => {
   if (command.includes("/")) {
     return command;
   }
 
-  const pathValue = process.env.PATH ?? "";
+  const pathValue = searchPath ?? "";
   for (const entry of pathValue.split(delimiter)) {
     if (entry.length === 0) {
       continue;
