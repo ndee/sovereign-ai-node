@@ -705,6 +705,48 @@ describe("openclaw install prefix under an unprivileged service user", () => {
     return calls;
   };
 
+  /**
+   * Drive `ensureInstalled` down the direct-npm fallback by failing the
+   * install.sh (`bash`) step, and return every exec the bootstrapper made.
+   */
+  const runDirectNpmFallback = async (serviceHome: string): Promise<ExecInput[]> => {
+    const calls: ExecInput[] = [];
+    const execRunner: ExecRunner = {
+      run: async (input): Promise<ExecResult> => {
+        calls.push(input);
+        if (input.command === "openclaw") {
+          const installed = calls.some(
+            (call) => call.command === "npm" && call.args?.[0] === "install",
+          );
+          return {
+            command: "openclaw --version",
+            exitCode: installed ? 0 : 1,
+            stdout: installed ? SOVEREIGN_PINNED_OPENCLAW_VERSION : "",
+            stderr: "",
+          };
+        }
+        if (input.command === "bash") {
+          return { command: "bash", exitCode: 1, stdout: "", stderr: "install.sh failed" };
+        }
+        return {
+          command: [input.command, ...(input.args ?? [])].join(" "),
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        };
+      },
+    };
+
+    const bootstrapper = new ShellOpenClawBootstrapper(execRunner, createLogger(), serviceHome);
+    await bootstrapper.ensureInstalled({
+      version: SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
+      noOnboard: true,
+      noPrompt: true,
+      skipIfCompatibleInstalled: true,
+    });
+    return calls;
+  };
+
   it("resolves a writable prefix inside the service home when not root", () => {
     const original = process.getuid;
     Object.defineProperty(process, "getuid", { value: () => 1001, configurable: true });
@@ -812,6 +854,48 @@ describe("openclaw install prefix under an unprivileged service user", () => {
       expect(
         (installCall?.options?.env as Record<string, string> | undefined)?.npm_config_prefix,
       ).toBe("/var/lib/sovereign-node/.npm-global");
+    });
+  });
+
+  // This branch only ever runs unprivileged (the prefix is resolved to
+  // undefined as root), yet it used to hand the spawn `HOME=/root`. npm reads
+  // its cache, its userconfig and its default prefix from HOME, so the service
+  // user was pointed at a directory it cannot read.
+  it("runs the direct npm fallback with the service HOME, not root's", async () => {
+    const originalHome = process.env.HOME;
+    process.env.HOME = "/root";
+    try {
+      await withUid(1001, async () => {
+        const calls = await runDirectNpmFallback("/var/lib/sovereign-node");
+        const installCall = calls.find(
+          (call) =>
+            call.command === "npm" && call.args?.[0] === "install" && call.args?.[1] === "-g",
+        );
+        const env = installCall?.options?.env as Record<string, string> | undefined;
+        expect(env?.HOME).toBe("/var/lib/sovereign-node");
+        expect(env?.HOME).not.toBe("/root");
+        // The cache must follow HOME, or npm writes beside root's cache.
+        expect(env?.NPM_CONFIG_CACHE).toBe("/var/lib/sovereign-node/.npm");
+      });
+    } finally {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+    }
+  });
+
+  it("leaves HOME inherited for a root direct npm fallback", async () => {
+    await withUid(0, async () => {
+      const calls = await runDirectNpmFallback("/var/lib/sovereign-node");
+      const installCall = calls.find(
+        (call) => call.command === "npm" && call.args?.[0] === "install" && call.args?.[1] === "-g",
+      );
+      const env = installCall?.options?.env as Record<string, string> | undefined;
+      // As root the ambient HOME is already correct; the service home must not
+      // be forced in, or root installs move to an unexpected tree.
+      expect(env?.HOME).toBe(process.env.HOME ?? "/root");
     });
   });
 

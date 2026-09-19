@@ -203,6 +203,104 @@ describe("real-service-lobster", () => {
     expect(env.npm_config_prefix).toBe(join(process.env.HOME ?? "", ".npm-global"));
   });
 
+  // The regression this file exists to pin: a stale install from an earlier
+  // pin still answers the commands probe correctly, because the command
+  // surface rarely changes between releases. Accepting that as proof of the
+  // version let the wrong build run indefinitely.
+  it("reinstalls a stale wrong version even when every required command is present", async () => {
+    const { runner, calls } = buildExecRunner([
+      // Command probe succeeds and lists exactly what is required...
+      successResult({ stdout: '["clawd.invoke"]' }),
+      // ...but the installed version is an older pin, not the requested one.
+      successResult({
+        stdout: JSON.stringify({
+          dependencies: { "@clawdbot/lobster": { version: "2026.1.10" } },
+        }),
+      }),
+      successResult({ stdout: "" }), // npm install
+      successResult({ stdout: '["clawd.invoke"]' }), // re-probe lobster
+      successResult({
+        stdout: JSON.stringify({
+          dependencies: { "@clawdbot/lobster": { version: "2026.1.24" } },
+        }),
+      }),
+    ]);
+
+    await expect(
+      ensureLobsterCliInstalled({
+        execRunner: runner,
+        logger: noopLogger,
+        packageName: "@clawdbot/lobster",
+        version: "2026.1.24",
+        installTimeoutMs: 60_000,
+        probeTimeoutMs: 5_000,
+        requiredCommands: ["clawd.invoke"],
+      }),
+    ).resolves.toBeUndefined();
+
+    // A commands-only match must NOT satisfy a version pin: the install runs.
+    const installCall = calls[2];
+    if (!installCall) throw new Error("expected the stale version to be reinstalled");
+    expect(installCall.command).toBe("npm");
+    expect(installCall.args).toEqual(["install", "-g", "@clawdbot/lobster@2026.1.24"]);
+  });
+
+  // The other direction: an unverifiable version must not become a false
+  // alarm. npm list is unavailable/unparseable here, so the version is null
+  // rather than wrong, and the commands probe is the only positive signal
+  // available. Reinstalling on every status poll would be the regression.
+  it("accepts a working CLI whose version cannot be determined at all", async () => {
+    const { runner, calls } = buildExecRunner([
+      successResult({ stdout: '["clawd.invoke"]' }),
+      successResult({ stdout: "not json at all" }),
+    ]);
+
+    await expect(
+      ensureLobsterCliInstalled({
+        execRunner: runner,
+        logger: noopLogger,
+        packageName: "@clawdbot/lobster",
+        version: "2026.1.24",
+        installTimeoutMs: 60_000,
+        probeTimeoutMs: 5_000,
+        requiredCommands: ["clawd.invoke"],
+      }),
+    ).resolves.toBeUndefined();
+
+    // Probe only: no install attempted.
+    expect(calls).toHaveLength(2);
+  });
+
+  it("reinstalls when the version is unknown and the required commands are missing", async () => {
+    const { runner, calls } = buildExecRunner([
+      successResult({ stdout: '["other.command"]' }),
+      successResult({ stdout: "not json at all" }),
+      successResult({ stdout: "" }), // npm install
+      successResult({ stdout: '["clawd.invoke"]' }),
+      successResult({
+        stdout: JSON.stringify({
+          dependencies: { "@clawdbot/lobster": { version: "2026.1.24" } },
+        }),
+      }),
+    ]);
+
+    await expect(
+      ensureLobsterCliInstalled({
+        execRunner: runner,
+        logger: noopLogger,
+        packageName: "@clawdbot/lobster",
+        version: "2026.1.24",
+        installTimeoutMs: 60_000,
+        probeTimeoutMs: 5_000,
+        requiredCommands: ["clawd.invoke"],
+      }),
+    ).resolves.toBeUndefined();
+
+    const installCall = calls[2];
+    if (!installCall) throw new Error("expected an install call");
+    expect(installCall.args).toEqual(["install", "-g", "@clawdbot/lobster@2026.1.24"]);
+  });
+
   it("throws LOBSTER_INSTALL_FAILED with stderr details when npm install fails", async () => {
     const { runner } = buildExecRunner([
       successResult({ exitCode: 1 }), // probe lobster fails -> detected null
