@@ -3,7 +3,7 @@ import { access } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 
 import type { Logger } from "../logging/logger.js";
-import type { ExecResult, ExecRunner } from "../system/exec.js";
+import { type ExecResult, type ExecRunner, PRIVILEGE_DROP_SPAWN_CWD } from "../system/exec.js";
 
 const OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS = 90_000;
 // 20 × 90s was pathological when combined with the 45-minute CI job budget:
@@ -375,6 +375,10 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
       ],
       options: {
         timeout: OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS,
+        // Privilege drop: see PRIVILEGE_DROP_SPAWN_CWD. The runner's default
+        // is a no-op for a root parent, but the child here is unprivileged
+        // and inherits whatever cwd the installer was started in.
+        cwd: PRIVILEGE_DROP_SPAWN_CWD,
       },
     });
   }

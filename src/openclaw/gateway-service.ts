@@ -3,7 +3,7 @@ import { access } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 
 import type { Logger } from "../logging/logger.js";
-import type { ExecResult, ExecRunner } from "../system/exec.js";
+import { type ExecResult, type ExecRunner, PRIVILEGE_DROP_SPAWN_CWD } from "../system/exec.js";
 
 const OPENCLAW_GATEWAY_COMMAND_TIMEOUT_MS = 120_000;
 const MANAGED_OPENCLAW_ENV_KEYS = [
@@ -94,6 +94,11 @@ export class ShellOpenClawGatewayServiceManager implements OpenClawGatewayServic
       ],
       options: {
         timeout: OPENCLAW_GATEWAY_COMMAND_TIMEOUT_MS,
+        // This drops to the fallback user, so the runner's own default cannot
+        // help: the parent is root (which traverses anything) while the child
+        // is not, and sudo preserves the caller's cwd rather than moving to
+        // the target user's home.
+        cwd: PRIVILEGE_DROP_SPAWN_CWD,
       },
     });
     if (retry.exitCode === 0) {

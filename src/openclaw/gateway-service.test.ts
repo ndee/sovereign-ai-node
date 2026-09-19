@@ -131,6 +131,10 @@ describe("ShellOpenClawGatewayServiceManager", () => {
         ],
         options: {
           timeout: 120000,
+          // Privilege drop: the child runs unprivileged while the parent is
+          // root, so the runner's own cwd default cannot protect it and the
+          // drop site must pin a traversable cwd itself.
+          cwd: "/",
         },
       });
     } finally {

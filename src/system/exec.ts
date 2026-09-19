@@ -35,6 +35,25 @@ export const resolveTraversableSpawnCwd = (): string | undefined => {
   return envHome !== undefined && envHome.length > 0 ? envHome : "/";
 };
 
+/**
+ * The cwd for a spawn that drops privilege (`sudo -u` / `runuser -u`).
+ *
+ * The runner's own default cannot help here: the *parent* is root, so
+ * `resolveTraversableSpawnCwd` correctly returns undefined (root traverses
+ * anything), yet the child runs as an unprivileged user and inherits the
+ * root cwd anyway. `sudo` and `runuser` both preserve the caller's cwd rather
+ * than moving to the target user's home, so a drop performed from `/root`
+ * hands the child a directory it cannot traverse.
+ *
+ * That makes this the same defect one level down, and it is why it must be
+ * named explicitly at the drop site instead of relying on the default.
+ *
+ * `/` is world-traversable on every supported system and is a safe place for
+ * a privilege-dropped helper to start; callers needing a specific directory
+ * still pass their own `cwd`.
+ */
+export const PRIVILEGE_DROP_SPAWN_CWD = "/";
+
 export type ExecInput = {
   command: string;
   args?: string[];
