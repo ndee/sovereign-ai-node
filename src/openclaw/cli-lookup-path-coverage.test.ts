@@ -80,8 +80,7 @@ const BARE_NAME_SPAWN_PATTERNS: { label: string; pattern: RegExp }[] = [
 ];
 
 /** Line number (1-based) of a character offset. */
-const lineOf = (source: string, index: number): number =>
-  source.slice(0, index).split("\n").length;
+const lineOf = (source: string, index: number): number => source.slice(0, index).split("\n").length;
 
 /**
  * The enclosing function/method body for a spawn site, used as the scope in
@@ -138,7 +137,8 @@ const enclosingScope = (source: string, index: number): string => {
 };
 
 const RESOLVES_LOOKUP_PATH = /resolveOpenClaw(?:Spawn)?LookupPath\s*\(/;
-const PASSES_LOOKUP_PATH_AS_ENV = /PATH:\s*[\s\S]{0,200}?resolveOpenClaw(?:Spawn)?LookupPath|PATH:\s*\w*[lL]ookupPath/;
+const PASSES_LOOKUP_PATH_AS_ENV =
+  /PATH:\s*[\s\S]{0,200}?resolveOpenClaw(?:Spawn)?LookupPath|PATH:\s*\w*[lL]ookupPath/;
 
 describe("OpenClaw CLI lookup PATH coverage across src/", () => {
   it("resolves a lookup PATH at every bare-name OpenClaw CLI spawn site", async () => {

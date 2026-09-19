@@ -8218,6 +8218,17 @@ export default function (api) {
     }
 
     const openclawEnv = command === "openclaw" ? await this.resolveManagedOpenClawEnv() : null;
+    // An unprivileged install cannot write npm's root-owned global prefix, so
+    // the CLI lands in `<serviceHome>/.npm-global/bin` (#254), which is NOT on
+    // the ambient PATH. Handing the spawn a bare copy of `process.env.PATH`
+    // therefore resolves `openclaw` to nothing and dies ENOENT while the
+    // binary sits on disk. Resolve through the shared helper so this file
+    // agrees with the gateway and managed-agent spawns about where the CLI
+    // lives, rather than hardcoding a fourth copy of the prefix.
+    const openclawLookupPath =
+      command === "openclaw"
+        ? resolveOpenClawSpawnLookupPath(this.paths.openclawServiceHome)
+        : undefined;
     const openclawServiceUser =
       command === "openclaw" ? await this.resolveManagedOpenClawServiceUser() : null;
     const shouldRunOpenClawAsServiceUser =
@@ -8258,19 +8269,12 @@ export default function (api) {
                 env: {
                   CI: "1",
                   ...(openclawEnv ?? {}),
-                  // An unprivileged install cannot write npm's root-owned
-                  // global prefix, so the CLI lands in
-                  // `<serviceHome>/.npm-global/bin` (#254), which is NOT on
-                  // the ambient PATH. Handing the spawn a bare copy of
-                  // `process.env.PATH` therefore resolves `openclaw` to
-                  // nothing and dies ENOENT while the binary sits on disk.
-                  // Resolve through the shared helper so this file agrees
-                  // with the gateway and managed-agent spawns about where
-                  // the CLI lives, rather than hardcoding a fourth copy.
-                  PATH:
-                    resolveOpenClawSpawnLookupPath(this.paths.openclawServiceHome) ??
-                    process.env.PATH ??
-                    "",
+                  // `undefined` means the ambient PATH already suffices (a
+                  // root install keeps npm's default prefix), so omit the key
+                  // and let the spawn inherit it — the same shape the gateway
+                  // and managed-agent spawns use, rather than handing the
+                  // child a redundant copy.
+                  ...(openclawLookupPath === undefined ? {} : { PATH: openclawLookupPath }),
                 },
               }
             : {}),
