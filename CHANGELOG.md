@@ -9,6 +9,13 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 From this point forward, GitHub Release notes are auto-generated from commit history
 by the `.github/workflows/release.yml` workflow.
 
+## [2.5.8](https://github.com/ndee/sovereign-ai-node/compare/v2.5.7...v2.5.8) (2026-09-19)
+
+
+### Bug Fixes
+
+* **openclaw:** resolve CLI spawns on the npm-prefix lookup PATH ([#270](https://github.com/ndee/sovereign-ai-node/issues/270)) ([9535f5d](https://github.com/ndee/sovereign-ai-node/commit/9535f5d91928ac75340f21f210e96407f35adcce))
+
 ## [2.5.7](https://github.com/ndee/sovereign-ai-node/compare/v2.5.6...v2.5.7) (2026-09-19)
 
 
