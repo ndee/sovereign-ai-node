@@ -4,11 +4,7 @@ import { delimiter, join } from "node:path";
 
 import type { Logger } from "../logging/logger.js";
 import { type ExecResult, type ExecRunner, PRIVILEGE_DROP_SPAWN_CWD } from "../system/exec.js";
-import {
-  isRetryableExecFailure,
-  resolveOpenClawLookupPath,
-  resolveOpenClawNpmPrefix,
-} from "./bootstrap.js";
+import { isRetryableExecFailure, resolveOpenClawSpawnLookupPath } from "./bootstrap.js";
 
 const OPENCLAW_GATEWAY_COMMAND_TIMEOUT_MS = 120_000;
 const MANAGED_OPENCLAW_ENV_KEYS = [
@@ -42,9 +38,13 @@ export class ShellOpenClawGatewayServiceManager implements OpenClawGatewayServic
    * the inherited `process.env.PATH`. Resolving it here — with the same
    * helpers the bootstrapper uses — keeps the place the install writes to and
    * the place the spawn looks in a single definition.
+   *
+   * Returns undefined when there is nothing to add (a root install keeps npm's
+   * default prefix), so the spawn simply inherits the ambient PATH rather than
+   * being handed a redundant copy of it.
    */
   private resolveLookupPath(): string | undefined {
-    return resolveOpenClawLookupPath(resolveOpenClawNpmPrefix(this.serviceHome));
+    return resolveOpenClawSpawnLookupPath(this.serviceHome);
   }
 
   async install(options?: GatewayInstallOptions): Promise<void> {
@@ -93,7 +93,7 @@ export class ShellOpenClawGatewayServiceManager implements OpenClawGatewayServic
       return primary;
     }
 
-    const sudoGatewayCommand = (await resolveExecutablePath("openclaw", lookupPath)) ?? "openclaw";
+    const sudoGatewayCommand = (await resolveExecutablePath("openclaw", lookupPath ?? process.env.PATH)) ?? "openclaw";
     const sudoGatewayEnv = [
       "CI=1",
       ...(lookupPath === undefined ? [] : [`PATH=${lookupPath}`]),

@@ -4,7 +4,7 @@ import { delimiter, join } from "node:path";
 
 import type { Logger } from "../logging/logger.js";
 import { type ExecResult, type ExecRunner, PRIVILEGE_DROP_SPAWN_CWD } from "../system/exec.js";
-import { resolveOpenClawLookupPath, resolveOpenClawNpmPrefix } from "./bootstrap.js";
+import { resolveOpenClawSpawnLookupPath } from "./bootstrap.js";
 
 const OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS = 90_000;
 // 20 × 90s was pathological when combined with the 45-minute CI job budget:
@@ -78,10 +78,11 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
    * An unprivileged install puts the CLI in `<npmPrefix>/bin`, which is NOT on
    * the inherited `process.env.PATH`. Resolving it with the same helpers the
    * bootstrapper uses keeps the place the install writes to and the place the
-   * spawn looks in a single definition.
+   * spawn looks in a single definition. Undefined means "inherit": a root
+   * install keeps npm's default prefix and needs nothing prepended.
    */
   private resolveLookupPath(): string | undefined {
-    return resolveOpenClawLookupPath(resolveOpenClawNpmPrefix(this.serviceHome));
+    return resolveOpenClawSpawnLookupPath(this.serviceHome);
   }
 
   async register(input: ManagedAgentRegistrationInput): Promise<ManagedAgentRegistrationResult> {
@@ -370,7 +371,7 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
     preferredUser: PreferredManagedOpenClawUser,
   ): Promise<ExecResult> {
     const lookupPath = this.resolveLookupPath();
-    const sudoGatewayCommand = (await resolveExecutablePath("openclaw", lookupPath)) ?? "openclaw";
+    const sudoGatewayCommand = (await resolveExecutablePath("openclaw", lookupPath ?? process.env.PATH)) ?? "openclaw";
     const pathEnvArg = lookupPath === undefined ? [] : [`PATH=${lookupPath}`];
     const sudoGatewayEnv =
       preferredUser.mode === "sudo-user-bus"

@@ -6,10 +6,12 @@ import { describe, expect, it } from "vitest";
 
 import { createLogger } from "../logging/logger.js";
 import type { ExecInput, ExecResult, ExecRunner } from "../system/exec.js";
+import { resolveOpenClawSpawnLookupPath } from "./bootstrap.js";
 import {
   isSystemdBusUnavailableMessage,
   ShellOpenClawGatewayServiceManager,
 } from "./gateway-service.js";
+
 
 describe("ShellOpenClawGatewayServiceManager", () => {
   it("runs openclaw gateway install with optional --force", async () => {
@@ -118,6 +120,11 @@ describe("ShellOpenClawGatewayServiceManager", () => {
           "--",
           "/usr/bin/env",
           "CI=1",
+          // An unprivileged install puts the CLI in <npmPrefix>/bin, so the
+          // privilege-dropped child is handed a PATH that can actually find it.
+          ...(resolveOpenClawSpawnLookupPath(undefined) === undefined
+            ? []
+            : [`PATH=${resolveOpenClawSpawnLookupPath(undefined)}`]),
           "XDG_RUNTIME_DIR=/run/user/1000",
           "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
           "OPENCLAW_HOME=/var/lib/sovereign-node/openclaw-home/.openclaw",

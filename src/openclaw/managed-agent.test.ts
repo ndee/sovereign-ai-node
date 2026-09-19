@@ -2,7 +2,18 @@ import { describe, expect, it } from "vitest";
 
 import { createLogger } from "../logging/logger.js";
 import type { ExecInput, ExecResult, ExecRunner } from "../system/exec.js";
+import { resolveOpenClawSpawnLookupPath } from "./bootstrap.js";
 import { ShellOpenClawManagedAgentRegistrar } from "./managed-agent.js";
+
+/**
+ * The PATH a privilege-dropped OpenClaw spawn carries.
+ *
+ * The registrar prepends `<npmPrefix>/bin` so the dropped child can find a CLI
+ * that an unprivileged install placed there. Derived from the same helpers the
+ * production code uses rather than hardcoded, so the expectation tracks the
+ * behaviour instead of freezing one machine's environment.
+ */
+const sudoLookupPath = resolveOpenClawSpawnLookupPath(undefined);
 
 describe("ShellOpenClawManagedAgentRegistrar", () => {
   it("registers agent and cron when commands succeed", async () => {
@@ -361,7 +372,7 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
           }
           if (
             serialized.startsWith(
-              `sudo -u runner -- /usr/bin/env CI=1 XDG_RUNTIME_DIR=/run/user/1001 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus OPENCLAW_HOME=/var/lib/sovereign-node/openclaw-home/.openclaw OPENCLAW_CONFIG=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 OPENCLAW_CONFIG_PATH=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 SOVEREIGN_NODE_CONFIG=/etc/sovereign-node/config.json5 ${process.execPath} `,
+              `sudo -u runner -- /usr/bin/env CI=1 PATH=${sudoLookupPath} XDG_RUNTIME_DIR=/run/user/1001 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus OPENCLAW_HOME=/var/lib/sovereign-node/openclaw-home/.openclaw OPENCLAW_CONFIG=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 OPENCLAW_CONFIG_PATH=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 SOVEREIGN_NODE_CONFIG=/etc/sovereign-node/config.json5 ${process.execPath} `,
             ) &&
             serialized.endsWith(" cron list --json")
           ) {
@@ -397,7 +408,7 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
         calls.some(
           (entry) =>
             entry.startsWith(
-              "sudo -u runner -- /usr/bin/env CI=1 XDG_RUNTIME_DIR=/run/user/1001 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus OPENCLAW_HOME=/var/lib/sovereign-node/openclaw-home/.openclaw OPENCLAW_CONFIG=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 OPENCLAW_CONFIG_PATH=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 SOVEREIGN_NODE_CONFIG=/etc/sovereign-node/config.json5",
+              `sudo -u runner -- /usr/bin/env CI=1 PATH=${sudoLookupPath} XDG_RUNTIME_DIR=/run/user/1001 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus OPENCLAW_HOME=/var/lib/sovereign-node/openclaw-home/.openclaw OPENCLAW_CONFIG=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 OPENCLAW_CONFIG_PATH=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 SOVEREIGN_NODE_CONFIG=/etc/sovereign-node/config.json5`,
             ) && entry.endsWith(" cron list --json"),
         ),
       ).toBe(true);
@@ -476,7 +487,7 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
           }
           if (
             serialized.startsWith(
-              `sudo -u runner -- /usr/bin/env CI=1 XDG_RUNTIME_DIR=/run/user/1001 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus OPENCLAW_HOME=/var/lib/sovereign-node/openclaw-home/.openclaw OPENCLAW_CONFIG=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 OPENCLAW_CONFIG_PATH=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 SOVEREIGN_NODE_CONFIG=/etc/sovereign-node/config.json5 ${process.execPath} `,
+              `sudo -u runner -- /usr/bin/env CI=1 PATH=${sudoLookupPath} XDG_RUNTIME_DIR=/run/user/1001 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus OPENCLAW_HOME=/var/lib/sovereign-node/openclaw-home/.openclaw OPENCLAW_CONFIG=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 OPENCLAW_CONFIG_PATH=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 SOVEREIGN_NODE_CONFIG=/etc/sovereign-node/config.json5 ${process.execPath} `,
             )
           ) {
             return {
@@ -620,7 +631,7 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
       expect(calls).not.toContain("openclaw cron list --json");
       expect(
         calls.some((entry) =>
-          entry.startsWith("sudo -u sovereign-node -- /usr/bin/env CI=1 OPENCLAW_HOME="),
+          entry.startsWith(`sudo -u sovereign-node -- /usr/bin/env CI=1 OPENCLAW_HOME=`),
         ),
       ).toBe(true);
     } finally {
