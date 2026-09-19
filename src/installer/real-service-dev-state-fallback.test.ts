@@ -102,8 +102,47 @@ describe("devStateFallbackDir", () => {
 });
 
 describe("privileged state dirs do not silently relocate", () => {
+  // These tests never get far enough to use any collaborator: resolving the
+  // state directory is the first thing that happens and the first thing that
+  // fails. The stubs exist only to satisfy the required deps shape.
   const buildService = (paths: SovereignPaths): RealInstallerService =>
-    new RealInstallerService(createLogger(), paths, {});
+    new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => null,
+        ensureInstalled: async () => {
+          throw new Error("not used");
+        },
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      preflightChecker: {
+        run: async () => {
+          throw new Error("not used");
+        },
+      },
+      imapTester: {
+        test: async () => {
+          throw new Error("not used");
+        },
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => {
+          throw new Error("not used");
+        },
+      },
+    });
 
   it("fails loudly when the install jobs dir is unwritable outside a scaffold checkout", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-jobs-prod-"));
