@@ -94,16 +94,19 @@ describe("ExecaExecRunner spawn cwd (real spawns)", () => {
     expect(result.stdout.trim().endsWith(sandbox.replace(/^\/private/, ""))).toBe(true);
   });
 
-  it.skipIf(runningAsRoot)("runs unprivileged spawns from a directory the user can traverse", async () => {
-    const runner = new ExecaExecRunner();
-    const result = await runner.run({ command: "pwd" });
-    expect(result.exitCode).toBe(0);
-    const landed = result.stdout.trim();
-    expect(landed.length).toBeGreaterThan(0);
-    // Whatever it chose, the user must be able to traverse it.
-    const { access, constants } = await import("node:fs/promises");
-    await expect(access(landed, constants.X_OK)).resolves.toBeUndefined();
-  });
+  it.skipIf(runningAsRoot)(
+    "runs unprivileged spawns from a directory the user can traverse",
+    async () => {
+      const runner = new ExecaExecRunner();
+      const result = await runner.run({ command: "pwd" });
+      expect(result.exitCode).toBe(0);
+      const landed = result.stdout.trim();
+      expect(landed.length).toBeGreaterThan(0);
+      // Whatever it chose, the user must be able to traverse it.
+      const { access, constants } = await import("node:fs/promises");
+      await expect(access(landed, constants.X_OK)).resolves.toBeUndefined();
+    },
+  );
 
   it("keeps the runner's contract stable regardless of privilege", () => {
     // Guard against the defaulting being deleted wholesale: the helper must

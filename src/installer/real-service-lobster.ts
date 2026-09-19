@@ -172,9 +172,7 @@ export const ensureLobsterCliInstalled = async (input: {
         ...(installResult.failureReason === undefined
           ? {}
           : { failureReason: installResult.failureReason }),
-        ...(installResult.errorCode === undefined
-          ? {}
-          : { errorCode: installResult.errorCode }),
+        ...(installResult.errorCode === undefined ? {} : { errorCode: installResult.errorCode }),
         stdout: truncateText(installResult.stdout, 2000),
         stderr: truncateText(installResult.stderr, 4000),
       },

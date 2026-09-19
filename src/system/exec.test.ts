@@ -8,6 +8,20 @@ vi.mock("execa", () => ({
 
 const { ExecaExecRunner } = await import("./exec.js");
 
+// `process.getuid` is optional in the Node typings (it does not exist on
+// Windows), which leaves the spy typed as `never`. Narrow it once here so
+// `mockReturnValue` stays callable at each use.
+type GetuidSpy = {
+  mockReturnValue: (uid: number) => void;
+  mockRestore: () => void;
+};
+
+const mockGetuid = (uid: number): GetuidSpy => {
+  const spy = vi.spyOn(process, "getuid" as never) as unknown as GetuidSpy;
+  spy.mockReturnValue(uid);
+  return spy;
+};
+
 describe("ExecaExecRunner", () => {
   it("defaults stdin to 'ignore' so subprocesses cannot block on inherited SSH/CI stdin", async () => {
     execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: "ok", stderr: "" });
@@ -222,7 +236,7 @@ describe("ExecaExecRunner", () => {
   // different call sites; defaulting here covers the ones not yet written.
   describe("traversable spawn cwd", () => {
     it("defaults cwd for every spawn when running unprivileged", async () => {
-      const getuid = vi.spyOn(process, "getuid").mockReturnValue(1000);
+      const getuid = mockGetuid(1000);
       vi.stubEnv("HOME", "/home/sovereign-node");
       execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
       const runner = new ExecaExecRunner();
@@ -236,7 +250,7 @@ describe("ExecaExecRunner", () => {
     });
 
     it("leaves cwd inherited when running as root, which traverses 0700 anyway", async () => {
-      const getuid = vi.spyOn(process, "getuid").mockReturnValue(0);
+      const getuid = mockGetuid(0);
       execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
       const runner = new ExecaExecRunner();
 
@@ -248,7 +262,7 @@ describe("ExecaExecRunner", () => {
     });
 
     it("falls back to / when unprivileged with no usable HOME", async () => {
-      const getuid = vi.spyOn(process, "getuid").mockReturnValue(1000);
+      const getuid = mockGetuid(1000);
       vi.stubEnv("HOME", "   ");
       execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
       const runner = new ExecaExecRunner();
@@ -262,7 +276,7 @@ describe("ExecaExecRunner", () => {
     });
 
     it("never overrides an explicit caller cwd, so compose project dirs survive", async () => {
-      const getuid = vi.spyOn(process, "getuid").mockReturnValue(1000);
+      const getuid = mockGetuid(1000);
       vi.stubEnv("HOME", "/home/sovereign-node");
       execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
       const runner = new ExecaExecRunner();
@@ -280,7 +294,7 @@ describe("ExecaExecRunner", () => {
     });
 
     it("honours an explicit undefined cwd as a deliberate request to inherit", async () => {
-      const getuid = vi.spyOn(process, "getuid").mockReturnValue(1000);
+      const getuid = mockGetuid(1000);
       vi.stubEnv("HOME", "/home/sovereign-node");
       execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" });
       const runner = new ExecaExecRunner();
@@ -297,7 +311,7 @@ describe("ExecaExecRunner", () => {
   describe("resolveTraversableSpawnCwd", () => {
     it("returns undefined for root and a traversable directory otherwise", async () => {
       const { resolveTraversableSpawnCwd } = await import("./exec.js");
-      const getuid = vi.spyOn(process, "getuid").mockReturnValue(0);
+      const getuid = mockGetuid(0);
       expect(resolveTraversableSpawnCwd()).toBeUndefined();
       getuid.mockReturnValue(1000);
       vi.stubEnv("HOME", "/home/sovereign-node");
@@ -308,7 +322,7 @@ describe("ExecaExecRunner", () => {
 
     it("returns / when getuid is unavailable and HOME is unset", async () => {
       const { resolveTraversableSpawnCwd } = await import("./exec.js");
-      const getuid = vi.spyOn(process, "getuid").mockReturnValue(1000);
+      const getuid = mockGetuid(1000);
       vi.stubEnv("HOME", "");
       expect(resolveTraversableSpawnCwd()).toBe("/");
       getuid.mockRestore();
