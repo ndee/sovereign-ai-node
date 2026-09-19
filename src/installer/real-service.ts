@@ -319,6 +319,13 @@ type RelayEnrollmentResult = RelayEnrollmentData;
 type CompiledHostPlan = {
   resources: CompiledHostResource[];
   botStatus: CompiledBotStatus[];
+  /**
+   * Ids of selected bot packages that declare systemd units in their manifest
+   * but compiled none, because no agent in the profile matched the package.
+   * Empty on a healthy plan AND on a node that legitimately declares no units
+   * — the two cases an empty `resources` list cannot tell apart on its own.
+   */
+  unmatchedSystemdBots?: string[];
 };
 
 type HostResourceContext = {
@@ -581,6 +588,11 @@ export class RealInstallerService implements InstallerService {
   // transition instead of throwing TEMPLATE_PIN_MISMATCH. Never set by any
   // other entry point, so every other caller keeps the hard refusal.
   private reconcileTransitionContext: ReconcileTransitionContext | null = null;
+
+  // Bot packages from the most recent compile that declare systemd units but
+  // matched no agent, so compiled nothing. Read by the systemd apply step to
+  // tell an expected-empty plan from a silently-lost one (issue #224).
+  private lastUnmatchedSystemdBots: string[] = [];
 
   private readonly releaseAuthorizationOwnerUids: readonly number[];
 
@@ -4204,6 +4216,7 @@ export class RealInstallerService implements InstallerService {
   ): Promise<CompiledHostPlan> {
     const resources: CompiledHostResource[] = [];
     const botStatus: CompiledBotStatus[] = [];
+    const unmatchedSystemdBots: string[] = [];
     const serviceNpmBinDir = await this.resolveServiceNpmBinDir(runtimeConfig);
 
     for (const botPackage of botPackages) {
@@ -4211,6 +4224,20 @@ export class RealInstallerService implements InstallerService {
         (entry) => entry.botId === botPackage.manifest.id || entry.id === botPackage.manifest.id,
       );
       if (agents.length === 0) {
+        // The bot package was selected for this node (its id or templateRef
+        // matched an agent in refreshRuntimeHostResources) yet no agent
+        // matches here, so none of its host resources compile. When that bot
+        // declares systemd units, the result is an install that looks healthy
+        // and is never scheduled — the issue #224 shape. Record it so callers
+        // can tell "this node legitimately declares no units" apart from
+        // "units were declared and silently vanished".
+        if (
+          botPackage.manifest.hostResources.some(
+            (resource) => resource.kind === "systemdService" || resource.kind === "systemdTimer",
+          )
+        ) {
+          unmatchedSystemdBots.push(botPackage.manifest.id);
+        }
         continue;
       }
       for (const agent of agents) {
@@ -4238,7 +4265,11 @@ export class RealInstallerService implements InstallerService {
       }
     }
 
-    return { resources, botStatus };
+    return {
+      resources,
+      botStatus,
+      ...(unmatchedSystemdBots.length === 0 ? {} : { unmatchedSystemdBots }),
+    };
   }
 
   private async refreshRuntimeHostResources(runtimeConfig: RuntimeConfig): Promise<void> {
@@ -4250,6 +4281,17 @@ export class RealInstallerService implements InstallerService {
       ),
     );
     const hostPlan = await this.compileHostResourcePlan(runtimeConfig, selectedBotPackages);
+    // A bot that was selected for this node but matched no agent compiles
+    // nothing. Losing that fact here is what makes a zero-unit plan
+    // indistinguishable from a node that declares no units at all, so it is
+    // surfaced loudly and handed to the apply step (issue #224).
+    if (hostPlan.unmatchedSystemdBots !== undefined) {
+      this.logger.warn(
+        { bots: hostPlan.unmatchedSystemdBots },
+        "Bot package declares systemd units but matched no agent; no units were compiled",
+      );
+    }
+    this.lastUnmatchedSystemdBots = hostPlan.unmatchedSystemdBots ?? [];
     runtimeConfig.hostResources = {
       planPath: join(dirname(this.paths.configPath), "host-resources.json"),
       resources: hostPlan.resources,
@@ -6555,13 +6597,24 @@ export default function (api) {
    * `failed` so callers decide whether that is fatal (reconcile and the
    * install step treat it as a hard error via
    * applyCompiledSystemdResourcesOrThrow).
+   *
+   * `applied: []` is deliberately ambiguous — it is the correct result both
+   * for a node that declares no units at all and for one whose units were all
+   * already converged. `expectedUnits` removes that ambiguity: it is the
+   * number of systemd units the compiled plan actually contained, so a caller
+   * can distinguish "nothing to do" (0) from "units existed and none of them
+   * converged". `lostBots` names packages that declared units but compiled
+   * none at all, which is never legitimate.
    */
   private async applyCompiledSystemdResources(runtimeConfig: RuntimeConfig): Promise<{
     applied: string[];
     failed: Array<{ name: string; reason: string }>;
+    expectedUnits: number;
+    lostBots: string[];
   }> {
     const applied: string[] = [];
     const failed: Array<{ name: string; reason: string }> = [];
+    const lostBots = [...this.lastUnmatchedSystemdBots];
 
     const systemdResources = (runtimeConfig.hostResources?.resources ?? []).filter(
       (
@@ -6569,8 +6622,18 @@ export default function (api) {
       ): resource is Extract<typeof resource, { kind: "systemdService" | "systemdTimer" }> =>
         resource.kind === "systemdService" || resource.kind === "systemdTimer",
     );
+    const expectedUnits = systemdResources.length;
     if (systemdResources.length === 0) {
-      return { applied, failed };
+      // Not an error on its own: a profile may legitimately declare no units.
+      // It IS an error when a selected bot declared units and lost them, and
+      // that is decided by the caller (applyCompiledSystemdResourcesOrThrow).
+      if (lostBots.length > 0) {
+        this.logger.warn(
+          { bots: lostBots },
+          "No bot systemd units compiled even though a selected bot declares them",
+        );
+      }
+      return { applied, failed, expectedUnits, lostBots };
     }
 
     const changedUnits: Array<{
@@ -6622,7 +6685,7 @@ export default function (api) {
     }
 
     if (changedUnits.length === 0) {
-      return { applied, failed };
+      return { applied, failed, expectedUnits, lostBots };
     }
 
     const reloadResult = await this.runSystemctlElevated(["daemon-reload"]);
@@ -6631,7 +6694,7 @@ export default function (api) {
       for (const unit of changedUnits) {
         failed.push({ name: unit.name, reason: "systemctl daemon-reload failed" });
       }
-      return { applied, failed };
+      return { applied, failed, expectedUnits, lostBots };
     }
 
     for (const unit of changedUnits) {
@@ -6654,7 +6717,7 @@ export default function (api) {
         applied.push(unit.name);
       }
     }
-    return { applied, failed };
+    return { applied, failed, expectedUnits, lostBots };
   }
 
   /**
@@ -6664,6 +6727,19 @@ export default function (api) {
    * update-path reconcile. A bot whose manifest declares a scan timer and
    * whose host cannot realize it is not a working install (issue #224 — a
    * device passed every check and never scanned mail).
+   *
+   * Two distinct failures are fatal here, and only these two:
+   *
+   *  1. A compiled unit that could not be converged (`failed`).
+   *  2. A selected bot that declares systemd units in its manifest and
+   *     compiled none (`lostBots`) — the plan was silently empty. Previously
+   *     this returned success having applied nothing, which is exactly the
+   *     #224 shape the OrThrow variant exists to prevent.
+   *
+   * A plan that legitimately contains no systemd units is NOT an error: a
+   * profile may declare none, and throwing on `applied.length === 0` would
+   * break every such install. That case is precisely `expectedUnits === 0`
+   * with an empty `lostBots`, and it returns normally.
    */
   private async applyCompiledSystemdResourcesOrThrow(
     runtimeConfig: RuntimeConfig,
@@ -6677,6 +6753,16 @@ export default function (api) {
           .join(", ")}`,
         retryable: true,
         details: { failed: report.failed, applied: report.applied },
+      };
+    }
+    if (report.lostBots.length > 0) {
+      throw {
+        code: "BOT_SYSTEMD_APPLY_FAILED",
+        message: `bot systemd units were declared but none compiled for: ${report.lostBots.join(", ")}`,
+        // Not retryable: a retry recompiles the same profile and loses the
+        // same units. This needs the agent/bot binding repaired first.
+        retryable: false,
+        details: { lostBots: report.lostBots, expectedUnits: report.expectedUnits },
       };
     }
     return { applied: report.applied };

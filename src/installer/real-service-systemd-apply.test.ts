@@ -320,4 +320,81 @@ describe("reconcileAgentWorkspaces systemd host resource convergence", () => {
       code: "BOT_SYSTEMD_APPLY_FAILED",
     });
   });
+
+  /**
+   * The zero-compiled branch. Distinct from the idempotent case above: there,
+   * units compiled and were already converged (changedUnits.length === 0).
+   * Here NOTHING compiles (systemdResources.length === 0) even though the bot
+   * manifest declares a scan service and timer — the issue #224 shape, where
+   * a device reports a healthy install and never scans mail.
+   *
+   * The profile selects the bot by templateRef (so it survives the package
+   * filter in refreshRuntimeHostResources) while the agent's id/botId match
+   * nothing, so compileHostResourcePlan yields an empty plan.
+   */
+  it("fails the reconcile when a bot declares systemd units but none compile", async () => {
+    mockUid(0);
+    const config = {
+      matrix: {
+        publicBaseUrl: "http://matrix.example.org",
+        adminBaseUrl: "http://127.0.0.1:8008",
+        operator: { userId: "@operator:matrix.example.org" },
+        bot: {
+          localpart: "sovereign-bot",
+          userId: "@sovereign-bot:matrix.example.org",
+          accessTokenSecretRef: "file:/tmp/token",
+        },
+        alertRoom: { roomId: "!alerts:matrix.example.org" },
+      },
+      openclawProfile: {
+        agents: [
+          {
+            // Selected via templateRef, but neither id nor botId matches the
+            // package id "fixture-bot", so no host resource compiles.
+            id: "unrelated-agent",
+            botId: "unrelated-agent",
+            templateRef: "fixture-bot@1.0.0",
+            workspace: workspaceDir,
+          },
+        ],
+      },
+    };
+    await writeFile(paths.configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+
+    const error = await makeService()
+      .reconcileAgentWorkspaces()
+      .catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: "BOT_SYSTEMD_APPLY_FAILED",
+      retryable: false,
+      details: { lostBots: ["fixture-bot"], expectedUnits: 0 },
+    });
+  });
+
+  /**
+   * The regression that would make the fix above dangerous. A profile that
+   * legitimately declares no systemd units at all must still install: an
+   * empty plan is only an error when units were expected. Throwing on
+   * `applied.length === 0` would break every such install.
+   */
+  it("succeeds when the profile legitimately declares no systemd units", async () => {
+    mockUid(0);
+    // A manifest with no host resources: nothing is expected, nothing compiles.
+    const manifest = JSON.parse(fixtureManifest()) as Record<string, unknown>;
+    manifest.hostResources = [];
+    await writeFile(
+      join(catalogDir, "bots", "fixture-bot", "sovereign-bot.json"),
+      `${JSON.stringify(manifest, null, 2)}\n`,
+      "utf8",
+    );
+
+    const calls: ExecCall[] = [];
+    const result = await makeService({ calls }).reconcileAgentWorkspaces();
+
+    expect(result.reconciled).toContain("fixture-bot");
+    expect(result.systemdUnits.applied).toEqual([]);
+    const serialized = calls.map((call) => [call.command, ...call.args].join(" "));
+    expect(serialized).not.toContain("systemctl daemon-reload");
+  });
 });
