@@ -4,7 +4,11 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 
 import type { Logger } from "../logging/logger.js";
-import type { ExecFailureReason, ExecRunner } from "../system/exec.js";
+import {
+  type ExecFailureReason,
+  type ExecRunner,
+  resolveTraversableSpawnCwd,
+} from "../system/exec.js";
 
 const OPENCLAW_DETECT_TIMEOUT_MS = 20_000;
 const OPENCLAW_INSTALL_TIMEOUT_MS = 15 * 60_000;
@@ -152,8 +156,10 @@ export const resolveOpenClawSpawnCwd = (serviceHome?: string): string | undefine
   if (home !== undefined && home.length > 0) {
     return home;
   }
-  const envHome = process.env.HOME?.trim();
-  return envHome !== undefined && envHome.length > 0 ? envHome : "/";
+  // No explicit service home: fall back to the generic traversable cwd the
+  // exec runner would have defaulted to anyway, so there is one definition of
+  // "somewhere this user may legally start" rather than two that can drift.
+  return resolveTraversableSpawnCwd();
 };
 
 export const resolveOpenClawNpmPrefix = (serviceHome?: string): string | undefined => {

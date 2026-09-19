@@ -4067,6 +4067,20 @@ describe("RealInstallerService", () => {
         },
       });
 
+      // When the command is delegated to the service user, the drop must pin
+      // a traversable cwd. The exec runner's default is a no-op here (the
+      // parent is root), while sudo preserves the caller's cwd — so a drop
+      // performed from /root would hand the unprivileged child a directory it
+      // cannot traverse, and the spawn dies EACCES naming an innocent binary.
+      // Only the `sudo -u <user>` privilege drop is in scope: `sudo -n tee` /
+      // `sudo -n systemctl` stay root-to-root and correctly inherit.
+      const delegatedCalls = execCalls.filter(
+        (call) => call.command === "sudo" && (call.args ?? [])[0] === "-u",
+      );
+      for (const call of delegatedCalls) {
+        expect(call.options).toMatchObject({ cwd: "/" });
+      }
+
       const registrationRaw = await readFile(
         join(paths.stateDir, "mail-sentinel", "registration.json"),
         "utf8",

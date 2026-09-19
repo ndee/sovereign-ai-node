@@ -108,7 +108,7 @@ import {
   resolveOpenRouterPrivacy,
 } from "../openclaw/openrouter-routing.js";
 import type { DockerRuntimePreparer } from "../system/docker-runtime.js";
-import type { ExecResult, ExecRunner } from "../system/exec.js";
+import { type ExecResult, type ExecRunner, PRIVILEGE_DROP_SPAWN_CWD } from "../system/exec.js";
 import type { ImapTester } from "../system/imap.js";
 import type {
   BundledMatrixAccountsResult,
@@ -8238,6 +8238,11 @@ export default function (api) {
         args: effectiveArgs,
         options: {
           timeout: options?.timeoutMs ?? INSTALLER_EXEC_TIMEOUT_MS,
+          // Dropping privilege needs the cwd named here: the runner's default
+          // sees a root parent and correctly leaves the cwd alone, but the
+          // child runs unprivileged and `sudo` preserves the caller's cwd, so
+          // a drop from /root would hand it an untraversable directory.
+          ...(shouldRunOpenClawAsServiceUser ? { cwd: PRIVILEGE_DROP_SPAWN_CWD } : {}),
           ...(command === "openclaw"
             ? {
                 env: {

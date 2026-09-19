@@ -1,5 +1,59 @@
 import { execa } from "execa";
 
+const isRunningAsRoot = (): boolean => process.getuid?.() === 0;
+
+/**
+ * Resolve a working directory every spawned child can legally start in.
+ *
+ * A child process inherits the parent's cwd, and the kernel resolves that cwd
+ * against the CHILD's credentials. When the parent was started in a directory
+ * the child's user cannot traverse — `/root` is mode 0700, and a CLI invoked
+ * as `runuser -u <service-user> -- sovereign-node ...` from a root shell
+ * inherits exactly that — the spawn is refused with EACCES before the binary
+ * is ever consulted. The failure names the command (`spawn npm EACCES`), which
+ * reads like npm is unexecutable; it is not, and the same npm runs fine for
+ * the same user from a traversable cwd.
+ *
+ * This only bites when the process is NOT root: root traverses 0700
+ * regardless, which is why an identical step succeeds during a root install
+ * and fails when it is re-entered unprivileged.
+ *
+ * Applied here, in the runner, rather than at each call site: the same defect
+ * has now surfaced at three different call sites in three releases, each fixed
+ * locally only for the next unprotected spawn to fail the same way. Defaulting
+ * centrally makes every present and future call site correct by construction.
+ *
+ * `$HOME` is preferred so a tool's own relative lookups (npm reading `.npmrc`)
+ * land somewhere the running user owns; `/` is the fallback because it is
+ * world-traversable on every supported system.
+ */
+export const resolveTraversableSpawnCwd = (): string | undefined => {
+  if (isRunningAsRoot()) {
+    return undefined;
+  }
+  const envHome = process.env.HOME?.trim();
+  return envHome !== undefined && envHome.length > 0 ? envHome : "/";
+};
+
+/**
+ * The cwd for a spawn that drops privilege (`sudo -u` / `runuser -u`).
+ *
+ * The runner's own default cannot help here: the *parent* is root, so
+ * `resolveTraversableSpawnCwd` correctly returns undefined (root traverses
+ * anything), yet the child runs as an unprivileged user and inherits the
+ * root cwd anyway. `sudo` and `runuser` both preserve the caller's cwd rather
+ * than moving to the target user's home, so a drop performed from `/root`
+ * hands the child a directory it cannot traverse.
+ *
+ * That makes this the same defect one level down, and it is why it must be
+ * named explicitly at the drop site instead of relying on the default.
+ *
+ * `/` is world-traversable on every supported system and is a safe place for
+ * a privilege-dropped helper to start; callers needing a specific directory
+ * still pass their own `cwd`.
+ */
+export const PRIVILEGE_DROP_SPAWN_CWD = "/";
+
 export type ExecInput = {
   command: string;
   args?: string[];
@@ -59,10 +113,19 @@ export class ExecaExecRunner implements ExecRunner {
     // Default stdin to "ignore" so subprocesses cannot inherit an empty
     // SSH/CI stdin and block forever on a read. Callers that genuinely
     // need to pipe input can still override via input.options.stdin.
+    const options = input.options ?? {};
+    // Default the cwd to somewhere the running user can traverse, so an
+    // inherited untraversable cwd cannot refuse the spawn with EACCES (see
+    // resolveTraversableSpawnCwd). An explicit `cwd` from the caller always
+    // wins: sites that must run somewhere specific (docker compose project
+    // directories in backup.ts / matrix.ts) are unaffected, because the
+    // default is only consulted when no `cwd` was supplied at all.
+    const defaultCwd = "cwd" in options ? undefined : resolveTraversableSpawnCwd();
     const subprocess = await execa(input.command, input.args ?? [], {
       reject: false,
       stdin: "ignore",
-      ...(input.options ?? {}),
+      ...(defaultCwd === undefined ? {} : { cwd: defaultCwd }),
+      ...options,
     });
     const command = [input.command, ...(input.args ?? [])].join(" ");
     const stdout = subprocess.stdout ?? "";

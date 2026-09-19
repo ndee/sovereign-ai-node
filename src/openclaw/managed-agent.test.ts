@@ -328,6 +328,7 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
 
   it("retries gateway commands via the sudo user when root cannot reach the gateway", async () => {
     const calls: string[] = [];
+    const sudoCallOptions: Record<string, unknown>[] = [];
     const priorSudoUser = process.env.SUDO_USER;
     const priorSudoUid = process.env.SUDO_UID;
     const priorOpenClawHome = process.env.OPENCLAW_HOME;
@@ -347,6 +348,9 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
         run: async (input): Promise<ExecResult> => {
           const serialized = [input.command, ...(input.args ?? [])].join(" ");
           calls.push(serialized);
+          if (input.command === "sudo") {
+            sudoCallOptions.push(input.options ?? {});
+          }
           if (serialized === "openclaw cron list --json") {
             return {
               command: serialized,
@@ -397,6 +401,14 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
             ) && entry.endsWith(" cron list --json"),
         ),
       ).toBe(true);
+      // Every privilege drop must pin a traversable cwd: the child is
+      // unprivileged while the parent is root, so the exec runner's own
+      // default (a no-op for root) cannot protect it, and sudo preserves the
+      // caller's cwd rather than moving to the target user's home.
+      expect(sudoCallOptions.length).toBeGreaterThan(0);
+      for (const options of sudoCallOptions) {
+        expect(options.cwd).toBe("/");
+      }
     } finally {
       if (priorSudoUser === undefined) {
         delete process.env.SUDO_USER;

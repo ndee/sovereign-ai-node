@@ -225,7 +225,44 @@ describe("real-service-lobster", () => {
     ).rejects.toMatchObject({
       code: "LOBSTER_INSTALL_FAILED",
       message: "npm install for Lobster CLI exited with non-zero status",
+      // A real non-zero exit (npm ran and failed) stays retryable: that is
+      // the network-blip case the retry was written for.
+      retryable: true,
       details: { exitCode: 1, stderr: expect.stringContaining("EACCES") },
+    });
+  });
+
+  // Regression: a spawn that never started is deterministic. Reporting it as
+  // retryable burns the retry budget re-running something that cannot change.
+  it("marks a failed spawn as non-retryable and surfaces the OS error code", async () => {
+    const { runner } = buildExecRunner([
+      successResult({ exitCode: 1 }), // probe lobster fails -> detected null
+      successResult({
+        exitCode: 127,
+        stderr: "Command failed with EACCES: npm install -g '@clawdbot/lobster@2026.1.24'",
+        failureReason: "spawn_failed",
+        errorCode: "EACCES",
+      }),
+    ]);
+
+    await expect(
+      ensureLobsterCliInstalled({
+        execRunner: runner,
+        logger: noopLogger,
+        packageName: "@clawdbot/lobster",
+        version: "2026.1.24",
+        installTimeoutMs: 60_000,
+        probeTimeoutMs: 5_000,
+        requiredCommands: ["clawd.invoke"],
+      }),
+    ).rejects.toMatchObject({
+      code: "LOBSTER_INSTALL_FAILED",
+      retryable: false,
+      details: {
+        exitCode: 127,
+        failureReason: "spawn_failed",
+        errorCode: "EACCES",
+      },
     });
   });
 
