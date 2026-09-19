@@ -145,6 +145,12 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
 
+      # Hosted in a REQUIRED check on purpose: "Smoke Tests" is one of the
+      # contexts the ruleset enforces, so a change that breaks the auto-merge
+      # guard cannot itself be auto-merged.
+      - name: Verify release-PR auto-merge cannot bypass required checks
+        run: bash scripts/release/test-auto-merge-release-pr.sh
+
       - name: CLI --help exits cleanly
         run: pnpm dev:cli --help
 
