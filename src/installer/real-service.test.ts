@@ -10380,6 +10380,12 @@ describe("RealInstallerService", () => {
           error?: { code: string; message: string; retryable: boolean };
         }>;
       };
+      /**
+       * Supply Matrix stubs that actually succeed, so `startInstall` runs for
+       * real and reaches the step that rewrites sovereign-node.json5. The
+       * default stubs throw, which is right for tests that never apply.
+       */
+      applyForReal?: boolean;
     } = {},
   ): Promise<RealInstallerService> =>
     new RealInstallerService(createLogger(), paths, {
@@ -10427,18 +10433,59 @@ describe("RealInstallerService", () => {
       ...(overrides.openrouterKeyValidator === undefined
         ? {}
         : { openrouterKeyValidator: overrides.openrouterKeyValidator }),
-      matrixProvisioner: {
-        provision: async () => {
-          throw new Error("not used");
-        },
-        bootstrapAccounts: async () => {
-          throw new Error("not used");
-        },
-        bootstrapRoom: async () => {
-          throw new Error("not used");
-        },
-        test: async () => ({ ok: true, homeserverUrl: "https://matrix.example.org", checks: [] }),
-      },
+      matrixProvisioner: overrides.applyForReal
+        ? {
+            provision: async (req) => ({
+              projectDir: join(dirname(paths.configPath), "matrix"),
+              composeFilePath: join(dirname(paths.configPath), "matrix", "compose.yaml"),
+              accessMode: "direct",
+              homeserverDomain: req.matrix.homeserverDomain,
+              publicBaseUrl: "http://matrix.example.org",
+              adminBaseUrl: "http://127.0.0.1:8008",
+              federationEnabled: req.matrix.federationEnabled ?? false,
+              tlsMode: "local-dev",
+              passthrough: false,
+            }),
+            bootstrapAccounts: async () => ({
+              operator: {
+                localpart: "operator",
+                userId: "@operator:matrix.example.org",
+                passwordSecretRef: `file:${join(paths.secretsDir, "matrix-operator.password")}`,
+                accessToken: "operator-token",
+              },
+              bot: {
+                localpart: "mail-sentinel",
+                userId: "@mail-sentinel:matrix.example.org",
+                passwordSecretRef: `file:${join(paths.secretsDir, "matrix-operator.password")}`,
+                accessToken: "bot-token",
+              },
+            }),
+            bootstrapRoom: async () => ({
+              roomId: "!alerts:matrix.example.org",
+              roomName: "Sovereign Alerts",
+            }),
+            test: async () => ({
+              ok: true,
+              homeserverUrl: "https://matrix.example.org",
+              checks: [],
+            }),
+          }
+        : {
+            provision: async () => {
+              throw new Error("not used");
+            },
+            bootstrapAccounts: async () => {
+              throw new Error("not used");
+            },
+            bootstrapRoom: async () => {
+              throw new Error("not used");
+            },
+            test: async () => ({
+              ok: true,
+              homeserverUrl: "https://matrix.example.org",
+              checks: [],
+            }),
+          },
     });
 
   const buildReconfigurePaths = (tempRoot: string): SovereignPaths => ({
@@ -10453,7 +10500,10 @@ describe("RealInstallerService", () => {
   });
 
   // Saved request with a migrated mail-sentinel instance so no migration is pending.
-  const buildReconfigureRequest = (): InstallRequest => {
+  // Pass `paths` when the test actually runs the install job: the default
+  // workspace points at the real /var/lib/sovereign-node, which an unprivileged
+  // test run cannot create.
+  const buildReconfigureRequest = (paths?: SovereignPaths): InstallRequest => {
     const request = buildInstallRequest();
     request.bots = {
       ...request.bots,
@@ -10462,7 +10512,10 @@ describe("RealInstallerService", () => {
         {
           id: "mail-sentinel",
           packageId: "mail-sentinel",
-          workspace: "/var/lib/sovereign-node/mail-sentinel/workspace",
+          workspace:
+            paths === undefined
+              ? "/var/lib/sovereign-node/mail-sentinel/workspace"
+              : join(paths.stateDir, "mail-sentinel", "workspace"),
           config: { imapConfigured: true, imapHost: "imap.example.org" },
           secretRefs: { imapPassword: "file:/tmp/imap-secret" },
           matrix: { allowedUsers: ["@operator:matrix.example.org"] },
@@ -10561,10 +10614,15 @@ describe("RealInstallerService", () => {
     const paths = buildReconfigurePaths(tempRoot);
     await writeRuntimeArtifacts(paths);
     const requestPath = join(dirname(paths.configPath), "install-request.json");
-    await writeFile(requestPath, `${JSON.stringify(buildReconfigureRequest(), null, 2)}\n`, "utf8");
+    await writeFile(
+      requestPath,
+      `${JSON.stringify(buildReconfigureRequest(paths), null, 2)}\n`,
+      "utf8",
+    );
 
     const tested: Array<{ protocol?: string; password?: string }> = [];
     const service = await buildReconfigureService(paths, {
+      applyForReal: true,
       imapTester: {
         test: async (req) => {
           tested.push({
@@ -10583,14 +10641,11 @@ describe("RealInstallerService", () => {
         },
       },
     });
-    const startInstall = vi.spyOn(service, "startInstall").mockResolvedValue({
-      job: {
-        jobId: "job_test",
-        state: "pending",
-        createdAt: "2026-08-22T00:00:00.000Z",
-        steps: [],
-      },
-    });
+    // Deliberately NOT mocked: this test claims the switch is "applied via the
+    // install job", so it has to run the install job. Mocking startInstall here
+    // removed the only thing under test and left the assertions checking the
+    // arguments handed to a stub.
+    const startInstall = vi.spyOn(service, "startInstall");
 
     try {
       const result = await service.reconfigureImap({
@@ -10614,7 +10669,7 @@ describe("RealInstallerService", () => {
           "imap.secretRef",
         ]),
       );
-      expect(result.job?.jobId).toBe("job_test");
+      expect(result.job?.jobId).toBeTruthy();
       expect(startInstall).toHaveBeenCalledTimes(1);
       const applied = startInstall.mock.calls[0]?.[0] as InstallRequest;
       expect(applied.imap).toEqual({
@@ -10646,6 +10701,38 @@ describe("RealInstallerService", () => {
       const savedRequest = await readFile(requestPath, "utf8");
       expect(savedRequest).not.toContain("new-password");
       expect(JSON.parse(savedRequest).imap.protocol).toBe("pop3");
+
+      // The assertions above all describe the install-request handoff, and
+      // every one of them passed while startInstall was mocked away. The apply
+      // itself is only proven by the file the install job actually rewrites.
+      const jobId = result.job?.jobId;
+      if (jobId === undefined) throw new Error("expected reconfigureImap to start an install job");
+      const finished = await waitForJob(service, jobId);
+      // The step that rewrites sovereign-node.json5 must genuinely have run.
+      // (The later smoke_checks step needs a live Matrix homeserver, which this
+      // harness deliberately does not stand up; it is not what this test is
+      // about.)
+      const configureStep = finished.job.steps.find((step) => step.id === "openclaw_configure");
+      expect(configureStep?.state).toBe("succeeded");
+
+      const runtimeConfig = JSON.parse(await readFile(paths.configPath, "utf8")) as {
+        imap?: {
+          protocol?: string;
+          host?: string;
+          port?: number;
+          username?: string;
+          mailbox?: string;
+        };
+      };
+      // sovereign-node.json5 is what the node actually reads at runtime. If the
+      // switch stops here, mail-sentinel keeps polling the old IMAP server no
+      // matter how correct install-request.json looks.
+      expect(runtimeConfig.imap?.protocol).toBe("pop3");
+      expect(runtimeConfig.imap?.host).toBe("pop.example.org");
+      expect(runtimeConfig.imap?.port).toBe(995);
+      expect(runtimeConfig.imap?.username).toBe("new@example.org");
+      // POP3 has no folders: the requested "Archive" must not survive.
+      expect(runtimeConfig.imap?.mailbox).toBe("INBOX");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
