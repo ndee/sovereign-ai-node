@@ -175,6 +175,31 @@ export const resolveOpenClawNpmPrefix = (serviceHome?: string): string | undefin
 };
 
 /**
+ * The HOME an OpenClaw npm spawn must run with.
+ *
+ * npm derives its cache, its userconfig (`$HOME/.npmrc`) and its default
+ * prefix from HOME. Handing an unprivileged spawn `HOME=/root` points all
+ * three at a directory that user cannot read, so npm fails on a path that only
+ * exists for root — the same root-shaped-environment assumption that produced
+ * the cwd and PATH bugs. `resolveOpenClawNpmPrefix` already encodes the rule:
+ * when it returns a prefix we are unprivileged, and the service home is the
+ * only HOME that spawn may legally use.
+ *
+ * Returns undefined when the ambient HOME is correct (running as root, or no
+ * service home configured), so call sites can spread it away and inherit.
+ */
+export const resolveOpenClawSpawnHome = (serviceHome?: string): string | undefined => {
+  if (isRunningAsRoot()) {
+    return undefined;
+  }
+  const home = serviceHome?.trim();
+  if (home !== undefined && home.length > 0) {
+    return home;
+  }
+  return undefined;
+};
+
+/**
  * Build the PATH that OpenClaw must be looked up on.
  *
  * The install runs `bash -lc` with `<prefix>/bin` prepended to PATH, but that
@@ -502,6 +527,10 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
     await ensureOpenClawPackageReadable(packageRoot, this.logger);
     await hardenBundledExtensionDirectories(packageRoot);
 
+    const repairHome = resolveOpenClawSpawnHome(this.serviceHome);
+    const repairCache = repairHome === undefined ? undefined : join(repairHome, ".npm");
+    const repairLookupPath = resolveOpenClawSpawnLookupPath(this.serviceHome);
+
     for (const target of BUNDLED_OPENCLAW_EXTENSION_REPAIR_TARGETS) {
       const extensionDir = join(packageRoot, target.relativeDir);
       const repairPlan = await planBundledExtensionDependencyRepair(extensionDir);
@@ -530,10 +559,16 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
           ),
         ],
         options: {
+          // cwd stays the extension dir — that is the package being repaired —
+          // but the rest of the environment must still be the service user's,
+          // or an unprivileged repair inherits root's HOME/cache and PATH.
           cwd: extensionDir,
           timeout: OPENCLAW_EXTENSION_REPAIR_TIMEOUT_MS,
           env: {
             CI: "1",
+            ...(repairHome === undefined ? {} : { HOME: repairHome }),
+            ...(repairCache === undefined ? {} : { NPM_CONFIG_CACHE: repairCache }),
+            ...(repairLookupPath === undefined ? {} : { PATH: repairLookupPath }),
           },
         },
       });
@@ -585,15 +620,21 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
       desiredVersion === SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS
         ? SOVEREIGN_PINNED_OPENCLAW_VERSION
         : desiredVersion;
-    const cacheDir = process.env.NPM_CONFIG_CACHE ?? join(process.env.HOME ?? "/root", ".npm");
     const prefix = resolveOpenClawNpmPrefix(this.serviceHome);
+    // Resolve HOME before the cache: when this branch runs unprivileged the
+    // cache must live under the service home too, or npm writes it beside
+    // root's and fails on the first unreadable entry.
+    const spawnHome = resolveOpenClawSpawnHome(this.serviceHome);
+    const effectiveHome = spawnHome ?? process.env.HOME ?? "/root";
+    const cacheDir = process.env.NPM_CONFIG_CACHE ?? join(effectiveHome, ".npm");
     if (prefix !== undefined) {
       this.logger.info(
-        { npmPrefix: prefix },
+        { npmPrefix: prefix, ...(spawnHome === undefined ? {} : { home: spawnHome }) },
         "Installing OpenClaw into the service user's npm prefix (install is running unprivileged)",
       );
     }
     const spawnCwd = resolveOpenClawSpawnCwd(this.serviceHome);
+    const lookupPath = resolveOpenClawSpawnLookupPath(this.serviceHome);
     const installResult = await this.execRunner.run({
       command: "npm",
       args: ["install", "-g", `openclaw@${installTarget}`],
@@ -602,9 +643,10 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
         ...(spawnCwd === undefined ? {} : { cwd: spawnCwd }),
         env: {
           CI: "1",
-          HOME: process.env.HOME ?? "/root",
+          HOME: effectiveHome,
           NPM_CONFIG_CACHE: cacheDir,
           ...(prefix === undefined ? {} : { npm_config_prefix: prefix }),
+          ...(lookupPath === undefined ? {} : { PATH: lookupPath }),
         },
       },
     });

@@ -137,15 +137,36 @@ export const ensureLobsterCliInstalled = async (input: {
     serviceHome: input.serviceHome,
   });
   if (detected !== null) {
+    // A version pin is satisfied by a VERSION, never by a commands probe. The
+    // commands check is evidence that the CLI runs, not that it is the build
+    // we pinned, so `version !== input.version` — a stale install left by an
+    // earlier pin — used to pass the gate whenever its command surface still
+    // looked right. It no longer does: a known-wrong version always reinstalls.
+    //
+    // `version === null` is the separate, legitimate case: the probe could not
+    // determine a version at all (npm list unavailable, or JSON we could not
+    // parse). Following the same rule the OpenClaw agent probes now use, an
+    // unverifiable probe proves nothing on its own — but it must not become a
+    // false alarm either, so the commands probe stays as the independent
+    // positive signal that keeps a working-but-unverifiable CLI usable.
     const versionVerified = detected.version === input.version;
+    const versionUnknown = detected.version === null;
     const commandsVerified =
       detected.commands.length > 0 &&
       input.requiredCommands.every((commandName) => detected.commands.includes(commandName));
-    if (versionVerified || commandsVerified) {
+    if (versionVerified || (versionUnknown && commandsVerified)) {
       return;
     }
     input.logger.info(
-      "Lobster CLI binary found but could not verify version or required commands; reinstalling",
+      {
+        packageName: input.packageName,
+        pinnedVersion: input.version,
+        ...(detected.version === null ? {} : { detectedVersion: detected.version }),
+        commandsVerified,
+      },
+      detected.version === null
+        ? "Lobster CLI binary found but neither its version nor its required commands could be verified; reinstalling"
+        : "Lobster CLI binary found at a different version than the pin; reinstalling",
     );
   }
 
