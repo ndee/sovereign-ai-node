@@ -9,6 +9,13 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 From this point forward, GitHub Release notes are auto-generated from commit history
 by the `.github/workflows/release.yml` workflow.
 
+## [2.5.10](https://github.com/ndee/sovereign-ai-node/compare/v2.5.9...v2.5.10) (2026-09-19)
+
+
+### Bug Fixes
+
+* **installer:** require a version for the version pin, stop relocating secrets silently, and un-hollow the apply test ([#273](https://github.com/ndee/sovereign-ai-node/issues/273)) ([557e253](https://github.com/ndee/sovereign-ai-node/commit/557e2536d7586fdacb8e1a7b1f8eb86cc592c3d0))
+
 ## [2.5.9](https://github.com/ndee/sovereign-ai-node/compare/v2.5.8...v2.5.9) (2026-09-19)
 
 
