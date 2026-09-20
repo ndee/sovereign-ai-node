@@ -81,6 +81,13 @@ describe("ShellOpenClawGatewayServiceManager", () => {
     process.env.OPENCLAW_CONFIG_PATH =
       "/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5";
     process.env.SOVEREIGN_NODE_CONFIG = "/etc/sovereign-node/config.json5";
+    // The sudo-user retry is only available to root: SUDO_USER/SUDO_UID name
+    // whoever invoked an ancestor sudo and survive a later privilege drop, but
+    // only root may actually `sudo -u <other>` without a password prompt. This
+    // test asserts what the retry LOOKS like, so it has to stand where the
+    // retry is legitimate — otherwise it pins a command the OS would refuse.
+    const priorGetuid = process.getuid;
+    Object.defineProperty(process, "getuid", { configurable: true, value: () => 0 });
     try {
       const execRunner: ExecRunner = {
         run: async (input): Promise<ExecResult> => {
@@ -144,6 +151,7 @@ describe("ShellOpenClawGatewayServiceManager", () => {
         },
       });
     } finally {
+      Object.defineProperty(process, "getuid", { configurable: true, value: priorGetuid });
       if (priorSudoUser === undefined) {
         delete process.env.SUDO_USER;
       } else {
@@ -189,6 +197,10 @@ describe("ShellOpenClawGatewayServiceManager", () => {
     const priorSudoUid = process.env.SUDO_UID;
     process.env.SUDO_USER = "user1";
     process.env.SUDO_UID = "1000";
+    // As above: the retry this asserts is root-only, so stand where it is
+    // legitimate rather than pinning a command a non-root caller cannot run.
+    const priorGetuid = process.getuid;
+    Object.defineProperty(process, "getuid", { configurable: true, value: () => 0 });
     try {
       const execRunner: ExecRunner = {
         run: async (input): Promise<ExecResult> => {
@@ -220,6 +232,7 @@ describe("ShellOpenClawGatewayServiceManager", () => {
       expect(calls[0]).toMatchObject({ command: "openclaw", args: ["gateway", "install"] });
       expect(calls[1]).toMatchObject({ command: "sudo", args: expect.arrayContaining(["user1"]) });
     } finally {
+      Object.defineProperty(process, "getuid", { configurable: true, value: priorGetuid });
       if (priorSudoUser === undefined) {
         delete process.env.SUDO_USER;
       } else {
