@@ -218,7 +218,36 @@ const resolveManagedOpenClawEnvArgs = (): string[] =>
     return typeof value === "string" && value.length > 0 ? [`${key}=${value}`] : [];
   });
 
+/**
+ * The invoking user to re-run a failed gateway command as, or null when that
+ * retry is not available.
+ *
+ * `SUDO_USER`/`SUDO_UID` describe who invoked an ANCESTOR `sudo`, not who this
+ * process is. They survive a later privilege drop: `runuser -u <service-user>`
+ * without `--login` sets only HOME/SHELL/USER/LOGNAME and leaves `SUDO_*`
+ * untouched, so an unprivileged child still sees them and reads them as an
+ * invitation to `sudo -u`. It is not one — only root may switch to another
+ * user without being challenged. From a non-root process `sudo -u` demands a
+ * password, and with no tty it does not even get to ask:
+ *
+ *   sudo: a terminal is required to read the password
+ *   sudo: a password is required
+ *
+ * That turns a recoverable failure into a hard one: the retry replaces the
+ * primary result, so the caller reports sudo's authentication refusal instead
+ * of the systemd/D-Bus error that actually needs handling, and the real
+ * diagnosis is lost.
+ *
+ * Requiring root here is what makes the retry sound rather than merely
+ * plausible, and it deliberately mirrors the identical guard on the
+ * managed-agent registrar's preferred-user resolution — the two spawn sites
+ * must agree on when dropping privilege is even possible.
+ */
 const resolveSudoUserFallback = (): { user: string; uid: string } | null => {
+  // Only root can `sudo -u <other>` without being prompted for a password.
+  if (typeof process.getuid !== "function" || process.getuid() !== 0) {
+    return null;
+  }
   const user = process.env.SUDO_USER?.trim() ?? "";
   const uid = process.env.SUDO_UID?.trim() ?? "";
   if (user.length === 0 || user === "root") {
