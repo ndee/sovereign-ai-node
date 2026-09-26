@@ -22,6 +22,7 @@ jobs:
           script: |
             const MARKER = '<!-- sain-lifecycle-guard -->';
             const STAGES = [
+              'lifecycle:analysis',
               'lifecycle:elaboration',
               'lifecycle:elaboration-complete',
               'lifecycle:dev',
@@ -120,8 +121,8 @@ jobs:
               await comment(`Removed \`lifecycle:testing-completed\` — this issue hasn't been through \`lifecycle:testing\`. Apply (or let automation apply) \`lifecycle:testing\` first.`);
             }
 
-            // RULE 4 — re-elaborating a later-stage issue: warn only (legit backtrack).
-            if (added === 'lifecycle:elaboration' &&
+            // RULE 4 — re-analysing / re-elaborating a later-stage issue: warn only (legit backtrack).
+            if ((added === 'lifecycle:analysis' || added === 'lifecycle:elaboration') &&
                 (names.has('lifecycle:testing') || names.has('lifecycle:testing-completed'))) {
-              await comment(`Note: \`lifecycle:elaboration\` was added to an issue already in a later stage. If this is a deliberate rework, remove the later-stage label too. (No label was changed.)`);
+              await comment(`Note: \`${added}\` was added to an issue already in a later stage. If this is a deliberate rework, remove the later-stage label too. (No label was changed.)`);
             }

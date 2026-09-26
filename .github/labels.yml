@@ -3,9 +3,13 @@
 # this file. The sync is NON-DESTRUCTIVE: it creates-or-updates only these labels
 # and never prunes others, so topic/priority labels are left untouched.
 #
-# These five model the issue lifecycle state machine. See docs/ISSUE_LIFECYCLE.md.
+# These six model the issue lifecycle state machine. See docs/ISSUE_LIFECYCLE.md.
 # Keep this file identical across sovereign-ai-node, sovereign-ai-bots, and the
 # private companion repo.
+
+- name: "lifecycle:analysis"
+  color: "C5DEF5"
+  description: "Lifecycle: root cause being determined from evidence (human-managed); not yet designed."
 
 - name: "lifecycle:elaboration"
   color: "FBCA04"
