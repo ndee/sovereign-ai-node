@@ -7,10 +7,13 @@ Automation keeps the labels honest; humans own the decision points.
 ## Stages
 
 ```
-discovery → elaboration → dev → testing → done
+discovery → analysis → elaboration → dev → testing → done
 ```
 
 - **discovery** — an idea/need is captured as an issue.
+- **analysis** — *optional*, for issues that pose a question rather than a solution: the root
+  cause is determined from evidence (logs, diagnostics, a reproduction) and the finding is
+  posted on the issue. A human then decides the next stage — usually elaboration.
 - **elaboration** — the solution is worked out (goal, acceptance criteria, design).
 - **dev** — the change is implemented; a draft PR is opened referencing the issue.
 - **testing** — the merged change is exercised by end-to-end tests (authored, run,
@@ -21,6 +24,7 @@ discovery → elaboration → dev → testing → done
 
 | Label | Stage | Who sets it | Meaning |
 |---|---|---|---|
+| `lifecycle:analysis` | analysis | human | Root cause being determined from evidence; not yet designed. |
 | `lifecycle:elaboration` | elaboration | human | Being elaborated; not yet ready to build. |
 | `lifecycle:elaboration-complete` | ready for dev | **human** | Elaboration done; ready to implement. |
 | `lifecycle:dev` | dev | maintainer/automation | Implementation in progress; a draft PR is open. |
@@ -37,6 +41,9 @@ An issue should carry **at most one** `lifecycle:` label at a time.
 - **`lifecycle:testing` is applied automatically** when a PR referencing the issue is
   merged — don't set it by hand. It means "there is integrated code; e2e tests should be
   authored, executed, and recorded." It requires a **merged linked PR**.
+- **Analysis ends with a finding, not a label.** The analysis is posted on the issue; a
+  human then moves it on (to `lifecycle:elaboration`, or closes it). Automation never
+  advances an issue out of analysis.
 - **Only a human** applies `lifecycle:elaboration-complete` and
   `lifecycle:testing-completed`, and **only a human closes** issues.
 - A **guard workflow** repairs illegal label combinations (e.g. two stage labels at once,
@@ -52,7 +59,7 @@ A cross-repo board mirrors these stages as columns:
 
 | File | What it does |
 |---|---|
-| `.github/labels.yml` | Canonical definition of the five `lifecycle:` labels. |
+| `.github/labels.yml` | Canonical definition of the six `lifecycle:` labels. |
 | `.github/workflows/sync-labels.yml` | Creates/updates those labels (non-destructive) on change. |
 | `.github/workflows/keep-issue-open-until-tested.yml` | On PR merge: reopens the referenced issue if auto-closed and applies `lifecycle:testing`. |
 | `.github/workflows/lifecycle-guard.yml` | Self-heals illegal `lifecycle:` label states and comments. |
