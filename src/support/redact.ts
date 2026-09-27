@@ -293,6 +293,13 @@ export const stripControlCharacters = (value: string): string =>
 export interface RedactTextOptions {
   /** Replace email addresses with a PII marker. Default true. */
   readonly redactEmails?: boolean;
+  /**
+   * Length bound applied after redaction. Defaults to `MAX_VALUE_LENGTH`,
+   * which keeps the HEAD of an over-long value. Callers that bound the text
+   * themselves — typically keeping the TAIL of a log, where the error is —
+   * pass `Number.POSITIVE_INFINITY` and truncate afterwards.
+   */
+  readonly maxLength?: number;
 }
 
 /**
@@ -303,6 +310,7 @@ export interface RedactTextOptions {
  */
 export const redactText = (input: string, options: RedactTextOptions = {}): string => {
   const redactEmails = options.redactEmails ?? true;
+  const maxLength = options.maxLength ?? MAX_VALUE_LENGTH;
   let value = stripControlCharacters(input);
 
   for (const rule of TEXT_RULES) {
@@ -317,10 +325,29 @@ export const redactText = (input: string, options: RedactTextOptions = {}): stri
     value = value.replace(EMAIL_RE, REDACTED_PII);
   }
 
-  if (value.length > MAX_VALUE_LENGTH) {
-    value = `${value.slice(0, MAX_VALUE_LENGTH)}…[truncated]`;
+  if (value.length > maxLength) {
+    value = `${value.slice(0, maxLength)}…[truncated]`;
   }
   return value;
+};
+
+/** Marker that replaces the local part of an email address in masked output. */
+export const MASKED_LOCAL_PART = "***";
+
+/**
+ * Mask the local part of every email address, keeping the domain.
+ *
+ * The domain of a mail server or relay is often exactly what a diagnosis needs
+ * ("the IMAP login to imap.example.com failed"); the mailbox name is personal
+ * data that adds nothing. `redactText` removes whole addresses; this is the
+ * narrower alternative for diagnostics that must keep the domain.
+ */
+export const maskEmailLocalParts = (input: string): string => {
+  EMAIL_RE.lastIndex = 0;
+  return input.replace(EMAIL_RE, (address) => {
+    const at = address.lastIndexOf("@");
+    return `${MASKED_LOCAL_PART}${address.slice(at)}`;
+  });
 };
 
 /**
