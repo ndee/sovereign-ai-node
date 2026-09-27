@@ -406,10 +406,19 @@ const unavailable = (
   reason,
 });
 
-const describeFailure = (error: unknown): string =>
-  error instanceof UnreadableFileError
-    ? error.message
-    : redactText(error instanceof Error ? error.message : String(error)).slice(0, 300);
+/** One redacted line: a manifest reason, not a stack or a command echo. */
+const describeFailure = (error: unknown): string => {
+  if (error instanceof UnreadableFileError) {
+    return error.message;
+  }
+  const lines = (error instanceof Error ? error.message : String(error))
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  // execFile errors start with "Command failed: <argv>"; the cause follows.
+  const cause = lines.find((line) => !line.startsWith("Command failed:")) ?? lines[0] ?? "failed";
+  return redactText(cause).slice(0, 300);
+};
 
 interface ListedFile {
   readonly path: string;
@@ -644,6 +653,10 @@ const collectJournal = async (
         source.unit,
         "--boot",
         boot,
+        // Read every journal on the host, not only the one named by the
+        // current machine-id: a cloned or re-imaged system whose machine-id
+        // changed after journald started would otherwise report nothing.
+        "--merge",
         "--no-pager",
         "--quiet",
         "--output=short-iso",

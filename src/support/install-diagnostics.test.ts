@@ -426,6 +426,7 @@ describe("journal collection", () => {
       "sovereign-node-api",
       "--boot",
       "-1",
+      "--merge",
       "--no-pager",
       "--quiet",
       "--output=short-iso",
@@ -460,6 +461,24 @@ describe("journal collection", () => {
       },
     });
     expect(nonError.manifest.files[0]?.reason).toBe("boot 0: plain string failure");
+    const execStyle = await build([{ kind: "journal", unit: "u4" }], {
+      run: async () => {
+        throw new Error("Command failed: journalctl --unit u4\nNo journal boot entry found.\n");
+      },
+    });
+    expect(execStyle.manifest.files[0]?.reason).toBe("boot 0: No journal boot entry found.");
+    const onlyArgv = await build([{ kind: "journal", unit: "u5" }], {
+      run: async () => {
+        throw new Error("Command failed: journalctl --unit u5");
+      },
+    });
+    expect(onlyArgv.manifest.files[0]?.reason).toBe("boot 0: Command failed: journalctl --unit u5");
+    const empty = await build([{ kind: "journal", unit: "u6" }], {
+      run: async () => {
+        throw new Error("");
+      },
+    });
+    expect(empty.manifest.files[0]?.reason).toBe("boot 0: failed");
   });
 
   it("keeps the tail of a long journal", async () => {
