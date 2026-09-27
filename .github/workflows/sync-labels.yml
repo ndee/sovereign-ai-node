@@ -2,7 +2,13 @@ name: Sync lifecycle labels
 
 # Keeps the canonical issue-lifecycle labels (.github/labels.yml) present and
 # up to date. NON-DESTRUCTIVE: creates-or-updates only the labels in the manifest
-# and never deletes any others, so topic/priority labels are safe.
+# and never deletes any label, so topic/priority labels are safe and labels that
+# were dropped from the manifest stay on their issues until removed by hand.
+#
+# Renames: an entry with `renamed_from: <old>` is renamed in place (old -> new)
+# when the new name does not exist yet and the old one does. GitHub's label
+# rename keeps every issue assignment, so no issue loses its stage. If both
+# names already exist, nothing is renamed or deleted; the run warns instead.
 on:
   push:
     branches: [main]
@@ -26,7 +32,8 @@ jobs:
           script: |
             const fs = require('fs');
             const text = fs.readFileSync('.github/labels.yml', 'utf8');
-            // Minimal YAML parse for our fixed shape: a list of {name,color,description}.
+            // Minimal YAML parse for our fixed shape: a list of
+            // {name, color, description, renamed_from?}.
             const labels = [];
             let cur = null;
             for (const raw of text.split('\n')) {
@@ -39,6 +46,8 @@ jobs:
               if (c) { cur.color = c[1]; continue; }
               const d = line.match(/^\s+description:\s*"?(.*?)"?\s*$/);
               if (d) { cur.description = d[1]; continue; }
+              const r = line.match(/^\s+renamed_from:\s*"?(.*?)"?\s*$/);
+              if (r) { cur.renamedFrom = r[1]; continue; }
             }
             core.info(`Parsed ${labels.length} lifecycle labels.`);
             // GitHub caps label descriptions at 100 chars; validate ALL up front so a
@@ -52,10 +61,21 @@ jobs:
             for (const l of labels) {
               const color = (l.color || '').replace(/^#/, '');
               try {
-                let exists = true;
-                try { await github.rest.issues.getLabel({ ...context.repo, name: l.name }); }
-                catch (e) { exists = false; }
-                if (exists) {
+                const labelExists = async (name) => {
+                  try { await github.rest.issues.getLabel({ ...context.repo, name }); return true; }
+                  catch (e) { if (e.status === 404) return false; throw e; }
+                };
+                const exists = await labelExists(l.name);
+                const oldExists = l.renamedFrom ? await labelExists(l.renamedFrom) : false;
+                if (!exists && oldExists) {
+                  // Rename in place: every issue carrying the old label keeps it.
+                  await github.rest.issues.updateLabel({ ...context.repo, name: l.renamedFrom,
+                    new_name: l.name, color, description: l.description || '' });
+                  core.info(`Renamed '${l.renamedFrom}' -> '${l.name}'.`);
+                } else if (exists) {
+                  if (oldExists) {
+                    core.warning(`Both '${l.renamedFrom}' and '${l.name}' exist; not renaming or deleting. Move issues off '${l.renamedFrom}' and delete it by hand.`);
+                  }
                   await github.rest.issues.updateLabel({ ...context.repo, name: l.name,
                     new_name: l.name, color, description: l.description || '' });
                   core.info(`Updated '${l.name}'.`);

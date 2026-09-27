@@ -3,8 +3,8 @@
 # A pull request is merge-ready only when a human can merge it without
 # re-deriving anything. This job refuses the three things that used to be
 # caught (or missed) by hand:
-#   1. closing keywords ("Closes #N", "Fixes #N", …) — issues must stay open
-#      through the testing stage; use "Refs #N" / "Part of #N".
+#   1. closing keywords ("Closes #N", "Fixes #N", …) — issues close when the
+#      change ships in a release, not at merge; use "Refs #N" / "Part of #N".
 #   2. a missing "## Validation" (or "## Evidence") section in the PR body.
 #   3. installer-affecting changes without named evidence in that section:
 #      a dev-VM fresh install + upgrade, a Pi / @web run, an e2e run — or an
@@ -48,7 +48,7 @@ jobs:
             // 1. closing keywords that reference an issue in this repo
             const closing = /\b(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)\b\s*:?\s*#\d+/i;
             const m = (title + '\n' + body).match(closing);
-            if (m) problems.push(`closing keyword "${m[0]}" — use "Refs #N" / "Part of #N"; issues stay open until tested (see docs/ISSUE_LIFECYCLE.md)`);
+            if (m) problems.push(`closing keyword "${m[0]}" — use "Refs #N" / "Part of #N"; issues stay open until the change ships in a release (see docs/ISSUE_LIFECYCLE.md)`);
 
             // 2. validation / evidence section (heading "Validation" or "Evidence", any level)
             const bl = body.split('\n');

@@ -1,32 +1,31 @@
 # Canonical issue-lifecycle labels (source of truth).
 # Synced by .github/workflows/sync-labels.yml on every push to main that touches
 # this file. The sync is NON-DESTRUCTIVE: it creates-or-updates only these labels
-# and never prunes others, so topic/priority labels are left untouched.
+# and never deletes any label, so topic/priority labels are left untouched.
 #
-# These six model the issue lifecycle state machine. See docs/ISSUE_LIFECYCLE.md.
-# Keep this file identical across sovereign-ai-node, sovereign-ai-bots, and the
-# private companion repo.
+# These four model the issue lifecycle state machine. See docs/ISSUE_LIFECYCLE.md.
+# Keep this file identical across the repos that share this lifecycle.
+#
+# Optional `renamed_from:` names the label's previous name. When the new name does
+# not exist yet but the old one does, the sync RENAMES the old label in place, so
+# every issue carrying it keeps it (under the new name). Once the new name exists,
+# the field is inert. Retired labels are simply omitted — the sync never deletes
+# them; remove them by hand once no issue carries them.
 
 - name: "lifecycle:analysis"
   color: "C5DEF5"
-  description: "Lifecycle: root cause being determined from evidence (human-managed); not yet designed."
+  description: "Lifecycle: root cause being determined from evidence; not yet designed."
 
 - name: "lifecycle:elaboration"
   color: "FBCA04"
-  description: "Lifecycle: being elaborated (human-managed); not yet ready to dispatch."
+  description: "Lifecycle: solution being elaborated into a plan; not yet approved."
 
-- name: "lifecycle:elaboration-complete"
+- name: "lifecycle:ready"
+  renamed_from: "lifecycle:elaboration-complete"
   color: "0E8A16"
-  description: "Lifecycle: elaboration done; ready for dev. Set by a human."
+  description: "Lifecycle: plan approved by a human; ready to implement."
 
-- name: "lifecycle:dev"
-  color: "1D76DB"
-  description: "Lifecycle: implementation in progress (a draft PR is open)."
-
-- name: "lifecycle:testing"
+- name: "lifecycle:merged"
+  renamed_from: "lifecycle:testing"
   color: "5319E7"
-  description: "Lifecycle: merged; under active e2e testing (recorded). Requires a merged linked PR."
-
-- name: "lifecycle:testing-completed"
-  color: "B60205"
-  description: "Lifecycle: human verified testing passed; ready to close. Set by a human."
+  description: "Lifecycle: merged, awaiting a release. Requires a merged linked PR."

@@ -2,53 +2,64 @@
 
 This repo tracks work as GitHub issues that move through a fixed set of stages.
 A small set of `lifecycle:` labels is the **state machine** for that progression.
-Automation keeps the labels honest; humans own the decision points.
+Conductor agents drive most transitions, automation keeps the labels honest, and
+humans own the decision points: approving a plan, merging a PR, and approving a ship.
 
 ## Stages
 
 ```
-discovery → analysis → elaboration → dev → testing → done
+(new) → analysis → elaboration → ready → implementing → merged → released
 ```
 
-- **discovery** — an idea/need is captured as an issue.
+- **new** — an idea/need is captured as an issue. No label yet.
 - **analysis** — *optional*, for issues that pose a question rather than a solution: the root
   cause is determined from evidence (logs, diagnostics, a reproduction) and the finding is
-  posted on the issue. A human then decides the next stage — usually elaboration.
-- **elaboration** — the solution is worked out (goal, acceptance criteria, design).
-- **dev** — the change is implemented; a draft PR is opened referencing the issue.
-- **testing** — the merged change is exercised by end-to-end tests (authored, run,
-  and recorded with screenshots/video), then reviewed.
-- **done** — a human has verified it and closes the issue.
+  posted on the issue.
+- **elaboration** — the solution is worked out into a plan (goal, acceptance criteria, design).
+- **ready** — a human has **approved the plan**; the issue is ready to implement.
+- **implementing** — an open PR says `Refs #N`. There is no label for this stage: the open,
+  referencing PR *is* the signal.
+- **merged** — the PR has been merged by a human; the change is integrated and waits for a
+  release.
+- **released** — a human has approved the ship and the release automation has published it.
+  The release automation **closes** the issue with a `Shipped in <version>` comment.
 
 ## Labels (the state machine)
 
 | Label | Stage | Who sets it | Meaning |
 |---|---|---|---|
-| `lifecycle:analysis` | analysis | human | Root cause being determined from evidence; not yet designed. |
-| `lifecycle:elaboration` | elaboration | human | Being elaborated; not yet ready to build. |
-| `lifecycle:elaboration-complete` | ready for dev | **human** | Elaboration done; ready to implement. |
-| `lifecycle:dev` | dev | maintainer/automation | Implementation in progress; a draft PR is open. |
-| `lifecycle:testing` | testing | **automation** (on PR merge) | Merged; under active e2e testing. |
-| `lifecycle:testing-completed` | done-pending | **human** | Testing verified; ready to close. |
+| `lifecycle:analysis` | analysis | conductor agent / human | Root cause being determined from evidence; not yet designed. |
+| `lifecycle:elaboration` | elaboration | conductor agent / human | Solution being elaborated into a plan; not yet approved. |
+| `lifecycle:ready` | ready | **human** (plan approval) | Plan approved; ready to implement. |
+| *(none)* | implementing | — | An open PR says `Refs #N`. |
+| `lifecycle:merged` | merged | **automation** (on PR merge) | Merged, awaiting a release. Requires a merged PR referencing the issue. |
+| *(issue closed)* | released | **release automation** (after ship approval) | Shipped; closed with a `Shipped in <version>` comment. |
 
-An issue should carry **at most one** `lifecycle:` label at a time.
+An issue carries **at most one** `lifecycle:` label at a time. When implementation starts,
+the `lifecycle:ready` label is removed; when the PR merges, automation applies
+`lifecycle:merged`.
+
+Retired labels (no longer part of the lifecycle): `lifecycle:dev`, `lifecycle:testing`,
+`lifecycle:testing-completed`. `lifecycle:elaboration-complete` was renamed to
+`lifecycle:ready`, and `lifecycle:testing` is superseded by `lifecycle:merged`.
 
 ## Rules
 
 - **Reference issues with `Refs #N` or `Part of #N` in PRs — never `Closes`/`Fixes`/
-  `Resolves`.** The issue must stay **open** through testing; closing keywords would
-  auto-close it on merge.
-- **`lifecycle:testing` is applied automatically** when a PR referencing the issue is
-  merged — don't set it by hand. It means "there is integrated code; e2e tests should be
-  authored, executed, and recorded." It requires a **merged linked PR**.
-- **Analysis ends with a finding, not a label.** The analysis is posted on the issue; a
-  human then moves it on (to `lifecycle:elaboration`, or closes it). Automation never
-  advances an issue out of analysis.
-- **Only a human** applies `lifecycle:elaboration-complete` and
-  `lifecycle:testing-completed`, and **only a human closes** issues.
-- A **guard workflow** repairs illegal label combinations (e.g. two stage labels at once,
-  `lifecycle:testing` with no merged PR, `lifecycle:testing-completed` without
-  `lifecycle:testing`) and comments explaining what it changed.
+  `Resolves`.** Issues close when the change **ships in a release**, not when the PR merges;
+  closing keywords would auto-close them on merge. The merge gate rejects them.
+- **`lifecycle:merged` is applied automatically** when a PR referencing the issue is
+  merged — don't set it by hand. It replaces whatever stage label the issue carried, and
+  reopens the issue if GitHub auto-closed it. It requires a **merged PR** referencing the
+  issue. Only `Refs #N` / `Part of #N` (or a closing keyword) count as a reference; a bare
+  `#N` mention does not.
+- **Analysis ends with a finding, not an automatic advance.** The analysis is posted on the
+  issue and the issue then moves on (to `lifecycle:elaboration`, or is closed).
+- **Two human approvals gate the pipeline:** plan approval (`lifecycle:elaboration` →
+  `lifecycle:ready`) and ship approval (merged → released). Humans also merge PRs.
+- **Only the release automation closes** issues in the normal flow, once the change ships.
+- A **guard workflow** repairs illegal label combinations (e.g. two stage labels at once, or
+  `lifecycle:merged` with no merged PR) and comments explaining what it changed.
 
 ## Visual pipeline
 
@@ -59,7 +70,8 @@ A cross-repo board mirrors these stages as columns:
 
 | File | What it does |
 |---|---|
-| `.github/labels.yml` | Canonical definition of the six `lifecycle:` labels. |
-| `.github/workflows/sync-labels.yml` | Creates/updates those labels (non-destructive) on change. |
-| `.github/workflows/keep-issue-open-until-tested.yml` | On PR merge: reopens the referenced issue if auto-closed and applies `lifecycle:testing`. |
+| `.github/labels.yml` | Canonical definition of the four `lifecycle:` labels, including rename sources (`renamed_from`). |
+| `.github/workflows/sync-labels.yml` | Creates/updates/renames those labels on change. Never deletes a label. |
+| `.github/workflows/keep-issue-open-until-released.yml` | On PR merge: reopens referenced issues if auto-closed and moves them to `lifecycle:merged`. |
 | `.github/workflows/lifecycle-guard.yml` | Self-heals illegal `lifecycle:` label states and comments. |
+| `.github/workflows/merge-ready.yml` | Merge gate: no closing keywords, and a `## Validation` section in the PR body. |

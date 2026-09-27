@@ -24,11 +24,10 @@ jobs:
             const STAGES = [
               'lifecycle:analysis',
               'lifecycle:elaboration',
-              'lifecycle:elaboration-complete',
-              'lifecycle:dev',
-              'lifecycle:testing',
-              'lifecycle:testing-completed',
+              'lifecycle:ready',
+              'lifecycle:merged',
             ];
+            const MERGED = 'lifecycle:merged';
             const n = context.payload.issue.number;
             const repo = context.repo;
 
@@ -70,16 +69,13 @@ jobs:
             }
 
             // A stage label is "viable" only if its own precondition holds, so Rule 1 never
-            // keeps a label that Rule 2/3 would immediately strip (which would leave the issue
-            // stage-less). lifecycle:testing needs a merged PR; testing-completed needs testing.
+            // keeps a label that Rule 2 would immediately strip (which would leave the issue
+            // stage-less). lifecycle:merged needs a merged PR referencing the issue.
             let mergedPR = null; // memoize the (network) check
-            async function viable(label, labelSet) {
-              if (label === 'lifecycle:testing') {
+            async function viable(label) {
+              if (label === MERGED) {
                 if (mergedPR === null) mergedPR = await hasMergedLinkedPR();
                 return mergedPR;
-              }
-              if (label === 'lifecycle:testing-completed') {
-                return labelSet.has('lifecycle:testing'); // and testing must itself be viable
               }
               return true;
             }
@@ -96,33 +92,23 @@ jobs:
               }
               let keep = null;
               for (const c of candidates) {
-                // For testing-completed, viability needs testing present; check against the
-                // candidate set as if only `c` (and a possibly-viable testing) survives.
-                if (await viable(c, names)) { keep = c; break; }
+                if (await viable(c)) { keep = c; break; }
               }
-              if (!keep) keep = candidates[0]; // none viable: fall back, Rule 2/3 will explain
+              if (!keep) keep = candidates[0]; // none viable: fall back, Rule 2 will explain
               for (const s of present) if (s !== keep) await removeLabel(s);
               await comment(`Removed conflicting lifecycle labels; kept \`${keep}\`. An issue can be in only one lifecycle stage at a time. See \`docs/ISSUE_LIFECYCLE.md\`.`);
             }
 
-            // RULE 2 — lifecycle:testing requires a merged linked PR.
-            if (names.has('lifecycle:testing')) {
+            // RULE 2 — lifecycle:merged requires a merged PR referencing the issue.
+            if (names.has(MERGED)) {
               if (mergedPR === null) mergedPR = await hasMergedLinkedPR();
-              const ok = mergedPR;
-              if (!ok) {
-                await removeLabel('lifecycle:testing');
-                await comment(`Removed \`lifecycle:testing\` — no **merged** linked PR found. This label is applied automatically when a referencing PR merges; there must be integrated code to test. See \`docs/ISSUE_LIFECYCLE.md\`.`);
+              if (!mergedPR) {
+                await removeLabel(MERGED);
+                await comment(`Removed \`${MERGED}\` — no **merged** PR referencing this issue found. This label is applied automatically when a PR that says \`Refs #${n}\` merges; there must be integrated code awaiting a release. See \`docs/ISSUE_LIFECYCLE.md\`.`);
               }
             }
 
-            // RULE 3 — lifecycle:testing-completed requires lifecycle:testing.
-            if (names.has('lifecycle:testing-completed') && !names.has('lifecycle:testing')) {
-              await removeLabel('lifecycle:testing-completed');
-              await comment(`Removed \`lifecycle:testing-completed\` — this issue hasn't been through \`lifecycle:testing\`. Apply (or let automation apply) \`lifecycle:testing\` first.`);
-            }
-
-            // RULE 4 — re-analysing / re-elaborating a later-stage issue: warn only (legit backtrack).
-            if ((added === 'lifecycle:analysis' || added === 'lifecycle:elaboration') &&
-                (names.has('lifecycle:testing') || names.has('lifecycle:testing-completed'))) {
+            // RULE 3 — re-analysing / re-elaborating a merged issue: warn only (legit backtrack).
+            if ((added === 'lifecycle:analysis' || added === 'lifecycle:elaboration') && names.has(MERGED)) {
               await comment(`Note: \`${added}\` was added to an issue already in a later stage. If this is a deliberate rework, remove the later-stage label too. (No label was changed.)`);
             }
