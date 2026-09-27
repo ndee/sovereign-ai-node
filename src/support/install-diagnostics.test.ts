@@ -663,6 +663,39 @@ describe("size cap: priority shedding", () => {
   });
 });
 
+describe("optional sources", () => {
+  it("lists an absent optional file without marking the bundle incomplete", async () => {
+    await writeFile(join(dir, "bad.json"), "{");
+    const absent = await build([
+      {
+        kind: "json-file",
+        name: "a.json",
+        path: join(dir, "a.json"),
+        purpose: "p",
+        optional: true,
+      },
+      { kind: "file-tail", name: "b.log", path: join(dir, "b.log"), purpose: "p", optional: true },
+    ]);
+    expect(absent.complete).toBe(true);
+    expect(absent.manifest.files.map((entry) => entry.optional)).toEqual([true, true]);
+    const readme = entriesOf(absent.archive).get("README.txt") ?? "";
+    expect(readme).toContain("Not present on this device (normal):\n  files/a.json\n  files/b.log");
+    expect(readme).not.toContain("Not included:");
+    // Only plain absence is excused: a broken optional file is still a gap.
+    const broken = await build([
+      {
+        kind: "json-file",
+        name: "bad.json",
+        path: join(dir, "bad.json"),
+        purpose: "p",
+        optional: true,
+      },
+    ]);
+    expect(broken.complete).toBe(false);
+    expect(broken.manifest.files[0]).not.toHaveProperty("optional");
+  });
+});
+
 describe("manifest and README", () => {
   it("describes included, missing and excluded content", async () => {
     await writeFile(join(dir, "a.log"), "hello\n");

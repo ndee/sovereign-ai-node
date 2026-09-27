@@ -141,6 +141,12 @@ export type DiagnosticsSource =
       readonly name: string;
       readonly path: string;
       readonly owner?: number;
+      /**
+       * Absence of this file is normal on some devices (written only after an
+       * update, only on flashed images, …). A missing file is still listed,
+       * but does not mark the bundle incomplete.
+       */
+      readonly optional?: boolean;
       readonly purpose: string;
       readonly maxBytes?: number;
       readonly priority?: number;
@@ -151,6 +157,12 @@ export type DiagnosticsSource =
       readonly name: string;
       readonly path: string;
       readonly owner?: number;
+      /**
+       * Absence of this file is normal on some devices (written only after an
+       * update, only on flashed images, …). A missing file is still listed,
+       * but does not mark the bundle incomplete.
+       */
+      readonly optional?: boolean;
       readonly purpose: string;
       readonly pick?: (parsed: unknown) => unknown;
       readonly maxBytes?: number;
@@ -192,6 +204,8 @@ export interface DiagnosticsManifestEntry {
   readonly truncated: boolean;
   readonly truncatedBytes: number;
   readonly reason?: string;
+  /** Present (true) when an optional source was simply not on this device. */
+  readonly optional?: boolean;
 }
 
 export interface DiagnosticsManifest {
@@ -246,6 +260,8 @@ interface Artifact {
   content?: string | undefined;
   truncatedBytes: number;
   reason?: string;
+  /** An optional source that is absent: listed, but not a gap. */
+  optional?: boolean;
 }
 
 // ── Defaults ───────────────────────────────────────────────────────────────
@@ -801,6 +817,18 @@ export const collectSystemSummary = async (
   return summary;
 };
 
+/** Mark an optional source's plain absence (and only that) as expected. */
+const excuseAbsence = (source: { readonly optional?: boolean }, artifact: Artifact): Artifact => {
+  if (
+    source.optional === true &&
+    artifact.status === "unavailable" &&
+    artifact.reason === "not present"
+  ) {
+    artifact.optional = true;
+  }
+  return artifact;
+};
+
 const collectSource = async (
   source: DiagnosticsSource,
   known: KnownSecretSet | undefined,
@@ -814,18 +842,21 @@ const collectSource = async (
       return await collectNpmLogs(source, known);
     case "file-tail":
       return [
-        await collectTextFile(
-          `files/${source.name}`,
-          source.path,
-          source.purpose,
-          source.priority ?? DIAGNOSTICS_PRIORITY.logs,
-          source.maxBytes ?? DEFAULT_SOURCE_CAPS.fileTailBytes,
-          known,
-          source.owner,
+        excuseAbsence(
+          source,
+          await collectTextFile(
+            `files/${source.name}`,
+            source.path,
+            source.purpose,
+            source.priority ?? DIAGNOSTICS_PRIORITY.logs,
+            source.maxBytes ?? DEFAULT_SOURCE_CAPS.fileTailBytes,
+            known,
+            source.owner,
+          ),
         ),
       ];
     case "json-file":
-      return [await collectJsonFile(source, known)];
+      return [excuseAbsence(source, await collectJsonFile(source, known))];
     case "journal":
       return [await collectJournal(source, run, known)];
     case "system":
@@ -965,11 +996,20 @@ export const renderReadme = (manifest: DiagnosticsManifest): string => {
       );
     }
   }
-  const missing = manifest.files.filter((entry) => entry.status !== "collected");
+  const missing = manifest.files.filter(
+    (entry) => entry.status !== "collected" && entry.optional !== true,
+  );
   if (missing.length > 0) {
     lines.push("", "Not included:");
     for (const entry of missing) {
       lines.push(`  ${entry.file} — ${entry.status}: ${entry.reason ?? ""}`);
+    }
+  }
+  const absent = manifest.files.filter((entry) => entry.optional === true);
+  if (absent.length > 0) {
+    lines.push("", "Not present on this device (normal):");
+    for (const entry of absent) {
+      lines.push(`  ${entry.file}`);
     }
   }
   lines.push("", "Never included:");
@@ -1032,9 +1072,12 @@ export const buildInstallDiagnostics = async (
       truncated: artifact.truncatedBytes > 0,
       truncatedBytes: artifact.truncatedBytes,
       ...(artifact.reason === undefined ? {} : { reason: artifact.reason }),
+      ...(artifact.optional === true ? { optional: true } : {}),
     };
   });
-  const complete = artifacts.every((artifact) => artifact.status === "collected");
+  const complete = artifacts.every(
+    (artifact) => artifact.status === "collected" || artifact.optional === true,
+  );
 
   const manifest: DiagnosticsManifest = {
     formatVersion: INSTALL_DIAGNOSTICS_FORMAT_VERSION,
@@ -1094,6 +1137,7 @@ export const defaultNodeDiagnosticsSources = (
     name: "install-provenance.json",
     path: paths.provenancePath,
     purpose: "How and when this node was installed (source, ref, versions)",
+    optional: true,
     pick: (parsed) =>
       pickFields(parsed, ["installedAt", "source", "ref", "version", "commit", "installMode"]),
   },
