@@ -1,0 +1,91 @@
+name: Keep issue open until released
+
+# Policy: an issue closes when its change SHIPS in a release, not when the PR
+# merges. When a PR is merged, this workflow finds the issues it references
+# (`Refs #N`, `Part of #N`, or a closing keyword that slipped through), reopens
+# any that GitHub auto-closed, and moves them to `lifecycle:merged` — replacing
+# whatever stage label they carried. The release automation later closes them
+# with a "Shipped in <version>" comment. See docs/ISSUE_LIFECYCLE.md.
+#
+# Label changes made here use GITHUB_TOKEN, which does not trigger other
+# workflows, so the lifecycle guard will not run on them. This workflow therefore
+# keeps the one-stage-label invariant itself.
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  keep-open:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reopen referenced issues and mark merged
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const text = `${pr.title || ''}\n${pr.body || ''}`;
+            // Collect same-repo issue numbers that follow a reference keyword, e.g.
+            // "Refs #12", "Part of #3, #4", "Fixes #7". A bare "#N" mention (or an
+            // owner/repo#N cross-ref) is NOT a reference: it must not reopen a
+            // shipped issue.
+            const nums = new Set();
+            const refRe = /\b(?:refs?|part\s+of|close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*:?\s*((?:#\d+\b(?:\s*,\s*|\s+and\s+|\s+)?)+)/gi;
+            for (const m of text.matchAll(refRe)) {
+              for (const n of m[1].matchAll(/#(\d+)/g)) nums.add(parseInt(n[1], 10));
+            }
+            if (nums.size === 0) {
+              core.info('No same-repo "Refs #N" / "Part of #N" references found in PR title/body.');
+              return;
+            }
+            const LABEL = 'lifecycle:merged';
+            // Stage labels replaced by LABEL. Includes retired names so an issue still
+            // carrying one is migrated the first time a referencing PR merges.
+            const REPLACED = [
+              'lifecycle:analysis',
+              'lifecycle:elaboration',
+              'lifecycle:ready',
+              'lifecycle:elaboration-complete',
+              'lifecycle:dev',
+              'lifecycle:testing',
+              'lifecycle:testing-completed',
+            ];
+            // Ensure the label exists (no-op if present); skip silently if creation not allowed.
+            // The label is normally created/owned by sync-labels.yml; this is a fallback.
+            try {
+              await github.rest.issues.getLabel({ ...context.repo, name: LABEL });
+            } catch (e) {
+              try {
+                await github.rest.issues.createLabel({ ...context.repo, name: LABEL, color: '5319e7',
+                  description: 'Lifecycle: merged, awaiting a release. Requires a merged linked PR.' });
+                core.info(`Created '${LABEL}' label.`);
+              } catch (e2) { core.warning(`Could not ensure '${LABEL}' label: ${e2.message}`); }
+            }
+            for (const n of nums) {
+              let issue;
+              try {
+                issue = (await github.rest.issues.get({ ...context.repo, issue_number: n })).data;
+              } catch (e) { core.info(`#${n} not an issue here (${e.status}); skipping.`); continue; }
+              if (issue.pull_request) { continue; } // it's a PR, not an issue
+              if (issue.state === 'closed') {
+                await github.rest.issues.update({ ...context.repo, issue_number: n, state: 'open' });
+                core.info(`Reopened #${n} (closed when PR #${pr.number} merged).`);
+              }
+              const names = (issue.labels || []).map(l => l.name || l);
+              for (const old of names.filter(x => REPLACED.includes(x))) {
+                try {
+                  await github.rest.issues.removeLabel({ ...context.repo, issue_number: n, name: old });
+                  core.info(`Removed '${old}' from #${n}.`);
+                } catch (e) { core.warning(`remove '${old}' from #${n}: ${e.message}`); }
+              }
+              if (!names.includes(LABEL)) {
+                await github.rest.issues.addLabels({ ...context.repo, issue_number: n, labels: [LABEL] });
+                core.info(`Added '${LABEL}' to #${n}.`);
+              }
+              await github.rest.issues.createComment({ ...context.repo, issue_number: n,
+                body: `Kept open by policy: PR #${pr.number} merged, so this issue is now \`${LABEL}\`. It stays open until the change ships; the release automation closes it with a "Shipped in <version>" comment.` });
+            }

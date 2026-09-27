@@ -9,7 +9,8 @@ Thanks for contributing to sovereign-ai-node.
   describes the stages, the `lifecycle:` labels, and who sets each.
 - **Branch per change.** Never commit to `main`. Open a **draft pull request** early.
 - **Reference issues with `Refs #N` or `Part of #N`** in your PR — not
-  `Closes`/`Fixes`/`Resolves`. Issues stay open until a human has tested and closed them.
+  `Closes`/`Fixes`/`Resolves`. Issues stay open after merge and are closed by the release
+  automation once the change ships in a release.
 - Keep PRs focused on a single issue.
 
 ## Before you push
@@ -23,5 +24,5 @@ Thanks for contributing to sovereign-ai-node.
 The `lifecycle:` labels are managed as code and partly automated; see
 [docs/ISSUE_LIFECYCLE.md](docs/ISSUE_LIFECYCLE.md) for the full state machine and the
 workflows that enforce it. In short: a guard repairs illegal label states, and
-`lifecycle:testing` is applied automatically when a referencing PR merges — you don't
+`lifecycle:merged` is applied automatically when a referencing PR merges — you don't
 set it by hand.
