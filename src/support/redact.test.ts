@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   isPiiKey,
   isSecretKey,
+  MASKED_LOCAL_PART,
   MAX_VALUE_LENGTH,
+  maskEmailLocalParts,
   REDACTED,
   REDACTED_PII,
   redactText,
@@ -820,5 +822,30 @@ describe("regex state safety", () => {
     expect(serialized).not.toContain("one@example.com");
     expect(serialized).not.toContain("two@example.com");
     expect(serialized).not.toContain("three@example.com");
+  });
+});
+
+describe("redactText — maxLength", () => {
+  it("defaults to keeping the head within MAX_VALUE_LENGTH", () => {
+    expect(redactText("a".repeat(9000)).endsWith("…[truncated]")).toBe(true);
+  });
+
+  it("can be unbounded so a caller can keep the tail itself", () => {
+    const text = `${"a".repeat(20_000)} password=hunter2 END`;
+    const redacted = redactText(text, { maxLength: Number.POSITIVE_INFINITY });
+    expect(redacted.endsWith("END")).toBe(true);
+    expect(redacted).not.toContain("hunter2");
+  });
+});
+
+describe("maskEmailLocalParts", () => {
+  it("keeps the domain and masks the mailbox", () => {
+    expect(maskEmailLocalParts("login alice.smith+tag@mail.example.org failed; bob@x.io")).toBe(
+      `login ${MASKED_LOCAL_PART}@mail.example.org failed; ${MASKED_LOCAL_PART}@x.io`,
+    );
+  });
+
+  it("leaves text without addresses alone", () => {
+    expect(maskEmailLocalParts("imap.example.com:993")).toBe("imap.example.com:993");
   });
 });

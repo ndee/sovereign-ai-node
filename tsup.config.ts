@@ -82,6 +82,7 @@ export default defineConfig([
       "lib/system": "src/lib/system.ts",
       "lib/app": "src/lib/app.ts",
       "lib/contracts": "src/lib/contracts.ts",
+      "lib/support": "src/lib/support.ts",
     },
     outDir: "dist",
     format: "esm",

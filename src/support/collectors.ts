@@ -76,6 +76,32 @@ export const defaultRunCommand: RunCommand = async (file, args, timeoutMs) => {
   return { stdout, stderr };
 };
 
+/** Output bound for `runBoundedCommand`: large enough for a windowed journal. */
+export const BOUNDED_COMMAND_MAX_BUFFER = 16 * 1024 * 1024;
+const BOUNDED_COMMAND_TIMEOUT_MS = 15_000;
+
+/**
+ * Runner for the install diagnostics bundle, which may run as root.
+ *
+ * Same discipline as `defaultRunCommand` — `execFile`, no shell, constant
+ * argv — plus what a root caller needs: a fixed PATH and locale instead of an
+ * inherited environment, `/` as the working directory, and an output bound
+ * sized for a journal window rather than a single status line.
+ */
+export const runBoundedCommand = async (
+  file: string,
+  args: readonly string[],
+): Promise<{ stdout: string }> => {
+  const { stdout } = await execFileAsync(file, [...args], {
+    timeout: BOUNDED_COMMAND_TIMEOUT_MS,
+    killSignal: "SIGKILL",
+    maxBuffer: BOUNDED_COMMAND_MAX_BUFFER,
+    cwd: "/",
+    env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C.UTF-8", SYSTEMD_COLORS: "0" },
+  });
+  return { stdout };
+};
+
 const truncate = (value: string): string =>
   value.length > MAX_ARTIFACT_BYTES ? `${value.slice(0, MAX_ARTIFACT_BYTES)}\n…[truncated]` : value;
 

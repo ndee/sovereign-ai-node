@@ -328,3 +328,118 @@ describe("support-bundle — error path", () => {
     }
   });
 });
+
+describe("support-bundle --install-diagnostics", () => {
+  const tempDir = async (): Promise<{ path: string; cleanup: () => Promise<void> }> => {
+    const { mkdtemp, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const base = await mkdtemp(join(tmpdir(), "sb-diag-"));
+    return { path: join(base, "out"), cleanup: () => rm(base, { recursive: true, force: true }) };
+  };
+
+  const programWith = (inputs: Parameters<typeof registerSupportBundleCommand>[2]): Command => {
+    const program = new Command();
+    program.exitOverride();
+    registerSupportBundleCommand(program, createMockApp(), inputs);
+    return program;
+  };
+
+  it("offers the flag", () => {
+    const flags = findCommand(buildProgram(), "support-bundle")?.options.map(
+      (option) => option.flags,
+    );
+    expect(flags).toContain("--install-diagnostics");
+  });
+
+  it("writes a complete zip and says so in human form", async () => {
+    const { path, cleanup } = await tempDir();
+    process.exitCode = undefined;
+    try {
+      await programWith({
+        sources: [{ kind: "value", name: "v.json", purpose: "p", value: 1 }],
+        secretSources: {},
+      }).parseAsync([
+        "node",
+        "test",
+        "support-bundle",
+        "--install-diagnostics",
+        "--output-dir",
+        path,
+      ]);
+      expect(output()).toContain("Install diagnostics file created.");
+      expect(output()).not.toContain("Not included:");
+      expect(output()).toMatch(/sovereign-ai-node-diagnostics-\d{4}-\d{2}-\d{2}-[a-z0-9]{6}\.zip/u);
+      expect(process.exitCode).toBeUndefined();
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("lists what is missing and exits partial", async () => {
+    const { path, cleanup } = await tempDir();
+    process.exitCode = undefined;
+    try {
+      await programWith({
+        sources: [{ kind: "file-tail", name: "a.log", path: "/nonexistent/a.log", purpose: "p" }],
+        secretSources: {},
+      }).parseAsync([
+        "node",
+        "test",
+        "support-bundle",
+        "--install-diagnostics",
+        "--output-dir",
+        path,
+      ]);
+      expect(output()).toContain("Not included:");
+      expect(output()).toContain("files/a.log: not present");
+      expect(process.exitCode).toBe(EXIT_PARTIAL);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("emits JSON with the manifest file list", async () => {
+    const { path, cleanup } = await tempDir();
+    process.exitCode = undefined;
+    try {
+      await programWith({ sources: [], secretSources: {} }).parseAsync([
+        "node",
+        "test",
+        "support-bundle",
+        "--install-diagnostics",
+        "--json",
+        "--output-dir",
+        path,
+      ]);
+      const parsed = JSON.parse(output()) as {
+        ok: boolean;
+        result: { complete: boolean; files: unknown[]; path: string };
+      };
+      expect(parsed.ok).toBe(true);
+      expect(parsed.result.complete).toBe(true);
+      expect(parsed.result.files).toEqual([]);
+      expect(parsed.result.path.endsWith(".zip")).toBe(true);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("uses the node's default sources when none are injected", async () => {
+    const { writeInstallDiagnostics } = await import("./support-bundle.js");
+    const { path, cleanup } = await tempDir();
+    try {
+      const { mkdir } = await import("node:fs/promises");
+      await mkdir(path, { recursive: true });
+      const written = await writeInstallDiagnostics(path, {
+        now: new Date("2026-09-27T00:00:00Z"),
+      });
+      expect(written.path).toContain("sovereign-ai-node-diagnostics-2026-09-27-");
+      expect(written.result.manifest.files.some((file) => file.file === "files/system.json")).toBe(
+        true,
+      );
+    } finally {
+      await cleanup();
+    }
+  });
+});
