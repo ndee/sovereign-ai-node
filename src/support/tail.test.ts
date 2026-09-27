@@ -140,3 +140,25 @@ describe("readSmallFile", () => {
     await expect(readSmallFile(path, 5)).rejects.toThrow("refused: larger than 5 bytes");
   });
 });
+
+describe("owner constraint", () => {
+  const uid = process.getuid?.() ?? 0;
+
+  it("accepts a file owned by the required account", async () => {
+    const path = join(dir, "mine");
+    await writeFile(path, "ok\n");
+    expect((await readFileTail(path, 100, { owner: uid })).text).toBe("ok\n");
+    expect(await readSmallFile(path, 100, { owner: uid })).toBe("ok\n");
+  });
+
+  it("refuses a file owned by anyone else", async () => {
+    const path = join(dir, "theirs");
+    await writeFile(path, "no\n");
+    await expect(readFileTail(path, 100, { owner: uid + 1 })).rejects.toThrow(
+      "refused: not owned by the expected account",
+    );
+    await expect(readSmallFile(path, 100, { owner: uid + 1 })).rejects.toThrow(
+      "refused: not owned by the expected account",
+    );
+  });
+});

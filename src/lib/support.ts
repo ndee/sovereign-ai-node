@@ -32,5 +32,10 @@ export {
 } from "../support/known-secrets.js";
 export { maskEmailLocalParts, REDACTED, REDACTED_PII, redactText } from "../support/redact.js";
 export { findSecretShapes } from "../support/shape-guard.js";
-export { readFileTail, readSmallFile, tailText } from "../support/tail.js";
+export {
+  type ReadConstraints,
+  readFileTail,
+  readSmallFile,
+  tailText,
+} from "../support/tail.js";
 export { crc32, createZip, readZip, type ZipEntry } from "../support/zip.js";

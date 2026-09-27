@@ -86,8 +86,22 @@ export class UnreadableFileError extends Error {}
  * opening would leave a window in which a planted symlink turns "read this
  * log" into "read any file on the host"; `O_NOFOLLOW` plus `fstat` on the
  * descriptor closes it.
+ *
+ * `O_NOFOLLOW` guards only the LAST path component. When a file sits in a
+ * directory a less privileged account can write to, that account could swap a
+ * parent directory for a symlink. Callers reading such locations pass the
+ * account's uid as `owner`: a file it does not own is refused, so a swapped
+ * directory can only ever lead to files the account could read anyway.
  */
-export const openRegularFile = async (path: string): Promise<FileHandle> => {
+export interface ReadConstraints {
+  /** Required owner uid of the file, checked on the open descriptor. */
+  readonly owner?: number;
+}
+
+export const openRegularFile = async (
+  path: string,
+  constraints: ReadConstraints = {},
+): Promise<FileHandle> => {
   let handle: FileHandle;
   try {
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -106,6 +120,10 @@ export const openRegularFile = async (path: string): Promise<FileHandle> => {
     await handle.close();
     throw new UnreadableFileError("refused: not a regular file");
   }
+  if (constraints.owner !== undefined && info.uid !== constraints.owner) {
+    await handle.close();
+    throw new UnreadableFileError("refused: not owned by the expected account");
+  }
   return handle;
 };
 
@@ -116,8 +134,12 @@ export const openRegularFile = async (path: string): Promise<FileHandle> => {
  * does not start at offset 0, the partial first line is dropped, so a line —
  * and any secret on it — is either returned whole or not at all.
  */
-export const readFileTail = async (path: string, maxBytes: number): Promise<FileTail> => {
-  const handle = await openRegularFile(path);
+export const readFileTail = async (
+  path: string,
+  maxBytes: number,
+  constraints: ReadConstraints = {},
+): Promise<FileTail> => {
+  const handle = await openRegularFile(path, constraints);
   try {
     const fileBytes = (await handle.stat()).size;
     const windowBytes = Math.min(fileBytes, maxBytes + TAIL_READ_MARGIN_BYTES);
@@ -141,8 +163,12 @@ export const readFileTail = async (path: string, maxBytes: number): Promise<File
  * Files above `maxBytes` are refused rather than silently cut, because the
  * callers parse the content (JSON, a secret value) and half a value is wrong.
  */
-export const readSmallFile = async (path: string, maxBytes: number): Promise<string> => {
-  const handle = await openRegularFile(path);
+export const readSmallFile = async (
+  path: string,
+  maxBytes: number,
+  constraints: ReadConstraints = {},
+): Promise<string> => {
+  const handle = await openRegularFile(path, constraints);
   try {
     const size = (await handle.stat()).size;
     if (size > maxBytes) {

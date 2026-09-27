@@ -757,3 +757,38 @@ describe("defaults", () => {
     expect(result.manifest.files[0]?.status).toBe("collected");
   });
 });
+
+describe("owner constraint on less-privileged locations", () => {
+  const uid = process.getuid?.() ?? 0;
+
+  it("reads files owned by the named account and refuses the rest, per source", async () => {
+    const jobs = join(dir, "jobs");
+    const logs = join(dir, "logs");
+    await mkdir(jobs);
+    await mkdir(logs);
+    await writeFile(join(jobs, "j.json"), JSON.stringify(jobRecord()));
+    await writeFile(join(logs, "a-debug-0.log"), "npm error\n");
+    await writeFile(join(dir, "f.log"), "log\n");
+    await writeFile(join(dir, "f.json"), "{}");
+    const sources = (owner: number): DiagnosticsSource[] => [
+      { kind: "install-jobs", dir: jobs, owner },
+      { kind: "npm-logs", dirs: [logs], owner },
+      { kind: "file-tail", name: "f.log", path: join(dir, "f.log"), purpose: "p", owner },
+      { kind: "json-file", name: "f.json", path: join(dir, "f.json"), purpose: "p", owner },
+    ];
+    const ok = await build(sources(uid));
+    expect(ok.manifest.files.map((entry) => entry.status)).toEqual([
+      "collected",
+      "collected",
+      "collected",
+      "collected",
+    ]);
+    const refused = await build(sources(uid + 1));
+    expect(refused.manifest.files.map((entry) => entry.reason)).toEqual([
+      "refused: not owned by the expected account",
+      "refused: not owned by the expected account",
+      "refused: not owned by the expected account",
+      "refused: not owned by the expected account",
+    ]);
+  });
+});

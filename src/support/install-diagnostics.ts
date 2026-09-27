@@ -52,7 +52,13 @@ import {
   redactText,
 } from "./redact.js";
 import { findSecretShapes } from "./shape-guard.js";
-import { readFileTail, readSmallFile, tailText, UnreadableFileError } from "./tail.js";
+import {
+  type ReadConstraints,
+  readFileTail,
+  readSmallFile,
+  tailText,
+  UnreadableFileError,
+} from "./tail.js";
 import { createZip } from "./zip.js";
 
 /** Bumped when the manifest shape changes. */
@@ -114,6 +120,8 @@ export type DiagnosticsSource =
       /** Newest install job records, field-allowlisted. */
       readonly kind: "install-jobs";
       readonly dir: string;
+      /** Required file owner uid (see `ReadConstraints`); for less-privileged directories. */
+      readonly owner?: number;
       readonly limit?: number;
       readonly maxBytesPerRecord?: number;
       readonly priority?: number;
@@ -122,6 +130,7 @@ export type DiagnosticsSource =
       /** Newest npm debug logs across the given `_logs` directories (tail). */
       readonly kind: "npm-logs";
       readonly dirs: readonly string[];
+      readonly owner?: number;
       readonly limit?: number;
       readonly maxBytes?: number;
       readonly priority?: number;
@@ -131,6 +140,7 @@ export type DiagnosticsSource =
       readonly kind: "file-tail";
       readonly name: string;
       readonly path: string;
+      readonly owner?: number;
       readonly purpose: string;
       readonly maxBytes?: number;
       readonly priority?: number;
@@ -140,6 +150,7 @@ export type DiagnosticsSource =
       readonly kind: "json-file";
       readonly name: string;
       readonly path: string;
+      readonly owner?: number;
       readonly purpose: string;
       readonly pick?: (parsed: unknown) => unknown;
       readonly maxBytes?: number;
@@ -376,6 +387,9 @@ export const pickInstallJobRecord = (record: unknown): Record<string, unknown> |
 
 // ── Collectors ─────────────────────────────────────────────────────────────
 
+const ownerConstraint = (owner: number | undefined): ReadConstraints =>
+  owner === undefined ? {} : { owner };
+
 const unavailable = (
   file: string,
   purpose: string,
@@ -455,7 +469,9 @@ const collectInstallJobs = async (
     const file = `files/install-jobs/${SAFE_SEGMENT_RE.test(id) ? id : `job-${index + 1}`}.json`;
     let parsed: unknown;
     try {
-      parsed = JSON.parse(await readSmallFile(entry.path, MAX_JOB_RECORD_FILE_BYTES));
+      parsed = JSON.parse(
+        await readSmallFile(entry.path, MAX_JOB_RECORD_FILE_BYTES, ownerConstraint(source.owner)),
+      );
     } catch (error) {
       artifacts.push(
         unavailable(
@@ -513,9 +529,10 @@ const collectTextFile = async (
   priority: number,
   maxBytes: number,
   known: KnownSecretSet | undefined,
+  owner: number | undefined,
 ): Promise<Artifact> => {
   try {
-    const read = await readFileTail(path, maxBytes);
+    const read = await readFileTail(path, maxBytes, ownerConstraint(owner));
     const tail = tailText(scrubDiagnosticText(read.text, known), maxBytes);
     return {
       file,
@@ -563,6 +580,7 @@ const collectNpmLogs = async (
         priority,
         source.maxBytes ?? DEFAULT_SOURCE_CAPS.npmLogBytes,
         known,
+        source.owner,
       ),
     );
   }
@@ -578,7 +596,11 @@ const collectJsonFile = async (
   let parsed: unknown;
   try {
     parsed = JSON.parse(
-      await readSmallFile(source.path, source.maxBytes ?? DEFAULT_SOURCE_CAPS.jsonFileBytes),
+      await readSmallFile(
+        source.path,
+        source.maxBytes ?? DEFAULT_SOURCE_CAPS.jsonFileBytes,
+        ownerConstraint(source.owner),
+      ),
     );
   } catch (error) {
     return unavailable(
@@ -786,6 +808,7 @@ const collectSource = async (
           source.priority ?? DIAGNOSTICS_PRIORITY.logs,
           source.maxBytes ?? DEFAULT_SOURCE_CAPS.fileTailBytes,
           known,
+          source.owner,
         ),
       ];
     case "json-file":
