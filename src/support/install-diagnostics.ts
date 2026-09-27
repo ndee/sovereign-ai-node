@@ -669,10 +669,6 @@ const collectJournal = async (
         source.unit,
         "--boot",
         boot,
-        // Read every journal on the host, not only the one named by the
-        // current machine-id: a cloned or re-imaged system whose machine-id
-        // changed after journald started would otherwise report nothing.
-        "--merge",
         "--no-pager",
         "--quiet",
         "--output=short-iso",

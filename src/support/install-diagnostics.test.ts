@@ -411,6 +411,7 @@ describe("file, json and value sources", () => {
 
 describe("journal collection", () => {
   it("collects current and previous boot with fixed argv", async () => {
+    // No --merge: journalctl rejects it together with --boot (systemd 255).
     const calls: string[][] = [];
     const run: DiagnosticsRunCommand = async (file, args) => {
       calls.push([file, ...args]);
@@ -426,7 +427,6 @@ describe("journal collection", () => {
       "sovereign-node-api",
       "--boot",
       "-1",
-      "--merge",
       "--no-pager",
       "--quiet",
       "--output=short-iso",
