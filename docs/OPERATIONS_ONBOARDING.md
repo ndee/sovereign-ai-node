@@ -363,7 +363,7 @@ If the simple flow fails, the operator should check these first:
 - OpenClaw CLI/version install sanity (bootstrap script reachability, version pin match)
 - Matrix service health and reverse proxy status
 - IMAP connectivity test and credential validity
-- when Proton Bridge is used in maintained validation flows, use the fresh-VM runbook from `sovereign-ai-node-pro/docs/PROTON_BRIDGE_VALIDATION.md`
+- when Proton Bridge is used in validation flows, validate it on a fresh VM
 - alert room target and bot membership
 
 ## Related Docs
@@ -372,7 +372,6 @@ If the simple flow fails, the operator should check these first:
 - `docs/MAIL_SENTINEL_DESIGN.md`
 - `docs/MATRIX_BUNDLED_SETUP.md`
 - `docs/INSTALLER_CONTRACTS.md`
-- `sovereign-ai-node-pro/docs/PROTON_BRIDGE_VALIDATION.md`
 
 ## Changing settings after install
 

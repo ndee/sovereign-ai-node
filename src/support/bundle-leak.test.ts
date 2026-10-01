@@ -10,7 +10,7 @@
  * manifests in composition — a collector that bypasses `redactValue`, a new
  * artifact added without redaction, a manifest field that echoes input — would
  * pass every unit test and fail here. That is precisely the class of bug that
- * would put a design partner's mail or credentials in the founder's inbox.
+ * would put an operator's mail or credentials in the founder's inbox.
  *
  * The negative control below is load-bearing: it proves the assertion is
  * capable of failing. Without it, a bug that made the search itself vacuous

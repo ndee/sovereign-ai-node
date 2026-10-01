@@ -2,7 +2,7 @@
 
 This repo tracks work as GitHub issues that move through a fixed set of stages.
 A small set of `lifecycle:` labels is the **state machine** for that progression.
-Conductor agents drive most transitions, automation keeps the labels honest, and
+Automation and agents drive most transitions, automation keeps the labels honest, and
 humans own the decision points: approving a plan, merging a PR, and approving a ship.
 
 ## Stages
@@ -28,8 +28,8 @@ humans own the decision points: approving a plan, merging a PR, and approving a 
 
 | Label | Stage | Who sets it | Meaning |
 |---|---|---|---|
-| `lifecycle:analysis` | analysis | conductor agent / human | Root cause being determined from evidence; not yet designed. |
-| `lifecycle:elaboration` | elaboration | conductor agent / human | Solution being elaborated into a plan; not yet approved. |
+| `lifecycle:analysis` | analysis | agent / human | Root cause being determined from evidence; not yet designed. |
+| `lifecycle:elaboration` | elaboration | agent / human | Solution being elaborated into a plan; not yet approved. |
 | `lifecycle:ready` | ready | **human** (plan approval) | Plan approved; ready to implement. |
 | *(none)* | implementing | — | An open PR says `Refs #N`. |
 | `lifecycle:merged` | merged | **automation** (on PR merge) | Merged, awaiting a release. Requires a merged PR referencing the issue. |

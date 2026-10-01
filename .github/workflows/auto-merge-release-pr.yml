@@ -4,12 +4,10 @@ name: Auto-merge release PR
 # opens the version-bump PR, and this arms GitHub's native auto-merge on it so
 # it lands as soon as the required checks pass.
 #
-# WHY NATIVE AUTO-MERGE HERE, AND NOT THE POLLING GUARD PRO NEEDS.
-# The two forges are not symmetric, and the difference is the whole design:
+# WHY NATIVE AUTO-MERGE HERE, AND NOT A POLLING GUARD.
+# Where a branch is unprotected, nothing would stop a red merge and a workflow
+# would have to poll CI itself. That is not the situation here:
 #
-#   * Pro's Forgejo `main` is UNPROTECTED (enable_status_check:false,
-#     status_check_contexts:[]), so nothing on that side would stop a red
-#     merge and the automation has to poll CI itself.
 #   * THIS repo has an active ruleset ("sovereign-rules") with
 #     required_status_checks, `bypass_actors: []` and
 #     `current_user_can_bypass: "never"`. GitHub itself refuses to merge until

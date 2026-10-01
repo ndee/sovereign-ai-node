@@ -3,7 +3,7 @@
 #
 # WHY THIS EXISTS: Pro web installs shipped hosts without /usr/local/bin/sovereign-tool
 # because the wrapper set in scripts/install/lib-build.sh is maintained by hand,
-# separately from the package.json `bin` map (issue node-pro#324). Mail Sentinel
+# separately from the package.json `bin` map (a past install regression). Mail Sentinel
 # could never scan mail on those hosts. This test fails whenever the two lists —
 # or the wrappers' exec targets — drift apart.
 #
@@ -41,7 +41,7 @@ while IFS=$'\t' read -r name target; do
 
   # 1. A wrapper heredoc must exist for this bin.
   if ! grep -Eq "^[[:space:]]*cat > /usr/local/bin/${name} <<" "$LIB_BUILD"; then
-    error "lib-build.sh install_wrappers() has no 'cat > /usr/local/bin/${name}' block — a fresh install would ship without ${name} (see issue node-pro#324)"
+    error "lib-build.sh install_wrappers() has no 'cat > /usr/local/bin/${name}' block — a fresh install would ship without ${name} (a past install regression)"
     continue
   fi
 
