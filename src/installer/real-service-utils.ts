@@ -143,13 +143,15 @@ export const sortToolInstances = (
 ): RuntimeConfig["sovereignTools"]["instances"] =>
   [...entries].sort((left, right) => left.id.localeCompare(right.id));
 
-export const resolveExecutablePath = async (command: string): Promise<string | null> => {
+export const resolveExecutablePath = async (
+  command: string,
+  searchPath: string = process.env.PATH ?? "",
+): Promise<string | null> => {
   if (command.includes("/")) {
     return command;
   }
 
-  const pathValue = process.env.PATH ?? "";
-  for (const entry of pathValue.split(delimiter)) {
+  for (const entry of searchPath.split(delimiter)) {
     if (entry.length === 0) {
       continue;
     }

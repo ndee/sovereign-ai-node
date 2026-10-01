@@ -3772,6 +3772,93 @@ describe("RealInstallerService", () => {
     }
   });
 
+  it("renders the gateway unit from the service user's npm prefix under a sudo-like PATH (#285)", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const priorUnitPath = process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH;
+    const priorPath = process.env.PATH;
+    const unitPath = join(tempRoot, "systemd", "sovereign-openclaw-gateway.service");
+    const serviceHome = join(tempRoot, "svc-home");
+    const npmBin = join(serviceHome, ".npm-global", "bin");
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+    const makeService = () =>
+      new RealInstallerService(createLogger(), paths, {
+        execRunner: {
+          run: async ({ command, args }: ExecInput): Promise<ExecResult> => {
+            const serialized = [command, ...(args ?? [])].join(" ");
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout:
+                serialized === "getent passwd sovereign-node"
+                  ? `sovereign-node:x:999:999::${serviceHome}:/bin/bash\n`
+                  : "",
+              stderr: "",
+            };
+          },
+        },
+      } as unknown as ConstructorParameters<typeof RealInstallerService>[2]);
+    const runtimeConfig = {
+      matrix: { adminBaseUrl: "https://matrix.example.org" },
+      openclaw: {
+        serviceUser: "sovereign-node",
+        serviceGroup: "sovereign-node",
+        gatewayEnvPath: join(tempRoot, "gateway.env"),
+      },
+    } as unknown as RuntimeConfig;
+    const render = async (): Promise<string> => {
+      const ok = await (
+        makeService() as unknown as {
+          ensureSystemGatewayServiceFallback(config: RuntimeConfig): Promise<boolean>;
+        }
+      ).ensureSystemGatewayServiceFallback(runtimeConfig);
+      expect(ok).toBe(true);
+      return readFile(unitPath, "utf8");
+    };
+
+    process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH = unitPath;
+    // sudo secure_path: no npm bin dir, no openclaw anywhere on it.
+    process.env.PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+    try {
+      // Binary not installed yet: still an absolute ExecStart in the prefix.
+      let unit = await render();
+      expect(unit).toContain(`ExecStart=${join(npmBin, "openclaw")} gateway run`);
+      expect(unit).toMatch(new RegExp(`Environment=PATH=${npmBin}:/usr/local/sbin`));
+
+      // Binary present in the prefix: resolved from there, not the caller PATH.
+      await mkdir(npmBin, { recursive: true });
+      await writeFile(join(npmBin, "openclaw"), "#!/bin/sh\n", { mode: 0o755 });
+      unit = await render();
+      expect(unit).toContain(`ExecStart=${join(npmBin, "openclaw")} gateway run`);
+
+      // A PATH that already carries the prefix is not duplicated.
+      process.env.PATH = `${npmBin}:/usr/bin`;
+      unit = await render();
+      expect(unit).toContain(`Environment=PATH=${npmBin}:/usr/bin\n`);
+
+      // No PATH at all: fall back to the standard system dirs.
+      delete process.env.PATH;
+      unit = await render();
+      expect(unit).toContain(`Environment=PATH=${npmBin}:/usr/local/sbin:`);
+    } finally {
+      process.env.PATH = priorPath;
+      if (priorUnitPath === undefined) {
+        delete process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH;
+      } else {
+        process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH = priorUnitPath;
+      }
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("starts system-level gateway fallback when user services are unavailable", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const priorGatewayUnitPath = process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH;

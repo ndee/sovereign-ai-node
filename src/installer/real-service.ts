@@ -4792,7 +4792,7 @@ export class RealInstallerService implements InstallerService {
   // The service user's npm prefix bin dir — resolved from `getent passwd`
   // like the lobster install/probe, with the same original-HOME fallback for
   // root/dev installs, so the unit PATH and the install location cannot drift.
-  private async resolveServiceNpmBinDir(runtimeConfig: RuntimeConfig): Promise<string | undefined> {
+  private async resolveServiceNpmBinDir(runtimeConfig: RuntimeConfig): Promise<string> {
     const serviceIdentity = this.getConfiguredServiceIdentity(runtimeConfig);
     const serviceHome = await this.resolveServiceUserHome(serviceIdentity.user);
     return resolveServiceNpmBinDir(serviceHome ?? undefined);
@@ -10352,7 +10352,20 @@ export default function (api) {
 
     const serviceIdentity = this.getConfiguredServiceIdentity(runtimeConfig);
     const managedTempDir = this.getManagedOpenClawTempDir(runtimeConfig);
-    const openclawCommand = (await resolveExecutablePath("openclaw")) ?? "openclaw";
+    // Resolve from the service user's npm prefix first, not the caller's PATH:
+    // a CLI reconfigure under sudo's secure_path lacks `.npm-global/bin`, which
+    // would render a bare `ExecStart=openclaw` (203/EXEC restart loop, #285).
+    const serviceNpmBinDir = await this.resolveServiceNpmBinDir(runtimeConfig);
+    const unitPathEnv = [
+      serviceNpmBinDir,
+      ...(process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin").split(
+        ":",
+      ),
+    ]
+      .filter((entry, index, entries) => entry.length > 0 && entries.indexOf(entry) === index)
+      .join(":");
+    const openclawCommand =
+      (await resolveExecutablePath("openclaw", unitPathEnv)) ?? join(serviceNpmBinDir, "openclaw");
     const unitName = SOVEREIGN_GATEWAY_SYSTEMD_UNIT;
     const waitsForLocalMatrix = shouldGateSystemGatewayOnLocalMatrix(
       runtimeConfig.matrix.adminBaseUrl,
@@ -10375,7 +10388,7 @@ export default function (api) {
       `Group=${serviceIdentity.group}`,
       `WorkingDirectory=${this.paths.openclawServiceHome}`,
       `Environment=HOME=${this.paths.openclawServiceHome}`,
-      `Environment=PATH=${process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}`,
+      `Environment=PATH=${unitPathEnv}`,
       `Environment=TMPDIR=${managedTempDir}`,
       `Environment=TMP=${managedTempDir}`,
       `Environment=TEMP=${managedTempDir}`,
