@@ -2,7 +2,7 @@
  * Redacted support bundle.
  *
  * Produces `sovereign-ai-node-support-<date>-<id>.tar.gz` containing only
- * allowlisted, redacted evidence, so a design partner can hand the founder a
+ * allowlisted, redacted evidence, so an operator can hand the founder a
  * complete picture without an SSH session and without sharing secrets or mail.
  *
  * # Security properties, and how each is achieved

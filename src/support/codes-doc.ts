@@ -13,7 +13,7 @@
 
 import { SAN_ERRORS, type SanErrorDefinition } from "./codes.js";
 
-/** Path of the generated document, relative to the node-pro repo root. */
+/** Path of the generated document, relative to the root of the repo that publishes it. */
 export const CODES_DOC_RELATIVE_PATH = "docs/supportability/error-codes.md";
 
 const indexRow = (entry: SanErrorDefinition): string =>

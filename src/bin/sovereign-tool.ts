@@ -232,7 +232,7 @@ const main = async (): Promise<void> => {
     // Resolved from build identity, exactly like sovereign-node
     // (src/cli/command-factory.ts): a deployed sovereign-tool must be able to
     // prove what it is via `sovereign-tool --version`. Pro web installs once
-    // shipped hosts without this binary at all (issue node-pro#324); a
+    // shipped hosts without this binary at all (a past install regression); a
     // verifiable identity is part of making that class of defect diagnosable.
     .version(getNodeBuildInfo().version);
 

@@ -226,8 +226,8 @@ describe("buildVersionInventory — environment", () => {
 
 describe("hashHostname", () => {
   it("is deterministic", () => {
-    expect(hashHostname("sovereign-ai-node-cathouse")).toBe(
-      hashHostname("sovereign-ai-node-cathouse"),
+    expect(hashHostname("example-node")).toBe(
+      hashHostname("example-node"),
     );
   });
 

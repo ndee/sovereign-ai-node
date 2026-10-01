@@ -155,7 +155,7 @@ jobs:
         run: pnpm dev:cli --help
 
       - name: sovereign-tool reports a verifiable version
-        # sovereign-tool is a REQUIRED product dependency (issue node-pro#324);
+        # sovereign-tool is a REQUIRED product dependency (a past install regression);
         # `--version` must work so a deployed binary's identity is checkable.
         run: |
           VERSION="$(pnpm --silent dev:tool --version)"
@@ -165,7 +165,7 @@ jobs:
 
       - name: package.json bin ↔ installer wrapper parity
         # Fails if a bin entry lacks a /usr/local/bin wrapper in
-        # scripts/install/lib-build.sh or the exec targets drift (node-pro#324).
+        # scripts/install/lib-build.sh or the exec targets drift (past install regression).
         run: bash scripts/ci/test-wrapper-bin-parity.sh
 
       - name: API starts and responds on /healthz

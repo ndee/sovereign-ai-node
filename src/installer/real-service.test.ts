@@ -14345,14 +14345,14 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
     ).resolveStableInstallationId = async () => id;
   };
 
-  // Legacy http enrollment for cathouse-style node (no dns01).
+  // Legacy http enrollment for example-node-style node (no dns01).
   const legacyRuntimeConfig = (controlUrl = "https://relay.sovereign-ai-node.com"): RuntimeConfig =>
     ({
       relay: {
         enabled: true,
         controlUrl,
-        hostname: "cathouse.relay.sovereign-ai-node.com",
-        publicBaseUrl: "https://cathouse.relay.sovereign-ai-node.com",
+        hostname: "example-node.relay.sovereign-ai-node.com",
+        publicBaseUrl: "https://example-node.relay.sovereign-ai-node.com",
         connected: false,
         serviceName: "sovereign-matrix-relay-tunnel.service",
         configPath: "/var/lib/relay/frpc.toml",
@@ -14360,7 +14360,7 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
           serverAddr: "relay.sovereign-ai-node.com",
           serverPort: 7000,
           tokenSecretRef: "file:/tmp/relay-token",
-          proxyName: "relay-cathouse",
+          proxyName: "relay-example-node",
           type: "http",
           localIp: "127.0.0.1",
           localPort: 18080,
@@ -14386,7 +14386,7 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
             provider: "desec",
             apiBase: "https://desec.io/api/v1",
             zone: "relay.sovereign-ai-node.com",
-            subname: "_acme-challenge.cathouse",
+            subname: "_acme-challenge.example-node",
             acmeEmail: "ops@example.org",
             token: "scoped-desec-secret",
           },
@@ -14439,7 +14439,7 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
           url,
           body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
         });
-        return passthroughResponse("cathouse.relay.sovereign-ai-node.com");
+        return passthroughResponse("example-node.relay.sovereign-ai-node.com");
       });
       stubRuntimeConfig(service, legacyRuntimeConfig());
       stubSecret(service, "reused-tunnel-token");
@@ -14452,7 +14452,7 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
       expect(captured).toHaveLength(1);
       expect(captured[0]?.url).toBe("https://relay.sovereign-ai-node.com/api/v1/enroll-public");
       // The existing slug is sent on the PUBLIC enroll path (refresh exception).
-      expect(captured[0]?.body.requestedSlug).toBe("cathouse");
+      expect(captured[0]?.body.requestedSlug).toBe("example-node");
       expect(captured[0]?.body.installationId).toBe("stable-machine-id");
       expect(captured[0]?.body.capabilities).toEqual(["tls-passthrough"]);
       // A legacy node refreshing to passthrough has no dns01 secret yet, so it
@@ -14460,7 +14460,7 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
       // prior failed refresh's persisted desecTokenId traps it without a secret.
       expect(captured[0]?.body.rotateDns01).toBe(true);
       // Result is now passthrough, hostname unchanged.
-      expect(enrollment.hostname).toBe("cathouse.relay.sovereign-ai-node.com");
+      expect(enrollment.hostname).toBe("example-node.relay.sovereign-ai-node.com");
       expect(enrollment.dns01).toBeDefined();
       expect(enrollment.tunnel.type).toBe("https");
     } finally {
@@ -14474,7 +14474,7 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
       let calls = 0;
       const service = buildService(buildPaths(tempRoot), async () => {
         calls += 1;
-        return httpResponse("cathouse.relay.sovereign-ai-node.com");
+        return httpResponse("example-node.relay.sovereign-ai-node.com");
       });
       stubRuntimeConfig(service, legacyRuntimeConfig());
       stubSecret(service, "reused-tunnel-token");
@@ -14490,7 +14490,7 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
       // Refresh returned http ⇒ keep-legacy ⇒ reuse the persisted legacy block.
       expect(enrollment.dns01).toBeUndefined();
       expect(enrollment.tunnel.type).toBe("http");
-      expect(enrollment.hostname).toBe("cathouse.relay.sovereign-ai-node.com");
+      expect(enrollment.hostname).toBe("example-node.relay.sovereign-ai-node.com");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -14511,7 +14511,7 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
       });
 
       // Hostname would have changed ⇒ refuse the refresh, keep the legacy node.
-      expect(enrollment.hostname).toBe("cathouse.relay.sovereign-ai-node.com");
+      expect(enrollment.hostname).toBe("example-node.relay.sovereign-ai-node.com");
       expect(enrollment.dns01).toBeUndefined();
       expect(enrollment.tunnel.type).toBe("http");
     } finally {
@@ -14533,7 +14533,7 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
         controlUrl: "https://relay.sovereign-ai-node.com",
       });
 
-      expect(enrollment.hostname).toBe("cathouse.relay.sovereign-ai-node.com");
+      expect(enrollment.hostname).toBe("example-node.relay.sovereign-ai-node.com");
       expect(enrollment.dns01).toBeUndefined();
       expect(enrollment.tunnel.type).toBe("http");
     } finally {
@@ -14560,7 +14560,7 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
         controlUrl: "https://relay.sovereign-ai-node.com",
       });
 
-      expect(enrollment.hostname).toBe("cathouse.relay.sovereign-ai-node.com");
+      expect(enrollment.hostname).toBe("example-node.relay.sovereign-ai-node.com");
       expect(enrollment.dns01).toBeUndefined();
       expect(enrollment.tunnel.type).toBe("http");
     } finally {
@@ -14577,7 +14577,7 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
           url,
           body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
         });
-        return passthroughResponse("cathouse.relay.sovereign-ai-node.com");
+        return passthroughResponse("example-node.relay.sovereign-ai-node.com");
       });
       // Custom relay: persisted runtime config points at a non-default control URL.
       stubRuntimeConfig(service, legacyRuntimeConfig("https://relay.example.com"));
@@ -14592,7 +14592,7 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
       expect(captured).toHaveLength(1);
       expect(captured[0]?.url).toBe("https://relay.example.com/api/v1/enroll");
       expect(captured[0]?.body.enrollmentToken).toBe("custom-relay-token");
-      expect(captured[0]?.body.requestedSlug).toBe("cathouse");
+      expect(captured[0]?.body.requestedSlug).toBe("example-node");
       expect(captured[0]?.body.installationId).toBeUndefined();
       expect(enrollment.dns01).toBeDefined();
     } finally {
@@ -14606,14 +14606,14 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
       let calls = 0;
       const service = buildService(buildPaths(tempRoot), async () => {
         calls += 1;
-        return passthroughResponse("cathouse.relay.sovereign-ai-node.com");
+        return passthroughResponse("example-node.relay.sovereign-ai-node.com");
       });
       const config = legacyRuntimeConfig();
       (config.relay as NonNullable<RuntimeConfig["relay"]>).dns01 = {
         provider: "desec",
         apiBase: "https://desec.io/api/v1",
         zone: "relay.sovereign-ai-node.com",
-        subname: "_acme-challenge.cathouse",
+        subname: "_acme-challenge.example-node",
         tokenSecretRef: "file:/tmp/relay-desec-token",
       };
       (config.relay as NonNullable<RuntimeConfig["relay"]>).tunnel.type = "https";
@@ -14699,7 +14699,7 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
           url,
           body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
         });
-        return passthroughResponse("cathouse.relay.sovereign-ai-node.com");
+        return passthroughResponse("example-node.relay.sovereign-ai-node.com");
       });
       const config = legacyRuntimeConfig();
       (config.relay as NonNullable<RuntimeConfig["relay"]>).hostname = "";
@@ -14712,7 +14712,7 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
       });
 
       // Slug came from publicBaseUrl's first label.
-      expect(captured[0]?.body.requestedSlug).toBe("cathouse");
+      expect(captured[0]?.body.requestedSlug).toBe("example-node");
       expect(enrollment.dns01).toBeDefined();
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
@@ -14725,7 +14725,7 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
       let calls = 0;
       const service = buildService(buildPaths(tempRoot), async () => {
         calls += 1;
-        return passthroughResponse("cathouse.relay.sovereign-ai-node.com");
+        return passthroughResponse("example-node.relay.sovereign-ai-node.com");
       });
       const config = legacyRuntimeConfig();
       // Neither a usable hostname nor a parseable publicBaseUrl ⇒ slug "".
@@ -14754,7 +14754,7 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
       let calls = 0;
       const service = buildService(buildPaths(tempRoot), async () => {
         calls += 1;
-        return passthroughResponse("cathouse.relay.sovereign-ai-node.com");
+        return passthroughResponse("example-node.relay.sovereign-ai-node.com");
       });
       // Custom (non-default) relay enrollment persisted, but the request carries
       // a blank enrollmentToken ⇒ cannot re-enroll ⇒ keep legacy without a call.
@@ -14798,7 +14798,7 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
 
       expect(enrollment.dns01).toBeUndefined();
       expect(enrollment.tunnel.type).toBe("http");
-      expect(enrollment.hostname).toBe("cathouse.relay.sovereign-ai-node.com");
+      expect(enrollment.hostname).toBe("example-node.relay.sovereign-ai-node.com");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -14808,7 +14808,7 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "relay-refresh-test-"));
     try {
       const service = buildService(buildPaths(tempRoot), async () =>
-        httpResponse("cathouse.relay.sovereign-ai-node.com"),
+        httpResponse("example-node.relay.sovereign-ai-node.com"),
       );
       stubRuntimeConfig(service, legacyRuntimeConfig());
       stubSecret(service, "reused-tunnel-token");
@@ -14818,18 +14818,18 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
       // pre-enrolled short-circuit is the fallback after the refresh declines.
       const enrollment = await invoke(service, {
         controlUrl: "https://relay.sovereign-ai-node.com",
-        hostname: "cathouse.relay.sovereign-ai-node.com",
-        publicBaseUrl: "https://cathouse.relay.sovereign-ai-node.com",
+        hostname: "example-node.relay.sovereign-ai-node.com",
+        publicBaseUrl: "https://example-node.relay.sovereign-ai-node.com",
         tunnel: {
           serverAddr: "relay.sovereign-ai-node.com",
           serverPort: 7000,
           token: "pre-enrolled-token",
-          proxyName: "relay-cathouse",
+          proxyName: "relay-example-node",
         },
       });
 
       // Refresh returned http ⇒ keep-legacy ⇒ pre-enrolled block is used.
-      expect(enrollment.hostname).toBe("cathouse.relay.sovereign-ai-node.com");
+      expect(enrollment.hostname).toBe("example-node.relay.sovereign-ai-node.com");
       expect(enrollment.dns01).toBeUndefined();
       expect(enrollment.tunnel.type).toBe("http");
       expect(enrollment.tunnel.token).toBe("pre-enrolled-token");
@@ -15070,7 +15070,7 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
         let adopted: Response | null = null;
         const service = buildService(paths, async (url, init) => {
           adopted ??= await withNodeSecret(
-            httpResponse("cathouse.relay.sovereign-ai-node.com"),
+            httpResponse("example-node.relay.sovereign-ai-node.com"),
             "adopted-node-secret",
           );
           return capture(captured, () => adopted as Response)(url, init);
@@ -15105,7 +15105,7 @@ describe("resolveRelayEnrollment passthrough refresh on upgrade", () => {
         let refreshed: Response | null = null;
         const service = buildService(paths, async (url, init) => {
           refreshed ??= await withNodeSecret(
-            passthroughResponse("cathouse.relay.sovereign-ai-node.com"),
+            passthroughResponse("example-node.relay.sovereign-ai-node.com"),
             "rotated-node-secret",
           );
           return capture(captured, () => refreshed as Response)(url, init);

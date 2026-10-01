@@ -241,11 +241,11 @@ check_sovereign_tool() {
   # hard "fail" that makes the whole suite exit non-zero (see main()).
   # Do NOT convert this check into a skip/warn precondition: a Pro web install
   # once shipped without /usr/local/bin/sovereign-tool and skipping guards hid
-  # the defect from e2e entirely (issue node-pro#324). A required product
+  # the defect from e2e entirely (a past install regression). A required product
   # capability may never be an optional e2e precondition.
   if ! command -v sovereign-tool >/dev/null 2>&1; then
     record "sovereign-tool" "fail" \
-      "sovereign-tool is a REQUIRED product dependency — a host without it cannot scan mail; failing, not skipping (issue node-pro#324)"
+      "sovereign-tool is a REQUIRED product dependency — a host without it cannot scan mail; failing, not skipping (a past install regression)"
     return
   fi
 

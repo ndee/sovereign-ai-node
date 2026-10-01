@@ -7,17 +7,16 @@
  * registry, the doc keeps the old wording, and a partner reads advice the node
  * no longer gives, during an incident, when they can least afford it.
  *
- * The document lives in the node-pro repo (that is where operator docs are
- * published) while the registry lives here, so the two are only linked if this
- * test finds the file. Rather than silently passing when it cannot — which
+ * The document is published outside this repo while the registry lives here,
+ * so the two are only linked if this test finds the file. Point
+ * SAN_CODES_DOC_ROOT at the checkout that holds it. Rather than silently passing when it cannot — which
  * would make the guard worthless in exactly the situation it exists for — the
  * test SKIPS explicitly and says so, and the structural assertions below still
  * run unconditionally.
  */
 
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -25,34 +24,22 @@ import { SAN_ERRORS } from "./codes.js";
 import { CODES_DOC_RELATIVE_PATH, renderCodesDocument } from "./codes-doc.js";
 
 /**
- * Locate the published document.
- *
- * The two repos sit side by side under a common parent in every checkout and
- * worktree layout used here. Returns null when it cannot be found rather than
- * throwing, so a standalone clone of the node repo still runs the suite.
+ * Locate the published document via SAN_CODES_DOC_ROOT (the root of the
+ * checkout that publishes it). Returns null when unset or unreadable rather
+ * than throwing, so a standalone clone still runs the suite.
  */
 const findPublishedDocument = (): string | null => {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    // node/.worktrees/<name>/src/support → sovereign-ai/
-    join(here, "..", "..", "..", "..", "..", "sovereign-ai-node-pro"),
-    join(here, "..", "..", "..", "sovereign-ai-node-pro"),
-  ];
-  for (const base of candidates) {
-    for (const suffix of [
-      join(".claude", "worktrees", "supportability-p0", CODES_DOC_RELATIVE_PATH),
-      CODES_DOC_RELATIVE_PATH,
-    ]) {
-      try {
-        const path = join(base, suffix);
-        readFileSync(path, "utf8");
-        return path;
-      } catch {
-        // Try the next candidate.
-      }
-    }
+  const root = process.env.SAN_CODES_DOC_ROOT;
+  if (root === undefined || root === "") {
+    return null;
   }
-  return null;
+  try {
+    const path = join(root, CODES_DOC_RELATIVE_PATH);
+    readFileSync(path, "utf8");
+    return path;
+  } catch {
+    return null;
+  }
 };
 
 describe("SAN error-code document", () => {
@@ -92,7 +79,7 @@ describe("SAN error-code document", () => {
       // Explicit, visible skip. A silent pass here would hollow out the guard.
       console.warn(
         `[codes-doc] published document not found; drift check skipped. ` +
-          `Expected at <node-pro>/${CODES_DOC_RELATIVE_PATH}`,
+          `Set SAN_CODES_DOC_ROOT so ${CODES_DOC_RELATIVE_PATH} can be found`,
       );
       expect(true).toBe(true);
       return;

@@ -10,7 +10,7 @@
  * arrive inside otherwise-legitimate values.
  *
  * The inverse design — dump everything and redact — is what `snapshot-node.sh`
- * does, and it is why that script cannot be given to a design partner.
+ * does, and it is why that script cannot be given to an operator.
  *
  * # Failure semantics
  *

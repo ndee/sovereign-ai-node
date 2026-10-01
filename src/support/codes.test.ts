@@ -66,7 +66,7 @@ describe("SAN_ERRORS registry integrity", () => {
 
   // Table-driven: every field of every entry is checked, so adding a code with
   // an empty explanation or a missing playbook anchor fails here rather than in
-  // front of a design partner mid-incident.
+  // front of an operator mid-incident.
   const requiredStringFields: readonly (keyof SanErrorDefinition)[] = [
     "id",
     "title",
