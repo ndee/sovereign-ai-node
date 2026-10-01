@@ -226,9 +226,7 @@ describe("buildVersionInventory — environment", () => {
 
 describe("hashHostname", () => {
   it("is deterministic", () => {
-    expect(hashHostname("example-node")).toBe(
-      hashHostname("example-node"),
-    );
+    expect(hashHostname("example-node")).toBe(hashHostname("example-node"));
   });
 
   it("prefixes with h:", () => {
