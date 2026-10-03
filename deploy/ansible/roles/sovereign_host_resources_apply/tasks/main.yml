@@ -35,11 +35,16 @@
   loop_control:
     label: "{{ item.path }}"
 
+# The parent (e.g. a bot workspace's data/) gets the file's owner too: a
+# root-owned parent stops the bot from creating siblings such as lock files
+# (issue #235). Every file resource lives inside a bot workspace.
 - name: Ensure managed file parent directories exist
   ansible.builtin.file:
     path: "{{ item.path | dirname }}"
     state: directory
     mode: "0755"
+    owner: "{{ item.owner | default(omit) }}"
+    group: "{{ item.group | default(omit) }}"
   loop: "{{ sovereign_host_resource_files }}"
   loop_control:
     label: "{{ item.path | dirname }}"
