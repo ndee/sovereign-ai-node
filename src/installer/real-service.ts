@@ -6511,12 +6511,42 @@ export default function (api) {
     workspace: string;
     runtimeConfig: RuntimeConfig;
   }): Promise<void> {
-    await mkdir(input.workspace, { recursive: true });
-    const openclawWorkspaceStateDir = join(input.workspace, ".openclaw");
-    await mkdir(openclawWorkspaceStateDir, { recursive: true });
+    // The bot state dir (e.g. <stateDir>/mail-sentinel) is usually created
+    // here too; it must not stay root-owned on a fresh install (issue #235).
+    await this.ensureRuntimeOwnedDirectory(input.workspace, this.paths.stateDir);
+    await this.ensureRuntimeOwnedDirectory(join(input.workspace, ".openclaw"), input.workspace);
     await this.applyLocalWorkspaceHostResources(input.runtimeConfig, input.id, input.workspace);
-    await this.applyRuntimeOwnership(openclawWorkspaceStateDir);
-    await this.applyRuntimeOwnership(input.workspace);
+  }
+
+  /**
+   * `mkdir -p` that hands the result to the service identity: `path` itself
+   * plus every directory this call created strictly below `boundary`.
+   *
+   * A root-run installer otherwise leaves intermediate directories root-owned
+   * (only the leaf used to be chowned), so a bot running as the service user
+   * cannot create files next to its state — issue #235, where Mail Sentinel's
+   * first scan failed with EACCES on `data/mail-sentinel-state.json.lock`.
+   * `path` is chowned even when it already existed, which also repairs nodes
+   * a previous fresh install left in that state. Nothing at or above
+   * `boundary` is touched. Without root this only creates the directories.
+   */
+  private async ensureRuntimeOwnedDirectory(path: string, boundary: string): Promise<void> {
+    const firstCreated = await mkdir(path, { recursive: true });
+    const boundaryPrefix = join(boundary, "/");
+    const owned = [path];
+    if (firstCreated !== undefined) {
+      for (
+        let parent = dirname(path);
+        parent.startsWith(boundaryPrefix) &&
+        (parent === firstCreated || parent.startsWith(`${firstCreated}/`));
+        parent = dirname(parent)
+      ) {
+        owned.push(parent);
+      }
+    }
+    for (const dir of owned) {
+      await this.applyRuntimeOwnership(dir);
+    }
   }
 
   private async applyLocalWorkspaceHostResources(
@@ -6537,11 +6567,10 @@ export default function (api) {
         if (!resource.path.startsWith(normalizedWorkspace) && resource.path !== workspaceDir) {
           continue;
         }
-        await mkdir(resource.path, { recursive: true });
+        await this.ensureRuntimeOwnedDirectory(resource.path, workspaceDir);
         if (resource.mode !== undefined) {
           await chmod(resource.path, Number.parseInt(resource.mode, 8));
         }
-        await this.applyRuntimeOwnership(resource.path);
         continue;
       }
       if (resource.kind !== "managedFile" && resource.kind !== "stateFile") {
@@ -6550,7 +6579,9 @@ export default function (api) {
       if (!resource.path.startsWith(normalizedWorkspace)) {
         continue;
       }
-      await mkdir(dirname(resource.path), { recursive: true });
+      // Manifests declare files such as data/mail-sentinel-state.json without
+      // a directory resource for data/; the bot must still own that parent.
+      await this.ensureRuntimeOwnedDirectory(dirname(resource.path), workspaceDir);
       if (resource.writePolicy === "ifMissing") {
         try {
           await access(resource.path, fsConstants.F_OK);
@@ -6782,8 +6813,7 @@ export default function (api) {
       sessionsStat = await stat(sessionsDir);
     } catch (error) {
       if (isNodeError(error) && error.code === "ENOENT") {
-        await mkdir(sessionsDir, { recursive: true });
-        await this.applyRuntimeOwnership(sessionsDir);
+        await this.ensureRuntimeOwnedDirectory(sessionsDir, runtimeConfig.openclaw.openclawHome);
         this.logger.info(
           { agentId, sessionsDir },
           "Created managed agent sessions directory (first install)",

@@ -279,6 +279,34 @@ jobs:
         run: |
           curl -f --retry 3 --retry-delay 2 http://127.0.0.1:8008/_matrix/client/v3/login | jq .
 
+      # Issue #235: a fresh install left mail-sentinel/workspace/data root-owned,
+      # so the first scan (User=sovereign-node) died with EACCES on its state
+      # lock until a later --update re-chowned the state dir.
+      - name: Verify bot state is owned by the service user and the first scan runs
+        run: |
+          state_dir=/var/lib/sovereign-node/mail-sentinel
+          sudo test -d "$state_dir/workspace/data"
+          not_owned="$(sudo find "$state_dir" ! -user sovereign-node)"
+          if [ -n "$not_owned" ]; then
+            echo "::error::Not owned by sovereign-node after a fresh install:"
+            echo "$not_owned"
+            exit 1
+          fi
+
+          since="$(date '+%Y-%m-%d %H:%M:%S')"
+          scan_rc=0
+          sudo systemctl start sovereign-mail-sentinel-scan.service || scan_rc=$?
+          journal="$(sudo journalctl -u sovereign-mail-sentinel-scan.service --since "$since" --no-pager)"
+          echo "$journal"
+          if grep -q 'EACCES' <<<"$journal"; then
+            echo "::error::Mail Sentinel scan hit EACCES"
+            exit 1
+          fi
+          if [ "$scan_rc" -ne 0 ]; then
+            echo "::error::sovereign-mail-sentinel-scan.service failed (exit $scan_rc)"
+            exit 1
+          fi
+
       - name: Collect logs on failure
         if: failure()
         run: |
