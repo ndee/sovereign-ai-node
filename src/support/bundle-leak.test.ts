@@ -28,6 +28,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { generateSupportBundle } from "./bundle.js";
 import type { RunCommand } from "./collectors.js";
+import { findUnmaskedIpClasses } from "./ip-mask.js";
 import { buildVersionInventory } from "./version-inventory.js";
 
 const execFileAsync = promisify(execFile);
@@ -43,6 +44,23 @@ const SENTINELS = {
 } as const;
 
 const S = SENTINELS;
+
+/**
+ * Identifying addresses (documentation ranges, classified public on purpose)
+ * and the fragments that identify on their own: the /64 prefix and the EUI-64
+ * interface id that encodes a MAC.
+ */
+const ADDRESS_SENTINELS = [
+  "203.0.113.45",
+  "2001:db8:4:5:a8bb:ccff:fe11:2233",
+  "2001:db8:4:5:",
+  "fd12:3456:789a:1:a8bb:ccff:fe11:2244",
+  "fe80::a8bb:ccff:fe11:2255",
+  "a8bb:ccff:fe11",
+  "a8:bb:cc:11:22:66",
+  "a8bbcc112266",
+] as const;
+const [PUBLIC_V4, GLOBAL_V6, , ULA, LINK_LOCAL, , MAC] = ADDRESS_SENTINELS;
 
 /**
  * Mail Sentinel state with PII in every shape the real schema allows —
@@ -107,6 +125,7 @@ const doctorReportWithSecrets = {
   overall: "warn",
   checks: [
     { id: "gateway", status: "warn", message: `probe failed: Bearer ${S.matrix}` },
+    { id: "relay", status: "warn", message: `connect ETIMEDOUT ${PUBLIC_V4}:443` },
     { id: "env", status: "pass", details: { OPENROUTER_API_KEY: S.openrouter } },
   ],
   suggestedCommands: [
@@ -121,6 +140,7 @@ const statusWithSecrets = {
   },
   imap: { host: "imap.example", password: S.imap, username: S.emailAddress },
   activationCode: S.activation,
+  network: { [GLOBAL_V6]: { via: `${LINK_LOCAL}%eth0` }, ula: ULA },
 };
 
 /**
@@ -136,7 +156,9 @@ const runWithHostileOutput: RunCommand = async (file, args, timeoutMs) => {
   return {
     stdout:
       file === "journalctl"
-        ? `2026-07-27 ERROR api_key=${S.openrouter} for ${S.emailAddress}\nBearer ${S.matrix}`
+        ? `2026-07-27 ERROR api_key=${S.openrouter} for ${S.emailAddress}\nBearer ${S.matrix}\n` +
+          `tunnel [${GLOBAL_V6.toUpperCase()}]:443 via ${PUBLIC_V4} dev enx${MAC.replaceAll(":", "")}\n` +
+          `neighbour ${LINK_LOCAL} lladdr ${MAC} ?host=${ULA.replaceAll(":", "%3A")}`
         : "Key=value\n",
     stderr: "",
   };
@@ -195,6 +217,34 @@ describe("support bundle end-to-end leak safety", () => {
       }
     }
     expect(leaks).toEqual([]);
+  }, 30_000);
+
+  it("emits no identifying IP or MAC address, prefix or interface id, in any case or encoding", async () => {
+    const { archivePath, extractDir } = await makeBundle();
+    const searchable = await gatherSearchableContent(archivePath, extractDir);
+    const leaks: string[] = [];
+    for (const value of ADDRESS_SENTINELS) {
+      const forms = [value, value.toUpperCase(), value.replaceAll(":", "%3A")];
+      for (const { label, content } of searchable) {
+        if (forms.some((form) => content.includes(form))) {
+          leaks.push(`${value} leaked into ${label}`);
+        }
+      }
+    }
+    expect(leaks).toEqual([]);
+    // Any identifying address at all, planted or not, fails the bundle.
+    const survivors = searchable
+      .filter(({ label }) => label !== "<archive-raw-bytes>")
+      .flatMap(({ label, content }) =>
+        findUnmaskedIpClasses(content).map((cls) => `${cls} in ${label}`),
+      );
+    expect(survivors).toEqual([]);
+    const journal = searchable.find(
+      ({ label }) => label === "journal-sovereign-node-api.txt",
+    )?.content;
+    expect(journal).toMatch(
+      /tunnel \[<global-ipv6#\d+>\]:443 via <public-ipv4#\d+> dev enx<mac#\d+>/u,
+    );
   }, 30_000);
 
   it("detects a leak when one is present (negative control)", async () => {

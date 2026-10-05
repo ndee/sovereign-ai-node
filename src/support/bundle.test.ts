@@ -899,3 +899,124 @@ describe("module constants", () => {
     expect(BUNDLE_FORMAT_VERSION).toBe(1);
   });
 });
+
+describe("generateSupportBundle — IP and MAC masking", () => {
+  /** Stand-in for tar that keeps every staged file by name. */
+  const captureArchive = () => {
+    const files = new Map<string, string>();
+    const createArchive = async (stagingDir: string, outputPath: string): Promise<void> => {
+      for (const entry of await readdir(stagingDir)) {
+        files.set(entry, await readFile(join(stagingDir, entry), "utf8"));
+      }
+      await writeFile(outputPath, "archive", { mode: 0o600 });
+    };
+    return { files, createArchive };
+  };
+
+  const journalRun =
+    (journal: (unit: string) => string): RunCommand =>
+    async (file, args) => {
+      if (file === "journalctl") {
+        return { stdout: journal(String(args[1])), stderr: "" };
+      }
+      return await healthyRun(file, args, 0);
+    };
+
+  it("masks every file and the manifest with one per-bundle numbering", async () => {
+    const { files, createArchive } = captureArchive();
+    const result = await generateSupportBundle(workDir, {
+      inventory: { ...inventory, installSource: "mirror 203.0.113.45" },
+      doctorReport: { checks: [{ id: "relay", message: "connect ETIMEDOUT 203.0.113.45:443" }] },
+      status: { peers: { "2001:db8::7": "up" } },
+      mailState: { messages: [], alerts: [] },
+      run: journalRun((unit) =>
+        unit === "sovereign-matrix-relay-tunnel"
+          ? "tunnel to [2001:db8::7]:443 via 198.51.100.9 dev enxa8bbcc112266\n"
+          : "listening on 192.168.1.20:8787\n",
+      ),
+      now: () => FIXED_NOW,
+      createArchive,
+    });
+    expect(result.complete).toBe(true);
+    // Equality semantics only: which number an address gets depends on order.
+    const tunnel = files.get("journal-sovereign-matrix-relay-tunnel.txt") ?? "";
+    const [, g6, other] =
+      /^tunnel to \[(<global-ipv6#\d+>)\]:443 via (<public-ipv4#\d+>) dev enx<mac#\d+>\n$/u.exec(
+        tunnel,
+      ) ?? [];
+    const relay = /ETIMEDOUT (<public-ipv4#\d+>):443/u.exec(files.get("doctor.json") ?? "")?.[1];
+    expect(g6).toMatch(/^<global-ipv6#\d+>$/u);
+    expect(relay).toMatch(/^<public-ipv4#\d+>$/u);
+    expect(other).not.toBe(relay);
+    expect(result.manifest.inventory.installSource).toBe(`mirror ${relay}`);
+    expect(files.get("status.json")).toContain(`"${g6}": "up"`);
+    expect(files.get("journal-sovereign-node-api.txt")).toBe("listening on 192.168.1.20:8787\n");
+    expect(result.manifest.redactionPolicy).toContain("<public-ipv4#1>");
+    for (const text of files.values()) {
+      expect(text).not.toMatch(/203\.0\.113\.45|198\.51\.100\.9|2001:db8|a8bbcc112266/u);
+    }
+  });
+
+  it("masks an address before the journal is cut, so no fragment survives the cut", async () => {
+    const { files, createArchive } = captureArchive();
+    await generateSupportBundle(workDir, {
+      inventory,
+      // Redaction keeps the head of long text; put the address across that cut.
+      run: journalRun(() => `${"x".repeat(7_980)} 2001:db8:4:5:a8bb:ccff:fe11:2233 tail\n`),
+      now: () => FIXED_NOW,
+      createArchive,
+    });
+    const journal = files.get("journal-sovereign-node-api.txt") ?? "";
+    expect(journal).toContain("<global-ipv6#1>");
+    expect(journal).not.toMatch(/2001:db8|a8bb|fe11/u);
+  });
+
+  it("withholds a file whose address the masker cannot decode, naming only the class", async () => {
+    const { files, createArchive } = captureArchive();
+    const result = await generateSupportBundle(workDir, {
+      inventory,
+      run: journalRun((unit) =>
+        unit === "sovereign-node-api" ? String.raw`dns 2001\u003adb8\u003a\u003a9` : "ok\n",
+      ),
+      now: () => FIXED_NOW,
+      createArchive,
+    });
+    const entry = result.manifest.files.find(
+      (file) => file.file === "journal-sovereign-node-api.txt",
+    );
+    expect(entry).toMatchObject({
+      status: "withheld",
+      bytes: 0,
+      reason: "withheld: text still contained an IP address after masking (global-ipv6)",
+    });
+    expect(files.has("journal-sovereign-node-api.txt")).toBe(false);
+    expect(result.complete).toBe(false);
+  });
+
+  it("masks a failure reason, and withholds one the masker cannot clean", async () => {
+    const { createArchive } = captureArchive();
+    const run: RunCommand = async (file, args) => {
+      if (file === "journalctl") {
+        throw new Error(
+          args[1] === "sovereign-node-api"
+            ? "connect ETIMEDOUT 203.0.113.45:443"
+            : String.raw`dns 2001\u003adb8\u003a\u003a9`,
+        );
+      }
+      return await healthyRun(file, args, 0);
+    };
+    const result = await generateSupportBundle(workDir, {
+      inventory,
+      run,
+      now: () => FIXED_NOW,
+      createArchive,
+    });
+    const reasons = Object.fromEntries(
+      result.manifest.files.map((file) => [file.file, file.reason]),
+    );
+    expect(reasons["journal-sovereign-node-api.txt"]).toBe("connect ETIMEDOUT <public-ipv4#1>:443");
+    expect(reasons["journal-sovereign-pro-api.txt"]).toBe(
+      "reason withheld: it still contained an IP address after masking (global-ipv6)",
+    );
+  });
+});
