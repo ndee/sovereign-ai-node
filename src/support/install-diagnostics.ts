@@ -17,10 +17,15 @@
  *    dropped, not redacted.
  * 3. **Free-text scrub.** Text (logs, journal, `error.details`) cannot be
  *    field-allowlisted, so it passes, in order, through the known-secret value
- *    scrub (`known-secrets.ts`), pattern redaction (`redact.ts`) and email
- *    local-part masking — and finally the fail-closed shape guard
- *    (`shape-guard.ts`): if anything credential-shaped survives, the whole
- *    artifact is WITHHELD and listed as such. The bundle is not aborted.
+ *    scrub (`known-secrets.ts`), pattern redaction (`redact.ts`), email
+ *    local-part masking and IP/MAC address masking (`ip-mask.ts`) — and
+ *    finally two fail-closed guards: if anything credential-shaped
+ *    (`shape-guard.ts`) or a public IP address survives, the whole artifact
+ *    is WITHHELD and listed as such. The bundle is not aborted.
+ *
+ * One `IpMasker` serves the whole bundle, manifest included, so the same
+ * address carries the same `<class#n>` token in every file of one bundle and
+ * a different one in the next bundle.
  *
  * # Size: tail-preserving, priority-shedding, never aborting
  *
@@ -42,6 +47,7 @@ import { join } from "node:path";
 
 import { DEFAULT_PATHS, type SovereignPaths } from "../config/paths.js";
 import { runBoundedCommand } from "./collectors.js";
+import { countMaskTokens, findUnmaskedIpClasses, IpMasker, type MaskClass } from "./ip-mask.js";
 import type { KnownSecretSet, KnownSecretSources } from "./known-secrets.js";
 import {
   isPiiKey,
@@ -61,8 +67,12 @@ import {
 } from "./tail.js";
 import { createZip } from "./zip.js";
 
-/** Bumped when the manifest shape changes. */
-export const INSTALL_DIAGNOSTICS_FORMAT_VERSION = 1;
+/**
+ * Bumped when the manifest shape changes. 2: `identifyingData`,
+ * `neverIncluded` (formerly `excluded`, kept as an alias) and per-file
+ * `masked` counts.
+ */
+export const INSTALL_DIAGNOSTICS_FORMAT_VERSION = 2;
 
 /** Uncompressed cap for the whole bundle. Exceeding it sheds, never aborts. */
 export const DEFAULT_MAX_TOTAL_BYTES = 8 * 1024 * 1024;
@@ -206,6 +216,8 @@ export interface DiagnosticsManifestEntry {
   readonly reason?: string;
   /** Present (true) when an optional source was simply not on this device. */
   readonly optional?: boolean;
+  /** How many addresses of each class were replaced by a token. Counts only. */
+  readonly masked: Partial<Record<MaskClass, number>>;
 }
 
 export interface DiagnosticsManifest {
@@ -220,6 +232,10 @@ export interface DiagnosticsManifest {
   readonly limits: { readonly maxTotalBytes: number };
   readonly totalBytes: number;
   readonly redactionPolicy: readonly string[];
+  /** Kinds of identifying information the bundle may contain (a declaration, not a detection). */
+  readonly identifyingData: readonly string[];
+  readonly neverIncluded: readonly string[];
+  /** @deprecated Alias of `neverIncluded`, kept for one format version. */
   readonly excluded: readonly string[];
   readonly files: readonly DiagnosticsManifestEntry[];
   readonly notes: readonly string[];
@@ -274,33 +290,36 @@ const defaultReadKernelFile = async (path: string): Promise<string> => readFile(
 // ── Scrubbing ──────────────────────────────────────────────────────────────
 
 /**
- * Free-text pipeline: known values, then patterns, then email local parts.
- * Length is NOT bounded here — callers keep the tail afterwards.
+ * Free-text pipeline: known values, then patterns, then email local parts,
+ * then IP and MAC addresses. Length is NOT bounded here — callers keep the
+ * tail afterwards. Pass the bundle's `masker` so token numbers agree across
+ * files; without one, numbering starts afresh for this text.
  */
-export const scrubDiagnosticText = (text: string, known?: KnownSecretSet): string => {
+export const scrubDiagnosticText = (
+  text: string,
+  known?: KnownSecretSet,
+  masker: IpMasker = new IpMasker(),
+): string => {
   const afterKnown = known === undefined ? text : known.scrub(text).text;
   const redacted = redactText(afterKnown, {
     redactEmails: false,
     maxLength: Number.POSITIVE_INFINITY,
   });
-  return maskEmailLocalParts(redacted);
+  return masker.mask(maskEmailLocalParts(redacted));
 };
 
-/**
- * Structured pipeline: secret-named keys lose their value, PII-named keys
- * lose theirs, every string runs the free-text pipeline and keeps its tail.
- */
-export const scrubDiagnosticValue = (
+const scrubValue = (
   input: unknown,
-  known?: KnownSecretSet,
-  stringBytes: number = JSON_STRING_BYTES,
-  depth = 0,
+  known: KnownSecretSet | undefined,
+  stringBytes: number,
+  masker: IpMasker,
+  depth: number,
 ): unknown => {
   if (depth > MAX_JSON_DEPTH) {
     return "[REDACTED:DEPTH]";
   }
   if (typeof input === "string") {
-    return tailText(scrubDiagnosticText(input, known), stringBytes).text;
+    return tailText(scrubDiagnosticText(input, known, masker), stringBytes).text;
   }
   if (input === null || typeof input === "number" || typeof input === "boolean") {
     return input;
@@ -308,18 +327,19 @@ export const scrubDiagnosticValue = (
   if (Array.isArray(input)) {
     return input
       .slice(-MAX_JSON_ARRAY_ENTRIES)
-      .map((entry) => scrubDiagnosticValue(entry, known, stringBytes, depth + 1));
+      .map((entry) => scrubValue(entry, known, stringBytes, masker, depth + 1));
   }
   if (typeof input === "object") {
     const output: Record<string, unknown> = {};
     for (const [rawKey, value] of Object.entries(input as Record<string, unknown>)) {
-      const key = maskEmailLocalParts(rawKey);
+      // Address-keyed maps (`{ "<ip>": … }`) must not leak through their keys.
+      const key = masker.mask(maskEmailLocalParts(rawKey));
       if (isSecretKey(rawKey)) {
         output[key] = REDACTED;
       } else if (isPiiKey(rawKey)) {
         output[key] = REDACTED_PII;
       } else {
-        output[key] = scrubDiagnosticValue(value, known, stringBytes, depth + 1);
+        output[key] = scrubValue(value, known, stringBytes, masker, depth + 1);
       }
     }
     return output;
@@ -327,6 +347,18 @@ export const scrubDiagnosticValue = (
   // undefined, bigint, function, symbol: nothing diagnostic to keep.
   return null;
 };
+
+/**
+ * Structured pipeline: secret-named keys lose their value, PII-named keys
+ * lose theirs, keys are address-masked, every string runs the free-text
+ * pipeline and keeps its tail.
+ */
+export const scrubDiagnosticValue = (
+  input: unknown,
+  known?: KnownSecretSet,
+  stringBytes: number = JSON_STRING_BYTES,
+  masker: IpMasker = new IpMasker(),
+): unknown => scrubValue(input, known, stringBytes, masker, 0);
 
 const serialize = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
 
@@ -403,6 +435,12 @@ export const pickInstallJobRecord = (record: unknown): Record<string, unknown> |
 
 // ── Collectors ─────────────────────────────────────────────────────────────
 
+/** Everything one bundle scrubs with: its known secrets and its one masker. */
+interface Scrub {
+  readonly known: KnownSecretSet | undefined;
+  readonly masker: IpMasker;
+}
+
 const ownerConstraint = (owner: number | undefined): ReadConstraints =>
   owner === undefined ? {} : { owner };
 
@@ -474,7 +512,7 @@ const listNewestFiles = async (
 
 const collectInstallJobs = async (
   source: Extract<DiagnosticsSource, { kind: "install-jobs" }>,
-  known: KnownSecretSet | undefined,
+  scrub: Scrub,
 ): Promise<Artifact[]> => {
   const priority = source.priority ?? DIAGNOSTICS_PRIORITY.installJobs;
   const cap = source.maxBytesPerRecord ?? DEFAULT_SOURCE_CAPS.installJobRecordBytes;
@@ -514,11 +552,15 @@ const collectInstallJobs = async (
       artifacts.push(unavailable(file, purpose, priority, "json", "not an install job record"));
       continue;
     }
-    let content = serialize(scrubDiagnosticValue(picked, known));
+    let content = serialize(
+      scrubDiagnosticValue(picked, scrub.known, JSON_STRING_BYTES, scrub.masker),
+    );
     let truncatedBytes = 0;
     if (Buffer.byteLength(content) > cap) {
       const full = Buffer.byteLength(content);
-      content = serialize(scrubDiagnosticValue(picked, known, JSON_STRING_BYTES_TIGHT));
+      content = serialize(
+        scrubDiagnosticValue(picked, scrub.known, JSON_STRING_BYTES_TIGHT, scrub.masker),
+      );
       truncatedBytes = full - Buffer.byteLength(content);
     }
     if (Buffer.byteLength(content) > cap) {
@@ -553,12 +595,12 @@ const collectTextFile = async (
   purpose: string,
   priority: number,
   maxBytes: number,
-  known: KnownSecretSet | undefined,
+  scrub: Scrub,
   owner: number | undefined,
 ): Promise<Artifact> => {
   try {
     const read = await readFileTail(path, maxBytes, ownerConstraint(owner));
-    const tail = tailText(scrubDiagnosticText(read.text, known), maxBytes);
+    const tail = tailText(scrubDiagnosticText(read.text, scrub.known, scrub.masker), maxBytes);
     return {
       file,
       purpose,
@@ -575,7 +617,7 @@ const collectTextFile = async (
 
 const collectNpmLogs = async (
   source: Extract<DiagnosticsSource, { kind: "npm-logs" }>,
-  known: KnownSecretSet | undefined,
+  scrub: Scrub,
 ): Promise<Artifact[]> => {
   const priority = source.priority ?? DIAGNOSTICS_PRIORITY.npmLogs;
   const purpose = "npm debug log (tail): the package install's own record of what failed";
@@ -604,7 +646,7 @@ const collectNpmLogs = async (
         purpose,
         priority,
         source.maxBytes ?? DEFAULT_SOURCE_CAPS.npmLogBytes,
-        known,
+        scrub,
         source.owner,
       ),
     );
@@ -614,7 +656,7 @@ const collectNpmLogs = async (
 
 const collectJsonFile = async (
   source: Extract<DiagnosticsSource, { kind: "json-file" }>,
-  known: KnownSecretSet | undefined,
+  scrub: Scrub,
 ): Promise<Artifact> => {
   const priority = source.priority ?? DIAGNOSTICS_PRIORITY.versions;
   const file = `files/${source.name}`;
@@ -643,7 +685,7 @@ const collectJsonFile = async (
     priority,
     kind: "json",
     status: "collected",
-    content: serialize(scrubDiagnosticValue(picked, known)),
+    content: serialize(scrubDiagnosticValue(picked, scrub.known, JSON_STRING_BYTES, scrub.masker)),
     truncatedBytes: 0,
   };
 };
@@ -651,7 +693,7 @@ const collectJsonFile = async (
 const collectJournal = async (
   source: Extract<DiagnosticsSource, { kind: "journal" }>,
   run: DiagnosticsRunCommand,
-  known: KnownSecretSet | undefined,
+  scrub: Scrub,
 ): Promise<Artifact> => {
   const priority = source.priority ?? DIAGNOSTICS_PRIORITY.journal;
   const maxBytes = source.maxBytes ?? DEFAULT_SOURCE_CAPS.journalBytes;
@@ -683,7 +725,10 @@ const collectJournal = async (
   if (sections.length === 0) {
     return unavailable(file, purpose, priority, "text", failures.join("; "));
   }
-  const tail = tailText(scrubDiagnosticText(sections.join("\n"), known), maxBytes);
+  const tail = tailText(
+    scrubDiagnosticText(sections.join("\n"), scrub.known, scrub.masker),
+    maxBytes,
+  );
   return {
     file,
     purpose,
@@ -827,15 +872,15 @@ const excuseAbsence = (source: { readonly optional?: boolean }, artifact: Artifa
 
 const collectSource = async (
   source: DiagnosticsSource,
-  known: KnownSecretSet | undefined,
+  scrub: Scrub,
   run: DiagnosticsRunCommand,
   readKernelFile: (path: string) => Promise<string>,
 ): Promise<Artifact[]> => {
   switch (source.kind) {
     case "install-jobs":
-      return await collectInstallJobs(source, known);
+      return await collectInstallJobs(source, scrub);
     case "npm-logs":
-      return await collectNpmLogs(source, known);
+      return await collectNpmLogs(source, scrub);
     case "file-tail":
       return [
         excuseAbsence(
@@ -846,15 +891,15 @@ const collectSource = async (
             source.purpose,
             source.priority ?? DIAGNOSTICS_PRIORITY.logs,
             source.maxBytes ?? DEFAULT_SOURCE_CAPS.fileTailBytes,
-            known,
+            scrub,
             source.owner,
           ),
         ),
       ];
     case "json-file":
-      return [excuseAbsence(source, await collectJsonFile(source, known))];
+      return [excuseAbsence(source, await collectJsonFile(source, scrub))];
     case "journal":
-      return [await collectJournal(source, run, known)];
+      return [await collectJournal(source, run, scrub)];
     case "system":
       return [
         {
@@ -864,7 +909,12 @@ const collectSource = async (
           kind: "json",
           status: "collected",
           content: serialize(
-            scrubDiagnosticValue(await collectSystemSummary(run, readKernelFile), known),
+            scrubDiagnosticValue(
+              await collectSystemSummary(run, readKernelFile),
+              scrub.known,
+              JSON_STRING_BYTES,
+              scrub.masker,
+            ),
           ),
           truncatedBytes: 0,
         },
@@ -877,7 +927,9 @@ const collectSource = async (
           priority: source.priority ?? DIAGNOSTICS_PRIORITY.versions,
           kind: "json",
           status: "collected",
-          content: serialize(scrubDiagnosticValue(source.value, known)),
+          content: serialize(
+            scrubDiagnosticValue(source.value, scrub.known, JSON_STRING_BYTES, scrub.masker),
+          ),
           truncatedBytes: 0,
         },
       ];
@@ -908,6 +960,40 @@ const applyShapeGuard = (artifact: Artifact): void => {
     artifact.content = undefined;
     artifact.reason = `withheld: text still matched credential shape(s) after redaction (${hits.join(", ")})`;
   }
+};
+
+/**
+ * Fail-closed IP guard: an identifying address that survived masking (an
+ * encoding the masker does not decode) withholds the whole file. The reason
+ * names the address class, never the address.
+ */
+const applyIpGuard = (artifact: Artifact): void => {
+  if (artifact.status !== "collected" || artifact.content === undefined) {
+    return;
+  }
+  const classes = findUnmaskedIpClasses(artifact.content);
+  if (classes.length > 0) {
+    artifact.status = "withheld";
+    artifact.content = undefined;
+    artifact.reason = `withheld: text still contained an IP address after masking (${classes.join(", ")})`;
+  }
+};
+
+/**
+ * Manifest reasons (an unreadable source's error, a partial journal) are free
+ * text too: mask them with the bundle's masker, and drop one the masker could
+ * not clean rather than ship it.
+ */
+const maskReason = (artifact: Artifact, masker: IpMasker): void => {
+  if (artifact.reason === undefined) {
+    return;
+  }
+  const masked = masker.mask(artifact.reason);
+  const classes = findUnmaskedIpClasses(masked);
+  artifact.reason =
+    classes.length === 0
+      ? masked
+      : `reason withheld: it still contained an IP address after masking (${classes.join(", ")})`;
 };
 
 const contentBytes = (artifact: Artifact): number =>
@@ -959,14 +1045,63 @@ export const REDACTION_POLICY: readonly string[] = [
   "Every value the device holds as a secret (secrets directory, config secret references, tokens) is replaced wherever it appears, including URL-encoded and JSON-escaped forms.",
   "Pattern redaction removes passwords, API keys, access tokens, bearer credentials, private keys and URL credentials.",
   "Email addresses keep only their domain (***@example.com).",
+  "Public IP addresses (IPv4 and IPv6) and network hardware (MAC) addresses are replaced by placeholders such as <public-ipv4#1> that keep only the kind of address; home-network, loopback and link-local IPv4 addresses stay readable.",
   "A file that still contains anything shaped like a credential after redaction is withheld, not shipped.",
+  "A file that still contains a public IP address after masking is withheld, not shipped.",
 ];
 
-export const EXCLUDED_CONTENT: readonly string[] = [
-  "Passwords, API keys, access tokens, private keys and the secrets directory itself",
-  "Mail content: no subjects, senders, recipients or message bodies",
-  "The install request as submitted (it held credentials on older releases)",
-  "Configuration files as a whole",
+/** One disclosure item; `id` is stable so other copies of these lists can be checked against it. */
+export interface DisclosureItem {
+  readonly id: string;
+  readonly text: string;
+}
+
+/**
+ * What a diagnostics file MAY contain that identifies the device or its
+ * owner. A static declaration of the kinds of data, not a scan result.
+ */
+export const IDENTIFYING_DATA: readonly DisclosureItem[] = [
+  { id: "device-hostname", text: "This device's name (hostname)" },
+  {
+    id: "lan-addresses",
+    text: "Addresses inside your home network (for example 192.168.x.x), loopback and link-local addresses",
+  },
+  { id: "relay-hostname", text: "Your node's relay address (its name on the relay service)" },
+  {
+    id: "mail-server",
+    text: "Your mail provider's server name and your mailbox's domain (the name before the @ is removed)",
+  },
+  { id: "times-and-model", text: "The times of events, your time zone and the device model" },
+  { id: "matrix-user-names", text: "The Matrix user names created during setup" },
+];
+
+export const NEVER_INCLUDED: readonly DisclosureItem[] = [
+  {
+    id: "credentials",
+    text: "Passwords, API keys, access tokens, private keys and the secrets directory itself",
+  },
+  { id: "mail-content", text: "Mail content: no subjects, senders, recipients or message bodies" },
+  {
+    id: "install-request",
+    text: "The install request as submitted (it held credentials on older releases)",
+  },
+  { id: "config-files", text: "Configuration files as a whole" },
+  {
+    id: "public-ip-addresses",
+    text: "Your public internet (IP) addresses: each is replaced by a placeholder such as <global-ipv6#1> that keeps only the kind of address",
+  },
+  { id: "mac-addresses", text: "Network hardware (MAC) addresses" },
+];
+
+/** @deprecated Use `NEVER_INCLUDED`; kept for one format version. */
+export const EXCLUDED_CONTENT: readonly string[] = NEVER_INCLUDED.map((item) => item.text);
+
+/** README legend for the address placeholders. */
+const PLACEHOLDER_LEGEND = [
+  "About the placeholders: <public-ipv4#1>, <global-ipv6#2>, <mac#1> and similar stand in for an",
+  "address that was removed. The word says what kind of address it was. The number only tells",
+  "different addresses apart inside this one file: it means nothing else, and it changes with",
+  "every new file.",
 ];
 
 export const renderReadme = (manifest: DiagnosticsManifest): string => {
@@ -1008,16 +1143,35 @@ export const renderReadme = (manifest: DiagnosticsManifest): string => {
       lines.push(`  ${entry.file}`);
     }
   }
-  lines.push("", "Never included:");
-  for (const item of manifest.excluded) {
+  lines.push("", "Identifying information in this file (it may contain):");
+  for (const item of manifest.identifyingData) {
     lines.push(`  - ${item}`);
   }
+  lines.push("", "Never included:");
+  for (const item of manifest.neverIncluded) {
+    lines.push(`  - ${item}`);
+  }
+  lines.push("", ...PLACEHOLDER_LEGEND);
   lines.push("", "How it was cleaned:");
   for (const item of manifest.redactionPolicy) {
     lines.push(`  - ${item}`);
   }
   lines.push("", "manifest.json lists every file with its size and SHA-256 checksum.", "");
   return lines.join("\n");
+};
+
+/** The caller's identity block, scrubbed like JSON and withheld if an address survives. */
+const scrubProduct = (product: unknown, scrub: Scrub): unknown => {
+  const scrubbed = scrubDiagnosticValue(
+    product ?? null,
+    scrub.known,
+    JSON_STRING_BYTES,
+    scrub.masker,
+  );
+  const classes = findUnmaskedIpClasses(serialize(scrubbed));
+  return classes.length === 0
+    ? scrubbed
+    : `[withheld: it still contained an IP address after masking (${classes.join(", ")})]`;
 };
 
 /**
@@ -1036,17 +1190,21 @@ export const buildInstallDiagnostics = async (
   const run = options.run ?? defaultDiagnosticsRun;
   const readKernelFile = options.readKernelFile ?? defaultReadKernelFile;
   const maxTotalBytes = options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES;
-  const known = options.knownSecrets;
+  // One masker for the whole bundle: equal addresses get equal tokens in
+  // every file and in the manifest; the next bundle numbers afresh.
+  const scrub: Scrub = { known: options.knownSecrets, masker: new IpMasker() };
 
   const artifacts: Artifact[] = [];
   const seen = new Set<string>();
   for (const source of options.sources) {
-    for (const artifact of await collectSource(source, known, run, readKernelFile)) {
+    for (const artifact of await collectSource(source, scrub, run, readKernelFile)) {
       if (seen.has(artifact.file)) {
         throw new Error(`duplicate diagnostics file name: ${artifact.file}`);
       }
       seen.add(artifact.file);
+      maskReason(artifact, scrub.masker);
       applyShapeGuard(artifact);
+      applyIpGuard(artifact);
       artifacts.push(artifact);
     }
   }
@@ -1069,6 +1227,7 @@ export const buildInstallDiagnostics = async (
       truncatedBytes: artifact.truncatedBytes,
       ...(artifact.reason === undefined ? {} : { reason: artifact.reason }),
       ...(artifact.optional === true ? { optional: true } : {}),
+      masked: artifact.content === undefined ? {} : countMaskTokens(artifact.content),
     };
   });
   const complete = artifacts.every(
@@ -1081,17 +1240,20 @@ export const buildInstallDiagnostics = async (
     generatedAt: now.toISOString(),
     generatedBy: options.generatedBy,
     complete,
-    product: scrubDiagnosticValue(options.product ?? null, known),
+    product: scrubProduct(options.product, scrub),
     limits: { maxTotalBytes },
     totalBytes: files.reduce((sum, entry) => sum + entry.bytes, 0),
     redactionPolicy: REDACTION_POLICY,
+    identifyingData: IDENTIFYING_DATA.map((item) => item.text),
+    neverIncluded: NEVER_INCLUDED.map((item) => item.text),
     excluded: EXCLUDED_CONTENT,
     files,
     notes: complete
       ? []
       : [
           "This file is INCOMPLETE. Some sources could not be collected, were withheld by the " +
-            "credential guard, or were dropped to fit the size cap; see each file's status and reason.",
+            "credential or IP-address guard, or were dropped to fit the size cap; see each file's " +
+            "status and reason.",
         ],
   };
 

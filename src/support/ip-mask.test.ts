@@ -24,15 +24,14 @@ const vectors = JSON.parse(
 ) as Vectors;
 
 describe("maskIpAddresses — vector corpus", () => {
-  it.each(vectors.masked.map((vector) => [vector.name, vector.input, vector.expected]))(
-    "%s",
-    (_name, input, expected) => {
-      const output = maskIpAddresses(input);
-      expect(output).toBe(expected);
-      // Whatever the masker produced must pass its own guard.
-      expect(findUnmaskedIpClasses(output)).toEqual([]);
-    },
-  );
+  it.each(
+    vectors.masked.map((vector) => [vector.name, vector.input, vector.expected]),
+  )("%s", (_name, input, expected) => {
+    const output = maskIpAddresses(input);
+    expect(output).toBe(expected);
+    // Whatever the masker produced must pass its own guard.
+    expect(findUnmaskedIpClasses(output)).toEqual([]);
+  });
 
   it.each(vectors.readable)("keeps non-identifying addresses readable: %s", (input) => {
     expect(maskIpAddresses(input)).toBe(input);
@@ -141,7 +140,7 @@ describe("countMaskTokens", () => {
 
 describe("ReDoS bound", () => {
   it("scans 512 KiB of hex-and-colon noise quickly", () => {
-    const noise = "a:b1:".repeat(512 * 1024 / 5) + "::".repeat(1000) + "1.2.".repeat(10_000);
+    const noise = "a:b1:".repeat((512 * 1024) / 5) + "::".repeat(1000) + "1.2.".repeat(10_000);
     const started = performance.now();
     new IpMasker().mask(noise);
     findUnmaskedIpClasses(noise);

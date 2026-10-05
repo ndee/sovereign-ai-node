@@ -102,13 +102,17 @@ const MAC_RE = new RegExp(
 );
 
 /** Predictable interface names that embed the MAC (USB ethernet, USB wifi). */
-const MAC_IFNAME_RE = new RegExp(String.raw`(?<![0-9A-Za-z_])(enx|wlx)(${HEX}{12})(?![0-9A-Za-z_])`, "gu");
+const MAC_IFNAME_RE = new RegExp(
+  String.raw`(?<![0-9A-Za-z_])(enx|wlx)(${HEX}{12})(?![0-9A-Za-z_])`,
+  "gu",
+);
 
 /**
  * A dotted quad right after a `ver` / `version` keyword in the same token is a
  * version string, not an address (`version=1.2.3.4`, `"openclawVersion":"…`).
  */
-const VERSION_PREFIX_RE = /(?:(?:^|[^A-Za-z])[Vv][Ee][Rr](?:[Ss][Ii][Oo][Nn])?|[a-z]Version)[^\sA-Za-z0-9]{0,4}$/u;
+const VERSION_PREFIX_RE =
+  /(?:(?:^|[^A-Za-z])[Vv][Ee][Rr](?:[Ss][Ii][Oo][Nn])?|[a-z]Version)[^\sA-Za-z0-9]{0,4}$/u;
 
 // ── Strict parse ───────────────────────────────────────────────────────────
 
@@ -273,8 +277,7 @@ const isVersionContext = (text: string, offset: number): boolean =>
 // ── Masker ─────────────────────────────────────────────────────────────────
 
 /** All-zero and broadcast MACs identify no hardware (`brd ff:ff:ff:ff:ff:ff`). */
-const isReadableMac = (key: string): boolean =>
-  key === "000000000000" || key === "ffffffffffff";
+const isReadableMac = (key: string): boolean => key === "000000000000" || key === "ffffffffffff";
 
 /**
  * One instance per bundle: it remembers which address got which number, so
@@ -392,7 +395,8 @@ export const findUnmaskedIpClasses = (text: string): IpClass[] => {
 
 // ── Counting ───────────────────────────────────────────────────────────────
 
-const TOKEN_RE = /<(public-ipv4|cgnat-ipv4|global-ipv6|link-local-ipv6|ula-ipv6|multicast-ipv6|other-ipv6|mac)#\d{1,9}>/gu;
+const TOKEN_RE =
+  /<(public-ipv4|cgnat-ipv4|global-ipv6|link-local-ipv6|ula-ipv6|multicast-ipv6|other-ipv6|mac)#\d{1,9}>/gu;
 
 /** How many mask tokens of each class `text` carries. Counts only, never values. */
 export const countMaskTokens = (text: string): Partial<Record<MaskClass, number>> => {
