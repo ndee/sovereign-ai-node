@@ -461,7 +461,11 @@ const unavailable = (
 });
 
 /** One redacted line: a manifest reason, not a stack or a command echo. */
-const describeFailure = (error: unknown): string => {
+/**
+ * One line naming why a source could not be read. Addresses are masked BEFORE
+ * the length cut, so a cut can never leave the tail of an address behind.
+ */
+const describeFailure = (error: unknown, masker: IpMasker): string => {
   if (error instanceof UnreadableFileError) {
     return error.message;
   }
@@ -471,7 +475,7 @@ const describeFailure = (error: unknown): string => {
     .filter((line) => line.length > 0);
   // execFile errors start with "Command failed: <argv>"; the cause follows.
   const cause = lines.find((line) => !line.startsWith("Command failed:")) ?? lines[0] ?? "failed";
-  return redactText(cause).slice(0, 300);
+  return masker.mask(redactText(cause)).slice(0, 300);
 };
 
 interface ListedFile {
@@ -542,7 +546,7 @@ const collectInstallJobs = async (
           purpose,
           priority,
           "json",
-          error instanceof SyntaxError ? "not valid JSON" : describeFailure(error),
+          error instanceof SyntaxError ? "not valid JSON" : describeFailure(error, scrub.masker),
         ),
       );
       continue;
@@ -611,7 +615,7 @@ const collectTextFile = async (
       truncatedBytes: read.skippedBytes + tail.droppedBytes,
     };
   } catch (error) {
-    return unavailable(file, purpose, priority, "text", describeFailure(error));
+    return unavailable(file, purpose, priority, "text", describeFailure(error, scrub.masker));
   }
 };
 
@@ -675,7 +679,7 @@ const collectJsonFile = async (
       source.purpose,
       priority,
       "json",
-      error instanceof SyntaxError ? "not valid JSON" : describeFailure(error),
+      error instanceof SyntaxError ? "not valid JSON" : describeFailure(error, scrub.masker),
     );
   }
   const picked = source.pick === undefined ? parsed : source.pick(parsed);
@@ -719,7 +723,7 @@ const collectJournal = async (
       ]);
       sections.push(`=== boot ${boot === "0" ? "current" : "previous"} ===\n${stdout}`);
     } catch (error) {
-      failures.push(`boot ${boot}: ${describeFailure(error)}`);
+      failures.push(`boot ${boot}: ${describeFailure(error, scrub.masker)}`);
     }
   }
   if (sections.length === 0) {

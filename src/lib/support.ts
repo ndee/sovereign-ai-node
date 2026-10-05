@@ -12,11 +12,14 @@ export {
   defaultDiagnosticsRun,
   defaultNodeDiagnosticsSources,
   defaultNodeKnownSecretSources,
+  type DisclosureItem,
   diagnosticsFileName,
   EXCLUDED_CONTENT,
+  IDENTIFYING_DATA,
   INSTALL_DIAGNOSTICS_FORMAT_VERSION,
   type InstallDiagnosticsOptions,
   type InstallDiagnosticsResult,
+  NEVER_INCLUDED,
   npmLogsDir,
   pickFields,
   pickInstallJobRecord,
@@ -24,6 +27,16 @@ export {
   scrubDiagnosticText,
   scrubDiagnosticValue,
 } from "../support/install-diagnostics.js";
+export {
+  countMaskTokens,
+  findUnmaskedIpClasses,
+  type IpClass,
+  IpMasker,
+  MASK_CLASSES,
+  type MaskClass,
+  maskIpAddresses,
+  maskIpAddressesInValue,
+} from "../support/ip-mask.js";
 export {
   KnownSecretSet,
   type KnownSecretSources,

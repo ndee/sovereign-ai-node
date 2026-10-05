@@ -21,6 +21,9 @@
  *   rather than silently truncating.
  * - **Integrity.** SHA-256 over the finished archive, plus a per-file checksum
  *   in the manifest, so tampering between generation and receipt is detectable.
+ * - **No public addresses.** Public IP and MAC addresses are masked with one
+ *   per-bundle `IpMasker` (`ip-mask.ts`); a file in which one survives is
+ *   withheld, never shipped.
  * - **Honest partial results.** Any collector that did not produce content sets
  *   `complete: false`; a partial bundle is never presented as whole.
  */
@@ -42,6 +45,7 @@ import {
   SUPPORTED_UNITS,
   summarizeMailState,
 } from "./collectors.js";
+import { findUnmaskedIpClasses, IpMasker, maskIpAddressesInValue } from "./ip-mask.js";
 import { redactValue } from "./redact.js";
 import type { VersionInventory } from "./version-inventory.js";
 
@@ -114,6 +118,47 @@ export interface BundleDependencies {
   /** Overrides the archive creation step; used to test without tar. */
   readonly createArchive?: (stagingDir: string, outputPath: string) => Promise<void>;
 }
+
+const serializeContent = (content: unknown): string =>
+  typeof content === "string" ? content : `${JSON.stringify(content, null, 2)}\n`;
+
+/**
+ * Mask one collector result with the bundle's masker, then apply the
+ * fail-closed IP guard: a result that still carries an identifying address
+ * (an encoding the masker does not decode) is withheld. The reason names the
+ * address class, never the address.
+ */
+const maskCollectorResult = (result: CollectorResult, masker: IpMasker): CollectorResult => {
+  const reason = result.reason === undefined ? undefined : masker.mask(result.reason);
+  const reasonClasses = reason === undefined ? [] : findUnmaskedIpClasses(reason);
+  const masked: CollectorResult = {
+    ...result,
+    ...(result.content === undefined
+      ? {}
+      : { content: maskIpAddressesInValue(result.content, masker) }),
+    ...(reason === undefined
+      ? {}
+      : {
+          reason:
+            reasonClasses.length === 0
+              ? reason
+              : `reason withheld: it still contained an IP address after masking (${reasonClasses.join(", ")})`,
+        }),
+  };
+  if (masked.content === undefined) {
+    return masked;
+  }
+  const classes = findUnmaskedIpClasses(serializeContent(masked.content));
+  if (classes.length === 0) {
+    return masked;
+  }
+  const { content: _withheld, ...rest } = masked;
+  return {
+    ...rest,
+    status: "withheld",
+    reason: `withheld: text still contained an IP address after masking (${classes.join(", ")})`,
+  };
+};
 
 const sha256 = (input: Buffer | string): string => createHash("sha256").update(input).digest("hex");
 
@@ -330,9 +375,13 @@ export const generateSupportBundle = async (
   results.push(await collectSystemResources(run));
   results.push(await collectClockState(run));
   results.push(await collectGatewaySyncOrdering(run));
+  // One masker for the whole bundle: an address carries the same token in
+  // every file and in the manifest; the next bundle numbers afresh.
+  const masker = new IpMasker();
   for (const unit of SUPPORTED_UNITS) {
-    results.push(await collectJournalTail(unit, run));
+    results.push(await collectJournalTail(unit, run, masker));
   }
+  const masked = results.map((result) => maskCollectorResult(result, masker));
 
   // Stage in a 0700 directory. mkdtemp gives an unpredictable name, closing the
   // symlink-race window that a fixed /tmp path would open.
@@ -343,7 +392,7 @@ export const generateSupportBundle = async (
     const manifestFiles: ManifestEntry[] = [];
     let totalBytes = 0;
 
-    for (const result of results) {
+    for (const result of masked) {
       if (!SAFE_NAME_RE.test(result.name)) {
         /* v8 ignore next 2 -- names are compile-time constants; guard is belt-and-braces. */
         throw new Error(`refusing unsafe artifact name: ${result.name}`);
@@ -360,10 +409,7 @@ export const generateSupportBundle = async (
         });
         continue;
       }
-      const serialized =
-        typeof result.content === "string"
-          ? result.content
-          : `${JSON.stringify(result.content, null, 2)}\n`;
+      const serialized = serializeContent(result.content);
       const buffer = Buffer.from(serialized, "utf8");
       totalBytes += buffer.byteLength;
       if (totalBytes > sizeCap) {
@@ -382,7 +428,7 @@ export const generateSupportBundle = async (
       });
     }
 
-    const complete = results.every((result) => result.status === "collected");
+    const complete = masked.every((result) => result.status === "collected");
 
     const manifest: BundleManifest = {
       bundleFormatVersion: BUNDLE_FORMAT_VERSION,
@@ -392,12 +438,15 @@ export const generateSupportBundle = async (
       redactionPolicy:
         "Allowlisted collection. No secrets, tokens, keys, env files or configuration files. " +
         "No email subjects, senders, recipients, bodies or snippets at any verbosity. " +
-        "Mail state reduced to counters. Journal tails capped and pattern-redacted.",
+        "Mail state reduced to counters. Journal tails capped and pattern-redacted. " +
+        "Public IP addresses and MAC addresses are replaced by placeholders such as " +
+        "<public-ipv4#1> that keep only the kind of address; a file in which one survives " +
+        "is withheld.",
       // Redacted for the same reason the standalone version-inventory.json is
       // (line ~268): provenance fields are read from an on-disk JSON and can
       // carry a repo URL with embedded credentials. Leaving the manifest copy
       // raw would have made one file safe and its twin unsafe.
-      inventory: redactValue(deps.inventory) as VersionInventory,
+      inventory: maskIpAddressesInValue(redactValue(deps.inventory), masker) as VersionInventory,
       files: manifestFiles,
       notes: complete
         ? []

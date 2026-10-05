@@ -9,6 +9,7 @@ import {
   IpMasker,
   MASK_CLASSES,
   maskIpAddresses,
+  maskIpAddressesInValue,
   parseIpv4,
   parseIpv6,
 } from "./ip-mask.js";
@@ -61,6 +62,22 @@ describe("IpMasker — per-bundle pseudonyms", () => {
     first.mask("203.0.113.1");
     expect(first.mask("203.0.113.2")).toBe("<public-ipv4#2>");
     expect(new IpMasker().mask("203.0.113.2")).toBe("<public-ipv4#1>");
+  });
+});
+
+describe("maskIpAddressesInValue", () => {
+  it("masks strings and keys at every depth with the shared numbering", () => {
+    const masker = new IpMasker();
+    masker.mask("203.0.113.9");
+    const input = {
+      "203.0.113.1": { nested: ["2001:db8::1", 4, null, true] },
+      plain: "via 203.0.113.9",
+    };
+    expect(maskIpAddressesInValue(input, masker)).toEqual({
+      "<public-ipv4#2>": { nested: ["<global-ipv6#1>", 4, null, true] },
+      plain: "via <public-ipv4#1>",
+    });
+    expect(input.plain).toBe("via 203.0.113.9");
   });
 });
 

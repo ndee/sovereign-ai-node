@@ -347,6 +347,28 @@ export class IpMasker {
 export const maskIpAddresses = (text: string, masker: IpMasker = new IpMasker()): string =>
   masker.mask(text);
 
+/**
+ * Mask every string in a JSON-shaped value, object keys included (an
+ * address-keyed map must not leak through its keys). Other values pass
+ * through unchanged; the input is not modified.
+ */
+export const maskIpAddressesInValue = (input: unknown, masker: IpMasker): unknown => {
+  if (typeof input === "string") {
+    return masker.mask(input);
+  }
+  if (Array.isArray(input)) {
+    return input.map((entry) => maskIpAddressesInValue(entry, masker));
+  }
+  if (input !== null && typeof input === "object") {
+    const output: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+      output[masker.mask(key)] = maskIpAddressesInValue(value, masker);
+    }
+    return output;
+  }
+  return input;
+};
+
 // ── Fail-closed guard ──────────────────────────────────────────────────────
 
 const ipClassesIn = (text: string): Set<IpClass> => {
