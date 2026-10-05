@@ -220,7 +220,8 @@
     "link-local 169.254.12.34, multicast 224.0.0.251 239.255.255.250, broadcast 255.255.255.255",
     "mapped private ::ffff:192.168.1.5 and ::ffff:127.0.0.1",
     "listen [::]:8008 and [::1]:8787 and 0.0.0.0:443",
-    "mac all zeros 00:00:00:00:00:00 and broadcast ff:ff:ff:ff:ff:ff"
+    "mac all zeros 00:00:00:00:00:00 and broadcast ff:ff:ff:ff:ff:ff",
+    "interface names without a hardware address: enx000000000000 wlxffffffffffff"
   ],
   "falsePositives": [
     "openclaw 2026.3.14 synapse 1.98.0 node v22.12.0",
