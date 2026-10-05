@@ -103,7 +103,7 @@ const MAC_RE = new RegExp(
 
 /** Predictable interface names that embed the MAC (USB ethernet, USB wifi). */
 const MAC_IFNAME_RE = new RegExp(
-  String.raw`(?<![0-9A-Za-z_])(enx|wlx)(${HEX}{12})(?![0-9A-Za-z_])`,
+  String.raw`(?<![0-9A-Za-z_])([Ee][Nn][Xx]|[Ww][Ll][Xx])(${HEX}{12})(?![0-9A-Za-z_])`,
   "gu",
 );
 

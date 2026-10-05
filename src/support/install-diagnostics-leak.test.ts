@@ -18,6 +18,11 @@
  * (near-miss prefixes, encoded forms, a secret split by a truncation point),
  * and a third replays a failed global npm install to prove the bundle still
  * carries the one line that explains the failure.
+ *
+ * A fourth block does the same for IP addresses: a public IPv4, a global
+ * EUI-64 IPv6, a ULA and a link-local address (documentation ranges only) are
+ * planted in every source kind and must be absent from the archive in every
+ * encoding, while the files that carried them are still collected.
  */
 
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -32,6 +37,7 @@ import {
   type DiagnosticsSource,
   pickFields,
 } from "./install-diagnostics.js";
+import { findUnmaskedIpClasses } from "./ip-mask.js";
 import { loadKnownSecrets } from "./known-secrets.js";
 import { readZip } from "./zip.js";
 
@@ -468,5 +474,345 @@ describe("install diagnostics — failed global npm install replay", () => {
     ).toBe(true);
     expect(result.complete).toBe(true);
     expect(result.bytes).toBeLessThan(2 * 1024 * 1024);
+    // Nothing in the replay is an address: the masker touched no byte of it.
+    expect(result.manifest.files.map((entry) => entry.masked)).toEqual([{}, {}]);
+  });
+});
+
+/**
+ * Documentation ranges only — the masker classifies them as PUBLIC on purpose,
+ * so no real address is ever needed here. The ULA and link-local addresses
+ * carry an EUI-64 interface id (`…ff:fe…`), the part that encodes a MAC.
+ */
+const ADDRESS = {
+  publicIpv4: "203.0.113.45",
+  otherPublicIpv4: "198.51.100.77",
+  globalEui64: "2001:db8:4:5:a8bb:ccff:fe11:2233",
+  ula: "fd12:3456:789a:1:a8bb:ccff:fe11:2244",
+  linkLocal: "fe80::a8bb:ccff:fe11:2255",
+  mac: "a8:bb:cc:11:22:66",
+} as const;
+
+/** Fragments that identify on their own: each /64 prefix and each interface id. */
+const ADDRESS_FRAGMENTS = [
+  "2001:db8:4:5:",
+  "fd12:3456:789a:1:",
+  "fe11:2233",
+  "fe11:2244",
+  "fe11:2255",
+  "a8bb:ccff",
+  "a8bbcc112266",
+];
+
+/** Every form an address could take in the archive. */
+const addressForms = (value: string): string[] => [
+  ...new Set([
+    value,
+    value.toUpperCase(),
+    value.toLowerCase(),
+    value.replaceAll(":", "%3A"),
+    value.replaceAll(":", "%3a"),
+    encodeURIComponent(value),
+    JSON.stringify(value).slice(1, -1),
+  ]),
+];
+
+const findAddressLeaks = (entries: Map<string, string>): string[] => {
+  const leaks: string[] = [];
+  for (const [name, text] of entries) {
+    for (const value of [...Object.values(ADDRESS), ...ADDRESS_FRAGMENTS]) {
+      if (addressForms(value).some((form) => text.includes(form))) {
+        leaks.push(`${value} in ${name}`);
+      }
+    }
+  }
+  return leaks;
+};
+
+const plantAddresses = async (): Promise<{
+  sources: DiagnosticsSource[];
+  run: DiagnosticsRunCommand;
+}> => {
+  const { publicIpv4: v4, globalEui64: g6, ula, linkLocal: ll, mac } = ADDRESS;
+  const jobsDir = join(dir, "install-jobs");
+  const npmDir = join(dir, "npm-logs");
+  await mkdir(jobsDir, { recursive: true });
+  await mkdir(npmDir, { recursive: true });
+
+  // A failing preflight's DNS error, as text and as the structured fields the
+  // resolver check writes, plus an address-keyed map.
+  await writeFile(
+    join(jobsDir, "job-dns.json"),
+    JSON.stringify({
+      version: 1,
+      response: {
+        job: {
+          jobId: "job-dns",
+          state: "failed",
+          createdAt: "2026-10-05T10:00:00.000Z",
+          steps: [
+            {
+              id: "preflight",
+              label: "Preflight",
+              state: "failed",
+              error: {
+                code: "RELAY_UNREACHABLE",
+                message: `relay.example.net resolved (${v4}), connect ETIMEDOUT ${v4}:443`,
+                retryable: true,
+                details: {
+                  stderr: `queryAaaa relay.example.net -> [${g6}]:443 ETIMEDOUT`,
+                  address: g6,
+                  family: 6,
+                  resolvers: { [ula]: "timeout", [`${ll}%eth0`]: "ok" },
+                },
+              },
+            },
+          ],
+        },
+      },
+    }),
+  );
+  await writeFile(
+    join(npmDir, "2026-10-05T10_00_00_000Z-debug-0.log"),
+    [
+      "0 verbose cli /usr/bin/node /usr/bin/npm",
+      `1 http fetch GET https://registry.example/?via=${g6.replaceAll(":", "%3A")} failed`,
+      `2 error connect ECONNREFUSED ${v4}:443`,
+      `3 verbose source ${ll.toUpperCase()}`,
+      "4 error code EACCES",
+    ].join("\n"),
+  );
+  const fileTail = join(dir, "installer.log");
+  await writeFile(
+    fileTail,
+    [
+      `inet6 ${g6.toUpperCase()}/64 scope global`,
+      `inet6 ${ula.toUpperCase()}/64`,
+      `inet6 ${ll.toUpperCase()}%ENXA8BBCC112266 scope link`,
+      `link/ether ${mac.toUpperCase()} brd ff:ff:ff:ff:ff:ff`,
+      `wan ${ADDRESS.otherPublicIpv4} lan 192.168.1.20`,
+    ].join("\n"),
+  );
+  const jsonPath = join(dir, "network.json");
+  await writeFile(
+    jsonPath,
+    JSON.stringify({ wan: v4, peers: { [g6]: { via: `${ll}%eth0` } }, ula, mac }),
+  );
+
+  const run: DiagnosticsRunCommand = async (file, args) => {
+    if (file === "journalctl" && args.includes("sovereign-node-api")) {
+      return {
+        stdout: [
+          `Oct 05 api[1]: listening on [${ula}]:8787`,
+          `Oct 05 api[1]: neighbour ${ll}%wlan0 lladdr ${mac}`,
+          `Oct 05 api[1]: ${JSON.stringify({ msg: "dns", address: g6, family: 6 })}`,
+          `Oct 05 api[1]: upstream ${v4}`,
+        ].join("\n"),
+      };
+    }
+    // The unreadable source: its failure reason carries an address.
+    throw new Error(`connect ETIMEDOUT ${v4}:443`);
+  };
+
+  const sources: DiagnosticsSource[] = [
+    { kind: "install-jobs", dir: jobsDir },
+    { kind: "npm-logs", dirs: [npmDir] },
+    { kind: "journal", unit: "sovereign-node-api" },
+    { kind: "journal", unit: "sovereign-relay-tunnel" },
+    { kind: "file-tail", name: "installer.log", path: fileTail, purpose: "installer log" },
+    { kind: "json-file", name: "network.json", path: jsonPath, purpose: "network" },
+    {
+      kind: "value",
+      name: "facts.json",
+      purpose: "facts",
+      value: { [v4]: "seen", list: [ula, `[${g6}]:993`] },
+    },
+    { kind: "system" },
+  ];
+  return { sources, run };
+};
+
+const buildWithAddresses = async () => {
+  const { sources, run } = await plantAddresses();
+  return buildInstallDiagnostics({
+    sources,
+    run,
+    readKernelFile: async () => "",
+    generatedBy: "ip-leak-test",
+    product: { version: "1.0.0", wan: ADDRESS.globalEui64, [ADDRESS.publicIpv4]: true },
+  });
+};
+
+describe("install diagnostics — IP address matrix", () => {
+  it("contains no planted address, prefix or interface id, in any encoding, in any entry", async () => {
+    const entries = unpack((await buildWithAddresses()).archive);
+    expect(entries.has("manifest.json")).toBe(true);
+    expect(findAddressLeaks(entries)).toEqual([]);
+  });
+
+  it("fails if any identifying address at all survives anywhere in the archive", async () => {
+    const entries = unpack((await buildWithAddresses()).archive);
+    const survivors = [...entries].flatMap(([name, text]) =>
+      findUnmaskedIpClasses(text).map((cls) => `${cls} in ${name}`),
+    );
+    expect(survivors).toEqual([]);
+  });
+
+  it("negative control: the same search finds an address that was not masked", () => {
+    const entries = new Map([["x", `x ${ADDRESS.linkLocal.toUpperCase()} x`]]);
+    expect(findAddressLeaks(entries)).not.toEqual([]);
+    expect(findUnmaskedIpClasses(`x ${ADDRESS.otherPublicIpv4} x`)).toEqual(["public-ipv4"]);
+  });
+
+  it("still ships every source that carried an address, with counts in the manifest", async () => {
+    const result = await buildWithAddresses();
+    const byFile = new Map(result.manifest.files.map((entry) => [entry.file, entry]));
+    expect(Object.fromEntries([...byFile].map(([file, entry]) => [file, entry.status]))).toEqual({
+      "files/install-jobs/job-dns.json": "collected",
+      "files/npm-logs/2026-10-05T10_00_00_000Z-debug-0.log": "collected",
+      "files/journal/sovereign-node-api.txt": "collected",
+      "files/journal/sovereign-relay-tunnel.txt": "unavailable",
+      "files/installer.log": "collected",
+      "files/network.json": "collected",
+      "files/facts.json": "collected",
+      "files/system.json": "collected",
+    });
+    expect(byFile.get("files/install-jobs/job-dns.json")?.masked).toEqual({
+      "public-ipv4": 2,
+      "global-ipv6": 2,
+      "link-local-ipv6": 1,
+      "ula-ipv6": 1,
+    });
+    expect(byFile.get("files/installer.log")?.masked).toEqual({
+      "public-ipv4": 1,
+      "global-ipv6": 1,
+      "link-local-ipv6": 1,
+      "ula-ipv6": 1,
+      mac: 2,
+    });
+    // The unreadable source's reason is masked, not dropped.
+    expect(byFile.get("files/journal/sovereign-relay-tunnel.txt")?.reason).toMatch(
+      /^boot 0: connect ETIMEDOUT <public-ipv4#\d+>:443$/u,
+    );
+    const entries = unpack(result.archive);
+    // Diagnostic content around the addresses survives: class, port, zone, LAN.
+    const log = entries.get("files/installer.log") ?? "";
+    expect(log).toMatch(/<link-local-ipv6#\d+>%ENX<mac#\d+> scope link/u);
+    expect(log).toContain("brd ff:ff:ff:ff:ff:ff");
+    expect(log).toContain("lan 192.168.1.20");
+    expect(entries.get("files/journal/sovereign-node-api.txt")).toMatch(
+      /listening on \[<ula-ipv6#\d+>\]:8787/u,
+    );
+    expect(entries.get("files/npm-logs/2026-10-05T10_00_00_000Z-debug-0.log")).toContain(
+      "error code EACCES",
+    );
+    expect(result.manifest.product).toMatchObject({ version: "1.0.0" });
+  });
+
+  it("gives one address one token across every file and the manifest, and others other tokens", async () => {
+    const result = await buildWithAddresses();
+    const entries = unpack(result.archive);
+    const tokenOf = (text: string | undefined, pattern: RegExp): string =>
+      pattern.exec(text ?? "")?.[1] ?? `no match for ${pattern}`;
+    const v4 = /(<public-ipv4#\d+>):443/u;
+    const inJob = tokenOf(entries.get("files/install-jobs/job-dns.json"), v4);
+    const inNpm = tokenOf(entries.get("files/npm-logs/2026-10-05T10_00_00_000Z-debug-0.log"), v4);
+    const inReason = tokenOf(
+      result.manifest.files.find((entry) => entry.status === "unavailable")?.reason,
+      v4,
+    );
+    const inProduct = Object.keys(result.manifest.product as object).find((key) =>
+      key.startsWith("<public-ipv4#"),
+    );
+    expect(inJob).toMatch(/^<public-ipv4#\d+>$/u);
+    expect([inNpm, inReason, inProduct]).toEqual([inJob, inJob, inJob]);
+    const other = tokenOf(entries.get("files/installer.log"), /wan (<public-ipv4#\d+>)/u);
+    expect(other).toMatch(/^<public-ipv4#\d+>$/u);
+    expect(other).not.toBe(inJob);
+    // The same global address, bracketed in a job record and quoted in a journal.
+    const g6Job = tokenOf(
+      entries.get("files/install-jobs/job-dns.json"),
+      /\[(<global-ipv6#\d+>)\]:443/u,
+    );
+    const g6Journal = tokenOf(
+      entries.get("files/journal/sovereign-node-api.txt"),
+      /"address":"(<global-ipv6#\d+>)"/u,
+    );
+    expect(g6Journal).toBe(g6Job);
+    expect((result.manifest.product as Record<string, unknown>).wan).toBe(g6Job);
+  });
+
+  it("numbers afresh in the next bundle", async () => {
+    const first = await buildWithAddresses();
+    const second = await buildWithAddresses();
+    expect(second.manifest.product).toEqual(first.manifest.product);
+  });
+
+  const buildText = async (content: string, maxBytes?: number) => {
+    await writeFile(join(dir, "x.log"), content);
+    return buildInstallDiagnostics({
+      sources: [
+        {
+          kind: "file-tail",
+          name: "x.log",
+          path: join(dir, "x.log"),
+          purpose: "p",
+          ...(maxBytes === undefined ? {} : { maxBytes }),
+        },
+      ],
+      generatedBy: "ip-adversarial",
+    });
+  };
+
+  it.each([
+    [
+      "JSON-escaped colons",
+      String.raw`host 2001\u003adb8\u003a4\u003a5\u003a\u003a1`,
+      "global-ipv6",
+    ],
+    ["hex-escaped dots", String.raw`upstream 203\x2e0\x2e113\x2e45`, "public-ipv4"],
+  ])("withholds the file for an address behind %s, naming only the class", async (_n, line, cls) => {
+    const result = await buildText(`before\n${line}\nafter\n`);
+    const entry = result.manifest.files[0];
+    expect(entry?.status).toBe("withheld");
+    expect(entry?.reason).toBe(
+      `withheld: text still contained an IP address after masking (${cls})`,
+    );
+    expect(unpack(result.archive).has("files/x.log")).toBe(false);
+    expect(findAddressLeaks(unpack(result.archive))).toEqual([]);
+  });
+
+  it("withholds a reason or product value the masker could not clean", async () => {
+    const exotic = String.raw`2001\u003adb8\u003a\u003a9`;
+    const result = await buildInstallDiagnostics({
+      sources: [{ kind: "journal", unit: "x" }],
+      run: async () => {
+        throw new Error(`dns ${exotic}`);
+      },
+      generatedBy: "ip-adversarial",
+      product: { note: exotic },
+    });
+    expect(result.manifest.files[0]?.reason).toBe(
+      "reason withheld: it still contained an IP address after masking (global-ipv6)",
+    );
+    expect(result.manifest.product).toBe(
+      "[withheld: it still contained an IP address after masking (global-ipv6)]",
+    );
+  });
+
+  it("never lets a truncation point leave the tail of an address behind", async () => {
+    const address = ADDRESS.globalEui64;
+    const cap = 4096;
+    for (const offsetFromEnd of [cap + 64 * 1024 + 10, cap + 10, cap - 5]) {
+      const tail = "t\n".repeat(Math.floor(offsetFromEnd / 2));
+      const content = `${"h".repeat(200_000)}\nwan ${address} up${tail}`;
+      const result = await buildText(content, cap);
+      expect(result.manifest.files[0]?.status).toBe("collected");
+      const text = unpack(result.archive).get("files/x.log") ?? "";
+      for (let length = 4; length < address.length; length += 1) {
+        expect(text).not.toContain(address.slice(address.length - length));
+      }
+      expect(Buffer.byteLength(text)).toBeLessThanOrEqual(cap);
+    }
   });
 });
