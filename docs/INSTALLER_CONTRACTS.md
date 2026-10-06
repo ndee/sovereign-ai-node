@@ -677,10 +677,12 @@ Constraints:
   block is persisted as `openrouter.privacy` in `sovereign-node.json5`, rendered into
   the managed OpenClaw config as
   `agents.defaults.models["openrouter/<model>"].params.provider`
-  (`{ data_collection, zdr, allow_fallbacks, only? }`) and sent by OpenClaw as the
-  `provider` routing block of every OpenRouter request, including `llm-task` mail
-  classification. Weakening it is an explicit opt-out. The configured model must have
-  at least one endpoint matching the profile (see
+  (`{ data_collection, zdr, allow_fallbacks, only? }`) for every OpenRouter model in
+  use (the default `openrouter.model` and each `agents.list[].model`, once per
+  distinct model; other params on those entries are kept, non-OpenRouter models get
+  none) and sent by OpenClaw as the `provider` routing block of every OpenRouter
+  request, including `llm-task` mail classification. Weakening it is an explicit
+  opt-out. Each of those models must have at least one endpoint matching the profile (see
   `https://openrouter.ai/api/v1/endpoints/zdr`), otherwise OpenRouter returns no
   eligible provider. The managed OpenClaw config also sets `agents.defaults.workspace`
   to a dedicated empty directory (`<service home>/llm-task-workspace`, `0750`,
