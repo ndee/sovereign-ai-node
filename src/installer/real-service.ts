@@ -105,7 +105,7 @@ import type {
   OpenClawManagedAgentRegistrar,
 } from "../openclaw/managed-agent.js";
 import {
-  buildOpenClawOpenRouterModelParams,
+  buildOpenClawOpenRouterModelsParams,
   resolveOpenRouterPrivacy,
 } from "../openclaw/openrouter-routing.js";
 import type { DockerRuntimePreparer } from "../system/docker-runtime.js";
@@ -12475,10 +12475,20 @@ export default function (api) {
           workspace: llmTaskWorkspaceDir,
           // OpenRouter privacy routing: OpenClaw forwards
           // `models["openrouter/<model>"].params.provider` as the `provider`
-          // block of the request body (compat.openRouterRouting).
-          models: buildOpenClawOpenRouterModelParams(
-            runtimeConfig.openrouter.model,
+          // block of the request body (compat.openRouterRouting), keyed by
+          // the model a call actually uses, so every agent model needs one.
+          models: buildOpenClawOpenRouterModelsParams(
+            [
+              normalizeOpenClawAgentModel(runtimeConfig.openrouter.model),
+              ...managedAgents.flatMap((entry) =>
+                entry.model === undefined ? [] : [normalizeOpenClawAgentModel(entry.model)],
+              ),
+            ],
             runtimeConfig.openrouter.privacy,
+            isRecord(existingRuntimePayload?.agents) &&
+              isRecord(existingRuntimePayload.agents.defaults)
+              ? existingRuntimePayload.agents.defaults.models
+              : undefined,
           ),
         },
         list: await Promise.all(

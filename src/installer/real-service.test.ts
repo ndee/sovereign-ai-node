@@ -673,7 +673,11 @@ afterAll(async () => {
 
 const writeRuntimeArtifacts = async (
   paths: SovereignPaths,
-  options: { openrouterPrivacy?: Record<string, unknown> } = {},
+  options: {
+    openrouterPrivacy?: Record<string, unknown>;
+    agents?: Record<string, unknown>[];
+    runtimePayload?: Record<string, unknown>;
+  } = {},
 ): Promise<void> => {
   const runtimeConfigPath = join(paths.openclawServiceHome, ".openclaw", "openclaw.json5");
   const runtimeProfilePath = join(
@@ -725,7 +729,7 @@ const writeRuntimeArtifacts = async (
           plugins: {
             allow: ["matrix"],
           },
-          agents: [
+          agents: options.agents ?? [
             {
               id: "mail-sentinel",
               workspace: join(paths.stateDir, "mail-sentinel", "workspace"),
@@ -781,7 +785,11 @@ const writeRuntimeArtifacts = async (
     )}\n`,
     "utf8",
   );
-  await writeFile(runtimeConfigPath, '{\n  "source": "test"\n}\n', "utf8");
+  await writeFile(
+    runtimeConfigPath,
+    `${JSON.stringify(options.runtimePayload ?? { source: "test" }, null, 2)}\n`,
+    "utf8",
+  );
   await writeFile(runtimeProfilePath, '{\n  "source": "test"\n}\n', "utf8");
   await writeFile(
     gatewayEnvPath,
@@ -2732,9 +2740,15 @@ describe("RealInstallerService", () => {
       );
       expect(openclawConfig.agents?.defaults?.model).toBe("openrouter/qwen/qwen-2.5-7b-instruct");
       // Strict OpenRouter privacy routing is the default and reaches the
-      // request body via agents.defaults.models[<model>].params.provider.
+      // request body via agents.defaults.models[<model>].params.provider,
+      // for the default model and for mail-sentinel's own model alike.
       expect(openclawConfig.agents?.defaults?.models).toEqual({
         "openrouter/qwen/qwen-2.5-7b-instruct": {
+          params: {
+            provider: { data_collection: "deny", zdr: true, allow_fallbacks: false },
+          },
+        },
+        "openrouter/qwen/qwen-2.5-32b-instruct": {
           params: {
             provider: { data_collection: "deny", zdr: true, allow_fallbacks: false },
           },
@@ -10913,6 +10927,87 @@ describe("RealInstallerService", () => {
       await expect(stat(join(paths.secretsDir, "openrouter-api-key"))).rejects.toMatchObject({
         code: "ENOENT",
       });
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("renders OpenRouter privacy routing for every agent model on re-render", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths = buildReconfigurePaths(tempRoot);
+    const agentWorkspace = (id: string) => join(paths.stateDir, id, "workspace");
+    await writeRuntimeArtifacts(paths, {
+      agents: [
+        {
+          id: "mail-sentinel",
+          workspace: agentWorkspace("mail-sentinel"),
+          model: "qwen/qwen3.5-27b",
+        },
+        {
+          id: "reality-alignment",
+          workspace: agentWorkspace("reality-alignment"),
+          model: "openrouter/qwen/qwen3.5-27b",
+        },
+        { id: "helper", workspace: agentWorkspace("helper"), model: "openai/gpt-5-mini" },
+        { id: "local", workspace: agentWorkspace("local"), model: "ollama/llama3.2:3b/q4" },
+      ],
+      // A previously rendered map: extra per-model params survive, a weakened
+      // provider block does not, and a model no longer in use is dropped.
+      runtimePayload: {
+        agents: {
+          defaults: {
+            models: {
+              "openrouter/qwen/qwen3.5-27b": {
+                params: {
+                  temperature: 0.2,
+                  provider: { data_collection: "allow", zdr: false, allow_fallbacks: true },
+                },
+              },
+              "openrouter/qwen/qwen-2.5-7b-instruct": { params: { temperature: 0.9 } },
+            },
+          },
+        },
+      },
+    });
+    const service = await buildReconfigureService(paths);
+    const runtimeConfigPath = join(paths.openclawServiceHome, ".openclaw", "openclaw.json5");
+    const readModels = async () =>
+      (
+        JSON.parse(await readFile(runtimeConfigPath, "utf8")) as {
+          agents?: {
+            defaults?: { models?: Record<string, unknown> };
+            list?: { id: string; model?: string; params?: unknown }[];
+          };
+        }
+      ).agents;
+    const strict = { data_collection: "deny", zdr: true, allow_fallbacks: false };
+    try {
+      await service.reconfigureOpenrouter({
+        openrouter: { model: "openai/gpt-5", apiKey: "sk-or-test" },
+      });
+      const agents = await readModels();
+      expect(agents?.defaults?.models).toEqual({
+        "openrouter/openai/gpt-5": { params: { provider: strict } },
+        "openrouter/qwen/qwen3.5-27b": { params: { temperature: 0.2, provider: strict } },
+        "openrouter/openai/gpt-5-mini": { params: { provider: strict } },
+      });
+      // Every OpenRouter model an agent runs on resolves to the strict block.
+      for (const entry of agents?.list ?? []) {
+        if (entry.model?.startsWith("openrouter/") === true) {
+          expect(agents?.defaults?.models?.[entry.model]).toMatchObject({
+            params: { provider: strict },
+          });
+        }
+        expect(entry.params).toBeUndefined();
+      }
+      expect(agents?.list?.find((entry) => entry.id === "local")?.model).toBe(
+        "ollama/llama3.2:3b/q4",
+      );
+
+      // A second re-render with nothing changed yields the same map.
+      await service.reconfigureOpenrouter({ openrouter: { model: "openai/gpt-4o" } });
+      await service.reconfigureOpenrouter({ openrouter: { model: "openai/gpt-5" } });
+      expect((await readModels())?.defaults?.models).toEqual(agents?.defaults?.models);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
