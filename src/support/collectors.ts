@@ -22,6 +22,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import { IpMasker } from "./ip-mask.js";
 import { redactText, redactValue } from "./redact.js";
 
 const execFileAsync = promisify(execFile);
@@ -35,7 +36,8 @@ export const JOURNAL_LINE_LIMIT = 200;
 /** Cap on any single collected text artifact. */
 export const MAX_ARTIFACT_BYTES = 256 * 1024;
 
-export type CollectorStatus = "collected" | "unavailable" | "skipped" | "failed";
+/** `withheld`: collected, but an IP address survived masking, so it is not shipped. */
+export type CollectorStatus = "collected" | "unavailable" | "skipped" | "failed" | "withheld";
 
 export interface CollectorResult {
   /** Stable artifact name; becomes the filename inside the bundle. */
@@ -168,10 +170,15 @@ export const collectUnitStates = async (
  * the node does not control, it can contain anything a component logged, and it
  * is where secrets accidentally end up. Three controls apply: a hard line cap,
  * a byte cap, and full redaction including control-character stripping.
+ *
+ * IP and MAC addresses are masked with the bundle's `masker` BEFORE redaction,
+ * because redaction cuts long text and a cut must never leave part of an
+ * address (its network prefix, or the MAC inside an EUI-64 tail) behind.
  */
 export const collectJournalTail = async (
   unit: (typeof SUPPORTED_UNITS)[number],
   run: RunCommand = defaultRunCommand,
+  masker: IpMasker = new IpMasker(),
 ): Promise<CollectorResult> => {
   const name = `journal-${unit}.txt`;
   const purpose = `Last ${JOURNAL_LINE_LIMIT} journal lines for ${unit}, redacted`;
@@ -195,7 +202,7 @@ export const collectJournalTail = async (
       purpose,
       status: "collected",
       privacy: "technical",
-      content: truncate(redactText(stdout)),
+      content: truncate(redactText(masker.mask(stdout))),
     };
   } catch (error) {
     return {

@@ -17,6 +17,8 @@ import {
   defaultNodeDiagnosticsSources,
   defaultNodeKnownSecretSources,
   diagnosticsFileName,
+  IDENTIFYING_DATA,
+  NEVER_INCLUDED,
   npmLogsDir,
   pickFields,
   pickInstallJobRecord,
@@ -709,7 +711,7 @@ describe("manifest and README", () => {
     const entries = entriesOf(result.archive);
     const manifest = manifestOf(result.archive);
     expect(manifest).toMatchObject({
-      formatVersion: 1,
+      formatVersion: 2,
       kind: "install-diagnostics",
       generatedAt: "2026-09-27T12:00:00.000Z",
       complete: false,
@@ -722,13 +724,26 @@ describe("manifest and README", () => {
     expect(readme).toContain("Not included:");
     expect(readme).toContain("files/b.log — unavailable: not present");
     expect(readme).toContain("Never included:");
+    expect(manifest.identifyingData).toEqual(IDENTIFYING_DATA.map((item) => item.text));
+    expect(manifest.neverIncluded).toEqual(NEVER_INCLUDED.map((item) => item.text));
+    expect(manifest.excluded).toEqual(manifest.neverIncluded);
+    expect(manifest.files[0]?.masked).toEqual({});
+    // Every declared identifier and every exclusion reaches the README.
+    expect(readme).toContain("Identifying information in this file (it may contain):");
+    for (const item of [...IDENTIFYING_DATA, ...NEVER_INCLUDED]) {
+      expect(readme).toContain(`  - ${item.text}`);
+    }
+    expect(readme.indexOf("Identifying information")).toBeLessThan(
+      readme.indexOf("Never included:"),
+    );
+    expect(readme).toContain("About the placeholders:");
     expect(result.sha256).toMatch(/^[0-9a-f]{64}$/u);
     expect(result.bytes).toBe(result.archive.byteLength);
   });
 
   it("renders a complete README without a missing section", () => {
     const readme = renderReadme({
-      formatVersion: 1,
+      formatVersion: 2,
       kind: "install-diagnostics",
       generatedAt: "t",
       generatedBy: "g",
@@ -737,6 +752,8 @@ describe("manifest and README", () => {
       limits: { maxTotalBytes: 1 },
       totalBytes: 0,
       redactionPolicy: ["r"],
+      identifyingData: ["i"],
+      neverIncluded: ["e"],
       excluded: ["e"],
       files: [
         {
@@ -748,6 +765,7 @@ describe("manifest and README", () => {
           sha256: "s",
           truncated: true,
           truncatedBytes: 1,
+          masked: {},
         },
         {
           file: "files/y",
@@ -758,6 +776,7 @@ describe("manifest and README", () => {
           sha256: "",
           truncated: false,
           truncatedBytes: 0,
+          masked: {},
         },
       ],
       notes: [],
