@@ -9,6 +9,13 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 From this point forward, GitHub Release notes are auto-generated from commit history
 by the `.github/workflows/release.yml` workflow.
 
+## [2.7.0](https://github.com/ndee/sovereign-ai-node/compare/v2.6.2...v2.7.0) (2026-10-06)
+
+
+### Features
+
+* mask public IP and MAC addresses in diagnostics exports ([#292](https://github.com/ndee/sovereign-ai-node/issues/292)) ([2771699](https://github.com/ndee/sovereign-ai-node/commit/2771699afb5266fcb5c6e0bad228825f7201aac6))
+
 ## [2.6.2](https://github.com/ndee/sovereign-ai-node/compare/v2.6.1...v2.6.2) (2026-10-04)
 
 
