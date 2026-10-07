@@ -117,3 +117,41 @@ export const buildOpenClawOpenRouterModelParams = (
     },
   };
 };
+
+/**
+ * Render the full `agents.defaults.models` map for every model in use.
+ *
+ * OpenClaw looks the params up by the model a call actually runs on
+ * (`resolveExtraParams()` keys on `<provider>/<model>`), so the default model
+ * alone is not enough: an agent pinned to its own model (`agents.list[].model`)
+ * would otherwise reach OpenRouter without the routing block. `modelRefs` are
+ * the OpenClaw model refs in use (`agents.defaults.model` plus each
+ * `agents.list[].model`). Every `openrouter/...` ref gets the routing block
+ * once; other providers are left alone. Params already present on an entry
+ * in `existing` (the previously rendered map) are kept; only `params.provider`
+ * is replaced, since the node owns it through `openrouter.privacy`.
+ */
+export const buildOpenClawOpenRouterModelsParams = (
+  modelRefs: readonly string[],
+  privacy: OpenRouterPrivacyConfig,
+  existing?: unknown,
+): Record<string, Record<string, unknown>> => {
+  const previous = isRecord(existing) ? existing : {};
+  const models: Record<string, Record<string, unknown>> = {};
+  for (const ref of modelRefs) {
+    const isOpenRouter = /^openrouter\//i.test(ref);
+    const key = isOpenRouter ? ref.replace(/^openrouter\//i, "openrouter/") : ref;
+    const previousEntry = previous[key];
+    const entry = isRecord(previousEntry) ? { ...previousEntry } : {};
+    if (isOpenRouter) {
+      entry.params = {
+        ...(isRecord(entry.params) ? entry.params : {}),
+        provider: buildOpenRouterProviderRouting(privacy),
+      };
+    }
+    if (Object.keys(entry).length > 0) {
+      models[key] = entry;
+    }
+  }
+  return models;
+};

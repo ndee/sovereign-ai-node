@@ -230,7 +230,9 @@ Current operator-facing commands:
 All provider-backed LLM calls (including mail classification through `llm-task`) go
 through OpenRouter. The node renders an OpenRouter `provider` routing block into the
 managed OpenClaw config so requests only reach endpoints that match the configured
-privacy profile. The default is strict and applies without any configuration:
+privacy profile. The block is rendered for every OpenRouter model in use: the default
+`openrouter.model` and each model a bot pins for itself. The default is strict and
+applies without any configuration:
 
 | `openrouter.privacy` field | Default | Effect |
 |---|---|---|
@@ -241,9 +243,10 @@ privacy profile. The default is strict and applies without any configuration:
 
 Set the fields under `openrouter.privacy` in the install request (or in
 `/etc/sovereign-node/sovereign-node.json5`, then re-run the installer / update) to opt
-out explicitly, e.g. `"privacy": { "zdr": false, "allowFallbacks": true }`. Pick a
-model that has an eligible endpoint (`https://openrouter.ai/api/v1/endpoints/zdr`); the
-bundled default `qwen/qwen-2.5-7b-instruct` does. `llm-task` additionally runs in a
+out explicitly, e.g. `"privacy": { "zdr": false, "allowFallbacks": true }`. Pick
+models (default and per-bot) that have an eligible endpoint
+(`https://openrouter.ai/api/v1/endpoints/zdr`); the bundled default
+`qwen/qwen-2.5-7b-instruct` does. `llm-task` additionally runs in a
 dedicated empty workspace (`<service home>/llm-task-workspace`) so no bot
 instructions or memory files are prepended to classification prompts.
 
