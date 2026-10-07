@@ -9,6 +9,13 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 From this point forward, GitHub Release notes are auto-generated from commit history
 by the `.github/workflows/release.yml` workflow.
 
+## [2.7.1](https://github.com/ndee/sovereign-ai-node/compare/v2.7.0...v2.7.1) (2026-10-07)
+
+
+### Bug Fixes
+
+* **installer:** apply OpenRouter privacy routing to every agent model ([#295](https://github.com/ndee/sovereign-ai-node/issues/295)) ([a545ffc](https://github.com/ndee/sovereign-ai-node/commit/a545ffc4e81d97fc032df37887b5e25bfaff5a92))
+
 ## [2.7.0](https://github.com/ndee/sovereign-ai-node/compare/v2.6.2...v2.7.0) (2026-10-06)
 
 
