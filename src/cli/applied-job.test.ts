@@ -49,12 +49,13 @@ describe("describeAppliedJob", () => {
     });
   });
 
-  it("exits 2 with the not-ready message when the gateway is not listening", () => {
+  it("exits 7 with the not-ready message when the gateway is not listening", () => {
     const report = describeAppliedJob("Mail settings", {
       job: job("succeeded", appliedSteps),
       gateway: { ready: false, waitedMs: 300_400, deadlineMs: 300_000 },
     });
     expect(report.exitCode).toBe(EXIT_APPLIED_DEGRADED);
+    expect(EXIT_APPLIED_DEGRADED).toBe(7);
     expect(report.lines).toEqual([
       "  [ok] Configure OpenClaw runtime",
       "  [warn] Wait for OpenClaw gateway (not listening)",

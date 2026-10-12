@@ -399,7 +399,7 @@ describe("registerMailSentinelsCommand", () => {
       "file:/tmp/ops-secret",
     ];
 
-    it("exits 2 when create applied but the gateway is not listening", async () => {
+    it("exits 7 when create applied but the gateway is not listening", async () => {
       const originalExitCode = process.exitCode;
       const app = createWaitingApp(false);
       try {
@@ -407,7 +407,7 @@ describe("registerMailSentinelsCommand", () => {
         expect(out).toContain(
           "Mail Sentinel mail-sentinel-ops applied, but the OpenClaw gateway is not ready yet",
         );
-        expect(process.exitCode).toBe(2);
+        expect(process.exitCode).toBe(7);
       } finally {
         process.exitCode = originalExitCode;
       }

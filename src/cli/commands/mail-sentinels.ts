@@ -59,7 +59,7 @@ const deleteMailSentinelSchema = z.object({
 /**
  * Prints a create/update/delete result. Unless `--no-wait` was given, first
  * waits for the install job that applies it, so the exit code reflects what
- * actually happened: 1 when the job failed, 2 when it applied the change but
+ * actually happened: 1 when the job failed, 7 when it applied the change but
  * the gateway is not listening yet.
  */
 const writeAppliedResult = async (input: {

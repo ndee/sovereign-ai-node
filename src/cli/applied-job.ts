@@ -6,7 +6,7 @@ import type {
 import { awaitInstallJob } from "./commands/install.js";
 
 /** Exit code for "the change was applied, but the node is degraded". */
-export const EXIT_APPLIED_DEGRADED = 2;
+export const EXIT_APPLIED_DEGRADED = 7;
 
 export type AppliedJobReport = {
   job: InstallJobSummary;

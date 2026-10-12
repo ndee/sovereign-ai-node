@@ -214,11 +214,12 @@ Standard exit codes:
 
 - `0`: success
 - `1`: generic runtime error
-- `2`: invalid arguments or invalid command usage; for the commands that apply a change through the install job and wait for it (`reconfigure imap`, `mail-sentinels create|update|delete`), `2` instead means **applied, but degraded**: the job succeeded, but the OpenClaw gateway was not listening by its readiness deadline (see "OpenClaw Gateway Readiness")
+- `2`: invalid arguments or invalid command usage
 - `3`: validation/preflight failure (operator input or environment)
 - `4`: dependency/service unavailable
 - `5`: install job failed
 - `6`: partial state requires operator repair/cleanup
+- `7`: applied, but degraded (e.g. gateway not ready): used by the commands that apply a change through the install job and wait for it (`reconfigure imap`, `mail-sentinels create|update|delete`) when the job succeeded but the OpenClaw gateway was not listening by its readiness deadline (see "OpenClaw Gateway Readiness")
 
 ## Commands (Normative)
 
@@ -341,7 +342,7 @@ Current subcommands:
 - `update <id>`
 - `delete <id>`
 
-`create`, `update` and `delete` apply the change through the install job and, by default, wait for it like `reconfigure imap` does: they print the per-step outcome, exit `1` when the job failed and `2` when it applied the change but the OpenClaw gateway is not listening yet. `--json` carries the terminal `job` and `gateway`. `--no-wait` returns as soon as the change is saved, with the pending `job` for polling.
+`create`, `update` and `delete` apply the change through the install job and, by default, wait for it like `reconfigure imap` does: they print the per-step outcome, exit `1` when the job failed and `7` when it applied the change but the OpenClaw gateway is not listening yet. `--json` carries the terminal `job` and `gateway`. `--no-wait` returns as soon as the change is saved, with the pending `job` for polling.
 
 ## `sovereign-node doctor`
 
@@ -414,7 +415,7 @@ Behavior:
 - the CLI then waits for that job (polling every 2 s), prints each step's outcome and exits:
   - `0` when the job succeeded and the OpenClaw gateway is listening;
   - `1` when the job failed (or was still running after 30 minutes);
-  - `2` when the job applied the settings but the gateway was not listening by its deadline. The message is: `Mail settings applied, but the OpenClaw gateway is not ready yet (not listening after <N> s). Bots will not reply and mail reviews will fail until it is. Check with: sovereign-node status --json`
+  - `7` when the job applied the settings but the gateway was not listening by its deadline. The message is: `Mail settings applied, but the OpenClaw gateway is not ready yet (not listening after <N> s). Bots will not reply and mail reviews will fail until it is. Check with: sovereign-node status --json`
 - `--json` returns `ok: true` with the terminal `result.job` and `result.gateway` (`GatewayReadinessSummary`), with the same exit codes
 - `--no-wait` keeps the earlier fire-and-forget behaviour: the command returns as soon as the change is saved, and `result.job` carries the pending job summary for polling. `POST /api/reconfigure/imap` always behaves this way
 - a POP3 connection always records `mailbox = "INBOX"` (POP3 has no folders)

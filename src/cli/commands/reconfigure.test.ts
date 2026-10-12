@@ -95,7 +95,7 @@ describe("reconfigure imap", () => {
     process.exitCode = priorExitCode;
   });
 
-  it("waits for the install job and exits 2 when the gateway is not ready", async () => {
+  it("waits for the install job and exits 7 when the gateway is not ready", async () => {
     const app = createApp(savedResult(), terminal(false));
 
     const out = await run(app, []);
@@ -105,7 +105,7 @@ describe("reconfigure imap", () => {
     expect(out).toContain(
       "Mail settings applied, but the OpenClaw gateway is not ready yet (not listening after 300 s).",
     );
-    expect(process.exitCode).toBe(2);
+    expect(process.exitCode).toBe(7);
   });
 
   it("carries the job and gateway readiness in --json output", async () => {
@@ -123,7 +123,7 @@ describe("reconfigure imap", () => {
       waitedMs: 300_000,
       deadlineMs: 300_000,
     });
-    expect(process.exitCode).toBe(2);
+    expect(process.exitCode).toBe(7);
   });
 
   it("exits 0 once the job applied the change and the gateway listens", async () => {
