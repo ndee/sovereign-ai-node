@@ -156,6 +156,17 @@ describe("OpenClaw gateway readiness", () => {
       });
     });
 
+    it("stays ready when `openclaw health` cannot be spawned", async () => {
+      const service = makeService({
+        listening: () => true,
+        exec: (serialized) => (serialized === "openclaw health" ? "throw" : {}),
+      });
+
+      const outcome = await internals(service).ensureSystemGatewayServiceFallback(runtimeConfig());
+
+      expect(outcome.ready).toBe(true);
+    });
+
     it("stays ready when the deep `openclaw health` check fails", async () => {
       const service = makeService({
         listening: () => true,
@@ -455,6 +466,17 @@ describe("OpenClaw gateway readiness", () => {
       expect(openclawCalls().filter((call) => call.args?.[0] === "health")).toEqual([
         expect.objectContaining({ options: expect.objectContaining({ timeout: 60_000 }) }),
       ]);
+    });
+
+    it("omits the message when the unit inspection gave none", async () => {
+      const service = makeService({ listening: () => true });
+      (
+        service as unknown as { inspectGatewayService: () => Promise<unknown> }
+      ).inspectGatewayService = async () => ({ installed: true, state: "running" });
+
+      const entry = await openclawService(service);
+      expect(entry?.readiness).toBe("ready");
+      expect(entry).not.toHaveProperty("message");
     });
 
     it("reports a running unit that does not listen yet as starting", async () => {

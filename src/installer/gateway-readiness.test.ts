@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   describeGatewayNotReady,
+  describeSkippedGatewaySmokeCheck,
   GATEWAY_READY_DEADLINE_MAX_MS,
   GATEWAY_READY_DEADLINE_MIN_MS,
   GATEWAY_READY_DEADLINE_MS,
@@ -275,5 +276,28 @@ describe("parseSystemctlShow", () => {
     ).toEqual({ activeEnterTimestamp: "2026-10-01T16:53:25.000Z" });
     expect(parseSystemctlShow("ActiveEnterTimestamp=\n")).toEqual({});
     expect(parseSystemctlShow("ActiveEnterTimestamp=not a date\n")).toEqual({});
+  });
+});
+
+describe("describeSkippedGatewaySmokeCheck", () => {
+  it("names the readiness outcome when there is one", () => {
+    const outcome = { unitStarted: true, ready: false, waitedMs: 300_000, deadlineMs: 300_000 };
+    expect(describeSkippedGatewaySmokeCheck(outcome)).toEqual({
+      id: "openclaw-gateway",
+      name: "OpenClaw gateway",
+      status: "warn",
+      message:
+        "OpenClaw gateway unit is running but not listening after 300 s (deadline 300 s); gateway smoke checks did not run",
+      details: outcome,
+    });
+  });
+
+  it("says the restart was skipped when there is none", () => {
+    expect(describeSkippedGatewaySmokeCheck(undefined)).toEqual({
+      id: "openclaw-gateway",
+      name: "OpenClaw gateway",
+      status: "warn",
+      message: "OpenClaw gateway restart was skipped; gateway smoke checks did not run",
+    });
   });
 });

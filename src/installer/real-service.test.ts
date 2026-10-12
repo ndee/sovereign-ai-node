@@ -11057,6 +11057,14 @@ describe("RealInstallerService", () => {
         }),
       );
       expect(result.gateway).toEqual({ ready: false, waitedMs: 300_000, deadlineMs: 300_000 });
+
+      // Asking for the settings already in place restarts nothing.
+      const unchanged = await service.reconfigureOpenrouter({
+        openrouter: { model: "openai/gpt-5" },
+      });
+      expect(unchanged.restartRequiredServices).toEqual([]);
+      expect(unchanged).not.toHaveProperty("gateway");
+      expect(gatewayRestartCalls).toBe(1);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -13288,6 +13296,16 @@ describe("RealInstallerService", () => {
       const configRaw = await readFile(paths.configPath, "utf8");
       const config = JSON.parse(configRaw) as { matrix?: { federationEnabled?: boolean } };
       expect(config.matrix?.federationEnabled).toBe(true);
+      expect(result.restartRequiredServices).toEqual(["openclaw-gateway", "synapse"]);
+      expect(result.gateway?.ready).toBe(true);
+
+      // Asking for the value already in place restarts nothing.
+      const unchanged = await service.reconfigureMatrix({ matrix: { federationEnabled: true } });
+      expect(unchanged.restartRequiredServices).toEqual([]);
+      expect(unchanged).not.toHaveProperty("gateway");
+      expect(unchanged.validation.map((entry) => entry.id)).not.toContain(
+        "openclaw-gateway-restart",
+      );
     } finally {
       if (priorOpenrouterApiKey === undefined) {
         delete process.env.OPENROUTER_API_KEY;

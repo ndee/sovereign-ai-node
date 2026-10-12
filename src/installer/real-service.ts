@@ -142,6 +142,7 @@ import {
 } from "../templates/catalog.js";
 import {
   describeGatewayNotReady,
+  describeSkippedGatewaySmokeCheck,
   type GatewayReadinessOutcome,
   type GatewayUnitSnapshot,
   parseSystemctlShow,
@@ -365,8 +366,6 @@ type RequestedBotInstance = RuntimeBotInstance;
 const OPENCLAW_EXEC_TOOL_ID = "exec";
 const OPENCLAW_SESSION_STATUS_TOOL_ID = "session_status";
 const OPENCLAW_STATUS_PROBE_TIMEOUT_MS = 5_000;
-const OPENCLAW_EMPTY_HEALTH_RETRY_ATTEMPTS = 3;
-const OPENCLAW_EMPTY_HEALTH_RETRY_DELAY_MS = 1_000;
 // A warm `openclaw health` takes seconds on a fast host and far longer on a
 // small ARM board, because it loads every plugin before it answers.
 const OPENCLAW_DEEP_HEALTH_TIMEOUT_MS = 60_000;
@@ -2203,10 +2202,10 @@ export class RealInstallerService implements InstallerService {
     return {
       target: "matrix",
       changed,
+      // The gateway is restarted only when federation changed, which also
+      // needs Synapse restarted.
       restartRequiredServices:
-        gatewayReadiness === undefined
-          ? []
-          : ["openclaw-gateway", ...(federationChanged ? ["synapse"] : [])],
+        gatewayReadiness === undefined ? [] : ["openclaw-gateway", "synapse"],
       validation: [
         check(
           "matrix-federation",
@@ -7830,39 +7829,29 @@ export default function (api) {
     return null;
   }
 
-  private async probeOpenClawHealth(options?: { timeoutMs?: number; attempts?: number }): Promise<{
+  private async probeOpenClawHealth(): Promise<{
     ok: boolean;
     message: string;
   }> {
-    const attempts = options?.attempts ?? OPENCLAW_EMPTY_HEALTH_RETRY_ATTEMPTS;
-    for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      const probe = await this.safeExec("openclaw", ["health"], {
-        timeoutMs: options?.timeoutMs ?? OPENCLAW_STATUS_PROBE_TIMEOUT_MS,
-      });
-      if (!probe.ok) {
-        return {
-          ok: false,
-          message: probe.error,
-        };
-      }
-      const body = `${probe.result.stdout}\n${probe.result.stderr}`;
-      if (probe.result.exitCode === 0 || this.looksLikeHealthyOpenClawHealth(body)) {
-        return {
-          ok: true,
-          message: summarizeText(probe.result.stdout || body, 220) || "openclaw health ok",
-        };
-      }
-      if (body.trim().length > 0 || attempt === attempts) {
-        return {
-          ok: false,
-          message: summarizeText(body, 220),
-        };
-      }
-      await delay(OPENCLAW_EMPTY_HEALTH_RETRY_DELAY_MS);
+    const probe = await this.safeExec("openclaw", ["health"], {
+      timeoutMs: OPENCLAW_DEEP_HEALTH_TIMEOUT_MS,
+    });
+    if (!probe.ok) {
+      return {
+        ok: false,
+        message: probe.error,
+      };
+    }
+    const body = `${probe.result.stdout}\n${probe.result.stderr}`;
+    if (probe.result.exitCode === 0 || this.looksLikeHealthyOpenClawHealth(body)) {
+      return {
+        ok: true,
+        message: summarizeText(probe.result.stdout || body, 220) || "openclaw health ok",
+      };
     }
     return {
       ok: false,
-      message: "",
+      message: summarizeText(body, 220),
     };
   }
 
@@ -10653,10 +10642,7 @@ export default function (api) {
       return {
         readiness: "ready",
         ...since,
-        health: await this.probeOpenClawHealth({
-          timeoutMs: OPENCLAW_DEEP_HEALTH_TIMEOUT_MS,
-          attempts: 1,
-        }),
+        health: await this.probeOpenClawHealth(),
       };
     }
     const starting =
@@ -10680,10 +10666,7 @@ export default function (api) {
    * slow to poll; run it once the port is up, as a deeper but non-blocking check.
    */
   private async logGatewayDeepHealth(): Promise<void> {
-    const health = await this.probeOpenClawHealth({
-      timeoutMs: OPENCLAW_DEEP_HEALTH_TIMEOUT_MS,
-      attempts: 1,
-    });
+    const health = await this.probeOpenClawHealth();
     if (health.ok) {
       this.logger.info({ health: health.message }, "OpenClaw gateway health check passed");
       return;
@@ -10789,19 +10772,7 @@ export default function (api) {
     }
 
     if (this.execRunner !== null && gatewayServiceSkipped) {
-      checks.push(
-        check(
-          "openclaw-gateway",
-          "OpenClaw gateway",
-          "warn",
-          `${
-            gatewayReadiness === undefined
-              ? "OpenClaw gateway restart was skipped"
-              : describeGatewayNotReady(gatewayReadiness)
-          }; gateway smoke checks did not run`,
-          gatewayReadiness === undefined ? undefined : { ...gatewayReadiness },
-        ),
-      );
+      checks.push(describeSkippedGatewaySmokeCheck(gatewayReadiness));
     }
 
     if (this.execRunner !== null && !gatewayServiceSkipped) {

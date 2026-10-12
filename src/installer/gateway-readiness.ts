@@ -130,6 +130,27 @@ export const describeGatewayNotReady = (outcome: GatewayReadinessOutcome): strin
     : `OpenClaw gateway unit failed to start${probe}`;
 };
 
+/** The smoke-check entry for an install whose gateway checks could not run. */
+export const describeSkippedGatewaySmokeCheck = (
+  outcome: GatewayReadinessOutcome | undefined,
+): {
+  id: string;
+  name: string;
+  status: "warn";
+  message: string;
+  details?: Record<string, unknown>;
+} => ({
+  id: "openclaw-gateway",
+  name: "OpenClaw gateway",
+  status: "warn",
+  message: `${
+    outcome === undefined
+      ? "OpenClaw gateway restart was skipped"
+      : describeGatewayNotReady(outcome)
+  }; gateway smoke checks did not run`,
+  ...(outcome === undefined ? {} : { details: { ...outcome } }),
+});
+
 type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
 /** Any HTTP response means the gateway is listening; only transport errors do not. */
