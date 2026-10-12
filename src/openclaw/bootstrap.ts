@@ -43,6 +43,8 @@ export type OpenClawInstallInfo = {
   binaryPath: string;
   version: string;
   installMethod: "install_sh" | "npm_fallback";
+  /** True when this call (re)installed the CLI rather than keeping the one found. */
+  reinstalled?: boolean;
 };
 
 export interface OpenClawBootstrapper {
@@ -420,6 +422,7 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
         binaryPath: detected.binaryPath,
         version: detected.version,
         installMethod: "install_sh",
+        reinstalled: false,
       };
     }
 
@@ -478,6 +481,7 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
         binaryPath: installed.binaryPath,
         version: installed.version,
         installMethod: "npm_fallback",
+        reinstalled: true,
       };
     }
 
@@ -508,6 +512,7 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
       binaryPath: installed.binaryPath,
       version: installed.version,
       installMethod: "install_sh",
+      reinstalled: true,
     };
   }
 
