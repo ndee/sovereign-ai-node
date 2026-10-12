@@ -5,3 +5,6 @@ dist/
 coverage/
 *.log
 .sovereign-node-dev/
+
+# local git worktrees (see CLAUDE.md worktree convention)
+.worktrees/
