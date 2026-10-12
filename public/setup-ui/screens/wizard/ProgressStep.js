@@ -30,6 +30,7 @@ const PHASE_OF = (stepId) => {
   if (
     stepId === "openclaw_gateway_service_install" ||
     stepId === "openclaw_configure" ||
+    stepId === "gateway_ready" ||
     stepId === "bots_configure"
   ) {
     return "Activating components";
@@ -329,6 +330,7 @@ export const ProgressStep = ({
     openclaw_bundled_plugin_tools: "Install bundled plugin tools",
     openclaw_gateway_service_install: "Install runtime gateway service",
     openclaw_configure: "Configure runtime",
+    gateway_ready: "Start runtime gateway",
   };
   const friendlyLabel = (step) => FRIENDLY_STEP_LABEL[step.id] ?? step.label ?? step.id;
 

@@ -45,6 +45,7 @@ import type {
 import { type CheckResult, CONTRACT_VERSION, type ComponentHealth } from "../contracts/common.js";
 import {
   type DoctorReport,
+  type GatewayReadinessSummary,
   type InstallJobStatusResponse,
   type InstallJobSummary,
   type InstallRequest,
@@ -139,6 +140,15 @@ import {
   type ToolTemplateDefinition,
   verifySignedTemplateManifest,
 } from "../templates/catalog.js";
+import {
+  describeGatewayNotReady,
+  type GatewayReadinessOutcome,
+  type GatewayUnitSnapshot,
+  parseSystemctlShow,
+  probeGatewayHttp,
+  resolveGatewayReadyDeadlineMs,
+  waitForGatewayReady,
+} from "./gateway-readiness.js";
 import { pruneInstallJobRecords, redactInstallRequestSecrets } from "./install-request-secrets.js";
 import {
   type InstallContext,
@@ -357,6 +367,11 @@ const OPENCLAW_SESSION_STATUS_TOOL_ID = "session_status";
 const OPENCLAW_STATUS_PROBE_TIMEOUT_MS = 5_000;
 const OPENCLAW_EMPTY_HEALTH_RETRY_ATTEMPTS = 3;
 const OPENCLAW_EMPTY_HEALTH_RETRY_DELAY_MS = 1_000;
+// A warm `openclaw health` takes seconds on a fast host and far longer on a
+// small ARM board, because it loads every plugin before it answers.
+const OPENCLAW_DEEP_HEALTH_TIMEOUT_MS = 60_000;
+// The unit `openclaw gateway install` creates for the user-service flow.
+const USER_GATEWAY_SYSTEMD_UNIT = "openclaw-gateway.service";
 const OPENCLAW_RUNTIME_SETTLE_ATTEMPTS = 6;
 const OPENCLAW_RUNTIME_SETTLE_DELAY_MS = 5_000;
 const SYSTEM_GATEWAY_MATRIX_WAIT_ATTEMPTS = 120;
@@ -577,6 +592,12 @@ export class RealInstallerService implements InstallerService {
   // (not a direct constant read) only so tests can shrink it and exercise the
   // not-reachable path without waiting out the real timeout.
   protected onboardingReadinessProbeTimeoutMs = ONBOARDING_READINESS_PROBE_TIMEOUT_MS;
+  // Clock for the gateway readiness wait. A protected field only so tests can
+  // run the multi-minute deadline on a fake clock.
+  protected gatewayReadinessClock: { now: () => number; sleep: (ms: number) => Promise<void> } = {
+    now: () => Date.now(),
+    sleep: (ms) => delay(ms),
+  };
 
   // Cached stable installation id (see resolveStableInstallationId). Memoised so
   // every relay enroll/refresh in a single install run sends the same identity.
@@ -1257,7 +1278,12 @@ export class RealInstallerService implements InstallerService {
       jobId,
     };
 
-    const steps = this.buildInstallSteps(req);
+    let gateway: GatewayReadinessSummary | undefined;
+    const steps = this.buildInstallSteps(req, {
+      onGatewayReadiness: (outcome) => {
+        gateway = summarizeGatewayReadiness(outcome);
+      },
+    });
     const initialJob: InstallJobSummary = {
       jobId,
       state: "pending",
@@ -1282,6 +1308,7 @@ export class RealInstallerService implements InstallerService {
           installationId,
           request: req,
           snapshot,
+          ...(gateway === undefined ? {} : { gateway }),
         });
       })
       .catch((error) => {
@@ -1427,7 +1454,8 @@ export class RealInstallerService implements InstallerService {
             state: "unknown" as GatewayState,
             message: undefined,
           };
-    const healthProbe = await this.probeOpenClawHealth();
+    const gatewayReadiness = await this.inspectGatewayReadiness(gateway.state);
+    const healthProbe = gatewayReadiness.health;
     const agentProbes = await Promise.all(
       expectedAgentIds.map(
         async (id) =>
@@ -1500,7 +1528,13 @@ export class RealInstallerService implements InstallerService {
           kind: "openclaw",
           health: openclawHealth,
           state: gateway.state,
-          ...(gateway.message === undefined ? {} : { message: gateway.message }),
+          readiness: gatewayReadiness.readiness,
+          ...(gatewayReadiness.since === undefined ? {} : { since: gatewayReadiness.since }),
+          ...(gatewayReadiness.readiness === "starting"
+            ? { message: "gateway starting (not listening yet)" }
+            : gateway.message === undefined
+              ? {}
+              : { message: gateway.message }),
         },
         {
           name: "synapse",
@@ -1603,7 +1637,8 @@ export class RealInstallerService implements InstallerService {
     const gateway = await this.inspectGatewayService();
     const relay =
       runtimeConfig?.relay?.enabled === true ? await this.inspectRelayTunnelService() : null;
-    const healthProbe = await this.probeOpenClawHealth();
+    const gatewayReadiness = await this.inspectGatewayReadiness(gateway.state);
+    const healthProbe = gatewayReadiness.health;
     const expectedAgentIds = runtimeConfig?.openclawProfile.agents.map((entry) => entry.id) ?? [];
     const expectedCronIds = runtimeConfig?.openclawProfile.crons.map((entry) => entry.id) ?? [];
     const agentProbes = await Promise.all(
@@ -1696,6 +1731,7 @@ export class RealInstallerService implements InstallerService {
             : "OpenClaw gateway service health probe failed or service is not running",
         {
           state: gateway.state,
+          readiness: gatewayReadiness.readiness,
           healthProbe: healthProbe.message,
         },
       ),
@@ -2108,7 +2144,7 @@ export class RealInstallerService implements InstallerService {
 
     const federationChanged = requestedFederation !== runtimeConfig.matrix.federationEnabled;
     const changed: string[] = [];
-    let gatewayRestarted = false;
+    let gatewayReadiness: GatewayReadinessOutcome | undefined;
 
     if (federationChanged) {
       changed.push("matrix.federationEnabled");
@@ -2155,8 +2191,7 @@ export class RealInstallerService implements InstallerService {
 
       await this.writeOpenClawRuntimeArtifacts(nextRuntimeConfig);
       this.setManagedOpenClawEnv(nextRuntimeConfig);
-      await this.refreshGatewayAfterRuntimeConfig(nextRuntimeConfig);
-      gatewayRestarted = true;
+      gatewayReadiness = await this.refreshGatewayAfterRuntimeConfig(nextRuntimeConfig);
     }
 
     const requestUpdate = await this.updateInstallRequestFederation({
@@ -2168,9 +2203,10 @@ export class RealInstallerService implements InstallerService {
     return {
       target: "matrix",
       changed,
-      restartRequiredServices: gatewayRestarted
-        ? ["openclaw-gateway", ...(federationChanged ? ["synapse"] : [])]
-        : [],
+      restartRequiredServices:
+        gatewayReadiness === undefined
+          ? []
+          : ["openclaw-gateway", ...(federationChanged ? ["synapse"] : [])],
       validation: [
         check(
           "matrix-federation",
@@ -2180,18 +2216,19 @@ export class RealInstallerService implements InstallerService {
             ? `Matrix federation ${requestedFederation ? "enabled" : "disabled"}`
             : "Matrix federation config already matched the requested value",
         ),
-        ...(gatewayRestarted
-          ? [
-              check(
-                "openclaw-gateway-restart",
-                "OpenClaw gateway restart",
-                "pass",
+        ...(gatewayReadiness === undefined
+          ? []
+          : [
+              gatewayRestartCheck(
+                gatewayReadiness,
                 "OpenClaw gateway restarted with updated federation settings",
               ),
-            ]
-          : []),
+            ]),
         ...requestUpdate.validation,
       ],
+      ...(gatewayReadiness === undefined
+        ? {}
+        : { gateway: summarizeGatewayReadiness(gatewayReadiness) }),
     };
   }
 
@@ -2266,7 +2303,7 @@ export class RealInstallerService implements InstallerService {
       changed.push("openrouter.apiKeySecretRef");
     }
 
-    let gatewayRestarted = false;
+    let gatewayReadiness: GatewayReadinessOutcome | undefined;
     if (runtimeChanged) {
       const openrouterConfig = isRecord(parsed.openrouter) ? parsed.openrouter : {};
       openrouterConfig.provider = "openrouter";
@@ -2287,8 +2324,7 @@ export class RealInstallerService implements InstallerService {
       };
       await this.writeOpenClawRuntimeArtifacts(nextRuntimeConfig);
       this.setManagedOpenClawEnv(nextRuntimeConfig);
-      await this.refreshGatewayAfterRuntimeConfig(nextRuntimeConfig);
-      gatewayRestarted = true;
+      gatewayReadiness = await this.refreshGatewayAfterRuntimeConfig(nextRuntimeConfig);
     }
 
     const requestUpdate = await this.updateInstallRequestOpenrouter({
@@ -2302,7 +2338,7 @@ export class RealInstallerService implements InstallerService {
     return {
       target: "openrouter",
       changed,
-      restartRequiredServices: gatewayRestarted ? ["openclaw-gateway"] : [],
+      restartRequiredServices: gatewayReadiness === undefined ? [] : ["openclaw-gateway"],
       validation: [
         check(
           "openrouter-runtime",
@@ -2312,18 +2348,19 @@ export class RealInstallerService implements InstallerService {
             ? "OpenRouter runtime config updated"
             : "OpenRouter runtime config already matched the requested values",
         ),
-        ...(gatewayRestarted
-          ? [
-              check(
-                "openclaw-gateway-restart",
-                "OpenClaw gateway restart",
-                "pass",
+        ...(gatewayReadiness === undefined
+          ? []
+          : [
+              gatewayRestartCheck(
+                gatewayReadiness,
                 "OpenClaw gateway restarted with updated OpenRouter settings",
               ),
-            ]
-          : []),
+            ]),
         ...requestUpdate.validation,
       ],
+      ...(gatewayReadiness === undefined
+        ? {}
+        : { gateway: summarizeGatewayReadiness(gatewayReadiness) }),
     };
   }
 
@@ -7793,13 +7830,14 @@ export default function (api) {
     return null;
   }
 
-  private async probeOpenClawHealth(): Promise<{
+  private async probeOpenClawHealth(options?: { timeoutMs?: number; attempts?: number }): Promise<{
     ok: boolean;
     message: string;
   }> {
-    for (let attempt = 1; attempt <= OPENCLAW_EMPTY_HEALTH_RETRY_ATTEMPTS; attempt += 1) {
+    const attempts = options?.attempts ?? OPENCLAW_EMPTY_HEALTH_RETRY_ATTEMPTS;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
       const probe = await this.safeExec("openclaw", ["health"], {
-        timeoutMs: OPENCLAW_STATUS_PROBE_TIMEOUT_MS,
+        timeoutMs: options?.timeoutMs ?? OPENCLAW_STATUS_PROBE_TIMEOUT_MS,
       });
       if (!probe.ok) {
         return {
@@ -7814,7 +7852,7 @@ export default function (api) {
           message: summarizeText(probe.result.stdout || body, 220) || "openclaw health ok",
         };
       }
-      if (body.trim().length > 0 || attempt === OPENCLAW_EMPTY_HEALTH_RETRY_ATTEMPTS) {
+      if (body.trim().length > 0 || attempt === attempts) {
         return {
           ok: false,
           message: summarizeText(body, 220),
@@ -8566,7 +8604,10 @@ export default function (api) {
     return configuredUser;
   }
 
-  private buildInstallSteps(req: InstallRequest): InstallStep[] {
+  private buildInstallSteps(
+    req: InstallRequest,
+    hooks?: { onGatewayReadiness?: (outcome: GatewayReadinessOutcome) => void },
+  ): InstallStep[] {
     const stepState: {
       effectiveRequest?: InstallRequest;
       relayEnrollment?: RelayEnrollmentResult;
@@ -8578,6 +8619,7 @@ export default function (api) {
       sharedServiceBotLocalpart?: string;
       botRegistrations?: ManagedAgentRegistrationResult[];
       gatewayServiceSkipped?: boolean;
+      gatewayReadiness?: GatewayReadinessOutcome;
       relayTunnelServiceInstalled?: boolean;
     } = {};
 
@@ -8993,23 +9035,24 @@ export default function (api) {
               await this.installRelayTunnelServiceOrThrow(runtimeConfig);
           }
 
+          // A gateway that is not listening yet does not fail this step: the
+          // configuration is applied, and `gateway_ready` reports the wait.
+          // Until it listens, bot registration is deferred as for a skipped
+          // gateway.
           if (stepState.gatewayServiceSkipped === true) {
-            const fallbackStarted = await this.ensureSystemGatewayServiceFallback(runtimeConfig);
-            if (fallbackStarted) {
-              stepState.gatewayServiceSkipped = false;
+            const outcome = await this.ensureSystemGatewayServiceFallback(runtimeConfig);
+            stepState.gatewayReadiness = outcome;
+            if (outcome.unitStarted) {
               // System-level gateway flow starts the gateway here rather than in
               // the user-service step, so fix the crypto runtime dir now (#207).
               await this.ensureMatrixCryptoRuntimeWritable(runtimeConfig);
-              return;
             }
-            this.logger.warn(
-              "OpenClaw gateway restart skipped because neither user-service nor system-service startup succeeded",
-            );
+            stepState.gatewayServiceSkipped = !outcome.ready;
             return;
           }
 
           try {
-            await this.refreshGatewayAfterRuntimeConfig(runtimeConfig);
+            stepState.gatewayReadiness = await this.refreshGatewayAfterRuntimeConfig(runtimeConfig);
           } catch (error) {
             if (isGatewayUserSystemdUnavailableError(error)) {
               stepState.gatewayServiceSkipped = true;
@@ -9023,7 +9066,33 @@ export default function (api) {
             }
             throw error;
           }
+          stepState.gatewayServiceSkipped = !stepState.gatewayReadiness.ready;
           await this.ensureMatrixCryptoRuntimeWritable(runtimeConfig);
+        },
+      },
+      {
+        id: "gateway_ready",
+        label: "Wait for OpenClaw gateway",
+        softFail: true,
+        run: async () => {
+          const outcome = stepState.gatewayReadiness ?? (await this.probeGatewayWithoutRestart());
+          stepState.gatewayReadiness = outcome;
+          hooks?.onGatewayReadiness?.(outcome);
+          if (outcome.ready) {
+            return;
+          }
+          throw {
+            code: "OPENCLAW_GATEWAY_NOT_READY",
+            message: describeGatewayNotReady(outcome),
+            retryable: true,
+            details: {
+              unit: outcome.unit ?? SOVEREIGN_GATEWAY_SYSTEMD_UNIT,
+              unitStarted: outcome.unitStarted,
+              waitedMs: outcome.waitedMs,
+              deadlineMs: outcome.deadlineMs,
+              ...(outcome.lastProbe === undefined ? {} : { lastProbe: outcome.lastProbe }),
+            },
+          };
         },
       },
       {
@@ -9057,12 +9126,14 @@ export default function (api) {
               retryable: false,
             };
           }
-          await this.runSmokeChecks(
+          const checks = await this.runSmokeChecks(
             stepState.matrixProvision,
             stepState.runtimeConfig ?? (await this.readRuntimeConfig()),
             stepState.gatewayServiceSkipped ?? false,
             stepState.relayEnrollment !== undefined,
+            stepState.gatewayReadiness,
           );
+          return checks.length === 0 ? undefined : { details: { checks } };
         },
       },
       {
@@ -9900,9 +9971,11 @@ export default function (api) {
     installationId: string;
     request: InstallRequest;
     snapshot: JobRunnerSnapshot;
+    gateway?: GatewayReadinessSummary;
   }): Promise<void> {
     const response: InstallJobStatusResponse = {
       job: input.snapshot.job,
+      ...(input.gateway === undefined ? {} : { gateway: input.gateway }),
       ...(input.snapshot.error === undefined ? {} : { error: input.snapshot.error }),
     };
 
@@ -10375,9 +10448,20 @@ export default function (api) {
     }
   }
 
-  private async ensureSystemGatewayServiceFallback(runtimeConfig: RuntimeConfig): Promise<boolean> {
+  private async ensureSystemGatewayServiceFallback(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<GatewayReadinessOutcome> {
+    const deadlineMs = resolveGatewayReadyDeadlineMs();
+    const unitNotStarted = (reason: string): GatewayReadinessOutcome => ({
+      unitStarted: false,
+      ready: false,
+      waitedMs: 0,
+      deadlineMs,
+      lastProbe: reason,
+      unit: SOVEREIGN_GATEWAY_SYSTEMD_UNIT,
+    });
     if (this.execRunner === null) {
-      return false;
+      return unitNotStarted("exec runner unavailable");
     }
 
     const serviceIdentity = this.getConfiguredServiceIdentity(runtimeConfig);
@@ -10458,7 +10542,7 @@ export default function (api) {
         },
         "Failed to write system-level OpenClaw gateway unit",
       );
-      return false;
+      return unitNotStarted(`failed to write ${unitPath}: ${describeError(error)}`);
     }
 
     const commands: string[][] = [
@@ -10477,7 +10561,7 @@ export default function (api) {
           },
           "System-level OpenClaw gateway command failed",
         );
-        return false;
+        return unitNotStarted(`systemctl ${args.join(" ")}: ${result.error}`);
       }
       if (result.result.exitCode !== 0) {
         const output = `${result.result.stdout}\n${result.result.stderr}`;
@@ -10494,37 +10578,120 @@ export default function (api) {
           },
           "System-level OpenClaw gateway command exited non-zero",
         );
-        return false;
-      }
-    }
-
-    for (let attempt = 1; attempt <= 20; attempt += 1) {
-      const health = await this.probeOpenClawHealth();
-      if (health.ok) {
-        this.logger.info(
-          {
-            unitName,
-            unitPath,
-            health: health.message,
-          },
-          "System-level OpenClaw gateway service started successfully",
-        );
-        return true;
-      }
-      if (attempt < 20) {
-        await delay(1000);
-      } else {
-        this.logger.warn(
-          {
-            unitName,
-            health: health.message,
-          },
-          "System-level OpenClaw gateway service did not become healthy in time",
+        return unitNotStarted(
+          `systemctl ${args.join(" ")} exited ${result.result.exitCode}: ${summarizeText(output, 200)}`,
         );
       }
     }
 
-    return false;
+    const outcome = await this.waitForGatewayReady(unitName, deadlineMs, () =>
+      this.inspectSystemGatewayUnit(),
+    );
+    if (!outcome.ready) {
+      this.logger.warn({ unitName, ...outcome }, `${describeGatewayNotReady(outcome)}`);
+      return outcome;
+    }
+    this.logger.info(
+      { unitName, unitPath, waitedMs: outcome.waitedMs },
+      "System-level OpenClaw gateway service is listening",
+    );
+    await this.logGatewayDeepHealth();
+    return outcome;
+  }
+
+  private async waitForGatewayReady(
+    unit: string,
+    deadlineMs: number,
+    inspectUnit: () => Promise<GatewayUnitSnapshot>,
+  ): Promise<GatewayReadinessOutcome> {
+    const outcome = await waitForGatewayReady(deadlineMs, {
+      probe: () => probeGatewayHttp(this.fetchImpl),
+      inspectUnit,
+      now: this.gatewayReadinessClock.now,
+      sleep: this.gatewayReadinessClock.sleep,
+    });
+    return { ...outcome, unit };
+  }
+
+  private async inspectSystemGatewayUnit(): Promise<
+    GatewayUnitSnapshot & { activeEnterTimestamp?: string }
+  > {
+    const shown = await this.safeExec("systemctl", [
+      "show",
+      "--timestamp=unix",
+      "-p",
+      "ActiveState",
+      "-p",
+      "NRestarts",
+      "-p",
+      "ActiveEnterTimestamp",
+      SOVEREIGN_GATEWAY_SYSTEMD_UNIT,
+    ]);
+    if (!shown.ok || shown.result.exitCode !== 0) {
+      return {};
+    }
+    return parseSystemctlShow(shown.result.stdout);
+  }
+
+  /**
+   * Readiness for status and doctor: a cheap port check first, and the slow
+   * `openclaw health` only once the gateway listens, so a slow CLI cannot make
+   * a listening gateway look down.
+   */
+  private async inspectGatewayReadiness(gatewayState: GatewayState): Promise<{
+    readiness: "ready" | "starting" | "down";
+    since?: string;
+    health: { ok: boolean; message: string };
+  }> {
+    const [probe, unit] = await Promise.all([
+      probeGatewayHttp(this.fetchImpl),
+      this.inspectSystemGatewayUnit(),
+    ]);
+    const since =
+      unit.activeEnterTimestamp === undefined ? {} : { since: unit.activeEnterTimestamp };
+    if (probe.ok) {
+      return {
+        readiness: "ready",
+        ...since,
+        health: await this.probeOpenClawHealth({
+          timeoutMs: OPENCLAW_DEEP_HEALTH_TIMEOUT_MS,
+          attempts: 1,
+        }),
+      };
+    }
+    const starting =
+      gatewayState === "running" ||
+      unit.activeState === "active" ||
+      unit.activeState === "activating";
+    return {
+      readiness: starting ? "starting" : "down",
+      ...since,
+      health: {
+        ok: false,
+        message: starting
+          ? `gateway starting (not listening yet): ${probe.reason}`
+          : `gateway not listening: ${probe.reason}`,
+      },
+    };
+  }
+
+  /**
+   * `openclaw health` loads every plugin before it answers, so it is far too
+   * slow to poll; run it once the port is up, as a deeper but non-blocking check.
+   */
+  private async logGatewayDeepHealth(): Promise<void> {
+    const health = await this.probeOpenClawHealth({
+      timeoutMs: OPENCLAW_DEEP_HEALTH_TIMEOUT_MS,
+      attempts: 1,
+    });
+    if (health.ok) {
+      this.logger.info({ health: health.message }, "OpenClaw gateway health check passed");
+      return;
+    }
+    this.logger.warn(
+      { health: health.message },
+      "OpenClaw gateway is listening but `openclaw health` did not confirm it; treating it as degraded",
+    );
   }
 
   private async runSmokeChecks(
@@ -10532,7 +10699,9 @@ export default function (api) {
     runtimeConfig: RuntimeConfig,
     gatewayServiceSkipped: boolean,
     relayModeEnabled: boolean,
-  ): Promise<void> {
+    gatewayReadiness?: GatewayReadinessOutcome,
+  ): Promise<CheckResult[]> {
+    const checks: CheckResult[] = [];
     const matrix = await this.testMatrix({
       publicBaseUrl: matrixProvision.adminBaseUrl,
       federationEnabled: matrixProvision.federationEnabled,
@@ -10619,6 +10788,22 @@ export default function (api) {
       };
     }
 
+    if (this.execRunner !== null && gatewayServiceSkipped) {
+      checks.push(
+        check(
+          "openclaw-gateway",
+          "OpenClaw gateway",
+          "warn",
+          `${
+            gatewayReadiness === undefined
+              ? "OpenClaw gateway restart was skipped"
+              : describeGatewayNotReady(gatewayReadiness)
+          }; gateway smoke checks did not run`,
+          gatewayReadiness === undefined ? undefined : { ...gatewayReadiness },
+        ),
+      );
+    }
+
     if (this.execRunner !== null && !gatewayServiceSkipped) {
       const gateway = await this.inspectGatewayService();
       if (!gateway.installed || gateway.state !== "running") {
@@ -10632,25 +10817,14 @@ export default function (api) {
           },
         };
       }
-
-      const health = await this.probeOpenClawHealth();
-      if (!health.ok) {
-        if (gateway.state === "running") {
-          this.logger.warn(
-            { health: health.message },
-            "OpenClaw health probe failed during smoke checks but gateway service is running; continuing",
-          );
-        } else {
-          throw {
-            code: "SMOKE_CHECKS_FAILED",
-            message: "OpenClaw health probe failed during smoke checks",
-            retryable: true,
-            details: {
-              health: health.message,
-            },
-          };
-        }
-      }
+      checks.push(
+        check(
+          "openclaw-gateway",
+          "OpenClaw gateway",
+          "pass",
+          "OpenClaw gateway service is running",
+        ),
+      );
 
       const requiredAgentIds = dedupeStrings(
         ensureCoreManagedAgents(runtimeConfig.openclawProfile.agents).map((entry) => entry.id),
@@ -10729,6 +10903,7 @@ export default function (api) {
         }
       }
     }
+    return checks;
   }
 
   private async readRuntimeConfig(): Promise<RuntimeConfig> {
@@ -11461,17 +11636,32 @@ export default function (api) {
     };
   }
 
-  private async refreshGatewayAfterRuntimeConfig(runtimeConfig: RuntimeConfig): Promise<void> {
+  /** One readiness probe for an install whose gateway restart was skipped. */
+  private async probeGatewayWithoutRestart(): Promise<GatewayReadinessOutcome> {
+    const probe = await probeGatewayHttp(this.fetchImpl);
+    return {
+      unitStarted: probe.ok,
+      ready: probe.ok,
+      waitedMs: 0,
+      deadlineMs: 0,
+      lastProbe: `gateway restart was skipped; ${probe.reason}`,
+      ...(probe.ok ? { readyAt: now() } : {}),
+    };
+  }
+
+  /**
+   * Restarts the gateway after a runtime config change and waits for it to
+   * listen. Throws OPENCLAW_GATEWAY_RESTART_FAILED only when the unit could not
+   * be started; a unit that is still starting at the deadline is returned as
+   * not ready, because the configuration itself was applied.
+   */
+  private async refreshGatewayAfterRuntimeConfig(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<GatewayReadinessOutcome> {
     if (this.shouldPreferSystemGatewayService(runtimeConfig)) {
-      const started = await this.ensureSystemGatewayServiceFallback(runtimeConfig);
-      if (started) {
-        return;
-      }
-      throw {
-        code: "OPENCLAW_GATEWAY_RESTART_FAILED",
-        message: "Failed to restart the system-level OpenClaw gateway service",
-        retryable: true,
-      };
+      return requireGatewayUnitStarted(
+        await this.ensureSystemGatewayServiceFallback(runtimeConfig),
+      );
     }
 
     try {
@@ -11489,68 +11679,44 @@ export default function (api) {
       await this.openclawGatewayServiceManager.start();
     }
 
+    const deadlineMs = resolveGatewayReadyDeadlineMs();
     if (this.execRunner === null) {
-      return;
+      return { unitStarted: true, ready: true, waitedMs: 0, deadlineMs };
     }
 
-    let gatewayState = await this.inspectGatewayRuntimeState();
-    if (gatewayState.health.ok) {
-      return;
+    const outcome = await this.waitForGatewayReady(USER_GATEWAY_SYSTEMD_UNIT, deadlineMs, () =>
+      this.inspectUserGatewayUnit(),
+    );
+    if (outcome.ready) {
+      await this.logGatewayDeepHealth();
+      return outcome;
     }
-
-    for (let probe = 1; probe <= 5; probe += 1) {
-      await delay(2000);
-      gatewayState = await this.inspectGatewayRuntimeState();
-      if (gatewayState.health.ok) {
-        this.logger.info({ probe }, "OpenClaw gateway became healthy after post-restart wait");
-        return;
-      }
+    if (outcome.unitStarted) {
+      this.logger.warn({ ...outcome }, describeGatewayNotReady(outcome));
+      return outcome;
     }
 
     this.logger.warn(
-      {
-        state: gatewayState.gateway.state,
-        message: gatewayState.gateway.message,
-        health: gatewayState.health.message,
-      },
-      "OpenClaw gateway did not become healthy after runtime configure; trying system-level fallback",
+      { ...outcome },
+      "OpenClaw gateway user service failed after runtime configure; trying system-level fallback",
     );
-    const fallbackStarted = await this.ensureSystemGatewayServiceFallback(runtimeConfig);
-    if (fallbackStarted) {
-      return;
-    }
-
-    throw {
-      code: "OPENCLAW_GATEWAY_RESTART_FAILED",
-      message: "OpenClaw gateway did not become healthy after runtime configure",
-      retryable: true,
-      details: {
-        state: gatewayState.gateway.state,
-        message: gatewayState.gateway.message,
-        health: gatewayState.health.message,
-      },
-    };
+    return requireGatewayUnitStarted(await this.ensureSystemGatewayServiceFallback(runtimeConfig));
   }
 
-  private async inspectGatewayRuntimeState(): Promise<{
-    gateway: {
-      installed: boolean;
-      state: GatewayState;
-      message?: string;
-    };
-    health: {
-      ok: boolean;
-      message: string;
-    };
-  }> {
-    const [gateway, health] = await Promise.all([
-      this.inspectGatewayService(),
-      this.probeOpenClawHealth(),
+  private async inspectUserGatewayUnit(): Promise<GatewayUnitSnapshot> {
+    const shown = await this.safeExec("systemctl", [
+      "--user",
+      "show",
+      "-p",
+      "ActiveState",
+      "-p",
+      "NRestarts",
+      USER_GATEWAY_SYSTEMD_UNIT,
     ]);
-    return {
-      gateway,
-      health,
-    };
+    if (!shown.ok || shown.result.exitCode !== 0) {
+      return {};
+    }
+    return parseSystemctlShow(shown.result.stdout);
   }
 
   private async resolveSecretRef(secretRef: string): Promise<string> {
@@ -13361,3 +13527,36 @@ const renderTemplateTransitionReport = (
   resourcesChanged: [...transition.diff.resourcesChanged],
   committed,
 });
+
+const requireGatewayUnitStarted = (outcome: GatewayReadinessOutcome): GatewayReadinessOutcome => {
+  if (outcome.unitStarted) {
+    return outcome;
+  }
+  throw {
+    code: "OPENCLAW_GATEWAY_RESTART_FAILED",
+    message: describeGatewayNotReady(outcome),
+    retryable: true,
+    details: { ...outcome },
+  };
+};
+
+const summarizeGatewayReadiness = (outcome: GatewayReadinessOutcome): GatewayReadinessSummary => ({
+  ready: outcome.ready,
+  ...(outcome.readyAt === undefined ? {} : { readyAt: outcome.readyAt }),
+  waitedMs: Math.max(0, Math.round(outcome.waitedMs)),
+  deadlineMs: Math.max(0, Math.round(outcome.deadlineMs)),
+});
+
+const gatewayRestartCheck = (
+  outcome: GatewayReadinessOutcome,
+  readyMessage: string,
+): CheckResult =>
+  outcome.ready
+    ? check("openclaw-gateway-restart", "OpenClaw gateway restart", "pass", readyMessage)
+    : check(
+        "openclaw-gateway-restart",
+        "OpenClaw gateway restart",
+        "warn",
+        `Settings applied, but ${describeGatewayNotReady(outcome)}`,
+        { ...outcome },
+      );

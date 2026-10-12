@@ -2,6 +2,8 @@ import type { Command } from "commander";
 import { z } from "zod";
 
 import type { AppContainer } from "../../app/create-app.js";
+import { gatewayReadinessSummarySchema } from "../../contracts/index.js";
+import { waitForAppliedJob } from "../applied-job.js";
 import { writeCliError, writeCliSuccess } from "../output.js";
 
 const mailSentinelSchema = z.object({
@@ -44,17 +46,56 @@ const applyMailSentinelSchema = z.object({
       currentStepId: z.string().min(1).optional(),
     })
     .optional(),
+  gateway: gatewayReadinessSummarySchema.optional(),
 });
 
 const deleteMailSentinelSchema = z.object({
   id: z.string().min(1),
   deleted: z.boolean(),
   job: applyMailSentinelSchema.shape.job,
+  gateway: gatewayReadinessSummarySchema.optional(),
 });
+
+/**
+ * Prints a create/update/delete result. Unless `--no-wait` was given, first
+ * waits for the install job that applies it, so the exit code reflects what
+ * actually happened: 1 when the job failed, 2 when it applied the change but
+ * the gateway is not listening yet.
+ */
+const writeAppliedResult = async (input: {
+  app: AppContainer;
+  command: string;
+  subject: string;
+  result: { job?: { jobId: string } | undefined };
+  schema: z.ZodType<unknown>;
+  json: boolean;
+  wait: boolean;
+}): Promise<void> => {
+  const { app, command, subject, result, schema, json } = input;
+  if (!input.wait || result.job === undefined) {
+    writeCliSuccess(command, result, schema, json);
+    return;
+  }
+  const report = await waitForAppliedJob(subject, result.job.jobId, (jobId) =>
+    app.installerService.getInstallJob(jobId),
+  );
+  const applied = {
+    ...result,
+    job: report.job,
+    ...(report.gateway === undefined ? {} : { gateway: report.gateway }),
+  };
+  if (json) {
+    writeCliSuccess(command, applied, schema, true);
+  } else {
+    process.stdout.write(`${report.lines.join("\n")}\n`);
+  }
+  process.exitCode = report.exitCode;
+};
 
 type CreateOrUpdateOptions = {
   imapProtocol?: string;
   json?: boolean;
+  wait?: boolean;
   imapHost?: string;
   imapPort?: string;
   imapTls?: string;
@@ -147,6 +188,10 @@ export const registerMailSentinelsCommand = (program: Command, app: AppContainer
     .option("--lookback-window <duration>", "Lookback window, e.g. 1h")
     .option("--default-reminder-delay <duration>", "Reminder delay, e.g. 4h")
     .option("--digest-interval <duration>", "Digest interval, e.g. 12h")
+    .option(
+      "--no-wait",
+      "Return once the change is saved, without waiting for the install job that applies it",
+    )
     .option("--json", "Emit JSON output")
     .action(async (id: string, opts: CreateOrUpdateOptions) => {
       const command = "mail-sentinels create";
@@ -177,7 +222,15 @@ export const registerMailSentinelsCommand = (program: Command, app: AppContainer
             : { defaultReminderDelay: opts.defaultReminderDelay }),
           ...(opts.digestInterval === undefined ? {} : { digestInterval: opts.digestInterval }),
         });
-        writeCliSuccess(command, result, applyMailSentinelSchema, Boolean(opts.json));
+        await writeAppliedResult({
+          app,
+          command,
+          subject: `Mail Sentinel ${id}`,
+          result,
+          schema: applyMailSentinelSchema,
+          json: Boolean(opts.json),
+          wait: opts.wait !== false,
+        });
       } catch (error) {
         writeCliError(command, error, Boolean(opts.json));
         process.exitCode = 1;
@@ -209,6 +262,10 @@ export const registerMailSentinelsCommand = (program: Command, app: AppContainer
     .option("--lookback-window <duration>", "Lookback window, e.g. 1h")
     .option("--default-reminder-delay <duration>", "Reminder delay, e.g. 4h")
     .option("--digest-interval <duration>", "Digest interval, e.g. 12h")
+    .option(
+      "--no-wait",
+      "Return once the change is saved, without waiting for the install job that applies it",
+    )
     .option("--json", "Emit JSON output")
     .action(async (id: string, opts: CreateOrUpdateOptions) => {
       const command = "mail-sentinels update";
@@ -241,7 +298,15 @@ export const registerMailSentinelsCommand = (program: Command, app: AppContainer
             : { defaultReminderDelay: opts.defaultReminderDelay }),
           ...(opts.digestInterval === undefined ? {} : { digestInterval: opts.digestInterval }),
         });
-        writeCliSuccess(command, result, applyMailSentinelSchema, Boolean(opts.json));
+        await writeAppliedResult({
+          app,
+          command,
+          subject: `Mail Sentinel ${id}`,
+          result,
+          schema: applyMailSentinelSchema,
+          json: Boolean(opts.json),
+          wait: opts.wait !== false,
+        });
       } catch (error) {
         writeCliError(command, error, Boolean(opts.json));
         process.exitCode = 1;
@@ -252,12 +317,24 @@ export const registerMailSentinelsCommand = (program: Command, app: AppContainer
     .command("delete")
     .description("Delete a Mail Sentinel instance and apply the removal via the installer")
     .argument("<id>", "Mail Sentinel instance ID")
+    .option(
+      "--no-wait",
+      "Return once the change is saved, without waiting for the install job that applies it",
+    )
     .option("--json", "Emit JSON output")
-    .action(async (id: string, opts: { json?: boolean }) => {
+    .action(async (id: string, opts: { json?: boolean; wait?: boolean }) => {
       const command = "mail-sentinels delete";
       try {
         const result = await app.installerService.deleteMailSentinelInstance({ id });
-        writeCliSuccess(command, result, deleteMailSentinelSchema, Boolean(opts.json));
+        await writeAppliedResult({
+          app,
+          command,
+          subject: `Mail Sentinel ${id} removal`,
+          result,
+          schema: deleteMailSentinelSchema,
+          json: Boolean(opts.json),
+          wait: opts.wait !== false,
+        });
       } catch (error) {
         writeCliError(command, error, Boolean(opts.json));
         process.exitCode = 1;

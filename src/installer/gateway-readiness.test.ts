@@ -64,6 +64,7 @@ describe("waitForGatewayReady", () => {
       ready: true,
       waitedMs: 0,
       deadlineMs: GATEWAY_READY_DEADLINE_MS,
+      readyAt: new Date(1_000_000).toISOString(),
     });
     expect(harness.sleeps).toEqual([]);
   });

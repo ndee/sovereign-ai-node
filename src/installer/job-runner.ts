@@ -7,11 +7,19 @@ export type InstallContext = {
 
 export type StepProgressReporter = (note: string) => void | Promise<void>;
 
+/** Optional machine-readable outcome a step attaches to its job record. */
+export type InstallStepOutcome = {
+  details?: Record<string, unknown>;
+};
+
 export interface InstallStep {
   id: JobStepId;
   label: string;
   softFail?: boolean;
-  run(ctx: InstallContext, reportProgress: StepProgressReporter): Promise<void>;
+  run(
+    ctx: InstallContext,
+    reportProgress: StepProgressReporter,
+  ): Promise<void | InstallStepOutcome>;
 }
 
 export type JobRunnerSnapshot = {
@@ -72,8 +80,9 @@ export class JobRunner {
         await notify(observer, { job });
       };
 
+      let outcome: void | InstallStepOutcome;
       try {
-        await step.run(ctx, reportProgress);
+        outcome = await step.run(ctx, reportProgress);
       } catch (caught) {
         const error = normalizeInstallError(caught);
         if (step.softFail === true) {
@@ -94,6 +103,9 @@ export class JobRunner {
 
       current.state = "succeeded";
       current.endedAt = now();
+      if (outcome?.details !== undefined) {
+        current.details = outcome.details;
+      }
       await notify(observer, { job });
     }
 

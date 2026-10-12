@@ -31,6 +31,10 @@ export type GatewayReadinessOutcome = {
   waitedMs: number;
   deadlineMs: number;
   lastProbe?: string;
+  /** ISO time the gateway was first seen listening. */
+  readyAt?: string;
+  /** The systemd unit that was waited on. */
+  unit?: string;
 };
 
 export type GatewayReadinessWaitDeps = {
@@ -74,7 +78,13 @@ export const waitForGatewayReady = async (
     const probe = await deps.probe();
     const waitedMs = deps.now() - startedAt;
     if (probe.ok) {
-      return { unitStarted: true, ready: true, waitedMs, deadlineMs };
+      return {
+        unitStarted: true,
+        ready: true,
+        waitedMs,
+        deadlineMs,
+        readyAt: new Date(deps.now()).toISOString(),
+      };
     }
     lastProbe = probe.reason;
 
