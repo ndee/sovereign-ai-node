@@ -42,6 +42,19 @@ describe("JobRunner", () => {
     expect(relayStep?.state).toBe("succeeded");
   });
 
+  it("records the details a step returns on its job record", async () => {
+    const checks = [{ id: "openclaw-gateway", name: "OpenClaw gateway", status: "warn" }];
+    const steps: InstallStep[] = [
+      { id: "smoke_checks", label: "Run smoke checks", run: async () => ({ details: { checks } }) },
+      { id: "test_alert", label: "Send hello alert", run: async () => ({}) },
+    ];
+
+    const result = await new JobRunner().run(ctx, steps);
+
+    expect(result.job.steps[0]?.details).toEqual({ checks });
+    expect(result.job.steps[1]).not.toHaveProperty("details");
+  });
+
   it("forwards reportProgress writes to the current step and notifies observers", async () => {
     const snapshots: Array<{ stepId: string; note?: string }> = [];
     const steps: InstallStep[] = [

@@ -32,6 +32,7 @@ export const jobStepIdSchema = z.enum([
   "matrix_bootstrap_room",
   "openclaw_gateway_service_install",
   "openclaw_configure",
+  "gateway_ready",
   "bots_configure",
   "mail_sentinel_scan_timer",
   "mail_sentinel_register",
@@ -243,6 +244,10 @@ export const serviceStatusSchema = z.object({
   ]),
   health: componentHealthSchema,
   state: z.enum(["running", "stopped", "failed", "unknown"]),
+  // OpenClaw gateway only: whether it answers on its port. "starting" means
+  // the unit is up but still loading; `since` is when the unit last started.
+  readiness: z.enum(["ready", "starting", "down"]).optional(),
+  since: isoTimestampSchema.optional(),
   message: z.string().optional(),
 });
 
@@ -344,9 +349,20 @@ export const installResultSchema = z.object({
   }),
 });
 
+// Whether the OpenClaw gateway was listening after the job restarted it.
+// `ready: false` means the configuration was applied but the gateway did not
+// answer within `deadlineMs`; the `gateway_ready` step carries the details.
+export const gatewayReadinessSummarySchema = z.object({
+  ready: z.boolean(),
+  readyAt: isoTimestampSchema.optional(),
+  waitedMs: z.number().int().nonnegative(),
+  deadlineMs: z.number().int().nonnegative(),
+});
+
 export const installJobStatusResponseSchema = z.object({
   job: installJobSummarySchema,
   result: installResultSchema.optional(),
+  gateway: gatewayReadinessSummarySchema.optional(),
   error: errorDetailSchema.optional(),
 });
 
@@ -431,6 +447,9 @@ export const reconfigureResultSchema = z.object({
   // (mail reconfiguration re-runs the idempotent install to regenerate the
   // bot/tool bindings). Clients poll it like an install job.
   job: installJobSummarySchema.optional(),
+  // Present when the gateway was restarted: by the reconfigure itself, or by
+  // the install job a client waited for.
+  gateway: gatewayReadinessSummarySchema.optional(),
 });
 
 // Non-secret view of the installer-entered settings that can be changed after
@@ -554,6 +573,7 @@ export type PreflightResult = z.infer<typeof preflightResultSchema>;
 export type InstallJobSummary = z.infer<typeof installJobSummarySchema>;
 export type InstallResult = z.infer<typeof installResultSchema>;
 export type InstallJobStatusResponse = z.infer<typeof installJobStatusResponseSchema>;
+export type GatewayReadinessSummary = z.infer<typeof gatewayReadinessSummarySchema>;
 export type SovereignStatus = z.infer<typeof sovereignStatusSchema>;
 export type DoctorReport = z.infer<typeof doctorReportSchema>;
 export type TestAlertResult = z.infer<typeof testAlertResultSchema>;

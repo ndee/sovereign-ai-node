@@ -320,4 +320,128 @@ describe("registerMailSentinelsCommand", () => {
       stdoutWrite.mockRestore();
     }
   });
+
+  describe("waiting for the applying install job", () => {
+    const pendingJob = {
+      jobId: "job_1",
+      state: "pending",
+      createdAt: "2026-10-12T10:00:00.000Z",
+      steps: [],
+    };
+    const createWaitingApp = (gatewayReady: boolean) => {
+      const app = createMockApp();
+      const service = app.installerService as unknown as Record<string, unknown>;
+      const instance = {
+        id: "mail-sentinel-ops",
+        packageId: "mail-sentinel",
+        workspace: "/var/lib/sovereign-node/mail-sentinel-ops/workspace",
+        allowedUsers: [],
+      };
+      service.createMailSentinelInstance = vi.fn(async () => ({
+        instance,
+        changed: true,
+        job: pendingJob,
+      }));
+      service.updateMailSentinelInstance = vi.fn(async () => ({
+        instance,
+        changed: true,
+        job: pendingJob,
+      }));
+      service.deleteMailSentinelInstance = vi.fn(async () => ({
+        id: "mail-sentinel-ops",
+        deleted: true,
+        job: pendingJob,
+      }));
+      service.getInstallJob = vi.fn(async () => ({
+        job: {
+          ...pendingJob,
+          state: "succeeded",
+          steps: [
+            {
+              id: "gateway_ready",
+              label: "Wait for OpenClaw gateway",
+              state: gatewayReady ? "succeeded" : "warned",
+            },
+          ],
+        },
+        gateway: { ready: gatewayReady, waitedMs: 300_000, deadlineMs: 300_000 },
+      }));
+      return app;
+    };
+
+    const runCli = async (app: AppContainer, args: string[]): Promise<string> => {
+      const program = new Command();
+      program.exitOverride();
+      registerMailSentinelsCommand(program, app);
+      let out = "";
+      const write = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+        out += String(chunk);
+        return true;
+      });
+      try {
+        await program.parseAsync(["node", "test", "mail-sentinels", ...args]);
+      } finally {
+        write.mockRestore();
+      }
+      return out;
+    };
+
+    const createArgs = [
+      "create",
+      "mail-sentinel-ops",
+      "--imap-host",
+      "imap.example.org",
+      "--imap-port",
+      "993",
+      "--imap-username",
+      "ops@example.org",
+      "--imap-secret-ref",
+      "file:/tmp/ops-secret",
+    ];
+
+    it("exits 7 when create applied but the gateway is not listening", async () => {
+      const originalExitCode = process.exitCode;
+      const app = createWaitingApp(false);
+      try {
+        const out = await runCli(app, createArgs);
+        expect(out).toContain(
+          "Mail Sentinel mail-sentinel-ops applied, but the OpenClaw gateway is not ready yet",
+        );
+        expect(process.exitCode).toBe(7);
+      } finally {
+        process.exitCode = originalExitCode;
+      }
+    });
+
+    it("carries gateway readiness in --json output for update", async () => {
+      const originalExitCode = process.exitCode;
+      const app = createWaitingApp(true);
+      try {
+        const envelope = JSON.parse(
+          await runCli(app, ["update", "mail-sentinel-ops", "--poll-interval", "15m", "--json"]),
+        ) as { result: { job: { state: string }; gateway: { ready: boolean } } };
+        expect(envelope.result.job.state).toBe("succeeded");
+        expect(envelope.result.gateway.ready).toBe(true);
+        expect(process.exitCode).toBe(0);
+      } finally {
+        process.exitCode = originalExitCode;
+      }
+    });
+
+    it("waits for a delete, unless --no-wait is given", async () => {
+      const originalExitCode = process.exitCode;
+      const app = createWaitingApp(true);
+      try {
+        expect(await runCli(app, ["delete", "mail-sentinel-ops"])).toContain(
+          "Mail Sentinel mail-sentinel-ops removal applied.",
+        );
+        expect(app.installerService.getInstallJob).toHaveBeenCalledTimes(1);
+
+        await runCli(app, ["delete", "mail-sentinel-ops", "--no-wait", "--json"]);
+        expect(app.installerService.getInstallJob).toHaveBeenCalledTimes(1);
+      } finally {
+        process.exitCode = originalExitCode;
+      }
+    });
+  });
 });

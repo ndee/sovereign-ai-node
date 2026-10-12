@@ -1,7 +1,8 @@
 import type { Command } from "commander";
 
 import type { AppContainer } from "../../app/create-app.js";
-import { reconfigureResultSchema } from "../../contracts/index.js";
+import { type ReconfigureResult, reconfigureResultSchema } from "../../contracts/index.js";
+import { waitForAppliedJob } from "../applied-job.js";
 import { writeCliError, writeCliSuccess } from "../output.js";
 
 type ReconfigureImapOptions = {
@@ -14,6 +15,7 @@ type ReconfigureImapOptions = {
   secretRef?: string;
   mailbox?: string;
   json?: boolean;
+  wait?: boolean;
 };
 
 const parseProtocol = (value: string): "imap" | "pop3" => {
@@ -61,6 +63,10 @@ export const registerReconfigureCommand = (program: Command, app: AppContainer):
     )
     .option("--secret-ref <ref>", "Existing secret ref (file:/path or env:NAME) for the password")
     .option("--mailbox <mailbox>", "IMAP folder to watch (default INBOX; ignored for POP3)")
+    .option(
+      "--no-wait",
+      "Return once the new connection is saved, without waiting for the install job that applies it",
+    )
     .option("--json", "Emit JSON output")
     .action(async (opts: ReconfigureImapOptions) => {
       const command = "reconfigure imap";
@@ -98,10 +104,31 @@ export const registerReconfigureCommand = (program: Command, app: AppContainer):
             mailbox: opts.mailbox ?? current.mail.mailbox,
           },
         });
-        writeCliSuccess(command, result, reconfigureResultSchema, Boolean(opts.json));
-        if (result.validation.some((entry) => entry.status === "fail")) {
-          process.exitCode = 1;
+        if (
+          opts.wait === false ||
+          result.job === undefined ||
+          result.validation.some((entry) => entry.status === "fail")
+        ) {
+          writeCliSuccess(command, result, reconfigureResultSchema, Boolean(opts.json));
+          if (result.validation.some((entry) => entry.status === "fail")) {
+            process.exitCode = 1;
+          }
+          return;
         }
+        const report = await waitForAppliedJob("Mail settings", result.job.jobId, (jobId) =>
+          app.installerService.getInstallJob(jobId),
+        );
+        const applied: ReconfigureResult = {
+          ...result,
+          job: report.job,
+          ...(report.gateway === undefined ? {} : { gateway: report.gateway }),
+        };
+        if (opts.json) {
+          writeCliSuccess(command, applied, reconfigureResultSchema, true);
+        } else {
+          process.stdout.write(`${report.lines.join("\n")}\n`);
+        }
+        process.exitCode = report.exitCode;
       } catch (error) {
         writeCliError(command, error, Boolean(opts.json));
         process.exitCode = 1;
