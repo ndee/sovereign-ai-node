@@ -8,13 +8,15 @@ import type { SovereignPaths } from "../config/paths.js";
 import { createLogger } from "../logging/logger.js";
 import type { OpenClawBootstrapper, OpenClawInstallInfo } from "../openclaw/bootstrap.js";
 import type { ExecInput, ExecResult } from "../system/exec.js";
+import { GATEWAY_READY_TIMEOUT_ENV, type GatewayReadinessOutcome } from "./gateway-readiness.js";
 import { RealInstallerService } from "./real-service.js";
 import type { RuntimeConfig } from "./real-service-shared.js";
 
 const runningAsRoot = process.getuid?.() === 0;
 
 type GatewayFallbackHandle = {
-  ensureSystemGatewayServiceFallback(config: RuntimeConfig): Promise<boolean>;
+  gatewayReadinessClock: { now: () => number; sleep: (ms: number) => Promise<void> };
+  ensureSystemGatewayServiceFallback(config: RuntimeConfig): Promise<GatewayReadinessOutcome>;
 };
 type InstallStepsHandle = {
   buildInstallSteps(req: unknown): Array<{ id: string; run: () => Promise<void> }>;
@@ -25,6 +27,7 @@ describe("OpenClaw temp dir across gateway restarts", () => {
   let paths: SovereignPaths;
   let tempDir: string;
   let priorUnitPath: string | undefined;
+  let priorDeadline: string | undefined;
 
   beforeEach(async () => {
     tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-openclaw-tmp-"));
@@ -41,6 +44,8 @@ describe("OpenClaw temp dir across gateway restarts", () => {
     tempDir = join(paths.openclawServiceHome, "tmp");
     priorUnitPath = process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH;
     process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH = join(tempRoot, "gateway.service");
+    priorDeadline = process.env[GATEWAY_READY_TIMEOUT_ENV];
+    delete process.env[GATEWAY_READY_TIMEOUT_ENV];
   });
 
   afterEach(async () => {
@@ -49,6 +54,11 @@ describe("OpenClaw temp dir across gateway restarts", () => {
       delete process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH;
     } else {
       process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH = priorUnitPath;
+    }
+    if (priorDeadline === undefined) {
+      delete process.env[GATEWAY_READY_TIMEOUT_ENV];
+    } else {
+      process.env[GATEWAY_READY_TIMEOUT_ENV] = priorDeadline;
     }
     await chmod(tempDir, 0o700).catch(() => {});
     await rm(tempRoot, { recursive: true, force: true });
@@ -64,6 +74,9 @@ describe("OpenClaw temp dir across gateway restarts", () => {
           stderr: "",
         }),
       },
+      // Any HTTP answer means the gateway listens, so the readiness wait after
+      // the restart returns on its first probe instead of polling a real port.
+      fetchImpl: async () => new Response("not found", { status: 404 }),
       ...(installInfo === undefined
         ? {}
         : {
@@ -85,10 +98,16 @@ describe("OpenClaw temp dir across gateway restarts", () => {
     }) as unknown as RuntimeConfig;
 
   const restartGateway = async (): Promise<void> => {
-    const started = await (
-      makeService() as unknown as GatewayFallbackHandle
-    ).ensureSystemGatewayServiceFallback(runtimeConfig());
-    expect(started).toBe(true);
+    const service = makeService() as unknown as GatewayFallbackHandle;
+    let clock = 0;
+    service.gatewayReadinessClock = {
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+      },
+    };
+    const outcome = await service.ensureSystemGatewayServiceFallback(runtimeConfig());
+    expect(outcome).toMatchObject({ unitStarted: true, ready: true });
   };
 
   const seedCaches = async (): Promise<void> => {
