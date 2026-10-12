@@ -307,6 +307,53 @@ jobs:
             exit 1
           fi
 
+      # The install job and status must agree with an independent look at the
+      # gateway port instead of reporting success while it does not listen.
+      - name: Verify reported gateway readiness matches the gateway port
+        run: |
+          job="$(sudo sh -c 'ls -t /var/lib/sovereign-node/install-jobs/*.json | head -n 1')"
+          sudo jq '{state: .response.job.state, gateway: .response.gateway, step: (.response.job.steps[] | select(.id == "gateway_ready"))}' "$job"
+          sudo jq -e '
+            .response.job.state == "succeeded"
+            and .response.gateway.ready == true
+            and ([.response.job.steps[] | select(.id == "gateway_ready" and .state == "succeeded")] | length) == 1
+          ' "$job" > /dev/null
+          curl -s -o /dev/null --max-time 5 http://127.0.0.1:18789/
+          sudo env "PATH=$PATH" sovereign-node status --json > /tmp/status.json
+          jq -e '.result.services[] | select(.kind == "openclaw") | .readiness == "ready"' /tmp/status.json
+
+      # A gateway that is up but never listens must be reported as not ready
+      # (warn, exit 0 for this command) rather than as restarted. The drop-in
+      # keeps the unit active without ever opening the port.
+      - name: Verify a gateway that never listens is reported as not ready
+        run: |
+          dropin=/etc/systemd/system/sovereign-openclaw-gateway.service.d
+          sudo mkdir -p "$dropin"
+          printf '[Service]\nExecStart=\nExecStart=/bin/sleep 600\n' | sudo tee "$dropin/ci-never-listens.conf" > /dev/null
+          rc=0
+          sudo env "PATH=$PATH" SOVEREIGN_NODE_GATEWAY_READY_TIMEOUT_MS=30000 \
+            sovereign-node reconfigure openrouter --model openrouter/ci-not-ready-probe --json \
+            > /tmp/reconfigure.json || rc=$?
+          jq . /tmp/reconfigure.json
+          test "$rc" -eq 0
+          jq -e '
+            .result.gateway.ready == false
+            and .result.gateway.deadlineMs == 30000
+            and ([.result.validation[] | select(.id == "openclaw-gateway-restart" and .status == "warn")] | length) == 1
+          ' /tmp/reconfigure.json > /dev/null
+          sudo env "PATH=$PATH" sovereign-node status --json > /tmp/status.json
+          jq -e '.result.services[] | select(.kind == "openclaw") | .readiness == "starting"' /tmp/status.json
+
+          sudo rm -f "$dropin/ci-never-listens.conf"
+          sudo systemctl daemon-reload
+          sudo systemctl restart sovereign-openclaw-gateway.service
+          for _ in $(seq 1 60); do
+            curl -s -o /dev/null --max-time 2 http://127.0.0.1:18789/ && exit 0
+            sleep 2
+          done
+          echo "::error::gateway did not listen again after removing the drop-in"
+          exit 1
+
       - name: Collect logs on failure
         if: failure()
         run: |

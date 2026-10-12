@@ -214,7 +214,7 @@ Standard exit codes:
 
 - `0`: success
 - `1`: generic runtime error
-- `2`: invalid arguments or invalid command usage
+- `2`: invalid arguments or invalid command usage; for the commands that apply a change through the install job and wait for it (`reconfigure imap`, `mail-sentinels create|update|delete`), `2` instead means **applied, but degraded**: the job succeeded, but the OpenClaw gateway was not listening by its readiness deadline (see "OpenClaw Gateway Readiness")
 - `3`: validation/preflight failure (operator input or environment)
 - `4`: dependency/service unavailable
 - `5`: install job failed
@@ -259,6 +259,7 @@ Purpose:
 `--json` result schema:
 
 - `result` MUST be a `SovereignStatus`
+- the `openclaw` service entry carries `readiness` (`ready` | `starting` | `down`) and, when systemd reports it, `since` (see "OpenClaw Gateway Readiness")
 
 ## `sovereign-node onboarding issue`
 
@@ -340,6 +341,8 @@ Current subcommands:
 - `update <id>`
 - `delete <id>`
 
+`create`, `update` and `delete` apply the change through the install job and, by default, wait for it like `reconfigure imap` does: they print the per-step outcome, exit `1` when the job failed and `2` when it applied the change but the OpenClaw gateway is not listening yet. `--json` carries the terminal `job` and `gateway`. `--no-wait` returns as soon as the change is saved, with the pending `job` for polling.
+
 ## `sovereign-node doctor`
 
 Purpose:
@@ -407,7 +410,13 @@ Current CLI flags:
 Behavior:
 
 - the order is **validate → persist → apply**: the new connection is tested with the submitted credentials first; a failed test returns a `ReconfigureResult` whose `mail-connection` check is `fail`, with `changed = []`, and leaves the previous configuration, secret file and bot bindings untouched
-- only after a successful test is the password written to the managed secret store (`/etc/sovereign-node/secrets/imap-password`, mode `0600`), the saved install request and runtime config updated, and the idempotent install job re-run so the mail-sentinel bot/tool bindings are regenerated; `result.job` carries the job summary for polling
+- only after a successful test is the password written to the managed secret store (`/etc/sovereign-node/secrets/imap-password`, mode `0600`), the saved install request and runtime config updated, and the idempotent install job re-run so the mail-sentinel bot/tool bindings are regenerated
+- the CLI then waits for that job (polling every 2 s), prints each step's outcome and exits:
+  - `0` when the job succeeded and the OpenClaw gateway is listening;
+  - `1` when the job failed (or was still running after 30 minutes);
+  - `2` when the job applied the settings but the gateway was not listening by its deadline. The message is: `Mail settings applied, but the OpenClaw gateway is not ready yet (not listening after <N> s). Bots will not reply and mail reviews will fail until it is. Check with: sovereign-node status --json`
+- `--json` returns `ok: true` with the terminal `result.job` and `result.gateway` (`GatewayReadinessSummary`), with the same exit codes
+- `--no-wait` keeps the earlier fire-and-forget behaviour: the command returns as soon as the change is saved, and `result.job` carries the pending job summary for polling. `POST /api/reconfigure/imap` always behaves this way
 - a POP3 connection always records `mailbox = "INBOX"` (POP3 has no folders)
 - switching accounts or protocols changes the tool's `uidValidity`, so Mail Sentinel drops its UID watermark and does not inherit one from the previous account
 - the same implementation backs `POST /api/reconfigure/imap` (see the Settings API below)
@@ -450,7 +459,7 @@ Behavior:
 
 - a new `--api-key` is validated against OpenRouter's key endpoint (`GET /api/v1/auth/key`, no completion, no credit usage) before anything is written; a rejected key returns `changed = []` with an `openrouter-key` check of `fail` and keeps the previous key
 - the key is stored at `/etc/sovereign-node/secrets/openrouter-api-key` (mode `0600`); it is never logged and never echoed in results
-- the OpenClaw gateway is restarted so the new key takes effect
+- the OpenClaw gateway is restarted so the new key takes effect; a gateway that is still starting at its readiness deadline does not fail the command: the `openclaw-gateway-restart` check is `warn` and `result.gateway.ready` is `false` (the same applies to `reconfigure matrix`). Only a gateway unit that failed to start is an error (`OPENCLAW_GATEWAY_RESTART_FAILED`)
 
 `--json` result schema:
 
@@ -549,6 +558,7 @@ type JobStep = {
     | "matrix_bootstrap_room"
     | "openclaw_gateway_service_install"
     | "openclaw_configure"
+    | "gateway_ready"
     | "bots_configure"
     | "mail_sentinel_scan_timer"
     | "mail_sentinel_register"
@@ -811,9 +821,19 @@ type InstallResult = {
 type InstallJobStatusResponse = {
   job: InstallJobSummary;
   result?: InstallResult; // present when state === "succeeded"
+  gateway?: GatewayReadinessSummary; // present once the gateway_ready step ran
   error?: ErrorDetail; // present when state === "failed"
 };
+
+type GatewayReadinessSummary = {
+  ready: boolean; // the OpenClaw gateway answered on its port
+  readyAt?: ISO8601; // when it was first seen listening
+  waitedMs: number;
+  deadlineMs: number;
+};
 ```
+
+A job that applied its configuration but whose gateway was not listening by the deadline still ends `succeeded`; its `gateway_ready` step is `warned` with `error.code = "OPENCLAW_GATEWAY_NOT_READY"` and `error.details = { unit, unitStarted, waitedMs, deadlineMs, lastProbe }`, and `gateway.ready` is `false`. The `smoke_checks` step then records an `openclaw-gateway` check with status `warn` in `details.checks` instead of skipping the gateway checks silently.
 
 ### `SovereignStatus`
 
@@ -825,6 +845,8 @@ type ServiceStatus = {
   kind: "sovereign-node" | "openclaw" | "synapse" | "postgres" | "reverse-proxy" | "relay-tunnel";
   health: ComponentHealth;
   state: "running" | "stopped" | "failed" | "unknown";
+  readiness?: "ready" | "starting" | "down"; // openclaw only
+  since?: ISO8601; // openclaw only: when the gateway unit last started
   message?: string;
 };
 
@@ -928,8 +950,19 @@ type ReconfigureResult = {
   changed: string[]; // field paths
   restartRequiredServices: string[];
   validation: CheckResult[];
+  job?: InstallJobSummary; // when applied through the install job
+  gateway?: GatewayReadinessSummary; // when the gateway was restarted
 };
 ```
+
+## OpenClaw Gateway Readiness
+
+A cold OpenClaw gateway start loads and transpiles its bundled plugins before it opens its port, which can take minutes on a small ARM board. Readiness is therefore defined as, and waited for with:
+
+- **signal:** any HTTP response from `GET http://127.0.0.1:18789/` (2 s per attempt). The `openclaw` CLI is never spawned while waiting; `openclaw health` runs once after the port answers, with a 60 s timeout, and its failure only marks the gateway `degraded`
+- **wait:** poll every 2 s until the port answers or the deadline passes, returning as soon as it answers. The deadline defaults to 300 s and can be set with `SOVEREIGN_NODE_GATEWAY_READY_TIMEOUT_MS` (clamped to 30 s–900 s)
+- **fail fast:** the wait stops early when systemd reports the unit `failed`, or when its `NRestarts` grows during the wait (crash loop); that outcome is "unit failed to start", not "not ready yet"
+- **status:** `services[kind=openclaw].readiness` is `ready` when the port answers, `starting` when the unit is up but the port does not answer yet (health `degraded`, message `gateway starting (not listening yet)`), and `down` otherwise; `since` is the unit's `ActiveEnterTimestamp`
 
 ## Endpoint Request/Response Contracts
 

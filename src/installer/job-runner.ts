@@ -19,6 +19,7 @@ export interface InstallStep {
   run(
     ctx: InstallContext,
     reportProgress: StepProgressReporter,
+    // biome-ignore lint/suspicious/noConfusingVoidType: most steps return nothing
   ): Promise<void | InstallStepOutcome>;
 }
 
@@ -80,7 +81,7 @@ export class JobRunner {
         await notify(observer, { job });
       };
 
-      let outcome: void | InstallStepOutcome;
+      let outcome: Awaited<ReturnType<InstallStep["run"]>>;
       try {
         outcome = await step.run(ctx, reportProgress);
       } catch (caught) {
