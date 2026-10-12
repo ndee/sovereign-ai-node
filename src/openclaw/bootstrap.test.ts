@@ -298,6 +298,7 @@ describe("ShellOpenClawBootstrapper", () => {
     });
 
     expect(result.version).toBe(SOVEREIGN_PINNED_OPENCLAW_VERSION);
+    expect(result.reinstalled).toBe(false);
     expect(calls).toHaveLength(2);
     expect(calls[0]).toMatchObject({
       command: "openclaw",
@@ -376,6 +377,7 @@ describe("ShellOpenClawBootstrapper", () => {
     });
 
     expect(result.version).toBe(SOVEREIGN_PINNED_OPENCLAW_VERSION);
+    expect(result.reinstalled).toBe(true);
     expect(calls).toHaveLength(5);
     expect(calls[1]?.args?.[1]).toContain(`'${SOVEREIGN_PINNED_OPENCLAW_VERSION}'`);
   });
@@ -454,6 +456,7 @@ describe("ShellOpenClawBootstrapper", () => {
 
     expect(result.version).toBe(SOVEREIGN_PINNED_OPENCLAW_VERSION);
     expect(result.installMethod).toBe("npm_fallback");
+    expect(result.reinstalled).toBe(true);
     expect(calls[2]).toMatchObject({
       command: "npm",
       args: ["install", "-g", `openclaw@${SOVEREIGN_PINNED_OPENCLAW_VERSION}`],

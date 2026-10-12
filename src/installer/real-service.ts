@@ -147,6 +147,11 @@ import {
   type JobRunnerSnapshot,
 } from "./job-runner.js";
 import {
+  clearOpenClawTempDirCaches,
+  removeForeignOwnedTempEntries,
+  resolveTempDirOwnerUid,
+} from "./openclaw-temp-dir.js";
+import {
   renderGuardedJsonStateWorkspacePluginConfig as renderGuardedJsonStateWorkspacePluginConfigFile,
   renderGuardedJsonStateWorkspacePluginManifest as renderGuardedJsonStateWorkspacePluginManifestFile,
 } from "./real-service-guarded-json-state-plugin.js";
@@ -8619,13 +8624,16 @@ export default function (api) {
             return;
           }
 
-          await this.openclawBootstrapper.ensureInstalled({
+          const installed = await this.openclawBootstrapper.ensureInstalled({
             version: resolveRequestedOpenClawVersion(openclaw?.version),
             noOnboard: true,
             noPrompt: true,
             forceReinstall: openclaw?.forceReinstall ?? false,
             skipIfCompatibleInstalled: openclaw?.skipIfCompatibleInstalled ?? true,
           });
+          if (installed.reinstalled === true) {
+            await this.clearOpenClawRuntimeCaches();
+          }
         },
       },
       {
@@ -10445,7 +10453,7 @@ export default function (api) {
     try {
       await mkdir(this.paths.openclawServiceHome, { recursive: true });
       await mkdir(managedTempDir, { recursive: true });
-      await this.cleanStaleTempEntries(managedTempDir);
+      await this.cleanStaleTempEntries(managedTempDir, runtimeConfig);
       await chmod(managedTempDir, 0o700);
       await this.applyConfiguredRuntimeOwnership(this.paths.openclawServiceHome, runtimeConfig);
       await this.applyConfiguredRuntimeOwnership(managedTempDir, runtimeConfig);
@@ -13254,23 +13262,40 @@ export default function (api) {
     }
   }
 
-  private async cleanStaleTempEntries(tempDir: string): Promise<void> {
+  private async cleanStaleTempEntries(
+    tempDir: string,
+    runtimeConfig: RuntimeConfig,
+  ): Promise<void> {
     try {
-      const entries = await readdir(tempDir);
-      for (const entry of entries) {
-        try {
-          await rm(join(tempDir, entry), { recursive: true, force: true });
-        } catch {
-          // best-effort cleanup
-        }
+      const ownerUid = resolveTempDirOwnerUid(
+        await this.resolveConfiguredRuntimeOwnership(runtimeConfig),
+        process.getuid?.(),
+      );
+      const removed = await removeForeignOwnedTempEntries(tempDir, ownerUid);
+      if (removed.length > 0) {
+        this.logger.info(
+          { tempDir, ownerUid, removed: removed.slice(0, 20), removedCount: removed.length },
+          "Removed temp entries the OpenClaw service user does not own",
+        );
       }
     } catch (error) {
-      if (isNodeError(error) && error.code === "ENOENT") {
-        return;
-      }
       this.logger.debug(
         { tempDir, error: describeError(error) },
         "Failed to clean stale temp entries",
+      );
+    }
+  }
+
+  private async clearOpenClawRuntimeCaches(): Promise<void> {
+    const runtimeConfig = await this.tryReadRuntimeConfig();
+    const tempDir = this.getManagedOpenClawTempDir(runtimeConfig ?? undefined);
+    try {
+      await clearOpenClawTempDirCaches(tempDir);
+      this.logger.info({ tempDir }, "Cleared OpenClaw runtime caches after an OpenClaw install");
+    } catch (error) {
+      this.logger.warn(
+        { tempDir, error: describeError(error) },
+        "Failed to clear OpenClaw runtime caches after an OpenClaw install",
       );
     }
   }
