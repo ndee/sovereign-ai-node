@@ -26,6 +26,9 @@ import type { RelayEnrollmentData } from "./real-service-relay-enrollment.js";
 import type { RuntimeConfig } from "./real-service-shared.js";
 import type { InstallerService } from "./service.js";
 
+// Any HTTP response from the gateway's loopback port means it is listening.
+const gatewayListeningFetch = async (): Promise<Response> => new Response("", { status: 200 });
+
 const waitForJob = async (
   service: InstallerService,
   jobId: string,
@@ -3805,6 +3808,7 @@ describe("RealInstallerService", () => {
     };
     const makeService = () =>
       new RealInstallerService(createLogger(), paths, {
+        fetchImpl: gatewayListeningFetch,
         execRunner: {
           run: async ({ command, args }: ExecInput): Promise<ExecResult> => {
             const serialized = [command, ...(args ?? [])].join(" ");
@@ -3829,12 +3833,12 @@ describe("RealInstallerService", () => {
       },
     } as unknown as RuntimeConfig;
     const render = async (): Promise<string> => {
-      const ok = await (
+      const outcome = await (
         makeService() as unknown as {
-          ensureSystemGatewayServiceFallback(config: RuntimeConfig): Promise<boolean>;
+          ensureSystemGatewayServiceFallback(config: RuntimeConfig): Promise<{ ready: boolean }>;
         }
       ).ensureSystemGatewayServiceFallback(runtimeConfig);
-      expect(ok).toBe(true);
+      expect(outcome.ready).toBe(true);
       return readFile(unitPath, "utf8");
     };
 
@@ -4500,6 +4504,7 @@ describe("RealInstallerService", () => {
     const commandCalls: string[] = [];
 
     const service = new RealInstallerService(createLogger(), paths, {
+      fetchImpl: gatewayListeningFetch,
       openclawBootstrapper: {
         detectInstalled: async () => null,
         ensureInstalled: async () => {
@@ -4621,7 +4626,9 @@ describe("RealInstallerService", () => {
 
       expect(gatewayRestartCalls).toBe(1);
       expect(gatewayStartCalls).toBe(0);
-      expect(commandCalls).toContain("openclaw gateway status");
+      // A listening port is the readiness signal; the stale "inactive" status
+      // is never consulted and no fallback unit is written.
+      expect(commandCalls).not.toContain("openclaw gateway status");
       expect(commandCalls).toContain("openclaw health");
       expect(commandCalls).not.toContain("systemctl daemon-reload");
       expect(commandCalls.some((command) => command.includes("enable --now"))).toBe(false);
@@ -4650,6 +4657,7 @@ describe("RealInstallerService", () => {
     const commandCalls: string[] = [];
 
     const service = new RealInstallerService(createLogger(), paths, {
+      fetchImpl: gatewayListeningFetch,
       openclawBootstrapper: {
         detectInstalled: async () => null,
         ensureInstalled: async () => {
@@ -4764,11 +4772,11 @@ describe("RealInstallerService", () => {
     try {
       const started = await (
         service as unknown as {
-          ensureSystemGatewayServiceFallback(config: RuntimeConfig): Promise<boolean>;
+          ensureSystemGatewayServiceFallback(config: RuntimeConfig): Promise<{ ready: boolean }>;
         }
       ).ensureSystemGatewayServiceFallback(runtimeConfig);
 
-      expect(started).toBe(true);
+      expect(started.ready).toBe(true);
       expect(commandCalls).toContain("systemctl daemon-reload");
       expect(commandCalls).toContain("systemctl enable --now sovereign-openclaw-gateway.service");
       expect(commandCalls).toContain("systemctl restart sovereign-openclaw-gateway.service");
@@ -4809,6 +4817,7 @@ describe("RealInstallerService", () => {
     };
 
     const service = new RealInstallerService(createLogger(), paths, {
+      fetchImpl: gatewayListeningFetch,
       openclawBootstrapper: {
         detectInstalled: async () => null,
         ensureInstalled: async () => {
@@ -4913,11 +4922,11 @@ describe("RealInstallerService", () => {
     try {
       const started = await (
         service as unknown as {
-          ensureSystemGatewayServiceFallback(config: RuntimeConfig): Promise<boolean>;
+          ensureSystemGatewayServiceFallback(config: RuntimeConfig): Promise<{ ready: boolean }>;
         }
       ).ensureSystemGatewayServiceFallback(runtimeConfig);
 
-      expect(started).toBe(true);
+      expect(started.ready).toBe(true);
       const unitRaw = await readFile(gatewayUnitPath, "utf8");
       expect(unitRaw).toContain("After=network-online.target");
       expect(unitRaw).not.toContain("docker.service");
@@ -4932,7 +4941,7 @@ describe("RealInstallerService", () => {
     }
   });
 
-  it("warns instead of failing smoke checks when gateway is running but health probe returns non-empty error", async () => {
+  it("does not fail smoke checks when `openclaw health` errors on a listening gateway", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const priorGatewayUnitPath = process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH;
     const priorServiceUser = process.env.SOVEREIGN_NODE_SERVICE_USER;
@@ -5143,7 +5152,287 @@ describe("RealInstallerService", () => {
       expect(stepStates.smoke_checks).toBe("succeeded");
       expect(stepStates.test_alert).toBe("succeeded");
       expect(sentMessageBody).toContain("Hello from Mail Sentinel");
-      expect(healthProbeCalls).toBeGreaterThanOrEqual(2);
+      // Smoke checks rely on the port; `openclaw health` runs once, after the
+      // restart, and is too slow on small hosts to gate anything.
+      expect(healthProbeCalls).toBe(1);
+      expect(finished.job.steps.find((step) => step.id === "smoke_checks")?.details).toEqual({
+        checks: [expect.objectContaining({ id: "openclaw-gateway", status: "pass" })],
+      });
+    } finally {
+      if (priorGatewayUnitPath === undefined) {
+        delete process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH;
+      } else {
+        process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH = priorGatewayUnitPath;
+      }
+      if (priorServiceUser === undefined) {
+        delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+      } else {
+        process.env.SOVEREIGN_NODE_SERVICE_USER = priorServiceUser;
+      }
+      if (priorServiceGroup === undefined) {
+        delete process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+      } else {
+        process.env.SOVEREIGN_NODE_SERVICE_GROUP = priorServiceGroup;
+      }
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a gateway that is not listening by the deadline as a warned gateway_ready step, not a silent success", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const priorGatewayUnitPath = process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH;
+    const priorServiceUser = process.env.SOVEREIGN_NODE_SERVICE_USER;
+    const priorServiceGroup = process.env.SOVEREIGN_NODE_SERVICE_GROUP;
+    const gatewayUnitPath = join(tempRoot, "systemd", "sovereign-openclaw-gateway.service");
+    process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH = gatewayUnitPath;
+    process.env.SOVEREIGN_NODE_SERVICE_USER = "sovereign-node";
+    process.env.SOVEREIGN_NODE_SERVICE_GROUP = "sovereign-node";
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "var", "backups"),
+    };
+
+    let sentMessageBody = "";
+    let healthProbeCalls = 0;
+    let gatewayProbes = 0;
+    let clock = 0;
+
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async (opts) => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: opts.version,
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {
+          throw {
+            code: "OPENCLAW_GATEWAY_INSTALL_FAILED",
+            message: "OpenClaw gateway command exited with non-zero status",
+            retryable: true,
+            details: {
+              command: "openclaw gateway install",
+              stderr:
+                "Gateway service check failed: Error: systemctl --user unavailable: Failed to connect to bus: No medium found",
+            },
+          };
+        },
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents add mail-sentinel --workspace /tmp/ws",
+          cronCommand: "openclaw cron add --name mail-sentinel-poll --every 5m",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+          capabilities: ["IMAP4rev1"],
+        }),
+      },
+      matrixProvisioner: {
+        provision: async (req) => ({
+          projectDir: join(tempRoot, "matrix"),
+          composeFilePath: join(tempRoot, "matrix", "compose.yaml"),
+          accessMode: "direct",
+          homeserverDomain: req.matrix.homeserverDomain,
+          publicBaseUrl: req.matrix.publicBaseUrl,
+          adminBaseUrl: "http://127.0.0.1:8008",
+          federationEnabled: req.matrix.federationEnabled ?? false,
+          tlsMode: "local-dev",
+          passthrough: false,
+        }),
+        bootstrapAccounts: async () => ({
+          operator: {
+            localpart: "operator",
+            userId: "@operator:matrix.example.org",
+            passwordSecretRef: "file:/tmp/operator.password",
+            accessToken: "operator-token",
+          },
+          bot: {
+            localpart: "mail-sentinel",
+            userId: "@mail-sentinel:matrix.example.org",
+            passwordSecretRef: "file:/tmp/mail-sentinel.password",
+            accessToken: "bot-token",
+          },
+        }),
+        bootstrapRoom: async () => ({
+          roomId: "!alerts:matrix.example.org",
+          roomName: "Sovereign Alerts",
+        }),
+        test: async (req) => ({
+          ok: true,
+          homeserverUrl: req.publicBaseUrl,
+          checks: [],
+        }),
+      },
+      execRunner: {
+        run: async (input): Promise<ExecResult> => {
+          const serialized = [input.command, ...(input.args ?? [])].join(" ");
+          const lobsterResult = maybeHandleInstalledLobsterExec(input);
+          if (lobsterResult !== null) {
+            return lobsterResult;
+          }
+
+          if (serialized.startsWith("systemctl is-active")) {
+            return { command: serialized, exitCode: 0, stdout: "active\n", stderr: "" };
+          }
+          if (serialized.startsWith("systemctl ")) {
+            return { command: serialized, exitCode: 0, stdout: "active", stderr: "" };
+          }
+          if (serialized === "openclaw health") {
+            healthProbeCalls += 1;
+            if (healthProbeCalls === 1) {
+              return { command: serialized, exitCode: 0, stdout: "ok", stderr: "" };
+            }
+            return {
+              command: serialized,
+              exitCode: 1,
+              stdout:
+                "[openclaw] Failed to start CLI: Error: gateway closed (1006 abnormal closure (no close frame)): no close reason\nGateway target: ws://127.0.0.1:18789",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw gateway status") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "Service: systemd (disabled)\nState: failed",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw agents list") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "mail-sentinel\nnode-operator",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw cron list") {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "mail-sentinel-poll",
+              stderr: "",
+            };
+          }
+          if (serialized === "openclaw plugins enable matrix") {
+            return { command: serialized, exitCode: 0, stdout: "enabled", stderr: "" };
+          }
+          if (serialized.startsWith("openclaw agents ")) {
+            return { command: serialized, exitCode: 0, stdout: "ok", stderr: "" };
+          }
+          if (serialized.startsWith("openclaw approvals allowlist add --agent ")) {
+            return { command: serialized, exitCode: 0, stdout: "ok", stderr: "" };
+          }
+          return { command: serialized, exitCode: 1, stdout: "", stderr: "unexpected command" };
+        },
+      },
+      fetchImpl: async (url, init) => {
+        const provisionResponse = buildManagedAgentMatrixProvisionResponse(url, init);
+        if (provisionResponse !== null) {
+          return provisionResponse;
+        }
+        if (url.includes("/joined_members")) {
+          return new Response(JSON.stringify({ joined: {} }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (url === "http://127.0.0.1:18789/") {
+          gatewayProbes += 1;
+          throw Object.assign(new TypeError("fetch failed"), {
+            cause: { code: "ECONNREFUSED" },
+          });
+        }
+        if (url.includes("/send/m.room.message/")) {
+          sentMessageBody = typeof init?.body === "string" ? init.body : "";
+          return new Response(JSON.stringify({ event_id: "$evt1" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+
+    (
+      service as unknown as {
+        gatewayReadinessClock: { now: () => number; sleep: (ms: number) => Promise<void> };
+      }
+    ).gatewayReadinessClock = {
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+      },
+    };
+
+    try {
+      const started = await service.startInstall(buildInstallRequest());
+      const finished = await waitForJob(service, started.job.jobId);
+      // The configuration was applied, so the job still succeeds, but the
+      // missing gateway is now visible instead of silently skipped.
+      expect(finished.job.state).toBe("succeeded");
+      const steps = Object.fromEntries(finished.job.steps.map((step) => [step.id, step]));
+      expect(steps.openclaw_configure?.state).toBe("succeeded");
+      expect(steps.gateway_ready?.state).toBe("warned");
+      expect(steps.gateway_ready?.error).toMatchObject({
+        code: "OPENCLAW_GATEWAY_NOT_READY",
+        message:
+          "OpenClaw gateway unit is running but not listening after 300 s (deadline 300 s); last probe: ECONNREFUSED",
+        details: {
+          unit: "sovereign-openclaw-gateway.service",
+          unitStarted: true,
+          waitedMs: 300_000,
+          deadlineMs: 300_000,
+          lastProbe: "ECONNREFUSED",
+        },
+      });
+      expect(finished.gateway).toEqual({ ready: false, waitedMs: 300_000, deadlineMs: 300_000 });
+      expect(steps.smoke_checks?.state).toBe("succeeded");
+      expect(steps.smoke_checks?.details).toEqual({
+        checks: [
+          expect.objectContaining({
+            id: "openclaw-gateway",
+            status: "warn",
+            message: expect.stringContaining("not listening after 300 s"),
+          }),
+        ],
+      });
+      // The wait polls the port, never the slow CLI.
+      expect(gatewayProbes).toBe(151);
+      expect(healthProbeCalls).toBe(0);
+      expect(sentMessageBody).toContain("Hello from Mail Sentinel");
     } finally {
       if (priorGatewayUnitPath === undefined) {
         delete process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH;
@@ -8593,6 +8882,7 @@ describe("RealInstallerService", () => {
     await writeNoCronManagedAgentRuntime(paths);
 
     const service = new RealInstallerService(createLogger(), paths, {
+      fetchImpl: gatewayListeningFetch,
       openclawBootstrapper: {
         detectInstalled: async () => ({
           binaryPath: "/usr/local/bin/openclaw",
@@ -8724,6 +9014,7 @@ describe("RealInstallerService", () => {
     await writeNoCronManagedAgentRuntime(paths);
 
     const service = new RealInstallerService(createLogger(), paths, {
+      fetchImpl: gatewayListeningFetch,
       openclawBootstrapper: {
         detectInstalled: async () => ({
           binaryPath: "/usr/local/bin/openclaw",
@@ -10625,6 +10916,151 @@ describe("RealInstallerService", () => {
     } as InstallRequest["bots"];
     return request;
   };
+
+  it("reports a slow gateway after an OpenRouter reconfigure as a warning, not a failure", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+    await writeRuntimeArtifacts(paths, {
+      openrouterPrivacy: {
+        zdr: false,
+        dataCollection: "allow",
+        allowFallbacks: true,
+        only: ["together", "deepinfra"],
+      },
+    });
+
+    const requestPath = join(dirname(paths.configPath), "install-request.json");
+    await writeFile(requestPath, `${JSON.stringify(buildInstallRequest(), null, 2)}\n`, "utf8");
+
+    let gatewayRestartCalls = 0;
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+        }),
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {
+          gatewayRestartCalls += 1;
+        },
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents add",
+          cronCommand: "openclaw cron add",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      execRunner: {
+        run: async ({ command, args }): Promise<ExecResult> => {
+          const serialized = [command, ...(args ?? [])].join(" ");
+          if (serialized.startsWith("systemctl --user show")) {
+            return {
+              command: serialized,
+              exitCode: 0,
+              stdout: "ActiveState=activating\n",
+              stderr: "",
+            };
+          }
+          return { command: serialized, exitCode: 0, stdout: "", stderr: "" };
+        },
+      },
+      fetchImpl: async (url) => {
+        if (url === "http://127.0.0.1:18789/") {
+          throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } });
+        }
+        return new Response("not found", { status: 404 });
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({
+          ok: true,
+          homeserverUrl: "https://matrix.example.org",
+          checks: [],
+        }),
+      },
+    });
+
+    let clock = 0;
+    (
+      service as unknown as {
+        gatewayReadinessClock: { now: () => number; sleep: (ms: number) => Promise<void> };
+      }
+    ).gatewayReadinessClock = {
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+      },
+    };
+
+    try {
+      const result = await service.reconfigureOpenrouter({
+        openrouter: {
+          model: "openai/gpt-5",
+          apiKey: "sk-or-updated",
+        },
+      });
+
+      expect(result.restartRequiredServices).toEqual(["openclaw-gateway"]);
+      expect(gatewayRestartCalls).toBe(1);
+      expect(result.validation).toContainEqual(
+        expect.objectContaining({
+          id: "openclaw-gateway-restart",
+          status: "warn",
+          message:
+            "Settings applied, but OpenClaw gateway unit is running but not listening after 300 s (deadline 300 s); last probe: ECONNREFUSED",
+        }),
+      );
+      expect(result.gateway).toEqual({ ready: false, waitedMs: 300_000, deadlineMs: 300_000 });
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
 
   it("reconfigureImap fails closed when the canonical request is missing", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
