@@ -684,7 +684,7 @@ describe("ImapReadonlyToolService.inventoryMail", () => {
 
   it("falls back to EXISTS when STATUS is refused, and copes with a missing open mailbox", async () => {
     const refused = await createInventoryService({
-      uids: false,
+      uids: [],
       statusMessages: false,
       mailbox: openMailbox({ exists: 9 }),
     }).inventoryMail({ instanceId: "mail-sentinel-imap" });
@@ -713,11 +713,28 @@ describe("ImapReadonlyToolService.inventoryMail", () => {
     expect(result).not.toHaveProperty("uidNext");
   });
 
-  it("refuses --after-uid without the UIDVALIDITY it belongs to", async () => {
+  it("refuses --after-uid without its UIDVALIDITY or outside the UID range", async () => {
     const service = createInventoryService({ uids: [] });
+    for (const afterUid of [3, -1, 1.5, 4_294_967_296]) {
+      await expect(
+        service.inventoryMail({
+          instanceId: "mail-sentinel-imap",
+          afterUid,
+          ...(afterUid === 3 ? {} : { uidValidity: "7" }),
+        }),
+      ).rejects.toMatchObject({ code: "MAIL_INVENTORY_INVALID_ARGUMENT", retryable: false });
+    }
+  });
+
+  it("fails instead of reporting an empty census when the UID search fails", async () => {
+    const service = createInventoryService({ uids: false });
     await expect(
-      service.inventoryMail({ instanceId: "mail-sentinel-imap", afterUid: 3 }),
-    ).rejects.toMatchObject({ code: "MAIL_INVENTORY_INVALID_ARGUMENT", retryable: false });
+      service.inventoryMail({ instanceId: "mail-sentinel-imap", afterUid: 10, uidValidity: "7" }),
+    ).rejects.toMatchObject({
+      code: "MAIL_INVENTORY_SEARCH_FAILED",
+      retryable: true,
+      details: { mailbox: "INBOX", afterUid: 10 },
+    });
   });
 
   it("enforces its own deadline and closes the connection", async () => {
@@ -773,7 +790,12 @@ describe("ImapReadonlyToolService.inventoryMail", () => {
       },
       pop3,
     });
-    await service.inventoryMail({ instanceId: "mail-sentinel-imap", timeoutMs: 999_999 });
+    // POP3 has no UID ranges: --after-uid is ignored, so it needs no UIDVALIDITY.
+    await service.inventoryMail({
+      instanceId: "mail-sentinel-imap",
+      timeoutMs: 999_999,
+      afterUid: 5,
+    });
     expect(calls).toEqual([
       {
         instanceId: "mail-sentinel-imap",

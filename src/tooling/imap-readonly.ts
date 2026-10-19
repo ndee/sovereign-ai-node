@@ -47,6 +47,8 @@ const DEFAULT_MAX_SEARCH_RESULTS = 10;
 const MAX_SEARCH_RESULTS = 50;
 const DEFAULT_MAX_MESSAGE_BYTES = 5 * 1024 * 1024;
 const DEFAULT_MAX_TEXT_CHARS = 12_000;
+/** UIDs are 32-bit unsigned (RFC 3501 §2.3.1.1). */
+const MAX_IMAP_UID = 4_294_967_295;
 
 type ToolRunner = <T>(
   account: ImapAccountCredentials,
@@ -615,14 +617,6 @@ export class ImapReadonlyToolService {
     timeoutMs?: number;
     configPath?: string;
   }): Promise<MailInventoryResult> {
-    if ((input.afterUid ?? 0) > 0 && input.uidValidity === undefined) {
-      throw new SovereignToolError(
-        "MAIL_INVENTORY_INVALID_ARGUMENT",
-        "--after-uid needs the --uid-validity it was recorded under",
-        false,
-        { afterUid: input.afterUid },
-      );
-    }
     const instance = await this.resolveToolInstance(input.instanceId, input.configPath);
     const timeoutMs = clampInventoryTimeout(input.timeoutMs);
     if (instance.protocol === "pop3") {
@@ -631,6 +625,20 @@ export class ImapReadonlyToolService {
         account: instance.account,
         timeoutMs,
       });
+    }
+    const requestedAfterUid = input.afterUid ?? 0;
+    if (
+      !Number.isSafeInteger(requestedAfterUid) ||
+      requestedAfterUid < 0 ||
+      requestedAfterUid > MAX_IMAP_UID ||
+      (requestedAfterUid > 0 && input.uidValidity === undefined)
+    ) {
+      throw new SovereignToolError(
+        "MAIL_INVENTORY_INVALID_ARGUMENT",
+        "--after-uid must be an IMAP UID and needs the --uid-validity it was recorded under",
+        false,
+        { afterUid: input.afterUid },
+      );
     }
     const mailbox = instance.account.mailbox;
     let openClient: ImapClientLike | undefined;
@@ -657,15 +665,23 @@ export class ImapReadonlyToolService {
               : undefined;
           const uidValidityChanged =
             input.uidValidity !== undefined && input.uidValidity !== uidValidity;
-          const afterUid = uidValidityChanged ? 0 : Math.max(0, Math.trunc(input.afterUid ?? 0));
+          const afterUid = uidValidityChanged ? 0 : requestedAfterUid;
           const nothingNew = uidNext !== undefined && afterUid + 1 >= uidNext;
           const matches = nothingNew
             ? []
             : await client.search({ uid: `${String(afterUid + 1)}:*` }, { uid: true });
+          // imapflow resolves `false` when the search failed (NO/BAD or a lost
+          // connection); in a census that must not read as "no messages".
+          if (matches === false) {
+            throw new SovereignToolError(
+              "MAIL_INVENTORY_SEARCH_FAILED",
+              `The IMAP server did not answer the UID search of ${mailbox}`,
+              true,
+              { mailbox, afterUid },
+            );
+          }
           // `n:*` also matches the highest UID when n is above it (RFC 3501 §6.4.8).
-          const uidRanges = compressUidRanges(
-            (matches === false ? [] : matches).filter((uid) => uid > afterUid),
-          );
+          const uidRanges = compressUidRanges(matches.filter((uid) => uid > afterUid));
           const lowestUid = uidRanges[0]?.[0];
           const highestUid = uidRanges[uidRanges.length - 1]?.[1];
           const count = uidRanges.reduce((sum, [first, last]) => sum + last - first + 1, 0);

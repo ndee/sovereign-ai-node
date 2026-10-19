@@ -50,6 +50,15 @@ describe("withInventoryDeadline", () => {
     await outcome;
     expect(onTimeout).toHaveBeenCalledTimes(1);
   });
+  it("still rejects when tearing down the connection throws", async () => {
+    vi.useFakeTimers();
+    const pending = withInventoryDeadline(1_000, new Promise(() => {}), () => {
+      throw new Error("already closed");
+    });
+    const outcome = expect(pending).rejects.toMatchObject({ code: "MAIL_INVENTORY_TIMEOUT" });
+    await vi.advanceTimersByTimeAsync(1_000);
+    await outcome;
+  });
 });
 
 describe("compressUidRanges", () => {

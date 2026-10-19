@@ -38,7 +38,11 @@ export const withInventoryDeadline = async <T>(
   let timer: NodeJS.Timeout | undefined;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      onTimeout();
+      try {
+        onTimeout();
+      } catch {
+        // Tear-down is best effort; the deadline must reject regardless.
+      }
       reject(
         new SovereignToolError(
           "MAIL_INVENTORY_TIMEOUT",

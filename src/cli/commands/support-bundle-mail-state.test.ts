@@ -10,19 +10,24 @@ import type { AppContainer } from "../../app/create-app.js";
 const WORKSPACE_STATE =
   "/var/lib/sovereign-node/mail-sentinel/workspace/data/mail-sentinel-state.json";
 
-const reads = vi.hoisted(() => ({ paths: [] as string[] }));
+const reads = vi.hoisted(() => ({ paths: [] as string[], maxBytes: [] as number[] }));
 
-vi.mock("node:fs/promises", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs/promises")>();
+vi.mock("../../support/tail.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../support/tail.js")>();
   return {
     ...actual,
-    readFile: (async (path: unknown, ...rest: unknown[]) => {
-      if (typeof path === "string" && path.endsWith("mail-sentinel-state.json")) {
+    readSmallFile: async (path: string, maxBytes: number, ...rest: unknown[]) => {
+      if (path.endsWith("mail-sentinel-state.json")) {
         reads.paths.push(path);
+        reads.maxBytes.push(maxBytes);
         return JSON.stringify({ integrity: { version: 1, days: {} } });
       }
-      return await (actual.readFile as (...args: unknown[]) => Promise<unknown>)(path, ...rest);
-    }) as typeof actual.readFile,
+      return await (actual.readSmallFile as (...args: unknown[]) => Promise<string>)(
+        path,
+        maxBytes,
+        ...rest,
+      );
+    },
   };
 });
 
@@ -54,6 +59,7 @@ let outputDir: string;
 beforeEach(async () => {
   outputDir = await mkdtemp(join(tmpdir(), "sb-mail-state-"));
   reads.paths = [];
+  reads.maxBytes = [];
   generated.deps = [];
   vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 });
@@ -76,7 +82,9 @@ describe("support-bundle — Mail Sentinel state", () => {
 
     await program.parseAsync(["node", "test", "support-bundle", "--output-dir", outputDir]);
 
+    // Read through the bounded, symlink-refusing reader.
     expect(reads.paths).toEqual([WORKSPACE_STATE]);
+    expect(reads.maxBytes).toEqual([32 * 1024 * 1024]);
     expect(generated.deps).toEqual([
       expect.objectContaining({ mailState: { integrity: { version: 1, days: {} } } }),
     ]);

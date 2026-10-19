@@ -32,6 +32,10 @@ deadline: `--timeout-ms`, default 20000, clamped to 1000–60000. When the
 deadline passes, the connection is dropped and the command exits 1 with the
 retryable error `MAIL_INVENTORY_TIMEOUT`.
 
+Errors are written to stderr; with `--json` the error envelope keeps the
+tool's own code (for example `MAIL_INVENTORY_TIMEOUT`, `POP3_INDEX_READ_FAILED`).
+A successful `--json` result is one compact JSON line on stdout.
+
 ### IMAP: a UID-range census
 
 - Without `--after-uid`, every UID in the mailbox is listed (a **full census**,
@@ -43,8 +47,11 @@ retryable error `MAIL_INVENTORY_TIMEOUT`.
 - If the server's UIDVALIDITY is no longer `<v>`, the old UIDs mean nothing:
   the command ignores `--after-uid`, takes a full census and reports
   `uidValidityChanged: true`. Treat that as a new key space.
-- `--after-uid` without `--uid-validity` is refused
-  (`MAIL_INVENTORY_INVALID_ARGUMENT`).
+- `--after-uid` without `--uid-validity`, or outside the 32-bit UID range, is
+  refused (`MAIL_INVENTORY_INVALID_ARGUMENT`).
+- A UID search the server refuses or a connection lost during it fails the
+  command with the retryable `MAIL_INVENTORY_SEARCH_FAILED`; it is never
+  reported as an empty census.
 
 `--json` result (`protocol: "imap"`):
 
@@ -63,7 +70,7 @@ retryable error `MAIL_INVENTORY_TIMEOUT`.
 ### POP3: a full UIDL listing
 
 POP3 has no ranges and no gap signal, so every call lists all UIDLs plus the
-`STAT` count. `--after-uid` and `--uid-validity` are not used.
+`STAT` count. `--after-uid` and `--uid-validity` are ignored.
 
 Each UIDL is mapped through the message index the POP3 search keeps under
 `/var/lib/sovereign-node/pop3-index/<instance>.json`. The inventory only reads

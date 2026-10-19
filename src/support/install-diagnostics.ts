@@ -1324,7 +1324,7 @@ export const defaultMailSentinelStatePath = (paths: SovereignPaths = DEFAULT_PAT
  * The state file also carries message metadata, so it can be several MB; it
  * is parsed only to be reduced to the integrity counts and never shipped.
  */
-const MAIL_STATE_MAX_BYTES = 32 * 1024 * 1024;
+export const MAIL_STATE_MAX_BYTES = 32 * 1024 * 1024;
 
 /**
  * `mail-integrity.json`: Mail Sentinel's per-day outcome counts, reduced by
