@@ -9,6 +9,13 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 From this point forward, GitHub Release notes are auto-generated from commit history
 by the `.github/workflows/release.yml` workflow.
 
+## [2.9.0](https://github.com/ndee/sovereign-ai-node/compare/v2.8.0...v2.9.0) (2026-10-19)
+
+
+### Features
+
+* **cli:** read-only mail-inventory command and integrity counts in diagnostics ([#302](https://github.com/ndee/sovereign-ai-node/issues/302)) ([35431ad](https://github.com/ndee/sovereign-ai-node/commit/35431ad0fdee5aa46f0f20bf5df6db51e7017b31))
+
 ## [2.8.0](https://github.com/ndee/sovereign-ai-node/compare/v2.7.1...v2.8.0) (2026-10-12)
 
 
