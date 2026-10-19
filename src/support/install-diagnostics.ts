@@ -46,7 +46,12 @@ import { arch, release, totalmem, uptime } from "node:os";
 import { join } from "node:path";
 
 import { DEFAULT_PATHS, type SovereignPaths } from "../config/paths.js";
-import { runBoundedCommand } from "./collectors.js";
+import {
+  MAIL_INTEGRITY_FILE,
+  MAIL_INTEGRITY_PURPOSE,
+  mailIntegrityCounts,
+  runBoundedCommand,
+} from "./collectors.js";
 import { countMaskTokens, findUnmaskedIpClasses, IpMasker, type MaskClass } from "./ip-mask.js";
 import type { KnownSecretSet, KnownSecretSources } from "./known-secrets.js";
 import {
@@ -1280,7 +1285,8 @@ export const npmLogsDir = (home: string): string => join(home, ".npm", "_logs");
 /**
  * The node's own sources: its install job records, the npm logs of the
  * service account and of root (CLI installs run as root), its services'
- * journals, the install provenance and the system summary.
+ * journals, the install provenance, Mail Sentinel's integrity counts and the
+ * system summary.
  */
 export const defaultNodeDiagnosticsSources = (
   paths: SovereignPaths = DEFAULT_PATHS,
@@ -1303,8 +1309,42 @@ export const defaultNodeDiagnosticsSources = (
     pick: (parsed) =>
       pickFields(parsed, ["installedAt", "source", "ref", "version", "commit", "installMode"]),
   },
+  mailIntegrityDiagnosticsSource(defaultMailSentinelStatePath(paths)),
   { kind: "system" },
 ];
+
+/**
+ * Where Mail Sentinel keeps its state: `data/` of the agent workspace the
+ * installer creates under the state directory.
+ */
+export const defaultMailSentinelStatePath = (paths: SovereignPaths = DEFAULT_PATHS): string =>
+  join(paths.stateDir, "mail-sentinel", "workspace", "data", "mail-sentinel-state.json");
+
+/**
+ * The state file also carries message metadata, so it can be several MB; it
+ * is parsed only to be reduced to the integrity counts and never shipped.
+ */
+const MAIL_STATE_MAX_BYTES = 32 * 1024 * 1024;
+
+/**
+ * `mail-integrity.json`: Mail Sentinel's per-day outcome counts, reduced by
+ * the same allowlist the support bundle uses. A device without Mail Sentinel
+ * simply has no state file, which is not a gap.
+ */
+export const mailIntegrityDiagnosticsSource = (
+  statePath: string = defaultMailSentinelStatePath(),
+  options: { readonly owner?: number; readonly priority?: number } = {},
+): DiagnosticsSource => ({
+  kind: "json-file",
+  name: MAIL_INTEGRITY_FILE,
+  path: statePath,
+  purpose: MAIL_INTEGRITY_PURPOSE,
+  optional: true,
+  maxBytes: MAIL_STATE_MAX_BYTES,
+  pick: mailIntegrityCounts,
+  ...(options.owner === undefined ? {} : { owner: options.owner }),
+  ...(options.priority === undefined ? {} : { priority: options.priority }),
+});
 
 /** The node's own secret stores. */
 export const defaultNodeKnownSecretSources = (

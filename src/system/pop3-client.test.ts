@@ -183,6 +183,31 @@ describe("SocketPop3Client", () => {
     expect(fake.commands.join("\n")).not.toContain("secret");
   });
 
+  it("abort drops the connection, rejects the pending command and skips QUIT", async () => {
+    const fake = await startFakePop3({ messages: [{ uidl: "u1", raw: SAMPLE_RAW }] });
+    servers.push(fake.close);
+
+    await expect(
+      runWithPop3Client(
+        {
+          account: {
+            host: "127.0.0.1",
+            port: fake.port,
+            tls: false,
+            username: "ops@example.org",
+            password: "secret",
+          },
+        },
+        async (client) => {
+          const pending = client.stat();
+          client.abort?.();
+          return await pending;
+        },
+      ),
+    ).rejects.toMatchObject({ code: "POP3_CONNECTION_LOST" });
+    expect(fake.commands).not.toContain("QUIT");
+  });
+
   it("reports POP3_AUTH_FAILED on a rejected password without leaking it", async () => {
     const fake = await startFakePop3({ messages: [] });
     servers.push(fake.close);

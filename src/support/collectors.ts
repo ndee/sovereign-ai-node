@@ -563,3 +563,160 @@ export const summarizeMailState = (state: unknown): CollectorResult => {
     },
   };
 };
+
+/**
+ * Outcome states the Mail Sentinel integrity ledger counts per day. A state
+ * outside this list is tallied as `other`, never echoed as a key: the block
+ * comes from an unvalidated file and a key is free text.
+ */
+export const KNOWN_INTEGRITY_STATES = [
+  "red",
+  "amber",
+  "gray",
+  "no-verdict:reviewer-unavailable",
+  "no-verdict:refused",
+  "no-verdict:defaulted",
+  "read-failed",
+  "read-failed:timeout",
+  "read-failed:other",
+  "too-large",
+  "not-returned",
+  "not-returned:truncated",
+  "not-returned:baseline",
+  "not-returned:outside-window",
+  "not-returned:below-watermark",
+  "pending",
+  "deferred",
+] as const;
+
+export const KNOWN_INTEGRITY_FLAGS = [
+  "inventory-gap",
+  "coverage-break",
+  "search-truncated",
+  "ledger-reset",
+] as const;
+
+const KNOWN_INTEGRITY_COVERAGE = ["full", "partial"] as const;
+
+const KNOWN_INVENTORY_STATES = ["unknown", "available", "unsupported", "failed"] as const;
+
+/** The ledger keeps 45 days; this only bounds a malformed block. */
+export const MAX_INTEGRITY_DAYS = 62;
+
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/u;
+
+const allowlisted = <T extends string>(
+  value: unknown,
+  known: readonly T[],
+  fallback: string,
+): string =>
+  typeof value === "string" && (known as readonly string[]).includes(value) ? value : fallback;
+
+/** A residual can be negative (more outcomes than inventoried mail); still only an integer. */
+const safeSignedCount = (value: unknown): number | null =>
+  typeof value === "number" && Number.isSafeInteger(value) ? value : null;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const summarizeIntegrityDay = (day: string, entry: Record<string, unknown>) => {
+  const states: Record<string, number> = Object.create(null) as Record<string, number>;
+  if (isRecord(entry.states)) {
+    for (const [state, value] of Object.entries(entry.states)) {
+      const count = safeCount(value);
+      if (count !== null) {
+        const bucket = allowlisted(state, KNOWN_INTEGRITY_STATES, "other");
+        states[bucket] = (states[bucket] ?? 0) + count;
+      }
+    }
+  }
+  const flags = Array.isArray(entry.flags)
+    ? [...new Set(entry.flags.map((flag) => allowlisted(flag, KNOWN_INTEGRITY_FLAGS, "other")))]
+    : [];
+  const coverage = allowlisted(entry.coverage, KNOWN_INTEGRITY_COVERAGE, "unknown");
+  const total = safeCount(entry.inventory);
+  return {
+    day,
+    coverage,
+    // Only a day with a successful inventory run has an inventory count; on
+    // any other day the producer's total comes from its own ledger and must
+    // not be read as an independent census.
+    inventory: coverage === "full" ? total : null,
+    recorded: coverage === "full" ? null : total,
+    states,
+    outageAffected: safeCount(entry.outageAffected),
+    residual: safeSignedCount(entry.residual),
+    seenNotInventoried: safeCount(entry.seenNotInventoried),
+    uidGaps: safeCount(entry.uidGaps),
+    unaccounted: safeCount(entry.unaccounted),
+    inFlight: safeCount(entry.inFlight),
+    flags: flags.sort(),
+  };
+};
+
+/**
+ * Reduce the `integrity` block of the Mail Sentinel state to allowlisted
+ * counts per day and outcome state. Identifiers, subjects, senders and
+ * Message-IDs never appear in the block's contract, and nothing outside the
+ * named count fields is copied, so a producer that adds them leaks nothing.
+ *
+ * Absent or partial blocks are normal (an older Mail Sentinel does not write
+ * one); they are reported as such, never as a failure.
+ */
+export const mailIntegrityCounts = (state: unknown): unknown => {
+  const block = isRecord(state) ? state.integrity : undefined;
+  if (!isRecord(block)) {
+    return {
+      available: false,
+      reason: "the installed Mail Sentinel does not record integrity counts",
+    };
+  }
+  const valid: Array<[string, Record<string, unknown>]> = [];
+  let ignoredDays = 0;
+  if (isRecord(block.days)) {
+    for (const [day, entry] of Object.entries(block.days)) {
+      if (DAY_RE.test(day) && Number.isFinite(Date.parse(day)) && isRecord(entry)) {
+        valid.push([day, entry]);
+      } else {
+        ignoredDays += 1;
+      }
+    }
+  }
+  valid.sort(([left], [right]) => left.localeCompare(right));
+  const kept = valid.slice(-MAX_INTEGRITY_DAYS);
+  return {
+    available: true,
+    version: safeCount(block.version),
+    updatedAt: safeTimestamp(block.updatedAt),
+    coverage: allowlisted(block.coverage, KNOWN_INTEGRITY_COVERAGE, "unknown"),
+    inventory: allowlisted(block.inventory, KNOWN_INVENTORY_STATES, "unknown"),
+    residual: safeSignedCount(block.residual),
+    unaccounted: safeCount(block.unaccounted),
+    inFlight: safeCount(block.inFlight),
+    days: kept.map(([day, entry]) => summarizeIntegrityDay(day, entry)),
+    ignoredDays,
+    omittedDays: valid.length - kept.length,
+  };
+};
+
+export const MAIL_INTEGRITY_FILE = "mail-integrity.json";
+
+export const MAIL_INTEGRITY_PURPOSE =
+  "Mail Sentinel integrity counts per day and outcome state — counts only, no message content";
+
+export const summarizeMailIntegrity = (state: unknown): CollectorResult =>
+  typeof state === "object" && state !== null
+    ? {
+        name: MAIL_INTEGRITY_FILE,
+        purpose: MAIL_INTEGRITY_PURPOSE,
+        status: "collected",
+        privacy: "safe",
+        content: mailIntegrityCounts(state),
+      }
+    : {
+        name: MAIL_INTEGRITY_FILE,
+        purpose: MAIL_INTEGRITY_PURPOSE,
+        status: "unavailable",
+        privacy: "safe",
+        reason: "state file absent or unreadable",
+      };

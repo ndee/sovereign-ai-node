@@ -18,6 +18,7 @@ import { listSanErrorIds, lookupSanError } from "../../support/codes.js";
 import {
   buildInstallDiagnostics,
   type DiagnosticsSource,
+  defaultMailSentinelStatePath,
   defaultNodeDiagnosticsSources,
   defaultNodeKnownSecretSources,
   diagnosticsFileName,
@@ -220,9 +221,7 @@ export const registerSupportBundleCommand = (
           contractVersion: CONTRACT_VERSION,
         });
 
-        const mailState = await tryReadMailState(
-          `${DEFAULT_PATHS.stateDir}/mail-sentinel-state.json`,
-        );
+        const mailState = await tryReadMailState(defaultMailSentinelStatePath());
 
         const now = new Date();
         const removedOldBundles = await cleanupOldBundles(directory, now);

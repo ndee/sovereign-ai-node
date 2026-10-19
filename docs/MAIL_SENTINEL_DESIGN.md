@@ -308,6 +308,8 @@ Plugin scope decision:
 
 - The IMAP plugin exposes a reusable read-only mail capability surface.
 - Mail triage logic, dedupe policy, and feedback learning remain agent/skill concerns.
+- `sovereign-tool mail-inventory` lists message identifiers independently of the search
+  path, so every arrival can be accounted for; see [MAIL_INVENTORY.md](MAIL_INVENTORY.md).
 
 ## IMAP Reliability Constraints
 

@@ -2,9 +2,12 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { mailInventoryResultSchema } from "../contracts/tool.js";
 
 import type { Pop3AccountCredentials, Pop3ClientLike } from "../system/pop3-client.js";
+import { hashUidl } from "./mail-inventory.js";
 import {
   accountFingerprint,
   buildStuckWindowNote,
@@ -374,5 +377,224 @@ describe("parseSinceBound", () => {
     );
     expect(parseSinceBound("since:not-a-date")).toBeUndefined();
     expect(parseSinceBound("ALL")).toBeUndefined();
+  });
+});
+
+describe("Pop3ReadonlyToolService.inventoryMail", () => {
+  let indexDir: string;
+  let messages: FakeMessage[];
+  let service: Pop3ReadonlyToolService;
+
+  const message = (uidl: string, id: string): FakeMessage => ({
+    uidl,
+    raw: buildRaw({ id, subject: `Subject ${id}`, date: "Mon, 10 Aug 2026 10:00:00 +0000" }),
+  });
+
+  /** Every file in the index directory with its bytes and mtime. */
+  const snapshotDir = async (): Promise<Record<string, string>> => {
+    const { readdir } = await import("node:fs/promises");
+    const entries: Record<string, string> = {};
+    for (const name of await readdir(indexDir)) {
+      const path = join(indexDir, name);
+      entries[name] = `${(await stat(path)).mtimeMs}:${await readFile(path, "utf8")}`;
+    }
+    return entries;
+  };
+
+  beforeEach(async () => {
+    indexDir = await mkdtemp(join(tmpdir(), "pop3-inventory-"));
+    messages = [message("u-a", "a@x"), message("u-b", "b@x")];
+    service = new Pop3ReadonlyToolService({
+      indexDir,
+      runner: async (_account, handler) => await handler(createFakeClient(messages, [])),
+    });
+  });
+
+  afterEach(async () => {
+    await rm(indexDir, { recursive: true, force: true });
+  });
+
+  it("maps every UIDL through the index without writing it", async () => {
+    const searched = await service.searchMail({ instanceId: "ms-pop", account, query: "ALL" });
+    messages.push(message("u-c", "c@x"));
+    const index = JSON.parse(await readFile(join(indexDir, "ms-pop.json"), "utf8")) as {
+      entries: Record<string, { baseline?: true }>;
+    };
+    if (index.entries["u-a"] === undefined) {
+      throw new Error("fixture: u-a must be indexed");
+    }
+    index.entries["u-a"].baseline = true;
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(join(indexDir, "ms-pop.json"), JSON.stringify(index));
+    const before = await snapshotDir();
+
+    const result = await service.inventoryMail({
+      instanceId: "ms-pop",
+      account,
+      timeoutMs: 20_000,
+    });
+
+    expect(mailInventoryResultSchema.parse(result)).toEqual(result);
+    expect(result).toMatchObject({
+      protocol: "pop3",
+      instanceId: "ms-pop",
+      mailbox: "INBOX",
+      uidValidity: searched.uidValidity,
+      index: "present",
+      messageCount: 3,
+      count: 3,
+      unindexedCount: 1,
+      messages: [
+        { uidlHash: hashUidl("u-a"), uid: 1, baseline: true },
+        { uidlHash: hashUidl("u-b"), uid: 2 },
+        { uidlHash: hashUidl("u-c") },
+      ],
+    });
+    expect(await snapshotDir()).toEqual(before);
+    // UIDLs can embed server host or file names; only their hash is emitted.
+    expect(JSON.stringify(result)).not.toMatch(/u-[abc]/);
+  });
+
+  it("never creates an index that does not exist yet", async () => {
+    const result = await service.inventoryMail({
+      instanceId: "ms-pop",
+      account,
+      timeoutMs: 20_000,
+    });
+
+    expect(result).toMatchObject({ index: "absent", count: 2, unindexedCount: 2 });
+    expect(result).not.toHaveProperty("uidValidity");
+    expect(await snapshotDir()).toEqual({});
+  });
+
+  it("reports a corrupt index as such and leaves it for the search to replace", async () => {
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(join(indexDir, "ms-pop.json"), "{not json");
+    const before = await snapshotDir();
+
+    const corrupt = await service.inventoryMail({ instanceId: "ms-pop", account, timeoutMs: 1 });
+    expect(corrupt).toMatchObject({ index: "corrupt", unindexedCount: 2 });
+    expect(corrupt).not.toHaveProperty("uidValidity");
+    expect(await snapshotDir()).toEqual(before);
+
+    await writeFile(join(indexDir, "ms-pop.json"), JSON.stringify({ version: 99 }));
+    expect(
+      await service.inventoryMail({ instanceId: "ms-pop", account, timeoutMs: 1 }),
+    ).toMatchObject({ index: "corrupt" });
+  });
+
+  it("does not resolve UIDLs through inherited object keys", async () => {
+    await service.searchMail({ instanceId: "ms-pop", account, query: "ALL" });
+    messages.push(message("constructor", "ctor@x"), message("__proto__", "proto@x"));
+
+    const result = await service.inventoryMail({ instanceId: "ms-pop", account, timeoutMs: 1 });
+    expect(result.messages.slice(2)).toEqual([
+      { uidlHash: hashUidl("constructor") },
+      { uidlHash: hashUidl("__proto__") },
+    ]);
+  });
+
+  it("fails closed when the index exists but cannot be read", async () => {
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(join(indexDir, "ms-pop.json"));
+    await expect(
+      service.inventoryMail({ instanceId: "ms-pop", account, timeoutMs: 1 }),
+    ).rejects.toMatchObject({ code: "POP3_INDEX_READ_FAILED" });
+  });
+
+  it("lists a large mailbox in server order", async () => {
+    messages = Array.from({ length: 5_000 }, (_, position) =>
+      message(`uidl-${String(position)}`, `${String(position)}@x`),
+    );
+    const reversing = new Pop3ReadonlyToolService({
+      indexDir,
+      runner: async (_account, handler) => {
+        const client = createFakeClient(messages, []);
+        return await handler({ ...client, uidl: async () => (await client.uidl()).reverse() });
+      },
+    });
+
+    const result = await reversing.inventoryMail({ instanceId: "ms-pop", account, timeoutMs: 1 });
+    expect(result).toMatchObject({ messageCount: 5_000, count: 5_000, unindexedCount: 5_000 });
+    expect(result.messages[0]).toEqual({ uidlHash: hashUidl("uidl-0") });
+    expect(result.messages[4_999]).toEqual({ uidlHash: hashUidl("uidl-4999") });
+  });
+
+  it("leaves a concurrent search's index write intact", async () => {
+    await Promise.all([
+      service.searchMail({ instanceId: "ms-pop", account, query: "ALL" }),
+      service.inventoryMail({ instanceId: "ms-pop", account, timeoutMs: 20_000 }),
+    ]);
+    const alone = await mkdtemp(join(tmpdir(), "pop3-inventory-alone-"));
+    try {
+      const reference = new Pop3ReadonlyToolService({
+        indexDir: alone,
+        runner: async (_account, handler) => await handler(createFakeClient(messages, [])),
+      });
+      await reference.searchMail({ instanceId: "ms-pop", account, query: "ALL" });
+      const strip = (raw: string) => {
+        const parsed = JSON.parse(raw) as { generation?: string };
+        delete parsed.generation;
+        return parsed;
+      };
+      expect(strip(await readFile(join(indexDir, "ms-pop.json"), "utf8"))).toEqual(
+        strip(await readFile(join(alone, "ms-pop.json"), "utf8")),
+      );
+    } finally {
+      await rm(alone, { recursive: true, force: true });
+    }
+  });
+
+  it("aborts the connection when its deadline passes", async () => {
+    vi.useFakeTimers();
+    try {
+      // The index is read from disk first; advance the clock only once the
+      // session is actually waiting on the server.
+      const stalledStat = (reached: () => void) => (): Promise<never> => {
+        reached();
+        return new Promise(() => {});
+      };
+      let aborted = 0;
+      let reachedFirst: () => void = () => {};
+      const firstReached = new Promise<void>((resolve) => {
+        reachedFirst = resolve;
+      });
+      const stalled = new Pop3ReadonlyToolService({
+        indexDir,
+        runner: async (_account, handler) =>
+          await handler({
+            ...createFakeClient(messages, []),
+            stat: stalledStat(reachedFirst),
+            abort: () => {
+              aborted += 1;
+            },
+          }),
+      });
+      const pending = stalled.inventoryMail({ instanceId: "ms-pop", account, timeoutMs: 3_000 });
+      const outcome = expect(pending).rejects.toMatchObject({ code: "MAIL_INVENTORY_TIMEOUT" });
+      await firstReached;
+      await vi.advanceTimersByTimeAsync(3_000);
+      await outcome;
+      expect(aborted).toBe(1);
+
+      // A client without `abort` still yields the timeout.
+      let reachedSecond: () => void = () => {};
+      const secondReached = new Promise<void>((resolve) => {
+        reachedSecond = resolve;
+      });
+      const plain = new Pop3ReadonlyToolService({
+        indexDir,
+        runner: async (_account, handler) =>
+          await handler({ ...createFakeClient(messages, []), stat: stalledStat(reachedSecond) }),
+      });
+      const second = expect(
+        plain.inventoryMail({ instanceId: "ms-pop", account, timeoutMs: 3_000 }),
+      ).rejects.toMatchObject({ code: "MAIL_INVENTORY_TIMEOUT" });
+      await secondReached;
+      await vi.advanceTimersByTimeAsync(3_000);
+      await second;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

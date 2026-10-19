@@ -9,8 +9,11 @@ import {
   collectUnitStates,
   JOURNAL_LINE_LIMIT,
   MAX_ARTIFACT_BYTES,
+  MAX_INTEGRITY_DAYS,
+  mailIntegrityCounts,
   type RunCommand,
   SUPPORTED_UNITS,
+  summarizeMailIntegrity,
   summarizeMailState,
 } from "./collectors.js";
 import { REDACTED, REDACTED_PII } from "./redact.js";
@@ -251,6 +254,222 @@ describe("summarizeMailState — degenerate inputs", () => {
   it("names the artifact consistently in every branch", () => {
     expect(summarizeMailState(null).name).toBe("mail-sentinel-summary.json");
     expect(summarizeMailState({}).name).toBe("mail-sentinel-summary.json");
+  });
+});
+
+describe("summarizeMailIntegrity", () => {
+  const SUBJECT = "TEST_SUBJECT_DO_NOT_LEAK";
+  const SENDER = "leak-sender@private-domain.example";
+  const MESSAGE_ID = "<TEST_MESSAGE_ID_DO_NOT_LEAK@private-domain.example>";
+
+  type Day = {
+    day: string;
+    coverage: string;
+    inventory: number | null;
+    recorded: number | null;
+    states: Record<string, number>;
+    residual: number | null;
+    flags: string[];
+  };
+  type Counts = {
+    available: boolean;
+    coverage: string;
+    inventory: string;
+    days: Day[];
+    ignoredDays: number;
+    omittedDays: number;
+  };
+
+  it("is unavailable without a readable state file, like the activity summary", () => {
+    for (const state of [undefined, null, "text"]) {
+      expect(summarizeMailIntegrity(state)).toMatchObject({
+        name: "mail-integrity.json",
+        status: "unavailable",
+        privacy: "safe",
+      });
+    }
+  });
+
+  it("is collected but marked unavailable when the bot records no integrity block", () => {
+    for (const state of [{}, { integrity: null }, { integrity: [1] }, []]) {
+      const result = summarizeMailIntegrity(state);
+      expect(result.status).toBe("collected");
+      expect(result.content).toEqual({
+        available: false,
+        reason: "the installed Mail Sentinel does not record integrity counts",
+      });
+    }
+  });
+
+  it("keeps per-day counts per allowlisted outcome state", () => {
+    const content = summarizeMailIntegrity({
+      integrity: {
+        version: 1,
+        updatedAt: "2026-10-19T08:00:00.000Z",
+        coverage: "full",
+        inventory: "available",
+        residual: 0,
+        unaccounted: 2,
+        inFlight: 1,
+        days: {
+          "2026-10-19": {
+            coverage: "full",
+            inventory: 41,
+            states: {
+              red: 1,
+              amber: 3,
+              gray: 33,
+              "no-verdict:reviewer-unavailable": 1,
+              "read-failed:timeout": 1,
+              "not-returned:below-watermark": 1,
+              pending: 1,
+            },
+            outageAffected: 1,
+            residual: 0,
+            seenNotInventoried: 0,
+            uidGaps: 2,
+            unaccounted: 2,
+            inFlight: 1,
+            flags: ["search-truncated", "inventory-gap", "search-truncated"],
+          },
+          "2026-10-18": {
+            coverage: "partial",
+            inventory: 7,
+            states: { gray: 7 },
+            residual: -1,
+            flags: ["ledger-reset", "coverage-break"],
+          },
+        },
+      },
+    }).content as Counts;
+
+    expect(content).toMatchObject({
+      available: true,
+      version: 1,
+      updatedAt: "2026-10-19T08:00:00.000Z",
+      coverage: "full",
+      inventory: "available",
+      residual: 0,
+      unaccounted: 2,
+      inFlight: 1,
+      ignoredDays: 0,
+      omittedDays: 0,
+    });
+    expect(content.days).toEqual([
+      {
+        day: "2026-10-18",
+        coverage: "partial",
+        // Not a census on a partial day: the total comes from the ledger.
+        inventory: null,
+        recorded: 7,
+        states: { gray: 7 },
+        outageAffected: null,
+        residual: -1,
+        seenNotInventoried: null,
+        uidGaps: null,
+        unaccounted: null,
+        inFlight: null,
+        flags: ["coverage-break", "ledger-reset"],
+      },
+      {
+        day: "2026-10-19",
+        coverage: "full",
+        inventory: 41,
+        recorded: null,
+        states: {
+          red: 1,
+          amber: 3,
+          gray: 33,
+          "no-verdict:reviewer-unavailable": 1,
+          "read-failed:timeout": 1,
+          "not-returned:below-watermark": 1,
+          pending: 1,
+        },
+        outageAffected: 1,
+        residual: 0,
+        seenNotInventoried: 0,
+        uidGaps: 2,
+        unaccounted: 2,
+        inFlight: 1,
+        flags: ["inventory-gap", "search-truncated"],
+      },
+    ]);
+  });
+
+  it("never echoes free text from the block: unknown keys become `other`, unknown fields vanish", () => {
+    const result = summarizeMailIntegrity({
+      integrity: {
+        version: "1",
+        updatedAt: SUBJECT,
+        coverage: SUBJECT,
+        inventory: SENDER,
+        residual: 0.5,
+        unaccountedMessages: [{ subject: SUBJECT, from: SENDER, messageId: MESSAGE_ID }],
+        days: {
+          [SUBJECT]: { inventory: 1 },
+          "2026-13-45": { inventory: 1 },
+          "2026-10-17": "not an object",
+          "2026-10-19": {
+            coverage: SENDER,
+            inventory: 3,
+            states: {
+              [SENDER]: 1,
+              [MESSAGE_ID]: 2,
+              red: "many",
+              ["__proto__"]: 4,
+              gray: -1,
+            },
+            flags: [SUBJECT, 7],
+            residual: "0",
+            items: [{ subject: SUBJECT, from: SENDER, messageId: MESSAGE_ID }],
+          },
+        },
+      },
+    });
+    const serialized = JSON.stringify(result);
+    for (const token of [SUBJECT, SENDER, MESSAGE_ID, "private-domain"]) {
+      expect(serialized).not.toContain(token);
+    }
+    const content = result.content as Counts;
+    expect(content).toMatchObject({
+      version: null,
+      updatedAt: null,
+      coverage: "unknown",
+      inventory: "unknown",
+      residual: null,
+      ignoredDays: 3,
+    });
+    expect(content.days).toEqual([
+      expect.objectContaining({
+        day: "2026-10-19",
+        coverage: "unknown",
+        inventory: null,
+        recorded: 3,
+        states: { other: 7 },
+        residual: null,
+        flags: ["other"],
+      }),
+    ]);
+  });
+
+  it("tolerates a block without days and bounds a runaway one", () => {
+    expect(mailIntegrityCounts({ integrity: { days: [] } })).toMatchObject({
+      available: true,
+      days: [],
+      ignoredDays: 0,
+    });
+    const days = Object.fromEntries(
+      Array.from({ length: MAX_INTEGRITY_DAYS + 8 }, (_, offset) => [
+        new Date(Date.UTC(2026, 0, 1 + offset)).toISOString().slice(0, 10),
+        { coverage: "full", inventory: offset, states: "none", flags: "none" },
+      ]),
+    );
+    const content = mailIntegrityCounts({ integrity: { days } }) as Counts;
+    expect(content.days).toHaveLength(MAX_INTEGRITY_DAYS);
+    expect(content.omittedDays).toBe(8);
+    // The newest days are the ones kept.
+    expect(content.days[0]?.day).toBe("2026-01-09");
+    expect(content.days[0]).toMatchObject({ states: {}, flags: [] });
   });
 });
 
