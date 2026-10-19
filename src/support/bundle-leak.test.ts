@@ -118,6 +118,23 @@ const mailStateWithPii = {
     domainWeights: { "private-domain.example": 2 },
   },
   zoneHistory: [{ at: "2026-07-27T08:00:00Z", messageKey: "k1", zone: "red", reason: S.emailBody }],
+  // Integrity counts with PII planted where only allowlisted names belong:
+  // state keys, flags, day keys and fields outside the contract.
+  integrity: {
+    version: 1,
+    coverage: S.emailAddress,
+    unaccountedMessages: [{ subject: S.emailBody, from: S.emailAddress }],
+    days: {
+      [S.emailBody]: { inventory: 1 },
+      "2026-07-27": {
+        coverage: "full",
+        inventory: 4,
+        states: { red: 1, [S.emailAddress]: 2, [`gray ${S.emailBody}`]: 1 },
+        flags: [S.emailBody, "inventory-gap"],
+        messageIds: [`<msg-1@private-domain.example>`],
+      },
+    },
+  },
 };
 
 /** Doctor and status payloads carrying credentials the way real ones might. */
@@ -217,6 +234,12 @@ describe("support bundle end-to-end leak safety", () => {
       }
     }
     expect(leaks).toEqual([]);
+    const integrity = searchable.find(({ label }) => label === "mail-integrity.json")?.content;
+    expect(JSON.parse(integrity ?? "null")).toMatchObject({
+      available: true,
+      days: [{ day: "2026-07-27", inventory: 4, states: { red: 1, other: 3 } }],
+      ignoredDays: 1,
+    });
   }, 30_000);
 
   it("emits no identifying IP or MAC address, prefix or interface id, in any case or encoding", async () => {

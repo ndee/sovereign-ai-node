@@ -18,12 +18,15 @@ import { listSanErrorIds, lookupSanError } from "../../support/codes.js";
 import {
   buildInstallDiagnostics,
   type DiagnosticsSource,
+  defaultMailSentinelStatePath,
   defaultNodeDiagnosticsSources,
   defaultNodeKnownSecretSources,
   diagnosticsFileName,
   type InstallDiagnosticsResult,
+  MAIL_STATE_MAX_BYTES,
 } from "../../support/install-diagnostics.js";
 import { type KnownSecretSources, loadKnownSecrets } from "../../support/known-secrets.js";
+import { readSmallFile } from "../../support/tail.js";
 import { buildVersionInventory, summarizeInventory } from "../../support/version-inventory.js";
 import { writeCliError } from "../output.js";
 
@@ -76,8 +79,9 @@ const explainResultSchema = z.object({
  */
 const tryReadMailState = async (statePath: string): Promise<unknown> => {
   try {
-    const { readFile } = await import("node:fs/promises");
-    return JSON.parse(await readFile(statePath, "utf8"));
+    // The bot's runtime account can write this directory: no symlinks, no
+    // devices, bounded size.
+    return JSON.parse(await readSmallFile(statePath, MAIL_STATE_MAX_BYTES));
   } catch {
     return undefined;
   }
@@ -220,9 +224,7 @@ export const registerSupportBundleCommand = (
           contractVersion: CONTRACT_VERSION,
         });
 
-        const mailState = await tryReadMailState(
-          `${DEFAULT_PATHS.stateDir}/mail-sentinel-state.json`,
-        );
+        const mailState = await tryReadMailState(defaultMailSentinelStatePath());
 
         const now = new Date();
         const removedOldBundles = await cleanupOldBundles(directory, now);

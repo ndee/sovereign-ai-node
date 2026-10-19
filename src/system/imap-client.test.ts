@@ -30,6 +30,7 @@ const createNoopClient = (): ImapClientLike => ({
     exists: 0,
   }),
   search: async () => [],
+  status: async () => ({ path: "INBOX" }),
 });
 
 const account = {

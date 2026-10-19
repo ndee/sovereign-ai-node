@@ -1,4 +1,10 @@
 export {
+  KNOWN_INTEGRITY_FLAGS,
+  KNOWN_INTEGRITY_STATES,
+  MAIL_INTEGRITY_FILE,
+  mailIntegrityCounts,
+} from "../support/collectors.js";
+export {
   buildInstallDiagnostics,
   collectSystemSummary,
   DEFAULT_MAX_TOTAL_BYTES,
@@ -11,6 +17,7 @@ export {
   type DisclosureItem,
   decodeThrottled,
   defaultDiagnosticsRun,
+  defaultMailSentinelStatePath,
   defaultNodeDiagnosticsSources,
   defaultNodeKnownSecretSources,
   diagnosticsFileName,
@@ -19,6 +26,7 @@ export {
   INSTALL_DIAGNOSTICS_FORMAT_VERSION,
   type InstallDiagnosticsOptions,
   type InstallDiagnosticsResult,
+  mailIntegrityDiagnosticsSource,
   NEVER_INCLUDED,
   npmLogsDir,
   pickFields,

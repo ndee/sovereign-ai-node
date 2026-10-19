@@ -69,6 +69,8 @@ export interface Pop3ClientLike {
   top(messageNumber: number, lines: number): Promise<Buffer>;
   retr(messageNumber: number): Promise<Buffer>;
   quit(): Promise<void>;
+  /** Drops the connection at once; pending commands reject. Used to enforce a deadline. */
+  abort?(): void;
 }
 
 export const DEFAULT_POP3_TIMEOUT_MS = 10_000;
@@ -527,6 +529,10 @@ export class SocketPop3Client implements Pop3ClientLike {
       true,
     );
     return response.payload;
+  }
+
+  abort(): void {
+    this.destroy();
   }
 
   async quit(): Promise<void> {

@@ -373,6 +373,7 @@ If the simple flow fails, the operator should check these first:
 
 - `docs/ARCHITECTURE.md`
 - `docs/MAIL_SENTINEL_DESIGN.md`
+- `docs/MAIL_INVENTORY.md`
 - `docs/MATRIX_BUNDLED_SETUP.md`
 - `docs/INSTALLER_CONTRACTS.md`
 

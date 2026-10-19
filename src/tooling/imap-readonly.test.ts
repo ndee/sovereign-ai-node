@@ -1,5 +1,7 @@
 import type { FetchMessageObject } from "imapflow";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { mailInventoryResultSchema } from "../contracts/tool.js";
 
 import type { RuntimeConfig } from "../installer/real-service-shared.js";
 import type { ImapClientLike } from "../system/imap-client.js";
@@ -131,6 +133,7 @@ const createNoopClient = (): ImapClientLike => ({
     exists: 0,
   }),
   search: async () => [],
+  status: async () => ({ path: "INBOX" }),
 });
 
 afterEach(() => {
@@ -487,5 +490,318 @@ describe("ImapReadonlyToolService protocol dispatch", () => {
     await expect(
       service.searchMail({ instanceId: "mail-sentinel-imap", query: "ALL" }),
     ).rejects.toMatchObject({ code: "TOOL_INSTANCE_INVALID" });
+  });
+});
+
+describe("ImapReadonlyToolService.inventoryMail", () => {
+  type Mailbox = Exclude<ImapClientLike["mailbox"], false>;
+
+  const openMailbox = (overrides: Partial<Mailbox> = {}): Mailbox => ({
+    path: "INBOX",
+    delimiter: "/",
+    flags: new Set(),
+    uidValidity: 7n,
+    uidNext: 101,
+    exists: 3,
+    ...overrides,
+  });
+
+  const createInventoryService = (input: {
+    uids: number[] | false;
+    mailbox?: ImapClientLike["mailbox"];
+    statusMessages?: number | false;
+    log?: { searches: unknown[]; locks: unknown[]; statuses: unknown[] };
+  }): ImapReadonlyToolService => {
+    process.env[TEST_SECRET_ENV] = "bridge-pass";
+    const runtimeConfig = buildRuntimeConfig(`env:${TEST_SECRET_ENV}`);
+    return new ImapReadonlyToolService({
+      configLoader: async () => runtimeConfig,
+      runner: async (_account, handler) =>
+        await handler({
+          ...createNoopClient(),
+          mailbox: input.mailbox ?? openMailbox(),
+          getMailboxLock: async (mailbox, options) => {
+            input.log?.locks.push({ mailbox, ...options });
+            return { path: "INBOX", release: () => {} };
+          },
+          status: (async (mailbox: string, query: unknown) => {
+            input.log?.statuses.push({ mailbox, query });
+            return input.statusMessages === false
+              ? false
+              : { path: "INBOX", messages: input.statusMessages ?? 3 };
+          }) as unknown as ImapClientLike["status"],
+          search: async (query) => {
+            input.log?.searches.push(query);
+            return input.uids;
+          },
+        }),
+    });
+  };
+
+  it("takes a full read-only census with UIDVALIDITY, STATUS count and internal gaps", async () => {
+    const log = { searches: [] as unknown[], locks: [] as unknown[], statuses: [] as unknown[] };
+    const service = createInventoryService({ uids: [12, 10, 11, 15, 20], log, statusMessages: 5 });
+    const result = await service.inventoryMail({ instanceId: "mail-sentinel-imap" });
+
+    expect(mailInventoryResultSchema.parse(result)).toEqual(result);
+    expect(result).toMatchObject({
+      protocol: "imap",
+      instanceId: "mail-sentinel-imap",
+      mailbox: "INBOX",
+      uidValidity: "7",
+      uidValidityChanged: false,
+      afterUid: 0,
+      uidNext: 101,
+      messageCount: 5,
+      count: 5,
+      highestUid: 20,
+      uidRanges: [
+        [10, 12],
+        [15, 15],
+        [20, 20],
+      ],
+      // 13, 14 and 16-19: holes between listed UIDs. History below UID 10 and
+      // the tail up to UIDNEXT are not arrivals of this census.
+      uidGaps: 6,
+    });
+    expect(Number.isFinite(Date.parse(result.inventoriedAt))).toBe(true);
+    expect(log.searches).toEqual([{ uid: "1:*" }]);
+    expect(log.statuses).toEqual([{ mailbox: "INBOX", query: { messages: true } }]);
+    expect(log.locks).toEqual([
+      {
+        mailbox: "INBOX",
+        readOnly: true,
+        description: "sovereign-tool:mail-sentinel-imap:inventory",
+      },
+    ]);
+  });
+
+  it("continues from the last inventoried UID and counts every vanished UID since", async () => {
+    const log = { searches: [] as unknown[], locks: [] as unknown[], statuses: [] as unknown[] };
+    // `41:*` also returns UID 40 when nothing is above it (RFC 3501): it must be dropped.
+    const service = createInventoryService({
+      uids: [40, 43, 44, 47],
+      log,
+      mailbox: openMailbox({ uidNext: 50 }),
+    });
+    const result = await service.inventoryMail({
+      instanceId: "mail-sentinel-imap",
+      afterUid: 40,
+      uidValidity: "7",
+    });
+
+    expect(log.searches).toEqual([{ uid: "41:*" }]);
+    expect(result).toMatchObject({
+      afterUid: 40,
+      uidValidityChanged: false,
+      count: 3,
+      highestUid: 47,
+      uidRanges: [
+        [43, 44],
+        [47, 47],
+      ],
+      // 41, 42, 45, 46, 48, 49: assigned after UID 40 but no longer listed.
+      uidGaps: 6,
+    });
+  });
+
+  it("starts a new key space with a full census when UIDVALIDITY changed", async () => {
+    const log = { searches: [] as unknown[], locks: [] as unknown[], statuses: [] as unknown[] };
+    const service = createInventoryService({
+      uids: [1, 2, 3],
+      log,
+      mailbox: openMailbox({ uidValidity: 99n, uidNext: 4 }),
+    });
+    const result = await service.inventoryMail({
+      instanceId: "mail-sentinel-imap",
+      afterUid: 500,
+      uidValidity: "7",
+    });
+
+    expect(log.searches).toEqual([{ uid: "1:*" }]);
+    expect(result).toMatchObject({
+      uidValidity: "99",
+      uidValidityChanged: true,
+      afterUid: 0,
+      count: 3,
+      uidRanges: [[1, 3]],
+      uidGaps: 0,
+    });
+  });
+
+  it("skips the search when nothing arrived since the last census", async () => {
+    const log = { searches: [] as unknown[], locks: [] as unknown[], statuses: [] as unknown[] };
+    const service = createInventoryService({
+      uids: [1],
+      log,
+      mailbox: openMailbox({ uidNext: 31 }),
+    });
+    const result = await service.inventoryMail({
+      instanceId: "mail-sentinel-imap",
+      afterUid: 30,
+      uidValidity: "7",
+    });
+
+    expect(log.searches).toEqual([]);
+    expect(result).toMatchObject({ count: 0, uidRanges: [], uidGaps: 0 });
+    expect(result).not.toHaveProperty("highestUid");
+  });
+
+  it("reports an empty mailbox as zero messages and zero gaps", async () => {
+    const service = createInventoryService({
+      uids: [],
+      statusMessages: 0,
+      mailbox: openMailbox({ uidNext: 900, exists: 0 }),
+    });
+    const result = await service.inventoryMail({ instanceId: "mail-sentinel-imap" });
+
+    expect(result).toMatchObject({ messageCount: 0, count: 0, uidRanges: [], uidGaps: 0 });
+    expect(result).not.toHaveProperty("highestUid");
+  });
+
+  it("lists a large mailbox without a result limit", async () => {
+    // 120 000 UIDs, every 1000th one expunged.
+    const uids = Array.from({ length: 120_000 }, (_, index) => index + 1).filter(
+      (uid) => uid % 1000 !== 0,
+    );
+    const service = createInventoryService({
+      uids,
+      statusMessages: uids.length,
+      mailbox: openMailbox({ uidNext: 120_001 }),
+    });
+    const result = await service.inventoryMail({ instanceId: "mail-sentinel-imap" });
+
+    expect(result.protocol).toBe("imap");
+    if (result.protocol !== "imap") {
+      return;
+    }
+    expect(result.count).toBe(uids.length);
+    expect(result.messageCount).toBe(uids.length);
+    expect(result.uidRanges).toHaveLength(120);
+    expect(result.uidGaps).toBe(119);
+    expect(result.highestUid).toBe(119_999);
+  });
+
+  it("falls back to EXISTS when STATUS is refused, and copes with a missing open mailbox", async () => {
+    const refused = await createInventoryService({
+      uids: [],
+      statusMessages: false,
+      mailbox: openMailbox({ exists: 9 }),
+    }).inventoryMail({ instanceId: "mail-sentinel-imap" });
+    expect(refused).toMatchObject({ messageCount: 9, count: 0 });
+
+    const log = { searches: [] as unknown[], locks: [] as unknown[], statuses: [] as unknown[] };
+    const closed = await createInventoryService({
+      uids: [5, 6],
+      statusMessages: false,
+      mailbox: false,
+      log,
+    }).inventoryMail({ instanceId: "mail-sentinel-imap", afterUid: 4, uidValidity: "7" });
+    // Without a UIDVALIDITY to compare, the caller's key space cannot be trusted.
+    expect(log.searches).toEqual([{ uid: "1:*" }]);
+    expect(closed).toMatchObject({ messageCount: 2, count: 2, uidValidityChanged: true });
+    expect(closed).not.toHaveProperty("uidValidity");
+    expect(closed).not.toHaveProperty("uidNext");
+  });
+
+  it("counts gaps up to the highest listed UID when UIDNEXT is unknown", async () => {
+    const result = await createInventoryService({
+      uids: [12, 14],
+      mailbox: openMailbox({ uidNext: 0 }),
+    }).inventoryMail({ instanceId: "mail-sentinel-imap", afterUid: 10, uidValidity: "7" });
+    expect(result).toMatchObject({ uidGaps: 2 });
+    expect(result).not.toHaveProperty("uidNext");
+  });
+
+  it("refuses --after-uid without its UIDVALIDITY or outside the UID range", async () => {
+    const service = createInventoryService({ uids: [] });
+    for (const afterUid of [3, -1, 1.5, 4_294_967_296]) {
+      await expect(
+        service.inventoryMail({
+          instanceId: "mail-sentinel-imap",
+          afterUid,
+          ...(afterUid === 3 ? {} : { uidValidity: "7" }),
+        }),
+      ).rejects.toMatchObject({ code: "MAIL_INVENTORY_INVALID_ARGUMENT", retryable: false });
+    }
+  });
+
+  it("fails instead of reporting an empty census when the UID search fails", async () => {
+    const service = createInventoryService({ uids: false });
+    await expect(
+      service.inventoryMail({ instanceId: "mail-sentinel-imap", afterUid: 10, uidValidity: "7" }),
+    ).rejects.toMatchObject({
+      code: "MAIL_INVENTORY_SEARCH_FAILED",
+      retryable: true,
+      details: { mailbox: "INBOX", afterUid: 10 },
+    });
+  });
+
+  it("enforces its own deadline and closes the connection", async () => {
+    vi.useFakeTimers();
+    try {
+      process.env[TEST_SECRET_ENV] = "bridge-pass";
+      const runtimeConfig = buildRuntimeConfig(`env:${TEST_SECRET_ENV}`);
+      let closed = 0;
+      const service = new ImapReadonlyToolService({
+        configLoader: async () => runtimeConfig,
+        runner: async (_account, handler) =>
+          await handler({
+            ...createNoopClient(),
+            close: () => {
+              closed += 1;
+            },
+            status: (() => new Promise(() => {})) as unknown as ImapClientLike["status"],
+          }),
+      });
+      const pending = service.inventoryMail({ instanceId: "mail-sentinel-imap", timeoutMs: 5_000 });
+      const outcome = expect(pending).rejects.toMatchObject({
+        code: "MAIL_INVENTORY_TIMEOUT",
+        retryable: true,
+        details: { timeoutMs: 5_000 },
+      });
+      await vi.advanceTimersByTimeAsync(5_000);
+      await outcome;
+      expect(closed).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("routes pop3-bound instances to the POP3 inventory with the clamped deadline", async () => {
+    process.env[TEST_SECRET_ENV] = "pop3-secret";
+    const runtimeConfig = buildRuntimeConfig(`env:${TEST_SECRET_ENV}`);
+    const instance = runtimeConfig.sovereignTools.instances[0];
+    if (instance === undefined) {
+      throw new Error("fixture missing tool instance");
+    }
+    instance.config = { ...instance.config, protocol: "pop3", port: "995" };
+    const calls: unknown[] = [];
+    const pop3 = {
+      inventoryMail: async (input: unknown) => {
+        calls.push(input);
+        return { protocol: "pop3" };
+      },
+    } as unknown as Pop3ReadonlyToolService;
+    const service = new ImapReadonlyToolService({
+      configLoader: async () => runtimeConfig,
+      runner: async () => {
+        throw new Error("IMAP runner must not be used for POP3 instances");
+      },
+      pop3,
+    });
+    // POP3 has no UID ranges: --after-uid is ignored, so it needs no UIDVALIDITY.
+    await service.inventoryMail({
+      instanceId: "mail-sentinel-imap",
+      timeoutMs: 999_999,
+      afterUid: 5,
+    });
+    expect(calls).toEqual([
+      {
+        instanceId: "mail-sentinel-imap",
+        timeoutMs: 60_000,
+        account: expect.objectContaining({ port: 995, password: "pop3-secret" }),
+      },
+    ]);
   });
 });

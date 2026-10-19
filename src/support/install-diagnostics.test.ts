@@ -14,10 +14,12 @@ import {
   type DiagnosticsSource,
   decodeThrottled,
   defaultDiagnosticsRun,
+  defaultMailSentinelStatePath,
   defaultNodeDiagnosticsSources,
   defaultNodeKnownSecretSources,
   diagnosticsFileName,
   IDENTIFYING_DATA,
+  mailIntegrityDiagnosticsSource,
   NEVER_INCLUDED,
   npmLogsDir,
   pickFields,
@@ -796,8 +798,14 @@ describe("defaults", () => {
       "journal",
       "journal",
       "json-file",
+      "json-file",
       "system",
     ]);
+    expect(sources[5]).toMatchObject({
+      name: "mail-integrity.json",
+      path: "/var/lib/sovereign-node/mail-sentinel/workspace/data/mail-sentinel-state.json",
+      optional: true,
+    });
     expect(sources[1]).toMatchObject({
       dirs: [npmLogsDir(DEFAULT_PATHS.stateDir), "/root/.npm/_logs"],
     });
@@ -826,6 +834,98 @@ describe("defaults", () => {
       generatedBy: "t",
     });
     expect(result.manifest.files[0]?.status).toBe("collected");
+  });
+});
+
+describe("mail integrity counts", () => {
+  const SUBJECT = "TEST_SUBJECT_DO_NOT_LEAK";
+  const SENDER = "leak-sender@private-domain.example";
+  const MESSAGE_ID = "<TEST_MESSAGE_ID_DO_NOT_LEAK@private-domain.example>";
+
+  it("ships only the allowlisted counts from the Mail Sentinel state", async () => {
+    const statePath = join(dir, "mail-sentinel-state.json");
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        messages: {
+          k1: { subject: SUBJECT, from: SENDER, messageId: MESSAGE_ID, snippet: SUBJECT },
+        },
+        alerts: [{ zone: "red", subject: SUBJECT, from: SENDER }],
+        integrity: {
+          version: 1,
+          coverage: "full",
+          days: {
+            "2026-10-19": {
+              coverage: "full",
+              inventory: 3,
+              states: { red: 1, gray: 1, "read-failed:timeout": 1, [SUBJECT]: 1 },
+              flags: [SENDER],
+              items: [{ messageId: MESSAGE_ID }],
+            },
+          },
+        },
+      }),
+    );
+    const result = await build([mailIntegrityDiagnosticsSource(statePath)]);
+    const entries = entriesOf(result.archive);
+    const counts = JSON.parse(entries.get("files/mail-integrity.json") ?? "null") as {
+      days: Array<{ inventory: number; states: Record<string, number>; flags: string[] }>;
+    };
+    expect(counts.days).toEqual([
+      expect.objectContaining({
+        day: "2026-10-19",
+        inventory: 3,
+        states: { red: 1, gray: 1, "read-failed:timeout": 1, other: 1 },
+        flags: ["other"],
+      }),
+    ]);
+    expect(result.complete).toBe(true);
+    for (const content of entries.values()) {
+      for (const token of [SUBJECT, SENDER, MESSAGE_ID, "private-domain"]) {
+        expect(content).not.toContain(token);
+      }
+    }
+    // The privacy notice is unchanged: these are counts, not mail content.
+    expect(result.manifest.neverIncluded).toContain(
+      "Mail content: no subjects, senders, recipients or message bodies",
+    );
+  });
+
+  it("treats a device without Mail Sentinel state as normal, not as a gap", async () => {
+    const result = await build([mailIntegrityDiagnosticsSource(join(dir, "absent.json"))]);
+    expect(result.complete).toBe(true);
+    expect(result.manifest.files[0]).toMatchObject({
+      file: "files/mail-integrity.json",
+      status: "unavailable",
+      optional: true,
+    });
+  });
+
+  it("reports a state without integrity counts as such", async () => {
+    const statePath = join(dir, "state.json");
+    await writeFile(statePath, JSON.stringify({ messages: {} }));
+    const result = await build([mailIntegrityDiagnosticsSource(statePath)]);
+    expect(JSON.parse(entriesOf(result.archive).get("files/mail-integrity.json") ?? "")).toEqual({
+      available: false,
+      reason: "the installed Mail Sentinel does not record integrity counts",
+    });
+  });
+
+  it("passes the owner and priority through and defaults to the node's state path", () => {
+    expect(mailIntegrityDiagnosticsSource()).toMatchObject({
+      path: defaultMailSentinelStatePath(),
+      purpose:
+        "Mail Sentinel integrity counts per day and outcome state — counts only, no message content",
+    });
+    expect(mailIntegrityDiagnosticsSource("/x.json", { owner: 7, priority: 15 })).toMatchObject({
+      path: "/x.json",
+      owner: 7,
+      priority: 15,
+    });
+    expect(mailIntegrityDiagnosticsSource("/x.json")).not.toHaveProperty("owner");
+    expect(defaultMailSentinelStatePath({ ...DEFAULT_PATHS, stateDir: "/srv/node" })).toBe(
+      "/srv/node/mail-sentinel/workspace/data/mail-sentinel-state.json",
+    );
   });
 });
 

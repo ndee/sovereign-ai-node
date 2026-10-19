@@ -65,6 +65,7 @@ const healthyRun: RunCommand = async (file) => {
 /** Captures the staging directory so cleanup can be asserted after the fact. */
 const makeArchiveSpy = () => {
   const seen: { stagingDir?: string; outputPath?: string } = {};
+  const staged: Record<string, string> = {};
   const createArchive = async (stagingDir: string, outputPath: string): Promise<void> => {
     seen.stagingDir = stagingDir;
     seen.outputPath = outputPath;
@@ -73,11 +74,13 @@ const makeArchiveSpy = () => {
     const entries = await readdir(stagingDir);
     const parts: Buffer[] = [];
     for (const entry of entries.sort()) {
-      parts.push(Buffer.from(`--${entry}--\n`), await readFile(join(stagingDir, entry)));
+      const content = await readFile(join(stagingDir, entry));
+      staged[entry] = content.toString("utf8");
+      parts.push(Buffer.from(`--${entry}--\n`), content);
     }
     await writeFile(outputPath, Buffer.concat(parts), { mode: 0o600 });
   };
-  return { seen, createArchive };
+  return { seen, staged, createArchive };
 };
 
 let workDir: string;
@@ -141,6 +144,7 @@ describe("generateSupportBundle — successful generation", () => {
       "doctor.json",
       "status.json",
       "mail-sentinel-summary.json",
+      "mail-integrity.json",
       "service-states.json",
       "system-resources.json",
       "clock.json",
@@ -417,7 +421,27 @@ describe("generateSupportBundle — partial results", () => {
     });
     const mail = result.manifest.files.find((entry) => entry.file === "mail-sentinel-summary.json");
     expect(mail?.status).toBe("unavailable");
+    const integrity = result.manifest.files.find((entry) => entry.file === "mail-integrity.json");
+    expect(integrity?.status).toBe("unavailable");
     expect(result.complete).toBe(false);
+  });
+
+  it("stays complete when the mail state carries no integrity counts yet", async () => {
+    const { createArchive, staged } = makeArchiveSpy();
+    const result = await generateSupportBundle(workDir, {
+      inventory,
+      doctorReport: { overall: "pass" },
+      status: { ok: true },
+      mailState: { messages: [], alerts: [] },
+      run: healthyRun,
+      now: () => FIXED_NOW,
+      createArchive,
+    });
+    expect(result.complete).toBe(true);
+    expect(JSON.parse(staged["mail-integrity.json"] ?? "null")).toEqual({
+      available: false,
+      reason: "the installed Mail Sentinel does not record integrity counts",
+    });
   });
 
   it("still produces a usable bundle when every command fails", async () => {

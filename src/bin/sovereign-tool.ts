@@ -15,13 +15,23 @@ import {
   type ImapSearchMailResult,
   imapReadMailResultSchema,
   imapSearchMailResultSchema,
+  mailInventoryResultSchema,
 } from "../contracts/tool.js";
 import {
   GuardedJsonStateToolService,
   normalizeMatrixActorUserId,
   resolveMatrixActorFromSessionStatus,
 } from "../tooling/guarded-json-state.js";
-import { ImapReadonlyToolService } from "../tooling/imap-readonly.js";
+import { ImapReadonlyToolService, SovereignToolError } from "../tooling/imap-readonly.js";
+import { formatMailInventoryResult } from "../tooling/mail-inventory.js";
+
+const parseNonNegativeInteger = (value: string): number => {
+  const parsed = Number.parseInt(value, 10);
+  if (!/^[0-9]+$/.test(value.trim()) || !Number.isSafeInteger(parsed)) {
+    throw new InvalidArgumentError("Expected a non-negative integer");
+  }
+  return parsed;
+};
 
 const parsePositiveInteger = (value: string): number => {
   const parsed = Number.parseInt(value, 10);
@@ -299,6 +309,73 @@ const main = async (): Promise<void> => {
         } catch (error) {
           writeCliError(command, error, Boolean(opts.json));
           process.exitCode = 1;
+        }
+      },
+    );
+
+  program
+    .command("mail-inventory")
+    .description(
+      "List message identifiers of a mail instance, read-only and without a result limit",
+    )
+    .requiredOption("--instance <id>", "Tool instance ID")
+    .option(
+      "--after-uid <uid>",
+      "IMAP: list only UIDs above this one (needs --uid-validity)",
+      parseNonNegativeInteger,
+    )
+    .option("--uid-validity <value>", "IMAP: the UIDVALIDITY --after-uid was recorded under")
+    .option(
+      "--timeout-ms <ms>",
+      "Deadline for the whole inventory (1000-60000)",
+      parsePositiveInteger,
+    )
+    .option("--config-path <path>", "Override Sovereign runtime config path")
+    .option("--json", "Emit JSON output")
+    .action(
+      async (opts: {
+        instance: string;
+        afterUid?: number;
+        uidValidity?: string;
+        timeoutMs?: number;
+        configPath?: string;
+        json?: boolean;
+      }) => {
+        const command = "mail-inventory";
+        try {
+          const result = await toolService.inventoryMail({
+            instanceId: opts.instance,
+            ...(opts.afterUid === undefined ? {} : { afterUid: opts.afterUid }),
+            ...(opts.uidValidity === undefined ? {} : { uidValidity: opts.uidValidity }),
+            ...(opts.timeoutMs === undefined ? {} : { timeoutMs: opts.timeoutMs }),
+            ...(opts.configPath === undefined ? {} : { configPath: opts.configPath }),
+          });
+          if (opts.json) {
+            writeCliSuccess(command, result, mailInventoryResultSchema, true, { compact: true });
+            return;
+          }
+          process.stdout.write(`${formatMailInventoryResult(result)}\n`);
+        } catch (error) {
+          // Passed as a plain record so the envelope keeps the tool's own
+          // error code (an Error instance is reported as CLI_ERROR).
+          writeCliError(
+            command,
+            error instanceof SovereignToolError
+              ? {
+                  code: error.code,
+                  message: error.message,
+                  retryable: error.retryable,
+                  ...(error.details === undefined ? {} : { details: error.details }),
+                }
+              : error,
+            Boolean(opts.json),
+          );
+          process.exitCode = 1;
+          // A timed-out connection may still hold the event loop open until its
+          // idle timeout; the deadline is only kept if the process ends now.
+          if (error instanceof SovereignToolError && error.code === "MAIL_INVENTORY_TIMEOUT") {
+            process.exit();
+          }
         }
       },
     );

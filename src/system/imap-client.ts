@@ -39,6 +39,7 @@ export type ImapClientLike = Pick<
   | "mailbox"
   | "mailboxOpen"
   | "search"
+  | "status"
 > &
   // Optional so the many test doubles that are plain objects keep type-checking;
   // the real ImapFlow is an EventEmitter and always has both.

@@ -43,6 +43,7 @@ import {
   defaultRunCommand,
   type RunCommand,
   SUPPORTED_UNITS,
+  summarizeMailIntegrity,
   summarizeMailState,
 } from "./collectors.js";
 import { findUnmaskedIpClasses, IpMasker, maskIpAddressesInValue } from "./ip-mask.js";
@@ -359,6 +360,7 @@ export const generateSupportBundle = async (
   );
 
   results.push(summarizeMailState(deps.mailState));
+  results.push(summarizeMailIntegrity(deps.mailState));
 
   if (deps.updateStatus !== undefined) {
     results.push({

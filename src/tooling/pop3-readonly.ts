@@ -5,12 +5,17 @@ import { dirname, join } from "node:path";
 import PostalMime from "postal-mime";
 
 import { DEFAULT_PATHS } from "../config/paths.js";
-import type { ImapReadMailResult, ImapSearchMailResult } from "../contracts/tool.js";
+import type {
+  ImapReadMailResult,
+  ImapSearchMailResult,
+  Pop3MailInventoryResult,
+} from "../contracts/tool.js";
 import {
   type Pop3AccountCredentials,
   type Pop3ClientLike,
   runWithPop3Client,
 } from "../system/pop3-client.js";
+import { hashUidl, withInventoryDeadline } from "./mail-inventory.js";
 import {
   normalizeParsedHeaders,
   SovereignToolError,
@@ -248,14 +253,21 @@ export class Pop3ReadonlyToolService {
     return join(this.options.indexDir ?? defaultPop3IndexDir(), `${instanceId}.json`);
   }
 
-  private async loadIndex(instanceId: string): Promise<Pop3UidlIndex> {
+  /**
+   * Reads the index without creating, repairing or writing it. The search
+   * replaces the file by rename, so a concurrent reader sees either the old or
+   * the new index, never a torn one.
+   */
+  private async peekIndex(
+    instanceId: string,
+  ): Promise<{ state: "present"; index: Pop3UidlIndex } | { state: "absent" | "corrupt" }> {
     const path = this.indexPath(instanceId);
     let raw: string;
     try {
       raw = await readFile(path, "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        return createIndex();
+        return { state: "absent" };
       }
       throw new SovereignToolError(
         "POP3_INDEX_READ_FAILED",
@@ -267,12 +279,18 @@ export class Pop3ReadonlyToolService {
     try {
       const parsed: unknown = JSON.parse(raw);
       if (isIndex(parsed)) {
-        return parsed;
+        return { state: "present", index: parsed };
       }
     } catch {
-      // fall through: a corrupt index is replaced by a fresh generation
+      // fall through: reported as corrupt
     }
-    return createIndex();
+    return { state: "corrupt" };
+  }
+
+  /** A missing or corrupt index is replaced by a fresh generation. */
+  private async loadIndex(instanceId: string): Promise<Pop3UidlIndex> {
+    const peeked = await this.peekIndex(instanceId);
+    return peeked.state === "present" ? peeked.index : createIndex();
   }
 
   private async saveIndex(instanceId: string, index: Pop3UidlIndex): Promise<void> {
@@ -396,6 +414,57 @@ export class Pop3ReadonlyToolService {
       messages: matching.slice(0, limit).map((entry) => toSummary(entry)),
       uidValidity: `${accountFingerprint(input.account)}:${index.generation}`,
       ...(note === undefined ? {} : { note }),
+    };
+  }
+
+  /**
+   * Full UIDL listing plus `STAT`, mapped through the message index READ-ONLY:
+   * it never assigns uids or writes the index, so it cannot race the search,
+   * which owns both. A UIDL the index has not seen yet is reported by hash
+   * only; the next search assigns its uid.
+   */
+  async inventoryMail(input: {
+    instanceId: string;
+    account: Pop3AccountCredentials;
+    timeoutMs: number;
+  }): Promise<Pop3MailInventoryResult> {
+    const peeked = await this.peekIndex(input.instanceId);
+    let openClient: Pop3ClientLike | undefined;
+    const work = this.runner(input.account, async (client) => {
+      openClient = client;
+      const stat = await client.stat();
+      return { stat, listing: await client.uidl() };
+    });
+    const { stat, listing } = await withInventoryDeadline(input.timeoutMs, work, () => {
+      openClient?.abort?.();
+    });
+
+    const entries = peeked.state === "present" ? peeked.index.entries : {};
+    const messages = listing
+      .slice()
+      .sort((left, right) => left.number - right.number)
+      .map((entry) => {
+        const indexed = Object.hasOwn(entries, entry.uidl) ? entries[entry.uidl] : undefined;
+        return {
+          uidlHash: hashUidl(entry.uidl),
+          ...(indexed === undefined ? {} : { uid: indexed.uid }),
+          ...(indexed?.baseline === true ? { baseline: true as const } : {}),
+        };
+      });
+
+    return {
+      protocol: "pop3",
+      instanceId: input.instanceId,
+      mailbox: "INBOX",
+      inventoriedAt: new Date().toISOString(),
+      messageCount: stat.count,
+      count: messages.length,
+      ...(peeked.state === "present"
+        ? { uidValidity: `${accountFingerprint(input.account)}:${peeked.index.generation}` }
+        : {}),
+      index: peeked.state,
+      messages,
+      unindexedCount: messages.filter((message) => message.uid === undefined).length,
     };
   }
 

@@ -10,7 +10,11 @@ import PostalMime from "postal-mime";
 
 import { DEFAULT_PATHS } from "../config/paths.js";
 import type { MailProtocol } from "../contracts/install.js";
-import type { ImapReadMailResult, ImapSearchMailResult } from "../contracts/tool.js";
+import type {
+  ImapReadMailResult,
+  ImapSearchMailResult,
+  MailInventoryResult,
+} from "../contracts/tool.js";
 import type { RuntimeConfig } from "../installer/real-service-shared.js";
 import { parseRuntimeConfigDocument } from "../installer/real-service-shared.js";
 import {
@@ -19,6 +23,12 @@ import {
   runWithImapClient,
 } from "../system/imap-client.js";
 import { parseTemplateRef } from "../templates/catalog.js";
+import {
+  clampInventoryTimeout,
+  compressUidRanges,
+  countUidGaps,
+  withInventoryDeadline,
+} from "./mail-inventory.js";
 import {
   normalizeParsedHeaders,
   parseBooleanString,
@@ -37,6 +47,8 @@ const DEFAULT_MAX_SEARCH_RESULTS = 10;
 const MAX_SEARCH_RESULTS = 50;
 const DEFAULT_MAX_MESSAGE_BYTES = 5 * 1024 * 1024;
 const DEFAULT_MAX_TEXT_CHARS = 12_000;
+/** UIDs are 32-bit unsigned (RFC 3501 §2.3.1.1). */
+const MAX_IMAP_UID = 4_294_967_295;
 
 type ToolRunner = <T>(
   account: ImapAccountCredentials,
@@ -589,6 +601,131 @@ export class ImapReadonlyToolService {
           },
         ),
     );
+  }
+
+  /**
+   * Read-only identifier census: the UIDs above `afterUid` (all of them when
+   * the key space changed or no `afterUid` was given), the mailbox's
+   * UIDVALIDITY and the server's own message count. Unlike `searchMail` there
+   * is no result limit and no date window, so an outage of any length still
+   * lists every arrival that is still in the mailbox.
+   */
+  async inventoryMail(input: {
+    instanceId: string;
+    afterUid?: number;
+    uidValidity?: string;
+    timeoutMs?: number;
+    configPath?: string;
+  }): Promise<MailInventoryResult> {
+    const instance = await this.resolveToolInstance(input.instanceId, input.configPath);
+    const timeoutMs = clampInventoryTimeout(input.timeoutMs);
+    if (instance.protocol === "pop3") {
+      return await this.pop3.inventoryMail({
+        instanceId: instance.instanceId,
+        account: instance.account,
+        timeoutMs,
+      });
+    }
+    const requestedAfterUid = input.afterUid ?? 0;
+    if (
+      !Number.isSafeInteger(requestedAfterUid) ||
+      requestedAfterUid < 0 ||
+      requestedAfterUid > MAX_IMAP_UID ||
+      (requestedAfterUid > 0 && input.uidValidity === undefined)
+    ) {
+      throw new SovereignToolError(
+        "MAIL_INVENTORY_INVALID_ARGUMENT",
+        "--after-uid must be an IMAP UID and needs the --uid-validity it was recorded under",
+        false,
+        { afterUid: input.afterUid },
+      );
+    }
+    const mailbox = instance.account.mailbox;
+    let openClient: ImapClientLike | undefined;
+    const work = this.runner(instance.account, async (client) => {
+      openClient = client;
+      // STATUS before EXAMINE: RFC 3501 advises against STATUS on the selected mailbox.
+      // imapflow resolves `false` (not a throw) when the server refuses STATUS.
+      const status = (await client.status(mailbox, { messages: true })) as
+        | { messages?: number }
+        | false;
+      return await withMailboxLock(
+        client,
+        mailbox,
+        `sovereign-tool:${instance.instanceId}:inventory`,
+        async () => {
+          const open = client.mailbox;
+          const uidValidity =
+            open !== false && typeof open.uidValidity === "bigint"
+              ? open.uidValidity.toString()
+              : undefined;
+          const uidNext =
+            open !== false && typeof open.uidNext === "number" && open.uidNext > 0
+              ? open.uidNext
+              : undefined;
+          const uidValidityChanged =
+            input.uidValidity !== undefined && input.uidValidity !== uidValidity;
+          const afterUid = uidValidityChanged ? 0 : requestedAfterUid;
+          const nothingNew = uidNext !== undefined && afterUid + 1 >= uidNext;
+          const matches = nothingNew
+            ? []
+            : await client.search({ uid: `${String(afterUid + 1)}:*` }, { uid: true });
+          // imapflow resolves `false` when the search failed (NO/BAD or a lost
+          // connection); in a census that must not read as "no messages".
+          if (matches === false) {
+            throw new SovereignToolError(
+              "MAIL_INVENTORY_SEARCH_FAILED",
+              `The IMAP server did not answer the UID search of ${mailbox}`,
+              true,
+              { mailbox, afterUid },
+            );
+          }
+          // `n:*` also matches the highest UID when n is above it (RFC 3501 §6.4.8).
+          const uidRanges = compressUidRanges(matches.filter((uid) => uid > afterUid));
+          const lowestUid = uidRanges[0]?.[0];
+          const highestUid = uidRanges[uidRanges.length - 1]?.[1];
+          const count = uidRanges.reduce((sum, [first, last]) => sum + last - first + 1, 0);
+          // A continuation counts every UID assigned since the last census; a
+          // full census only the holes between the UIDs it lists, because the
+          // mailbox's earlier history is not an arrival in this period.
+          const uidGaps =
+            afterUid > 0
+              ? countUidGaps(
+                  uidRanges,
+                  afterUid,
+                  Math.max(uidNext === undefined ? 0 : uidNext - 1, highestUid ?? afterUid),
+                )
+              : lowestUid === undefined || highestUid === undefined
+                ? 0
+                : countUidGaps(uidRanges, lowestUid - 1, highestUid);
+          const reportedCount =
+            status !== false && typeof status.messages === "number"
+              ? status.messages
+              : open === false
+                ? count
+                : open.exists;
+
+          return {
+            protocol: "imap" as const,
+            instanceId: instance.instanceId,
+            mailbox,
+            inventoriedAt: new Date().toISOString(),
+            messageCount: reportedCount,
+            count,
+            ...(uidValidity === undefined ? {} : { uidValidity }),
+            uidValidityChanged,
+            afterUid,
+            ...(uidNext === undefined ? {} : { uidNext }),
+            ...(highestUid === undefined ? {} : { highestUid }),
+            uidRanges,
+            uidGaps,
+          };
+        },
+      );
+    });
+    return await withInventoryDeadline(timeoutMs, work, () => {
+      openClient?.close();
+    });
   }
 
   private async resolveToolInstance(

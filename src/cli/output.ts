@@ -15,6 +15,7 @@ export const writeCliSuccess = <T>(
   result: T,
   resultSchema: ZodType<T>,
   json: boolean,
+  options: { compact?: boolean } = {},
 ): void => {
   if (!json) {
     process.stdout.write(`${command}: scaffold response generated\n`);
@@ -30,7 +31,9 @@ export const writeCliSuccess = <T>(
     result,
   });
 
-  process.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`);
+  process.stdout.write(
+    `${options.compact === true ? JSON.stringify(envelope) : JSON.stringify(envelope, null, 2)}\n`,
+  );
 };
 
 export const writeCliError = (command: string, error: unknown, json: boolean): void => {
