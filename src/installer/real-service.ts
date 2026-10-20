@@ -83,10 +83,24 @@ import {
   type SetupUiBootstrapState,
 } from "../onboarding/setup-ui-bootstrap.js";
 import {
+  buildOpenClawClosedToolPolicy,
+  resolveOpenClawScanAgentId,
+} from "../openclaw/agent-tool-policy.js";
+import {
   type OpenClawBootstrapper,
   resolveOpenClawSpawnLookupPath,
   resolveRequestedOpenClawVersion,
 } from "../openclaw/bootstrap.js";
+import {
+  createDefaultExecPinningEnvironment,
+  describeExecWrapperInvocation,
+  type ExecPinningEnvironment,
+  type ExecWrapperPlan,
+  parseExecApprovalsSnapshot,
+  planExecApprovalsReconciliation,
+  planExecWrapper,
+  type ServiceUserIdentity,
+} from "../openclaw/exec-pinning.js";
 import type { OpenClawGatewayServiceManager } from "../openclaw/gateway-service.js";
 import {
   extractGuardedJsonStateActorFromConversationInfoText,
@@ -109,6 +123,10 @@ import {
   buildOpenClawOpenRouterModelsParams,
   resolveOpenRouterPrivacy,
 } from "../openclaw/openrouter-routing.js";
+import {
+  TYPED_TOOL_CONFIRM_COMMAND,
+  TYPED_TOOL_OPENCLAW_PLUGIN_ID,
+} from "../openclaw/typed-tool-runtime.js";
 import type { DockerRuntimePreparer } from "../system/docker-runtime.js";
 import { type ExecResult, type ExecRunner, PRIVILEGE_DROP_SPAWN_CWD } from "../system/exec.js";
 import type { ImapTester } from "../system/imap.js";
@@ -261,6 +279,15 @@ import {
   textContainsId,
   truncateText,
 } from "./real-service-shared.js";
+import {
+  renderTypedToolPluginConfig,
+  renderTypedToolPluginIndex,
+  renderTypedToolPluginManifest,
+  renderTypedToolPluginRuntime,
+  TYPED_TOOL_COMMAND_TIMEOUT_MS,
+  TYPED_TOOL_CONFIRM_TTL_MS,
+  type TypedToolPluginTool,
+} from "./real-service-typed-tool-plugin.js";
 import {
   dedupeStrings,
   isBotConfigRecordMap,
@@ -494,6 +521,8 @@ type RealInstallerServiceDeps = {
    * files; production wiring never sets it.
    */
   releaseAuthorizationOwnerUids?: readonly number[];
+  /** Where exec wrappers live and how ownership is probed; injectable for tests. */
+  execPinning?: ExecPinningEnvironment;
 };
 
 type RuntimeConfigTemplatesInstalledEntry = RuntimeConfig["templates"]["installed"][number];
@@ -621,6 +650,8 @@ export class RealInstallerService implements InstallerService {
 
   private readonly releaseAuthorizationOwnerUids: readonly number[];
 
+  private readonly execPinning: ExecPinningEnvironment;
+
   // Candidate machine-id paths for resolveStableInstallationId, in priority
   // order. A protected field (not a direct constant read) only so tests can
   // redirect them to point at temp files and exercise the persisted fallback.
@@ -662,6 +693,12 @@ export class RealInstallerService implements InstallerService {
     this.execRunner = deps.execRunner ?? null;
     this.fetchImpl = deps.fetchImpl ?? defaultFetch;
     this.releaseAuthorizationOwnerUids = deps.releaseAuthorizationOwnerUids ?? [0];
+    this.execPinning =
+      deps.execPinning ??
+      createDefaultExecPinningEnvironment(async (args) => {
+        const result = await this.safeExec("id", args);
+        return result.ok && result.result.exitCode === 0 ? result.result.stdout.trim() : null;
+      });
   }
 
   private async listBotPackages(): Promise<LoadedBotPackage[]> {
@@ -3338,6 +3375,12 @@ export class RealInstallerService implements InstallerService {
                 openclawPlugins: [...previousEntry.openclawPlugins],
                 openclawBundledPlugins: [...previousEntry.openclawBundledPlugins],
                 openclawToolNames: [...previousEntry.openclawToolNames],
+                ...(previousEntry.openclawTypedTool === undefined
+                  ? {}
+                  : { openclawTypedTool: previousEntry.openclawTypedTool }),
+                ...(previousEntry.openclawScanAgent === undefined
+                  ? {}
+                  : { openclawScanAgent: previousEntry.openclawScanAgent }),
               },
         next: input.targetToolTemplate,
         previousKeyId: input.installed.keyId,
@@ -4107,18 +4150,36 @@ export class RealInstallerService implements InstallerService {
     config: Record<string, string>;
     secretRefs: Record<string, string>;
   } {
-    return {
-      config: Object.fromEntries(
-        (Object.entries(tool.config) as Array<[string, (typeof tool.config)[string]]>).map(
-          ([key, binding]) => [
-            key,
-            this.stringifyBotBindingValue(
-              this.resolveRequiredBotPathValue(runtimeConfig, binding.from, context),
-              binding.stringify === true,
+    // Node owns the scan agent's id, so it is added to the tool config rather
+    // than bound from the manifest; a bot reading it can fall back to its own
+    // agent on nodes that render no scan agent.
+    const scanAgentConfig =
+      context?.botPackage.toolTemplates.some(
+        (toolTemplate) =>
+          toolTemplate.templateRef === tool.templateRef &&
+          toolTemplate.manifest.openclawScanAgent !== undefined,
+      ) === true
+        ? {
+            scanAgentId: resolveOpenClawScanAgentId(
+              String(this.resolveRequiredBotPathValue(runtimeConfig, "agent.id", context)),
             ),
-          ],
+          }
+        : {};
+    return {
+      config: {
+        ...Object.fromEntries(
+          (Object.entries(tool.config) as Array<[string, (typeof tool.config)[string]]>).map(
+            ([key, binding]) => [
+              key,
+              this.stringifyBotBindingValue(
+                this.resolveRequiredBotPathValue(runtimeConfig, binding.from, context),
+                binding.stringify === true,
+              ),
+            ],
+          ),
         ),
-      ),
+        ...scanAgentConfig,
+      },
       secretRefs: Object.fromEntries(
         (Object.entries(tool.secretRefs) as Array<[string, (typeof tool.secretRefs)[string]]>).map(
           ([key, binding]) => [
@@ -4717,6 +4778,7 @@ export class RealInstallerService implements InstallerService {
         : (inlineContent ?? "");
     const toolSection = await this.buildManagedBotToolSection(
       context.runtimeConfig,
+      context.agent.id,
       context.toolInstanceIds,
     );
     return `${renderTemplateWorkspaceContent({
@@ -4731,15 +4793,18 @@ export class RealInstallerService implements InstallerService {
 
   private async buildManagedBotToolSection(
     runtimeConfig: RuntimeConfig,
+    agentId: string,
     toolInstanceIds: string[],
   ): Promise<string> {
-    const boundTools = this.resolveBoundToolInstances(runtimeConfig, toolInstanceIds);
+    const bound = await this.resolveBoundToolManifests(runtimeConfig, toolInstanceIds);
+    const typedOnly = bound.some(({ manifest }) => manifest.openclawTypedTool !== undefined);
     const toolLines =
-      boundTools.length === 0
+      bound.length === 0
         ? ["No bound tool instances."]
-        : ["Use only the documented OpenClaw tools or CLI commands listed below.", ""];
-    for (const tool of boundTools) {
-      const manifest = await this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef);
+        : typedOnly
+          ? ["Use only the documented OpenClaw tools listed below.", ""]
+          : ["Use only the documented OpenClaw tools or CLI commands listed below.", ""];
+    for (const { tool, manifest } of bound) {
       toolLines.push(
         `- \`${tool.id}\``,
         `  template: \`${tool.templateRef}\``,
@@ -4747,13 +4812,36 @@ export class RealInstallerService implements InstallerService {
         ...this.listDocumentedOpenClawToolNames(manifest).map(
           (toolName) => `  openclaw-tool: \`${toolName}\``,
         ),
-        ...this.listDocumentedSovereignToolCommands(runtimeConfig, tool.id, manifest).map(
-          (command) => `  command: \`${command}\``,
-        ),
-        ...this.listDocumentedSovereignToolNotes(manifest),
+        ...(typedOnly
+          ? this.listDocumentedTypedToolLines(manifest)
+          : [
+              ...this.listDocumentedSovereignToolCommands(runtimeConfig, tool.id, manifest).map(
+                (command) => {
+                  const plan = this.planAgentExecWrapper(agentId, command);
+                  return plan === null
+                    ? `  command: \`${command}\``
+                    : `  command: \`${describeExecWrapperInvocation(plan)}\` (runs \`${command}\`)`;
+                },
+              ),
+              ...this.listDocumentedSovereignToolNotes(manifest),
+            ]),
       );
     }
     return toolLines.join("\n");
+  }
+
+  private listDocumentedTypedToolLines(manifest: ToolTemplateDefinition): string[] {
+    const typedTool = manifest.openclawTypedTool;
+    if (typedTool === undefined) {
+      return [];
+    }
+    return [
+      `  openclaw-tool: \`${typedTool.name}\``,
+      `  operations: ${typedTool.operations.map((operation) => operation.name).join(", ")}`,
+      `  note: use the OpenClaw tool \`${typedTool.name}\` for every request this tool covers; there is no shell, exec or file access`,
+      "  note: changes are accepted only when the operator wrote the message that started the turn; otherwise the tool refuses and nothing changes",
+      `  note: operations that lower alerting only record a pending change and return a code; tell the operator exactly what would change and that it applies only after they send \`/${TYPED_TOOL_CONFIRM_COMMAND} <code>\``,
+    ];
   }
 
   private renderSystemdServiceResource(
@@ -5573,13 +5661,16 @@ export class RealInstallerService implements InstallerService {
 
   private listDeclaredOpenClawPluginIds(manifest: ToolTemplateDefinition): string[] {
     return dedupeStrings([
-      ...(manifest.openclawPlugins ?? []),
+      ...this.listLoadableOpenClawPluginIds(manifest),
       ...(manifest.openclawBundledPlugins ?? []),
     ]);
   }
 
   private listLoadableOpenClawPluginIds(manifest: ToolTemplateDefinition): string[] {
-    return dedupeStrings(manifest.openclawPlugins ?? []);
+    return dedupeStrings([
+      ...(manifest.openclawPlugins ?? []),
+      ...(manifest.openclawTypedTool === undefined ? [] : [TYPED_TOOL_OPENCLAW_PLUGIN_ID]),
+    ]);
   }
 
   private listRequiredOpenClawPluginIds(botPackages: LoadedBotPackage[]): string[] {
@@ -5640,7 +5731,9 @@ export class RealInstallerService implements InstallerService {
     return botPackages.some((botPackage) =>
       botPackage.toolTemplates.some((toolTemplate) => {
         const manifest = toolTemplate.manifest;
+        // A scan agent serves the bot's own scan, which runs the lobster CLI.
         return (
+          manifest.openclawScanAgent !== undefined ||
           this.listDeclaredOpenClawPluginIds(manifest).includes("lobster") ||
           this.listDocumentedOpenClawToolNames(manifest).includes("lobster")
         );
@@ -5964,6 +6057,7 @@ export default function (api) {
   private async writeManagedOpenClawExtensions(input: {
     runtimeConfig: RuntimeConfig;
   }): Promise<void> {
+    await this.writeManagedTypedToolExtension(input.runtimeConfig);
     const workspaceBindings: Record<string, string[]> = {};
     for (const agent of input.runtimeConfig.openclawProfile.agents) {
       const toolInstanceIds = agent.toolInstanceIds ?? [];
@@ -6025,22 +6119,177 @@ export default function (api) {
     }
   }
 
-  private async listAgentExecAllowlistPatterns(
+  private async resolveBoundToolManifests(
+    runtimeConfig: RuntimeConfig,
+    toolInstanceIds: string[],
+  ): Promise<
+    Array<{
+      tool: RuntimeConfig["sovereignTools"]["instances"][number];
+      manifest: ToolTemplateDefinition;
+    }>
+  > {
+    return await Promise.all(
+      this.resolveBoundToolInstances(runtimeConfig, toolInstanceIds).map(async (tool) => ({
+        tool,
+        manifest: await this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef),
+      })),
+    );
+  }
+
+  private async listManagedScanAgents(
+    runtimeConfig: RuntimeConfig,
+    agents: RuntimeAgentEntry[],
+  ): Promise<Array<{ id: string; toolNames: string[] }>> {
+    const agentIds = new Set(agents.map((agent) => agent.id));
+    const scanAgents: Array<{ id: string; toolNames: string[] }> = [];
+    for (const agent of agents) {
+      const toolNames = dedupeStrings(
+        (await this.resolveBoundToolManifests(runtimeConfig, agent.toolInstanceIds ?? [])).flatMap(
+          ({ manifest }) => manifest.openclawScanAgent?.toolNames ?? [],
+        ),
+      );
+      if (toolNames.length === 0) {
+        continue;
+      }
+      const id = resolveOpenClawScanAgentId(agent.id);
+      if (agentIds.has(id)) {
+        this.logger.warn(
+          { agentId: agent.id, scanAgentId: id },
+          "Scan agent id is already taken by another agent; not rendering the scan agent",
+        );
+        continue;
+      }
+      scanAgents.push({ id, toolNames });
+    }
+    return scanAgents;
+  }
+
+  private async findBotPackageByToolTemplateRef(
+    templateRef: string,
+  ): Promise<LoadedBotPackage | null> {
+    return (
+      (await this.listBotPackages()).find((botPackage) =>
+        botPackage.toolTemplates.some((toolTemplate) => toolTemplate.templateRef === templateRef),
+      ) ?? null
+    );
+  }
+
+  private async writeManagedTypedToolExtension(runtimeConfig: RuntimeConfig): Promise<void> {
+    const extensionDir = join(
+      runtimeConfig.openclaw.openclawHome,
+      "extensions",
+      TYPED_TOOL_OPENCLAW_PLUGIN_ID,
+    );
+    const tools = new Map<string, TypedToolPluginTool>();
+    const scripts: Array<{ source: string; target: string }> = [];
+    for (const agent of runtimeConfig.openclawProfile.agents) {
+      for (const { tool, manifest } of await this.resolveBoundToolManifests(
+        runtimeConfig,
+        agent.toolInstanceIds ?? [],
+      )) {
+        const typedTool = manifest.openclawTypedTool;
+        if (typedTool === undefined) {
+          continue;
+        }
+        const botPackage = await this.findBotPackageByToolTemplateRef(tool.templateRef);
+        if (botPackage === null) {
+          throw {
+            code: "TYPED_TOOL_SOURCE_UNAVAILABLE",
+            message: `Bot package for typed tool template '${tool.templateRef}' is unavailable`,
+            retryable: false,
+          };
+        }
+        const source = resolve(botPackage.rootDir, typedTool.script);
+        if (!source.startsWith(`${resolve(botPackage.rootDir)}/`)) {
+          throw {
+            code: "TYPED_TOOL_SOURCE_UNAVAILABLE",
+            message: `Typed tool script for '${tool.templateRef}' is outside its bot package`,
+            retryable: false,
+          };
+        }
+        // The script runs from node's own extension directory, outside every
+        // agent workspace, so no agent file tool can reach it.
+        const target = join(extensionDir, "bin", tool.id, basename(typedTool.script));
+        scripts.push({ source, target });
+        const entry: TypedToolPluginTool = tools.get(typedTool.name) ?? {
+          name: typedTool.name,
+          description: typedTool.description,
+          operations: typedTool.operations,
+          bindings: [],
+        };
+        entry.bindings.push({
+          workspaceDir: agent.workspace,
+          toolInstanceId: tool.id,
+          script: target,
+          cwd: agent.workspace,
+        });
+        tools.set(typedTool.name, entry);
+      }
+    }
+    if (tools.size === 0) {
+      return;
+    }
+
+    const stateDir = join(
+      runtimeConfig.openclaw.openclawHome,
+      "state",
+      TYPED_TOOL_OPENCLAW_PLUGIN_ID,
+    );
+    await mkdir(stateDir, { recursive: true, mode: 0o700 });
+    await chmod(stateDir, 0o700);
+    await this.applyConfiguredRuntimeOwnership(stateDir, runtimeConfig);
+
+    for (const dir of [extensionDir, join(extensionDir, "bin")]) {
+      await mkdir(dir, { recursive: true });
+      await this.applyTrustedOpenClawExtensionOwnership(dir);
+    }
+    for (const script of scripts) {
+      await mkdir(dirname(script.target), { recursive: true });
+      await this.applyTrustedOpenClawExtensionOwnership(dirname(script.target));
+      await writeFile(script.target, await readFile(script.source));
+      await chmod(script.target, 0o644);
+      await this.applyTrustedOpenClawExtensionOwnership(script.target);
+    }
+    const files = [
+      { name: "openclaw.plugin.json", content: renderTypedToolPluginManifest() },
+      {
+        name: "plugin-config.json",
+        content: renderTypedToolPluginConfig({
+          runtimeConfigPath: this.paths.configPath,
+          stateDir,
+          operatorUserIds: [runtimeConfig.matrix.operator.userId],
+          confirmTtlMs: TYPED_TOOL_CONFIRM_TTL_MS,
+          commandTimeoutMs: TYPED_TOOL_COMMAND_TIMEOUT_MS,
+          tools: Array.from(tools.values()),
+        }),
+      },
+      { name: "runtime.js", content: renderTypedToolPluginRuntime() },
+      { name: "index.js", content: renderTypedToolPluginIndex() },
+    ];
+    for (const file of files) {
+      const path = join(extensionDir, file.name);
+      await writeFile(path, `${file.content}\n`, "utf8");
+      await this.applyTrustedOpenClawExtensionOwnership(path);
+    }
+  }
+
+  private async listAgentExecAllowlistCommands(
     runtimeConfig: RuntimeConfig,
     toolInstanceIds: string[],
   ): Promise<string[]> {
-    const patterns = new Set<string>();
-    for (const tool of this.resolveBoundToolInstances(runtimeConfig, toolInstanceIds)) {
-      const manifest = await this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef);
-      for (const command of manifest.allowedCommands) {
-        const rendered = this.renderSovereignToolCommand(runtimeConfig, tool.id, command);
-        const [executable] = rendered.split(" ");
-        if (executable?.startsWith("/")) {
-          patterns.add(executable);
-        }
-      }
+    const bound = await this.resolveBoundToolManifests(runtimeConfig, toolInstanceIds);
+    // A typed tool closes the agent's tool surface: no template bound to it
+    // reaches exec, including core templates such as imap-readonly.
+    if (bound.some(({ manifest }) => manifest.openclawTypedTool !== undefined)) {
+      return [];
     }
-    return Array.from(patterns);
+    return dedupeStrings(
+      bound.flatMap(({ tool, manifest }) =>
+        this.listDocumentedSovereignToolCommands(runtimeConfig, tool.id, manifest).filter(
+          (command) => command.startsWith("/"),
+        ),
+      ),
+    );
   }
 
   private async buildOpenClawAgentToolPolicy(
@@ -6048,6 +6297,7 @@ export default function (api) {
     toolInstanceIds: string[],
   ): Promise<{
     allow: string[];
+    deny?: string[];
     elevated?: {
       enabled: boolean;
     };
@@ -6057,15 +6307,19 @@ export default function (api) {
       ask: "off";
     };
   } | null> {
-    const boundToolManifests = await Promise.all(
-      this.resolveBoundToolInstances(runtimeConfig, toolInstanceIds).map(
-        async (tool) => await this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef),
-      ),
-    );
+    const boundToolManifests = (
+      await this.resolveBoundToolManifests(runtimeConfig, toolInstanceIds)
+    ).map(({ manifest }) => manifest);
     const openclawToolNames = dedupeStrings(
       boundToolManifests.flatMap((manifest) => manifest.openclawToolNames ?? []),
     );
-    const execPatterns = await this.listAgentExecAllowlistPatterns(runtimeConfig, toolInstanceIds);
+    const typedToolNames = boundToolManifests.flatMap((manifest) =>
+      manifest.openclawTypedTool === undefined ? [] : [manifest.openclawTypedTool.name],
+    );
+    if (typedToolNames.length > 0) {
+      return buildOpenClawClosedToolPolicy([...typedToolNames, ...openclawToolNames]);
+    }
+    const execPatterns = await this.listAgentExecAllowlistCommands(runtimeConfig, toolInstanceIds);
     if (execPatterns.length === 0 && openclawToolNames.length === 0) {
       return null;
     }
@@ -10311,17 +10565,134 @@ export default function (api) {
           allowAlreadyExists: true,
         });
       }
-      for (const pattern of await this.listAgentExecAllowlistPatterns(
+    }
+    await this.reconcileManagedExecApprovals(runtimeConfig);
+  }
+
+  /**
+   * Make the exec approvals store hold exactly the wrappers of the agents'
+   * allowlisted commands. Entries from earlier versions, from removed tools or
+   * for the wildcard agent are removed, and a command is never allowlisted when
+   * the service user could change what its wrapper or executable runs.
+   */
+  private async reconcileManagedExecApprovals(runtimeConfig: RuntimeConfig): Promise<void> {
+    const serviceUser = this.getConfiguredServiceIdentity(runtimeConfig).user;
+    const identity = await this.execPinning.resolveServiceUser(serviceUser);
+    const expected: Record<string, string[]> = {};
+    for (const agent of runtimeConfig.openclawProfile.agents) {
+      if (agent.matrix?.accessTokenSecretRef === undefined) {
+        continue;
+      }
+      const patterns: string[] = [];
+      for (const command of await this.listAgentExecAllowlistCommands(
         runtimeConfig,
         agent.toolInstanceIds ?? [],
       )) {
-        await this.runOpenClawCommandAlternatives({
-          label: `${agent.id}-exec-allowlist`,
-          commands: [["approvals", "allowlist", "add", "--agent", agent.id, pattern]],
-          allowAlreadyExists: true,
-        });
+        const plan = this.planAgentExecWrapper(agent.id, command);
+        if (plan !== null && (await this.ensureExecWrapper(plan, identity, serviceUser))) {
+          patterns.push(plan.path);
+        }
+      }
+      if (patterns.length > 0) {
+        expected[agent.id] = patterns;
       }
     }
+
+    const snapshot = await this.safeExec("openclaw", ["approvals", "get", "--json"]);
+    const current =
+      snapshot.ok && snapshot.result.exitCode === 0
+        ? parseExecApprovalsSnapshot(snapshot.result.stdout)
+        : null;
+    if (current === null) {
+      throw {
+        code: "MANAGED_AGENT_REGISTER_FAILED",
+        message: "OpenClaw exec approvals could not be read for reconciliation",
+        retryable: true,
+        details: {
+          failures: [
+            snapshot.ok
+              ? {
+                  command: snapshot.result.command,
+                  exitCode: snapshot.result.exitCode,
+                  stderr: truncateText(snapshot.result.stderr, 1200),
+                  stdout: truncateText(snapshot.result.stdout, 1200),
+                }
+              : {
+                  command: "openclaw approvals get --json",
+                  exitCode: -1,
+                  stderr: truncateText(snapshot.error, 1200),
+                  stdout: "",
+                },
+          ],
+        },
+      };
+    }
+    const plan = planExecApprovalsReconciliation(current, expected);
+    for (const entry of plan.remove) {
+      await this.runOpenClawCommandAlternatives({
+        label: `${entry.agent}-exec-allowlist-remove`,
+        commands: [["approvals", "allowlist", "remove", "--agent", entry.agent, entry.pattern]],
+      });
+    }
+    for (const entry of plan.add) {
+      await this.runOpenClawCommandAlternatives({
+        label: `${entry.agent}-exec-allowlist`,
+        commands: [["approvals", "allowlist", "add", "--agent", entry.agent, entry.pattern]],
+        allowAlreadyExists: true,
+      });
+    }
+  }
+
+  private planAgentExecWrapper(agentId: string, command: string): ExecWrapperPlan | null {
+    return planExecWrapper({ wrapperRoot: this.execPinning.wrapperRoot, agentId, command });
+  }
+
+  private async ensureExecWrapper(
+    plan: ExecWrapperPlan,
+    identity: ServiceUserIdentity | null,
+    serviceUser: string,
+  ): Promise<boolean> {
+    const refuse = (reason: string): false => {
+      this.logger.warn(
+        { serviceUser, wrapper: plan.path, executable: plan.executable },
+        `Not allowlisting exec command: ${reason}`,
+      );
+      return false;
+    };
+    if (identity === null) {
+      return refuse("the service user could not be resolved");
+    }
+    // A gateway that runs as root crosses no privilege boundary through exec,
+    // so ownership tells nothing there.
+    const checkOwnership = identity.uid !== 0;
+    if (checkOwnership && (await this.execPinning.isPathWritable(plan.executable, identity))) {
+      return refuse("the service user can modify the executable");
+    }
+    if (this.execPinning.runningAsRoot()) {
+      const agentDir = dirname(plan.path);
+      for (const dir of [dirname(agentDir), agentDir]) {
+        await mkdir(dir, { recursive: true, mode: 0o755 });
+        await chmod(dir, 0o755);
+        await this.execPinning.chownToRoot(dir);
+      }
+      await writeFile(plan.path, plan.content, { encoding: "utf8", mode: 0o755 });
+      await chmod(plan.path, 0o755);
+      await this.execPinning.chownToRoot(plan.path);
+    } else {
+      let existing: string | null = null;
+      try {
+        existing = await readFile(plan.path, "utf8");
+      } catch {
+        existing = null;
+      }
+      if (existing !== plan.content) {
+        return refuse("its wrapper is missing or outdated and only a root install can write it");
+      }
+    }
+    if (checkOwnership && (await this.execPinning.isPathWritable(plan.path, identity))) {
+      return refuse("the service user can modify the wrapper");
+    }
+    return true;
   }
 
   private async runOpenClawCommandAlternatives(input: {
@@ -12636,23 +13007,33 @@ export default function (api) {
               : undefined,
           ),
         },
-        list: await Promise.all(
-          managedAgents.map(async (entry) => {
-            const tools = await this.buildOpenClawAgentToolPolicy(
-              runtimeConfig,
-              entry.toolInstanceIds ?? [],
-            );
-            return {
-              id: entry.id,
-              workspace: entry.workspace,
-              ...(entry.default === true ? { default: true } : {}),
-              ...(entry.model === undefined
-                ? {}
-                : { model: normalizeOpenClawAgentModel(entry.model) }),
-              ...(tools === null ? {} : { tools }),
-            };
-          }),
-        ),
+        list: [
+          ...(await Promise.all(
+            managedAgents.map(async (entry) => {
+              const tools = await this.buildOpenClawAgentToolPolicy(
+                runtimeConfig,
+                entry.toolInstanceIds ?? [],
+              );
+              return {
+                id: entry.id,
+                workspace: entry.workspace,
+                ...(entry.default === true ? { default: true } : {}),
+                ...(entry.model === undefined
+                  ? {}
+                  : { model: normalizeOpenClawAgentModel(entry.model) }),
+                ...(tools === null ? {} : { tools }),
+              };
+            }),
+          )),
+          // Scan agents have no channel binding and no workspace files: a bot's
+          // scan reaches only the plugin tools its template names, through
+          // the gateway, and never shares a session with the chat agent.
+          ...(await this.listManagedScanAgents(runtimeConfig, managedAgents)).map((scan) => ({
+            id: scan.id,
+            workspace: llmTaskWorkspaceDir,
+            tools: buildOpenClawClosedToolPolicy(scan.toolNames),
+          })),
+        ],
       },
       cron: {
         enabled: true,

@@ -45,6 +45,7 @@ const writeBotPackage = async (
     displayName: string;
     defaultInstall: boolean;
     agentTemplateModel?: string;
+    toolTemplates?: unknown[];
     matrixRouting?: {
       defaultAccount?: boolean;
       dm?: {
@@ -78,6 +79,7 @@ const writeBotPackage = async (
         },
         ...(input.matrixRouting === undefined ? {} : { matrixRouting: input.matrixRouting }),
         configDefaults: {},
+        ...(input.toolTemplates === undefined ? {} : { toolTemplates: input.toolTemplates }),
         toolInstances: [],
         hostResources: [
           {
@@ -165,6 +167,53 @@ describe("FilesystemBotCatalog", () => {
     );
     expect(packages[0]?.manifestFileSha256).toBe(
       createHash("sha256").update(rawManifest, "utf8").digest("hex"),
+    );
+  });
+
+  it("carries typed tools and scan agents through to the tool template definitions", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-bot-catalog-test-"));
+    tempRoots.push(tempRoot);
+    const typedTool = {
+      name: "mail_sentinel",
+      description: "Mail Sentinel",
+      script: "workspace/bin/dist/mail-sentinel.js",
+      operations: [
+        { name: "version", description: "Build", effect: "read", argv: ["version", "--json"] },
+      ],
+    };
+    const template = {
+      kind: "sovereign-tool-template",
+      version: "2.0.0",
+      description: "Tool",
+      capabilities: ["x.read"],
+    };
+    await writeBotPackage(tempRoot, {
+      id: "mail-sentinel",
+      displayName: "Mail Sentinel",
+      defaultInstall: true,
+      toolTemplates: [
+        {
+          ...template,
+          id: "typed-tool",
+          openclawTypedTool: typedTool,
+          openclawScanAgent: { toolNames: ["llm-task"] },
+        },
+        { ...template, id: "plain-tool" },
+      ],
+    });
+
+    const [botPackage] = await new FilesystemBotCatalog(tempRoot).listPackages();
+    expect(botPackage?.toolTemplates.map((entry) => entry.manifest)).toEqual([
+      expect.objectContaining({
+        id: "typed-tool",
+        allowedCommands: [],
+        openclawTypedTool: typedTool,
+        openclawScanAgent: { toolNames: ["llm-task"] },
+      }),
+      expect.not.objectContaining({ openclawTypedTool: expect.anything() }),
+    ]);
+    expect(Object.hasOwn(botPackage?.toolTemplates[1]?.manifest ?? {}, "openclawScanAgent")).toBe(
+      false,
     );
   });
 

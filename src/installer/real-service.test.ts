@@ -17,6 +17,7 @@ import type {
   OpenClawInstallOptions,
 } from "../openclaw/bootstrap.js";
 import { SOVEREIGN_PINNED_OPENCLAW_VERSION } from "../openclaw/bootstrap.js";
+import { type ExecPinningEnvironment, planExecWrapper } from "../openclaw/exec-pinning.js";
 import type { ExecInput, ExecResult } from "../system/exec.js";
 import type { ImapTester } from "../system/imap.js";
 import type { BundledMatrixProvisioner, BundledMatrixProvisionResult } from "../system/matrix.js";
@@ -145,6 +146,79 @@ const maybeHandleInstalledLobsterExec = (input: {
     };
   }
   return null;
+};
+
+const createTestExecPinning = (
+  wrapperRoot: string,
+  overrides: Partial<ExecPinningEnvironment> = {},
+): ExecPinningEnvironment => ({
+  wrapperRoot,
+  runningAsRoot: () => true,
+  resolveServiceUser: async () => ({ uid: 4242, gids: [4242] }),
+  isPathWritable: async () => false,
+  chownToRoot: async () => {},
+  ...overrides,
+});
+
+const handleExecApprovalsExec = (
+  serialized: string,
+  approvals: Record<string, string[]> = {},
+): ExecResult | null => {
+  if (serialized === "openclaw approvals get --json") {
+    return {
+      command: serialized,
+      exitCode: 0,
+      stdout: JSON.stringify({
+        path: "/openclaw-home/.openclaw/exec-approvals.json",
+        file: {
+          version: 1,
+          agents: Object.fromEntries(
+            Object.entries(approvals).map(([agent, patterns]) => [
+              agent,
+              { allowlist: patterns.map((pattern) => ({ pattern })) },
+            ]),
+          ),
+        },
+      }),
+      stderr: "",
+    };
+  }
+  if (serialized.startsWith("openclaw approvals allowlist ")) {
+    return { command: serialized, exitCode: 0, stdout: "ok", stderr: "" };
+  }
+  return null;
+};
+
+const TYPED_SENTINEL_SCRIPT = "#!/usr/bin/env node\nconsole.log(JSON.stringify({ ok: true }));\n";
+
+const TYPED_SENTINEL_TOOL = {
+  name: "typed_sentinel",
+  description: "Typed fixture commands.",
+  script: "workspace/bin/dist/typed-sentinel.js",
+  operations: [
+    {
+      name: "status",
+      description: "Status",
+      effect: "read",
+      argv: ["status", "--instance", "<tool-instance-id>", "--json"],
+    },
+    {
+      name: "feedback",
+      description: "Feedback",
+      effect: "change",
+      argv: ["feedback", "--instance", "<tool-instance-id>", "--json"],
+      params: {
+        action: {
+          type: "string",
+          description: "Action",
+          enum: ["important", "not-important"],
+          argv: ["--action", "{value}"],
+        },
+      },
+      required: ["action"],
+      confirm: { param: "action", values: ["not-important"] },
+    },
+  ],
 };
 
 const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
@@ -423,6 +497,7 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
           "<agent-workspace>/bin/mail-sentinel.js feedback --instance <tool-instance-id> --latest --action important --json",
           "<agent-workspace>/bin/mail-sentinel.js feedback --instance <tool-instance-id> --alert-id <alert-id> --action important --json",
           "<agent-workspace>/bin/mail-sentinel.js feedback --instance <tool-instance-id> --alert-id <alert-id> --action remind-later --delay <duration> --json",
+          "mail-sentinel-helper report --json",
         ],
       },
     ],
@@ -530,6 +605,62 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
         path: "data/README.md",
         source: "workspace/data/README.md",
         content: "Mail Sentinel data.\n",
+      },
+    ],
+  });
+
+  await writeBotPackage({
+    id: "typed-sentinel",
+    displayName: "Typed Sentinel",
+    description: "Fixture bot whose chat commands go through a typed tool.",
+    defaultInstall: false,
+    matrixMode: "dedicated-account",
+    matrixRouting: { dm: { enabled: true }, alertRoom: { autoReply: true, requireMention: false } },
+    toolTemplates: [
+      {
+        kind: "sovereign-tool-template",
+        id: "typed-sentinel-tool",
+        version: "1.0.0",
+        description: "Typed fixture tool.",
+        capabilities: ["typed.read", "typed.change"],
+        requiredSecretRefs: [],
+        requiredConfigKeys: ["agentId"],
+        openclawBundledPlugins: ["llm-task"],
+        allowedCommands: [],
+        openclawTypedTool: TYPED_SENTINEL_TOOL,
+        openclawScanAgent: { toolNames: ["llm-task"] },
+      },
+    ],
+    toolInstances: [
+      {
+        id: "typed-sentinel-imap",
+        templateRef: "imap-readonly@1.0.0",
+        config: {
+          host: { from: "imap.host" },
+          port: { from: "imap.host" },
+          tls: { from: "imap.host" },
+          username: { from: "imap.host" },
+          mailbox: { from: "imap.mailbox" },
+        },
+        secretRefs: { password: { from: "imap.secretRef" } },
+      },
+      {
+        id: "typed-sentinel-core",
+        templateRef: "typed-sentinel-tool@1.0.0",
+        config: { agentId: { from: "agent.id" } },
+        secretRefs: {},
+      },
+    ],
+    requiredToolTemplates: [
+      { id: "typed-sentinel-tool", version: "1.0.0" },
+      { id: "imap-readonly", version: "1.0.0" },
+    ],
+    extraWorkspaceFiles: [
+      {
+        path: "bin/typed-sentinel.js",
+        source: "workspace/bin/dist/typed-sentinel.js",
+        content: TYPED_SENTINEL_SCRIPT,
+        mode: "755",
       },
     ],
   });
@@ -4011,11 +4142,16 @@ describe("RealInstallerService", () => {
           checks: [],
         }),
       },
+      execPinning: createTestExecPinning(join(tempRoot, "exec-wrappers")),
       execRunner: {
         run: async (input): Promise<ExecResult> => {
           execCalls.push(input);
           const serialized = [input.command, ...(input.args ?? [])].join(" ");
           commandCalls.push(serialized);
+          const approvalsResult = handleExecApprovalsExec(serialized);
+          if (approvalsResult !== null) {
+            return approvalsResult;
+          }
           const lobsterResult = maybeHandleInstalledLobsterExec(input);
           if (lobsterResult !== null) {
             return lobsterResult;
@@ -4127,11 +4263,25 @@ describe("RealInstallerService", () => {
       expect(commandCalls.some((command) => command === "systemctl daemon-reload")).toBe(true);
       expect(commandCalls.some((command) => command.includes("enable --now"))).toBe(true);
       expect(commandCalls.some((command) => command.includes("is-active"))).toBe(true);
+      // Every allowlisted command is pinned by its own wrapper, and the
+      // approvals store holds only wrapper paths.
+      expect(commandCalls).toContain("openclaw approvals get --json");
+      const wrapperDir = join(tempRoot, "exec-wrappers", "mail-sentinel");
+      const allowlisted = commandCalls
+        .filter((command) =>
+          command.startsWith("openclaw approvals allowlist add --agent mail-sentinel "),
+        )
+        .map((command) => command.split(" ").at(-1) ?? "");
+      expect(allowlisted.length).toBeGreaterThan(0);
+      expect(allowlisted.every((path) => path.startsWith(`${wrapperDir}/`))).toBe(true);
+      expect(allowlisted.some((path) => path.includes("mail-sentinel-helper"))).toBe(false);
       expect(
-        commandCalls.includes(
-          "openclaw approvals allowlist add --agent mail-sentinel /usr/local/bin/sovereign-tool",
-        ),
-      ).toBe(true);
+        await readFile(join(paths.stateDir, "mail-sentinel", "workspace", "TOOLS.md"), "utf8"),
+      ).toContain("  command: `mail-sentinel-helper report --json`\n");
+      const searchWrapper = allowlisted.find((path) => path.includes("/imap-search-mail-"));
+      expect(await readFile(searchWrapper ?? "", "utf8")).toContain(
+        "exec '/usr/local/bin/sovereign-tool' 'imap-search-mail' '--instance' 'mail-sentinel-imap' '--query' \"$1\"",
+      );
 
       const stepStates = Object.fromEntries(
         finished.job.steps.map((step) => [step.id, step.state]),
@@ -5540,10 +5690,15 @@ describe("RealInstallerService", () => {
           checks: [],
         }),
       },
+      execPinning: createTestExecPinning("/tmp/sovereign-exec-wrappers"),
       execRunner: {
         run: async ({ command, args }) => {
           const serialized = [command, ...(args ?? [])].join(" ");
           commandCalls.push(serialized);
+          const approvalsResult = handleExecApprovalsExec(serialized);
+          if (approvalsResult !== null) {
+            return approvalsResult;
+          }
           return {
             command: serialized,
             exitCode: 0,
@@ -7137,6 +7292,7 @@ describe("RealInstallerService", () => {
           checks: [],
         }),
       },
+      execPinning: createTestExecPinning(join(tempRoot, "exec-wrappers")),
       execRunner: {
         run: async (input): Promise<ExecResult> => {
           const lobster = maybeHandleInstalledLobsterExec(input);
@@ -7144,6 +7300,10 @@ describe("RealInstallerService", () => {
             return lobster;
           }
           const serialized = [input.command, ...(input.args ?? [])].join(" ");
+          const approvalsResult = handleExecApprovalsExec(serialized);
+          if (approvalsResult !== null) {
+            return approvalsResult;
+          }
           if (serialized === "openclaw health") {
             return {
               command: serialized,
@@ -11717,10 +11877,15 @@ describe("RealInstallerService", () => {
           checks: [],
         }),
       },
+      execPinning: createTestExecPinning(join(tempRoot, "exec-wrappers")),
       execRunner: {
         run: async (input): Promise<ExecResult> => {
           const serialized = [input.command, ...(input.args ?? [])].join(" ");
           openclawCommands.push(serialized);
+          const approvalsResult = handleExecApprovalsExec(serialized);
+          if (approvalsResult !== null) {
+            return approvalsResult;
+          }
           if (serialized.startsWith("openclaw ")) {
             return {
               command: serialized,
@@ -12273,10 +12438,15 @@ describe("RealInstallerService", () => {
           checks: [],
         }),
       },
+      execPinning: createTestExecPinning(join(tempRoot, "exec-wrappers")),
       execRunner: {
         run: async (input): Promise<ExecResult> => {
           const serialized = [input.command, ...(input.args ?? [])].join(" ");
           commandCalls.push(serialized);
+          const approvalsResult = handleExecApprovalsExec(serialized);
+          if (approvalsResult !== null) {
+            return approvalsResult;
+          }
 
           if (serialized === "openclaw health") {
             return {
@@ -16674,5 +16844,617 @@ describe("ensureMatrixCryptoRuntimeWritable (issue #207)", () => {
       else process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT = priorOverride;
       await rm(tempRoot, { recursive: true, force: true });
     }
+  });
+});
+
+describe("typed tools, scan agents and exec pinning", () => {
+  const buildPathsFor = (tempRoot: string): SovereignPaths => ({
+    configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+    secretsDir: join(tempRoot, "etc", "secrets"),
+    stateDir: join(tempRoot, "var", "lib"),
+    logsDir: join(tempRoot, "var", "log"),
+    installJobsDir: join(tempRoot, "install-jobs"),
+    openclawServiceHome: join(tempRoot, "openclaw-home"),
+    provenancePath: join(tempRoot, "install-provenance.json"),
+    backupsDir: join(tempRoot, "backups"),
+  });
+
+  const matrixFetch = async (url: string, init?: RequestInit): Promise<Response> => {
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+    if (url.includes("/_synapse/admin/v2/users/")) {
+      return json({ name: decodeURIComponent(url.split("/_synapse/admin/v2/users/")[1] ?? "") });
+    }
+    if (url.endsWith("/_matrix/client/v3/login")) {
+      const body =
+        typeof init?.body === "string"
+          ? (JSON.parse(init.body) as { identifier?: { user?: string } })
+          : {};
+      const localpart = body.identifier?.user ?? "unknown";
+      return json({
+        user_id: `@${localpart}:matrix.example.org`,
+        access_token: `${localpart}-token`,
+      });
+    }
+    if (url.endsWith("/_matrix/client/v3/account/whoami")) {
+      const token = (new Headers(init?.headers).get("Authorization") ?? "").replace(
+        /^Bearer\s+/u,
+        "",
+      );
+      return json({ user_id: `@${token.replace(/-token$/, "")}:matrix.example.org` });
+    }
+    if (url.endsWith("/invite") || url.endsWith("/join")) {
+      return json({});
+    }
+    return new Response("not found", { status: 404 });
+  };
+
+  const buildService = (
+    paths: SovereignPaths,
+    options: {
+      commands: string[];
+      execPinning: ExecPinningEnvironment;
+      approvals?: Record<string, string[]>;
+      approvalsGet?: () => ExecResult | Promise<ExecResult>;
+    },
+  ): RealInstallerService =>
+    new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({ binaryPath: "/usr/local/bin/openclaw", version: "0.2.0" }),
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "0.2.0",
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => {
+          throw new Error("not used");
+        },
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+        }),
+      },
+      matrixProvisioner: {
+        provision: async () => {
+          throw new Error("not used");
+        },
+        bootstrapAccounts: async () => {
+          throw new Error("not used");
+        },
+        bootstrapRoom: async () => {
+          throw new Error("not used");
+        },
+        test: async () => ({ ok: true, homeserverUrl: "https://matrix.example.org", checks: [] }),
+      },
+      execPinning: options.execPinning,
+      execRunner: {
+        run: async (input): Promise<ExecResult> => {
+          const serialized = [input.command, ...(input.args ?? [])].join(" ");
+          options.commands.push(serialized);
+          if (
+            serialized === "openclaw approvals get --json" &&
+            options.approvalsGet !== undefined
+          ) {
+            return await options.approvalsGet();
+          }
+          const approvals = handleExecApprovalsExec(serialized, options.approvals);
+          if (approvals !== null) {
+            return approvals;
+          }
+          if (serialized.startsWith("openclaw ")) {
+            return { command: serialized, exitCode: 0, stdout: "ok", stderr: "" };
+          }
+          return { command: serialized, exitCode: 1, stdout: "", stderr: "unexpected command" };
+        },
+      },
+      fetchImpl: matrixFetch,
+    });
+
+  const withRuntime = async (
+    run: (input: { tempRoot: string; paths: SovereignPaths }) => Promise<void>,
+  ): Promise<void> => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-typed-tools-test-"));
+    const paths = buildPathsFor(tempRoot);
+    await writeRuntimeArtifacts(paths);
+    const priorOpenrouterApiKey = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = "sk-or-test";
+    try {
+      await run({ tempRoot, paths });
+    } finally {
+      if (priorOpenrouterApiKey === undefined) {
+        delete process.env.OPENROUTER_API_KEY;
+      } else {
+        process.env.OPENROUTER_API_KEY = priorOpenrouterApiKey;
+      }
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  };
+
+  const CORE_GROUP_DENY = [
+    "group:fs",
+    "group:runtime",
+    "group:web",
+    "group:memory",
+    "group:sessions",
+    "group:ui",
+    "group:messaging",
+    "group:automation",
+    "group:nodes",
+    "group:agents",
+    "group:media",
+  ];
+
+  it("gives a typed-tool bot a closed chat agent, a tool-less scan agent and no exec", async () => {
+    await withRuntime(async ({ tempRoot, paths }) => {
+      const commands: string[] = [];
+      const service = buildService(paths, {
+        commands,
+        execPinning: createTestExecPinning(join(tempRoot, "exec-wrappers")),
+        approvals: {
+          "typed-sentinel": ["/old/workspace/bin/typed-sentinel.js"],
+          "*": ["/usr/bin/uname"],
+        },
+      });
+
+      const instantiated = await service.instantiateSovereignBot({ id: "typed-sentinel" });
+      expect(instantiated.agent.toolInstanceIds).toEqual([
+        "typed-sentinel-imap",
+        "typed-sentinel-core",
+      ]);
+
+      // Approvals: stale entries from earlier versions and wildcard entries
+      // are removed, and the typed-tool agent gets no exec entry at all.
+      expect(commands).toEqual(
+        expect.arrayContaining([
+          "openclaw approvals get --json",
+          "openclaw approvals allowlist remove --agent typed-sentinel /old/workspace/bin/typed-sentinel.js",
+          "openclaw approvals allowlist remove --agent * /usr/bin/uname",
+        ]),
+      );
+      expect(
+        commands.some((command) => command.includes("allowlist add --agent typed-sentinel")),
+      ).toBe(false);
+
+      const openclawHome = join(paths.openclawServiceHome, ".openclaw");
+      const openclawConfig = JSON.parse(
+        await readFile(join(openclawHome, "openclaw.json5"), "utf8"),
+      ) as {
+        agents: {
+          defaults: { workspace: string };
+          list: Array<{ id: string; workspace: string; tools?: Record<string, unknown> }>;
+        };
+        bindings?: Array<{ agentId: string }>;
+        plugins: {
+          allow: string[];
+          load?: { paths: string[] };
+          entries: Record<string, { enabled?: boolean }>;
+        };
+      };
+      const chatAgent = openclawConfig.agents.list.find((agent) => agent.id === "typed-sentinel");
+      expect(chatAgent?.tools).toEqual({
+        allow: ["typed_sentinel", "session_status"],
+        deny: CORE_GROUP_DENY,
+      });
+      const scanAgent = openclawConfig.agents.list.find(
+        (agent) => agent.id === "typed-sentinel-scan",
+      );
+      expect(scanAgent).toEqual({
+        id: "typed-sentinel-scan",
+        workspace: openclawConfig.agents.defaults.workspace,
+        tools: { allow: ["llm-task", "session_status"], deny: CORE_GROUP_DENY },
+      });
+      expect(
+        openclawConfig.bindings?.some((binding) => binding.agentId === "typed-sentinel-scan"),
+      ).toBe(false);
+      expect(openclawConfig.bindings?.some((binding) => binding.agentId === "typed-sentinel")).toBe(
+        true,
+      );
+
+      const extensionDir = join(openclawHome, "extensions", "sovereign-typed-tools");
+      expect(openclawConfig.plugins.load?.paths).toContain(extensionDir);
+      expect(openclawConfig.plugins.entries["sovereign-typed-tools"]?.enabled).toBe(true);
+      expect(openclawConfig.plugins.entries["llm-task"]?.enabled).toBe(true);
+
+      const workspace = join(paths.stateDir, "typed-sentinel", "workspace");
+      const pluginConfig = JSON.parse(
+        await readFile(join(extensionDir, "plugin-config.json"), "utf8"),
+      ) as Record<string, unknown>;
+      const script = join(extensionDir, "bin", "typed-sentinel-core", "typed-sentinel.js");
+      expect(pluginConfig).toEqual({
+        runtimeConfigPath: paths.configPath,
+        stateDir: join(openclawHome, "state", "sovereign-typed-tools"),
+        operatorUserIds: ["@operator:matrix.example.org"],
+        confirmTtlMs: 15 * 60 * 1000,
+        commandTimeoutMs: 120_000,
+        tools: [
+          {
+            name: "typed_sentinel",
+            description: TYPED_SENTINEL_TOOL.description,
+            operations: TYPED_SENTINEL_TOOL.operations,
+            bindings: [
+              {
+                workspaceDir: workspace,
+                toolInstanceId: "typed-sentinel-core",
+                script,
+                cwd: workspace,
+              },
+            ],
+          },
+        ],
+      });
+      expect(await readFile(script, "utf8")).toBe(TYPED_SENTINEL_SCRIPT);
+      expect(
+        JSON.parse(await readFile(join(extensionDir, "openclaw.plugin.json"), "utf8")),
+      ).toMatchObject({
+        id: "sovereign-typed-tools",
+      });
+      expect(await readFile(join(extensionDir, "index.js"), "utf8")).toContain("shell: false");
+      expect(await readFile(join(extensionDir, "runtime.js"), "utf8")).toContain(
+        "export const typedToolBuildArgv =",
+      );
+      expect((await stat(join(openclawHome, "state", "sovereign-typed-tools"))).mode & 0o777).toBe(
+        0o700,
+      );
+
+      const runtimeConfig = JSON.parse(await readFile(paths.configPath, "utf8")) as {
+        sovereignTools: { instances: Array<{ id: string; config: Record<string, string> }> };
+      };
+      expect(
+        runtimeConfig.sovereignTools.instances.find(
+          (instance) => instance.id === "typed-sentinel-core",
+        )?.config,
+      ).toEqual({ agentId: "typed-sentinel", scanAgentId: "typed-sentinel-scan" });
+      expect(
+        runtimeConfig.sovereignTools.instances.find(
+          (instance) => instance.id === "typed-sentinel-imap",
+        )?.config.scanAgentId,
+      ).toBeUndefined();
+
+      const toolsMd = await readFile(join(workspace, "TOOLS.md"), "utf8");
+      expect(toolsMd).toContain("Use only the documented OpenClaw tools listed below.");
+      expect(toolsMd).toContain("openclaw-tool: `typed_sentinel`");
+      expect(toolsMd).toContain("operations: status, feedback");
+      expect(toolsMd).toContain("`/confirm <code>`");
+      expect(toolsMd).not.toContain("command:");
+      expect(toolsMd).not.toContain("sovereign-tool");
+    });
+  });
+
+  it("refuses to allowlist commands the service user could change", async () => {
+    await withRuntime(async ({ tempRoot, paths }) => {
+      const commands: string[] = [];
+      const writable = new Set(["/usr/local/bin/sovereign-node"]);
+      const service = buildService(paths, {
+        commands,
+        execPinning: createTestExecPinning(join(tempRoot, "exec-wrappers"), {
+          isPathWritable: async (path) => writable.has(path),
+        }),
+        approvals: { "node-operator": ["/usr/local/bin/sovereign-node"] },
+      });
+      await service.instantiateSovereignBot({ id: "node-operator" });
+      expect(commands).toContain(
+        "openclaw approvals allowlist remove --agent node-operator /usr/local/bin/sovereign-node",
+      );
+      expect(
+        commands.some((command) => command.startsWith("openclaw approvals allowlist add")),
+      ).toBe(false);
+    });
+  });
+
+  it("refuses a wrapper that stays writable after it was written", async () => {
+    await withRuntime(async ({ tempRoot, paths }) => {
+      const commands: string[] = [];
+      const wrapperRoot = join(tempRoot, "exec-wrappers");
+      const service = buildService(paths, {
+        commands,
+        execPinning: createTestExecPinning(wrapperRoot, {
+          isPathWritable: async (path) => path.startsWith(wrapperRoot),
+        }),
+      });
+      await service.instantiateSovereignBot({ id: "node-operator" });
+      expect(
+        commands.some((command) => command.startsWith("openclaw approvals allowlist add")),
+      ).toBe(false);
+    });
+  });
+
+  it("writes root-owned wrappers and allowlists exactly those when running as root", async () => {
+    await withRuntime(async ({ tempRoot, paths }) => {
+      const commands: string[] = [];
+      const chowned: string[] = [];
+      const wrapperRoot = join(tempRoot, "exec-wrappers");
+      const service = buildService(paths, {
+        commands,
+        execPinning: createTestExecPinning(wrapperRoot, {
+          chownToRoot: async (path) => {
+            chowned.push(path);
+          },
+        }),
+      });
+      await service.instantiateSovereignBot({ id: "node-operator" });
+      const added = commands
+        .filter((command) =>
+          command.startsWith("openclaw approvals allowlist add --agent node-operator "),
+        )
+        .map((command) => command.split(" ").at(-1) ?? "");
+      expect(added).toHaveLength(11);
+      const status = planExecWrapper({
+        wrapperRoot,
+        agentId: "node-operator",
+        command: "/usr/local/bin/sovereign-node status --json",
+      });
+      expect(added).toContain(status?.path);
+      expect(await readFile(status?.path ?? "", "utf8")).toBe(status?.content);
+      expect((await stat(status?.path ?? "")).mode & 0o777).toBe(0o755);
+      expect(chowned).toEqual(
+        expect.arrayContaining([wrapperRoot, join(wrapperRoot, "node-operator"), status?.path]),
+      );
+      const toolsMd = await readFile(
+        join(paths.stateDir, "node-operator", "workspace", "TOOLS.md"),
+        "utf8",
+      );
+      expect(toolsMd).toContain(
+        `command: \`${status?.path ?? ""}\` (runs \`/usr/local/bin/sovereign-node status --json\`)`,
+      );
+    });
+  });
+
+  it("keeps a current wrapper but refuses a missing or outdated one when not running as root", async () => {
+    await withRuntime(async ({ tempRoot, paths }) => {
+      const commands: string[] = [];
+      const wrapperRoot = join(tempRoot, "exec-wrappers");
+      const status = planExecWrapper({
+        wrapperRoot,
+        agentId: "node-operator",
+        command: "/usr/local/bin/sovereign-node status --json",
+      });
+      const doctor = planExecWrapper({
+        wrapperRoot,
+        agentId: "node-operator",
+        command: "/usr/local/bin/sovereign-node doctor --json",
+      });
+      if (status === null || doctor === null) {
+        throw new Error("expected wrapper plans");
+      }
+      await mkdir(join(wrapperRoot, "node-operator"), { recursive: true });
+      await writeFile(status.path, status.content, "utf8");
+      await writeFile(doctor.path, "#!/bin/sh\nexec /bin/sh\n", "utf8");
+      const service = buildService(paths, {
+        commands,
+        execPinning: createTestExecPinning(wrapperRoot, { runningAsRoot: () => false }),
+      });
+      await service.instantiateSovereignBot({ id: "node-operator" });
+      const added = commands.filter((command) =>
+        command.startsWith("openclaw approvals allowlist add"),
+      );
+      expect(added).toEqual([
+        `openclaw approvals allowlist add --agent node-operator ${status.path}`,
+      ]);
+      expect(await readFile(doctor.path, "utf8")).toBe("#!/bin/sh\nexec /bin/sh\n");
+    });
+  });
+
+  it("refuses every exec command when the service user cannot be resolved", async () => {
+    await withRuntime(async ({ tempRoot, paths }) => {
+      const commands: string[] = [];
+      const service = buildService(paths, {
+        commands,
+        execPinning: createTestExecPinning(join(tempRoot, "exec-wrappers"), {
+          resolveServiceUser: async () => null,
+        }),
+      });
+      await service.instantiateSovereignBot({ id: "node-operator" });
+      expect(
+        commands.some((command) => command.startsWith("openclaw approvals allowlist add")),
+      ).toBe(false);
+    });
+  });
+
+  it("skips ownership checks when the gateway itself runs as root", async () => {
+    await withRuntime(async ({ tempRoot, paths }) => {
+      const commands: string[] = [];
+      const service = buildService(paths, {
+        commands,
+        execPinning: createTestExecPinning(join(tempRoot, "exec-wrappers"), {
+          resolveServiceUser: async () => ({ uid: 0, gids: [0] }),
+          isPathWritable: async () => true,
+        }),
+      });
+      await service.instantiateSovereignBot({ id: "node-operator" });
+      expect(
+        commands.filter((command) => command.startsWith("openclaw approvals allowlist add")),
+      ).toHaveLength(11);
+    });
+  });
+
+  it("does not render a scan agent whose id another agent already uses", async () => {
+    await withRuntime(async ({ tempRoot, paths }) => {
+      const raw = JSON.parse(await readFile(paths.configPath, "utf8")) as {
+        openclawProfile: { agents: Array<Record<string, unknown>> };
+      };
+      raw.openclawProfile.agents.push({
+        id: "typed-sentinel-scan",
+        workspace: join(tempRoot, "taken"),
+      });
+      await writeFile(paths.configPath, JSON.stringify(raw), "utf8");
+      const service = buildService(paths, {
+        commands: [],
+        execPinning: createTestExecPinning(join(tempRoot, "exec-wrappers")),
+      });
+      await service.instantiateSovereignBot({ id: "typed-sentinel" });
+      const openclawConfig = JSON.parse(
+        await readFile(join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"), "utf8"),
+      ) as { agents: { list: Array<{ id: string; workspace: string }> } };
+      expect(
+        openclawConfig.agents.list.filter((agent) => agent.id === "typed-sentinel-scan"),
+      ).toEqual([expect.objectContaining({ workspace: join(tempRoot, "taken") })]);
+    });
+  });
+
+  it("resolves the service user through id by default", async () => {
+    await withRuntime(async ({ paths }) => {
+      const commands: string[] = [];
+      const service = new RealInstallerService(createLogger(), paths, {
+        openclawBootstrapper: {
+          detectInstalled: async () => null,
+          ensureInstalled: async () => {
+            throw new Error("not used");
+          },
+        },
+        openclawGatewayServiceManager: {
+          install: async () => {},
+          start: async () => {},
+          restart: async () => {},
+        },
+        preflightChecker: {
+          run: async () => ({
+            mode: "bundled_matrix",
+            overall: "pass",
+            checks: [],
+            recommendedActions: [],
+          }),
+        },
+        imapTester: {
+          test: async () => {
+            throw new Error("not used");
+          },
+        },
+        matrixProvisioner: {
+          provision: async () => {
+            throw new Error("not used");
+          },
+          bootstrapAccounts: async () => {
+            throw new Error("not used");
+          },
+          bootstrapRoom: async () => {
+            throw new Error("not used");
+          },
+          test: async () => ({ ok: true, homeserverUrl: "https://matrix.example.org", checks: [] }),
+        },
+        execRunner: {
+          run: async (input): Promise<ExecResult> => {
+            const serialized = [input.command, ...(input.args ?? [])].join(" ");
+            commands.push(serialized);
+            if (serialized.startsWith("id -u ")) {
+              return { command: serialized, exitCode: 0, stdout: "4242\n", stderr: "" };
+            }
+            if (serialized.startsWith("id -G ")) {
+              return { command: serialized, exitCode: 1, stdout: "", stderr: "no such user" };
+            }
+            const approvals = handleExecApprovalsExec(serialized);
+            if (approvals !== null) {
+              return approvals;
+            }
+            return { command: serialized, exitCode: 0, stdout: "ok", stderr: "" };
+          },
+        },
+        fetchImpl: matrixFetch,
+      });
+      const priorServiceUser = process.env.SOVEREIGN_NODE_SERVICE_USER;
+      process.env.SOVEREIGN_NODE_SERVICE_USER = "svc-test";
+      try {
+        await service.instantiateSovereignBot({ id: "node-operator" });
+      } finally {
+        if (priorServiceUser === undefined) {
+          delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+        } else {
+          process.env.SOVEREIGN_NODE_SERVICE_USER = priorServiceUser;
+        }
+      }
+      expect(commands).toEqual(expect.arrayContaining(["id -u svc-test", "id -G svc-test"]));
+      expect(
+        commands.some((command) => command.startsWith("openclaw approvals allowlist add")),
+      ).toBe(false);
+    });
+  });
+
+  it("refuses a typed-tool script it cannot trace to its bot package", async () => {
+    await withRuntime(async ({ tempRoot, paths }) => {
+      const service = buildService(paths, {
+        commands: [],
+        execPinning: createTestExecPinning(join(tempRoot, "exec-wrappers")),
+      });
+      const internals = service as unknown as {
+        resolveBoundToolManifests: () => Promise<unknown>;
+        listBotPackages: () => Promise<unknown>;
+        writeManagedTypedToolExtension: (config: unknown) => Promise<void>;
+      };
+      const runtimeConfig = {
+        openclaw: { openclawHome: join(tempRoot, "home") },
+        openclawProfile: {
+          agents: [{ id: "x", workspace: join(tempRoot, "ws"), toolInstanceIds: ["t"] }],
+        },
+      };
+      const bound = (script: string) => async () => [
+        {
+          tool: { id: "t", templateRef: "typed-sentinel-tool@1.0.0" },
+          manifest: { openclawTypedTool: { ...TYPED_SENTINEL_TOOL, script } },
+        },
+      ];
+      internals.resolveBoundToolManifests = bound("../outside.js");
+      await expect(internals.writeManagedTypedToolExtension(runtimeConfig)).rejects.toMatchObject({
+        code: "TYPED_TOOL_SOURCE_UNAVAILABLE",
+        message: "Typed tool script for 'typed-sentinel-tool@1.0.0' is outside its bot package",
+      });
+      internals.listBotPackages = async () => [];
+      internals.resolveBoundToolManifests = bound("workspace/bin/dist/typed-sentinel.js");
+      await expect(internals.writeManagedTypedToolExtension(runtimeConfig)).rejects.toMatchObject({
+        code: "TYPED_TOOL_SOURCE_UNAVAILABLE",
+        message: "Bot package for typed tool template 'typed-sentinel-tool@1.0.0' is unavailable",
+      });
+    });
+  });
+
+  it.each([
+    [
+      "exits non-zero",
+      () => ({ command: "openclaw approvals get --json", exitCode: 1, stdout: "", stderr: "no" }),
+    ],
+    [
+      "prints no snapshot",
+      () => ({ command: "openclaw approvals get --json", exitCode: 0, stdout: "ok", stderr: "" }),
+    ],
+    [
+      "cannot be started",
+      () => {
+        throw new Error("spawn openclaw ENOENT");
+      },
+    ],
+  ])("fails instead of keeping unknown approvals when the store %s", async (_label, approvalsGet) => {
+    await withRuntime(async ({ tempRoot, paths }) => {
+      const service = buildService(paths, {
+        commands: [],
+        execPinning: createTestExecPinning(join(tempRoot, "exec-wrappers")),
+        approvalsGet,
+      });
+      await expect(service.instantiateSovereignBot({ id: "node-operator" })).rejects.toMatchObject({
+        code: "MANAGED_AGENT_REGISTER_FAILED",
+        message: "OpenClaw exec approvals could not be read for reconciliation",
+      });
+    });
   });
 });

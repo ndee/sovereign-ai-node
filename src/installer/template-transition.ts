@@ -82,10 +82,23 @@ const stableSerialize = (value: unknown): string => {
   return JSON.stringify(value);
 };
 
+/** Shell commands plus typed-tool operations: everything an agent can run. */
+const toolTemplateCommandSurface = (template: ToolTemplateDefinition): string[] => {
+  const typedTool = template.openclawTypedTool;
+  return [
+    ...template.allowedCommands,
+    ...(typedTool === undefined
+      ? []
+      : typedTool.operations.map(
+          (operation) => `${typedTool.name}:${operation.name} (${operation.effect})`,
+        )),
+  ];
+};
+
 /**
- * Diff two tool-template definitions (capabilities and allowed commands are
- * the authorization-relevant surfaces; everything else groups under
- * unknown-change so a novel manifest field can never change surfaces
+ * Diff two tool-template definitions (capabilities, allowed commands and typed
+ * operations are the authorization-relevant surfaces; everything else groups
+ * under unknown-change so a novel manifest field can never change surfaces
  * invisibly).
  */
 export const diffToolTemplateSurfaces = (input: {
@@ -118,8 +131,10 @@ export const diffToolTemplateSurfaces = (input: {
 
   const capabilitiesAdded = added(input.previous.capabilities, input.next.capabilities);
   const capabilitiesRemoved = added(input.next.capabilities, input.previous.capabilities);
-  const commandsAdded = added(input.previous.allowedCommands, input.next.allowedCommands);
-  const commandsRemoved = added(input.next.allowedCommands, input.previous.allowedCommands);
+  const previousCommands = toolTemplateCommandSurface(input.previous);
+  const nextCommands = toolTemplateCommandSurface(input.next);
+  const commandsAdded = added(previousCommands, nextCommands);
+  const commandsRemoved = added(nextCommands, previousCommands);
 
   if (capabilitiesAdded.length > 0) classifications.add("capability-added");
   if (capabilitiesRemoved.length > 0) classifications.add("capability-removed");

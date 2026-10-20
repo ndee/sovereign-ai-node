@@ -51,6 +51,34 @@ describe("diffToolTemplateSurfaces", () => {
     expect(diff.previousAvailable).toBe(true);
   });
 
+  it("lists typed-tool operations as part of the command surface", () => {
+    const typedTool = {
+      name: "mail_sentinel",
+      description: "Mail Sentinel",
+      script: "workspace/bin/dist/mail-sentinel.js",
+      operations: [
+        { name: "status", description: "Status", effect: "read" as const, argv: ["status"] },
+        {
+          name: "feedback",
+          description: "Feedback",
+          effect: "change" as const,
+          argv: ["feedback"],
+        },
+      ],
+    };
+    const diff = diffToolTemplateSurfaces({
+      previous: toolTemplate(),
+      next: toolTemplate({ allowedCommands: [], openclawTypedTool: typedTool }),
+      previousKeyId: "k",
+      nextKeyId: "k",
+    });
+    expect(diff.commandsAdded).toEqual([
+      "mail_sentinel:status (read)",
+      "mail_sentinel:feedback (change)",
+    ]);
+    expect(diff.commandsRemoved).toEqual(["<agent-workspace>/bin/mail-sentinel.js version --json"]);
+  });
+
   it("reports removals", () => {
     const previous = toolTemplate();
     const next = toolTemplate({ capabilities: ["mail-sentinel.scan"], allowedCommands: [] });

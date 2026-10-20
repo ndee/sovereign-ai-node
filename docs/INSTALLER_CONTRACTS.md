@@ -708,6 +708,70 @@ Constraints:
 - relay hostname selection is installer-managed; user-provided relay slugs are not part of the public contract
 - `matrix.federationEnabled` defaults to `false`
 
+#### Agent tool surface: typed tools, scan agents and exec pinning
+
+A bot tool template opts an agent into tools in one of three ways. The managed
+OpenClaw config is rendered from these declarations on every configure and
+update.
+
+- **Typed tool** (`openclawTypedTool`): `{ name, description, script,
+  operations[] }`. Node generates the `sovereign-typed-tools` OpenClaw plugin
+  (`<openclaw home>/extensions/sovereign-typed-tools`, loaded through
+  `plugins.load.paths`) and registers one tool per typed tool name. Each
+  operation declares `name`, `description`, `effect` (`read` | `change`), a fixed
+  `argv` (where `<tool-instance-id>` is the bound instance), optional `params`
+  (`type` `string` | `boolean`, `description`, optional `enum`, `pattern`,
+  `maxLength` ≤ 500, and the `argv` fragment `["--flag", "{value}"]` or
+  `["--flag"]`), `required`, `exactlyOneOf`, `confirm` (`"always"` or
+  `{ param, values }`) and `confirmPreviewArgv` (flags appended for a
+  side-effect-free preview of a change that needs confirmation).
+  - The plugin never starts a shell. It copies `script` from the bot package
+    into its own extension directory, outside every agent workspace, and runs it
+    with the gateway's node binary, a fixed argv, a fixed `PATH` and
+    `SOVEREIGN_NODE_CONFIG`. String values are length-limited, may not contain
+    control characters or start with `-`, and are always passed as a single
+    argv element after their flag.
+  - A `change` operation runs only when the runtime-supplied requester of the
+    turn is the node operator (`matrix.operator.userId`). Turns that no Matrix
+    user started, and turns started by anyone else, are refused.
+  - A `change` operation with a matching `confirm` only records a pending change
+    (`<openclaw home>/state/sovereign-typed-tools/pending.json`, `0600`) and
+    returns a six-character code, plus the CLI's own preview when the operation
+    declares `confirmPreviewArgv` (a failing preview records nothing). Nothing changes until the same operator sends
+    `/confirm <code>` within 15 minutes. That command is an OpenClaw plugin
+    command, handled before any model turn, so a model can neither propose and
+    confirm in one turn nor confirm at all.
+  - An agent bound to a typed tool gets a closed tool policy:
+    `tools.allow` holds the typed tool names, any plugin tools from
+    `openclawToolNames`, and `session_status` as the core anchor OpenClaw needs to
+    keep an allow list. `tools.deny` holds every core tool group (`group:fs`,
+    `group:runtime`, `group:web`, `group:memory`, `group:sessions`, `group:ui`,
+    `group:messaging`, `group:automation`, `group:nodes`, `group:agents`,
+    `group:media`). No `allowedCommands` of any template bound to that agent are
+    allowlisted for exec, and `TOOLS.md` documents only the OpenClaw tools.
+- **Scan agent** (`openclawScanAgent`): `{ toolNames }`, plugin tools only. Node
+  adds an agent `<agent id>-scan` to `agents.list` with the `llm-task` workspace,
+  no channel binding and the closed tool policy for `toolNames`. The bound tool
+  instance's config gets `scanAgentId`, so the bot's own scan can use that
+  agent's session instead of the chat agent's. A scan agent also makes the
+  installer provide the lobster CLI.
+- **Shell commands** (`allowedCommands`, for templates without a typed tool):
+  each command is pinned by a root-owned wrapper
+  (`/usr/local/lib/sovereign-node/exec-wrappers/<agent id>/<command>-<hash>`,
+  `0755`) that fixes the full argv, takes exactly the declared placeholders as
+  arguments and refuses arguments starting with `-`. The exec allowlist holds
+  only those wrapper paths, and `TOOLS.md` documents the wrapper together with
+  the command it runs. A command is not allowlisted when the service user can
+  modify the executable or the wrapper (it owns, or may write, the path or any
+  directory above it), or when the wrapper is missing or outdated and the
+  installer is not running as root. Executables inside an agent workspace are
+  therefore never allowlisted.
+- The exec approvals store is reconciled to exactly that set on every
+  configure and update (`openclaw approvals get --json`, then
+  `approvals allowlist remove` / `add`). Entries from earlier versions, from
+  removed tools and for the wildcard agent (`*`) are removed. If the store cannot
+  be read, the step fails instead of leaving unknown entries in place.
+
 #### Relay TLS mode (legacy http vs. TLS-passthrough)
 
 The relay tunnel runs in one of two modes. The mode is **not** selected by the

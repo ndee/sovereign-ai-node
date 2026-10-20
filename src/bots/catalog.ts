@@ -12,6 +12,7 @@ import {
   type ToolTemplateDefinition,
 } from "../templates/catalog.js";
 import { enabledWhenSchema, hostResourcesSchema } from "./host-resources.js";
+import { scanAgentTemplateSchema, typedToolTemplateSchema } from "./typed-tool-schema.js";
 
 export type BotConfigValue = string | number | boolean;
 export type BotConfigRecord = Record<string, BotConfigValue>;
@@ -65,6 +66,8 @@ const toolTemplateSchema = z.object({
   openclawPlugins: z.array(z.string().min(1)).default([]),
   openclawBundledPlugins: z.array(z.string().min(1)).default([]),
   openclawToolNames: z.array(z.string().min(1)).default([]),
+  openclawTypedTool: typedToolTemplateSchema.optional(),
+  openclawScanAgent: scanAgentTemplateSchema.optional(),
 });
 
 const agentTemplateSchema = z.object({
@@ -291,6 +294,12 @@ export class FilesystemBotCatalog implements BotCatalog {
           openclawPlugins: [...entry.openclawPlugins],
           openclawBundledPlugins: [...entry.openclawBundledPlugins],
           openclawToolNames: [...entry.openclawToolNames],
+          ...(entry.openclawTypedTool === undefined
+            ? {}
+            : { openclawTypedTool: entry.openclawTypedTool }),
+          ...(entry.openclawScanAgent === undefined
+            ? {}
+            : { openclawScanAgent: entry.openclawScanAgent }),
         },
         templateRef,
         keyId: BOT_PACKAGE_KEY_ID,
