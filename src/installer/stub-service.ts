@@ -385,6 +385,7 @@ export class StubInstallerService implements InstallerService {
   ): Promise<
     | { ok: true; username: string }
     | { ok: false; reason: "invalid" | "homeserver-unreachable" | "not-configured" }
+    | { ok: false; reason: "rate-limited"; retryAfterSeconds?: number }
   > {
     if (password === "scaffold-operator-password") {
       return { ok: true, username: "@admin:matrix.example.org" };

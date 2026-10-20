@@ -474,6 +474,10 @@ const SOVEREIGN_EXECUTABLE_PATHS: Record<string, string> = {
 };
 
 const DEFAULT_MATRIX_USER_INVITE_TTL_MINUTES = 1_440;
+// Upper bound on the total time one Matrix login waits out homeserver rate
+// limits; a single retry-after longer than what is left fails the login.
+const MATRIX_LOGIN_RATE_LIMIT_WAIT_BUDGET_MS = 120_000;
+const MATRIX_LOGIN_RATE_LIMIT_MIN_DELAY_MS = 100;
 
 type RealInstallerServiceDeps = {
   openclawBootstrapper: OpenClawBootstrapper;
@@ -2677,6 +2681,7 @@ export class RealInstallerService implements InstallerService {
   ): Promise<
     | { ok: true; username: string }
     | { ok: false; reason: "invalid" | "homeserver-unreachable" | "not-configured" }
+    | { ok: false; reason: "rate-limited"; retryAfterSeconds?: number }
   > {
     let runtimeConfig: RuntimeConfig;
     try {
@@ -2721,6 +2726,16 @@ export class RealInstallerService implements InstallerService {
     }
     if (response.status === 401 || response.status === 403) {
       return { ok: false, reason: "invalid" };
+    }
+    if (response.status === 429) {
+      const retryAfterMs = readRetryAfterMs(parseJsonSafely(await response.text()));
+      return {
+        ok: false,
+        reason: "rate-limited",
+        ...(retryAfterMs === undefined
+          ? {}
+          : { retryAfterSeconds: Math.max(1, Math.ceil(retryAfterMs / 1000)) }),
+      };
     }
     return { ok: false, reason: "homeserver-unreachable" };
   }
@@ -7180,7 +7195,8 @@ export default function (api) {
       "/_matrix/client/v3/login",
       ensureTrailingSlash(input.adminBaseUrl),
     ).toString();
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    const rateLimitDeadline = Date.now() + MATRIX_LOGIN_RATE_LIMIT_WAIT_BUDGET_MS;
+    while (true) {
       const response = await this.fetchImpl(endpoint, {
         method: "POST",
         headers: {
@@ -7215,14 +7231,13 @@ export default function (api) {
         return { userId, accessToken };
       }
 
-      if (
-        response.status === 429 &&
-        isRecord(parsed) &&
-        typeof parsed.retry_after_ms === "number" &&
-        Number.isFinite(parsed.retry_after_ms)
-      ) {
-        await delay(Math.min(Math.max(Math.trunc(parsed.retry_after_ms), 100), 5_000));
-        continue;
+      const retryAfterMs = response.status === 429 ? readRetryAfterMs(parsed) : undefined;
+      if (retryAfterMs !== undefined) {
+        const waitMs = Math.max(retryAfterMs, MATRIX_LOGIN_RATE_LIMIT_MIN_DELAY_MS);
+        if (waitMs <= rateLimitDeadline - Date.now()) {
+          await delay(waitMs);
+          continue;
+        }
       }
 
       throw {
@@ -7236,12 +7251,6 @@ export default function (api) {
         },
       };
     }
-
-    throw {
-      code: "MATRIX_AGENT_IDENTITY_FAILED",
-      message: `Matrix login was rate-limited for ${input.expectedUserId}`,
-      retryable: true,
-    };
   }
 
   private async ensureMatrixUserInAlertRoom(input: {
@@ -13556,3 +13565,11 @@ const gatewayRestartCheck = (
         `Settings applied, but ${describeGatewayNotReady(outcome)}`,
         { ...outcome },
       );
+
+const readRetryAfterMs = (body: unknown): number | undefined =>
+  isRecord(body) &&
+  typeof body.retry_after_ms === "number" &&
+  Number.isFinite(body.retry_after_ms) &&
+  body.retry_after_ms >= 0
+    ? Math.trunc(body.retry_after_ms)
+    : undefined;

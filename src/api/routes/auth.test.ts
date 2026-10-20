@@ -153,6 +153,49 @@ describe("auth routes", () => {
     }
   });
 
+  it("returns 429 RATE_LIMITED with Retry-After when the homeserver throttles the sign-in", async () => {
+    const { app, service } = await buildHarness();
+    service.verifyOperatorPassword = async () => ({
+      ok: false,
+      reason: "rate-limited",
+      retryAfterSeconds: 42,
+    });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/auth/login",
+        payload: { password: "anything" },
+      });
+      expect(response.statusCode).toBe(429);
+      expect(response.headers["retry-after"]).toBe("42");
+      expect(response.json().error).toMatchObject({
+        code: "RATE_LIMITED",
+        retryable: true,
+        details: { retryAfterSeconds: 42 },
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("returns 429 RATE_LIMITED without Retry-After when the homeserver gives no delay", async () => {
+    const { app, service } = await buildHarness();
+    service.verifyOperatorPassword = async () => ({ ok: false, reason: "rate-limited" });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/auth/login",
+        payload: { password: "anything" },
+      });
+      expect(response.statusCode).toBe(429);
+      expect(response.headers["retry-after"]).toBeUndefined();
+      expect(response.json().error.code).toBe("RATE_LIMITED");
+      expect(response.json().error.details).toBeUndefined();
+    } finally {
+      await app.close();
+    }
+  });
+
   it("returns 409 OPERATOR_NOT_CONFIGURED when verifyOperatorPassword reports not-configured", async () => {
     const { app, service } = await buildHarness();
     service.verifyOperatorPassword = async () => ({ ok: false, reason: "not-configured" });

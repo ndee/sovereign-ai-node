@@ -146,6 +146,19 @@ export const registerAuthRoutes = (
           retryable: true,
         });
       }
+      if (result.reason === "rate-limited") {
+        if (result.retryAfterSeconds !== undefined) {
+          reply.header("Retry-After", String(result.retryAfterSeconds));
+        }
+        return sendApiError(reply, 429, {
+          code: "RATE_LIMITED",
+          message: "Matrix homeserver is rate limiting sign-in attempts; try again later",
+          retryable: true,
+          ...(result.retryAfterSeconds === undefined
+            ? {}
+            : { details: { retryAfterSeconds: result.retryAfterSeconds } }),
+        });
+      }
       if (result.reason === "not-configured") {
         return sendApiError(reply, 409, {
           code: "OPERATOR_NOT_CONFIGURED",

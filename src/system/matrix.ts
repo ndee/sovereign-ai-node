@@ -36,8 +36,6 @@ const MATRIX_HTTP_TIMEOUT_MS = 8_000;
 const MATRIX_LOGIN_RETRY_ATTEMPTS = 5;
 const MATRIX_LOGIN_RETRY_DELAY_MS = 500;
 const MATRIX_LOGIN_RATE_LIMIT_FALLBACK_DELAY_MS = 1_000;
-const MATRIX_LOGIN_RATE_LIMIT_MAX_DELAY_MS = MATRIX_READY_TIMEOUT_MS;
-const MATRIX_LOGIN_RATE_LIMIT_FAST_RETRY_THRESHOLD_MS = 10_000;
 const MATRIX_COMPOSE_COMMAND_TIMEOUT_MS = resolveDurationFromEnv(
   "SOVEREIGN_MATRIX_COMPOSE_TIMEOUT_MS",
   600_000,
@@ -78,6 +76,20 @@ export const RELAY_PASSTHROUGH_DNS01_PROPAGATION_TIMEOUT_SECONDS = 600;
 const MATRIX_ONBOARDING_DIR = "onboarding";
 const MATRIX_ONBOARDING_STATE_FILE = "state.json";
 const MATRIX_ONBOARDING_API_PORT = 8090;
+// Synapse reads "M" as MiB, so the edge media cap below must stay equal to it.
+const MATRIX_MAX_UPLOAD_SIZE = "50M";
+const MATRIX_EDGE_MEDIA_BODY_LIMIT_BYTES = 50 * 1024 * 1024;
+const MATRIX_EDGE_API_BODY_LIMIT_BYTES = 1024 * 1024;
+// The federation toggle rewrites only the region between these markers, so the
+// mode-specific site header (TLS, LAN names, CA download) never has to be
+// reconstructed outside a full provision run.
+const MATRIX_EDGE_POLICY_BEGIN = "  # BEGIN matrix edge policy";
+const MATRIX_EDGE_POLICY_END = "  # END matrix edge policy";
+// Synapse's own unknown-endpoint answer, with distinct text so a refusal at the
+// proxy can be told apart from one by the homeserver.
+const MATRIX_EDGE_REFUSAL_BODY =
+  '{"errcode":"M_UNRECOGNIZED","error":"Path not served by this proxy"}';
+const MATRIX_EDGE_TOO_LARGE_BODY = '{"errcode":"M_TOO_LARGE","error":"Request body too large"}';
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -393,7 +405,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       writes.push(
         writeFile(
           join(proxyDir, "Caddyfile"),
-          `${renderCaddyfile(new URL(publicBaseUrl).hostname, onboardingMode, lanIPv4, dns01)}\n`,
+          `${renderCaddyfile(new URL(publicBaseUrl).hostname, onboardingMode, federationEnabled, lanIPv4, dns01)}\n`,
           "utf8",
         ),
         writeFile(
@@ -1475,15 +1487,16 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
             break;
           }
           rateLimitAttempts += 1;
-          const retryDelayMs = Math.min(readMatrixLoginRetryDelayMs(error), remainingBudgetMs);
-          if (retryDelayMs > MATRIX_LOGIN_RATE_LIMIT_FAST_RETRY_THRESHOLD_MS) {
+          const retryDelayMs = readMatrixLoginRetryDelayMs(error);
+          if (retryDelayMs > remainingBudgetMs) {
             this.logger.warn(
               {
                 localpart,
                 rateLimitAttempts,
                 retryDelayMs,
+                remainingBudgetMs,
               },
-              "Matrix login rate limited with a long cooldown; aborting login retries",
+              "Matrix login rate limit cooldown exceeds the remaining wait budget; aborting login retries",
             );
             break;
           }
@@ -2168,7 +2181,66 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       await writeFile(wellKnownServerPath, `${wellKnown.server}\n`, "utf8");
     }
 
+    const edgeChanged = await this.updateEdgeFederationPolicy(
+      join(params.projectDir, "reverse-proxy", "Caddyfile"),
+      params.federationEnabled,
+    );
+
     await this.runComposeCommand(params.projectDir, params.composeFilePath, ["restart", "synapse"]);
+    if (edgeChanged) {
+      const recreate = await this.runComposeCommand(params.projectDir, params.composeFilePath, [
+        "up",
+        "-d",
+        "--no-deps",
+        "--force-recreate",
+        "reverse-proxy",
+      ]);
+      if (recreate.exitCode !== 0) {
+        throw {
+          code: "MATRIX_EDGE_RELOAD_FAILED",
+          message:
+            "Bundled Matrix reverse proxy could not be recreated after the federation change",
+          retryable: true,
+          details: {
+            command: recreate.command,
+            exitCode: recreate.exitCode,
+            stderr: truncateText(recreate.stderr, 4000),
+          },
+        };
+      }
+    }
+  }
+
+  private async updateEdgeFederationPolicy(
+    caddyfilePath: string,
+    federationEnabled: boolean,
+  ): Promise<boolean> {
+    let caddyfile: string;
+    try {
+      caddyfile = await readFile(caddyfilePath, "utf8");
+    } catch {
+      return false;
+    }
+    const lines = caddyfile.split("\n");
+    const begin = lines.indexOf(MATRIX_EDGE_POLICY_BEGIN);
+    const end = lines.indexOf(MATRIX_EDGE_POLICY_END);
+    if (begin < 0 || end < begin) {
+      this.logger.warn(
+        { caddyfilePath },
+        "Caddyfile has no edge policy region; it is re-rendered on the next provision run",
+      );
+      return false;
+    }
+    const updated = [
+      ...lines.slice(0, begin),
+      ...renderMatrixEdgePolicy(federationEnabled),
+      ...lines.slice(end + 1),
+    ].join("\n");
+    if (updated === caddyfile) {
+      return false;
+    }
+    await writeFile(caddyfilePath, updated, "utf8");
+    return true;
   }
 
   private async runComposeCommand(
@@ -2522,16 +2594,21 @@ const renderSynapseConfig = (input: SynapseConfigInput): string => {
     "enable_registration_without_verification: false",
     "allow_public_rooms_without_auth: false",
     "allow_public_rooms_over_federation: false",
+    // Sized at about twice the installer's own peak login rate. Every
+    // loopback and relayed client reaches Synapse from one address, so the
+    // per-address bucket stays loose and the per-account buckets carry the
+    // throttling; failed_attempts keeps Synapse's default.
     "rc_login:",
     "  address:",
-    "    per_second: 1000",
-    "    burst_count: 1000",
+    "    per_second: 0.1",
+    "    burst_count: 10",
     "  account:",
-    "    per_second: 1000",
-    "    burst_count: 1000",
+    "    per_second: 0.05",
+    "    burst_count: 8",
     "  failed_attempts:",
-    "    per_second: 1000",
-    "    burst_count: 1000",
+    "    per_second: 0.17",
+    "    burst_count: 3",
+    `max_upload_size: "${MATRIX_MAX_UPLOAD_SIZE}"`,
     `registration_shared_secret: "${input.registrationSharedSecret}"`,
     `macaroon_secret_key: "${input.macaroonSecret}"`,
     `form_secret: "${input.formSecret}"`,
@@ -2731,6 +2808,7 @@ const validateBundledTlsMode = (input: {
 const renderCaddyfile = (
   siteHostname: string,
   tlsMode: BundledMatrixOnboardingMode,
+  federationEnabled: boolean,
   extraSiteNames: ReadonlyArray<string> = [],
   dns01?: RelayDns01Input,
 ): string => {
@@ -2775,30 +2853,6 @@ const renderCaddyfile = (
           "  }",
         ]
       : []),
-    "  @wellKnown path /.well-known/matrix/client /.well-known/matrix/server",
-    "  handle @wellKnown {",
-    "    root * /srv",
-    "    header Access-Control-Allow-Origin *",
-    "    header Content-Type application/json",
-    '    header Cache-Control "public, max-age=300"',
-    "    file_server",
-    "  }",
-    "",
-    "  @onboard path /onboard /onboard/ /onboard/index.html",
-    "  handle @onboard {",
-    "    root * /srv",
-    "    rewrite * /onboard/index.html",
-    '    header Cache-Control "no-store"',
-    "    file_server",
-    "  }",
-    "",
-    "  @onboardApi path /onboard/api /onboard/api/*",
-    "  handle @onboardApi {",
-    '    header Cache-Control "no-store"',
-    "    uri strip_prefix /onboard/api",
-    `    reverse_proxy onboarding-api:${MATRIX_ONBOARDING_API_PORT}`,
-    "  }",
-    "",
     ...(tlsMode === "internal"
       ? [
           "  @ca path /downloads/caddy-root-ca.crt",
@@ -2813,12 +2867,99 @@ const renderCaddyfile = (
           "",
         ]
       : []),
-    "  handle {",
-    "    reverse_proxy synapse:8008",
-    "  }",
+    ...renderMatrixEdgePolicy(federationEnabled),
     "}",
   ].join("\n");
 };
+
+const MATRIX_MEDIA_UPLOAD_PATH_REGEXP = "^/_matrix/media/[^/]+/upload(/|$)";
+
+const renderMatrixEdgePolicy = (federationEnabled: boolean): string[] => [
+  MATRIX_EDGE_POLICY_BEGIN,
+  // request_body bounds streamed (chunked) bodies; the Content-Length checks
+  // below refuse a declared over-size body before Synapse sees any of it.
+  `  @mediaUpload path_regexp ${MATRIX_MEDIA_UPLOAD_PATH_REGEXP}`,
+  `  @apiBody not path_regexp ${MATRIX_MEDIA_UPLOAD_PATH_REGEXP}`,
+  "  request_body @mediaUpload {",
+  `    max_size ${MATRIX_EDGE_MEDIA_BODY_LIMIT_BYTES}`,
+  "  }",
+  "  request_body @apiBody {",
+  `    max_size ${MATRIX_EDGE_API_BODY_LIMIT_BYTES}`,
+  "  }",
+  "",
+  "  @mediaBodyTooLarge {",
+  `    path_regexp ${MATRIX_MEDIA_UPLOAD_PATH_REGEXP}`,
+  `    expression \`${renderContentLengthAbove(MATRIX_EDGE_MEDIA_BODY_LIMIT_BYTES)}\``,
+  "  }",
+  "  @apiBodyTooLarge {",
+  `    not path_regexp ${MATRIX_MEDIA_UPLOAD_PATH_REGEXP}`,
+  `    expression \`${renderContentLengthAbove(MATRIX_EDGE_API_BODY_LIMIT_BYTES)}\``,
+  "  }",
+  "  handle @mediaBodyTooLarge {",
+  ...renderFixedJsonResponse(MATRIX_EDGE_TOO_LARGE_BODY, 413),
+  "  }",
+  "  handle @apiBodyTooLarge {",
+  ...renderFixedJsonResponse(MATRIX_EDGE_TOO_LARGE_BODY, 413),
+  "  }",
+  "",
+  // Path matchers below see the cleaned path while Synapse receives the raw
+  // one, so a dot segment could otherwise route past the allowlist.
+  "  @nonCanonicalPath vars_regexp {http.request.uri.path} (^|/)\\.\\.?(/|$)",
+  "  handle @nonCanonicalPath {",
+  ...renderFixedJsonResponse(MATRIX_EDGE_REFUSAL_BODY, 404),
+  "  }",
+  "",
+  "  @wellKnown path /.well-known/matrix/client /.well-known/matrix/server",
+  "  handle @wellKnown {",
+  "    root * /srv",
+  "    header Access-Control-Allow-Origin *",
+  "    header Content-Type application/json",
+  '    header Cache-Control "public, max-age=300"',
+  "    file_server",
+  "  }",
+  "",
+  "  @onboard path /onboard /onboard/ /onboard/index.html",
+  "  handle @onboard {",
+  "    root * /srv",
+  "    rewrite * /onboard/index.html",
+  '    header Cache-Control "no-store"',
+  "    file_server",
+  "  }",
+  "",
+  "  @onboardApi path /onboard/api /onboard/api/*",
+  "  handle @onboardApi {",
+  '    header Cache-Control "no-store"',
+  "    uri strip_prefix /onboard/api",
+  `    reverse_proxy onboarding-api:${MATRIX_ONBOARDING_API_PORT}`,
+  "  }",
+  "",
+  "  @synapseClient path / /_matrix/client/* /_matrix/media/* /_matrix/static/* /_synapse/client/*",
+  "  handle @synapseClient {",
+  "    reverse_proxy synapse:8008",
+  "  }",
+  "",
+  ...(federationEnabled
+    ? [
+        "  @synapseFederation path /_matrix/federation/* /_matrix/key/*",
+        "  handle @synapseFederation {",
+        "    reverse_proxy synapse:8008",
+        "  }",
+        "",
+      ]
+    : []),
+  "  handle {",
+  ...renderFixedJsonResponse(MATRIX_EDGE_REFUSAL_BODY, 404),
+  "  }",
+  MATRIX_EDGE_POLICY_END,
+];
+
+const renderContentLengthAbove = (limitBytes: number): string =>
+  `{http.request.header.Content-Length} != "" && int({http.request.header.Content-Length}) > ${limitBytes}`;
+
+const renderFixedJsonResponse = (body: string, status: number): string[] => [
+  "    header Content-Type application/json",
+  `    respond \`${body}\` ${status}`,
+];
 
 const renderWellKnownFiles = (input: {
   accessMode: BundledMatrixAccessMode;
@@ -2973,7 +3114,7 @@ const readMatrixLoginRetryDelayMs = (error: unknown): number =>
       ? Math.trunc(error.details.retryAfterMs)
       : MATRIX_LOGIN_RATE_LIMIT_FALLBACK_DELAY_MS,
     MATRIX_LOGIN_RATE_LIMIT_FALLBACK_DELAY_MS,
-    MATRIX_LOGIN_RATE_LIMIT_MAX_DELAY_MS,
+    Number.POSITIVE_INFINITY,
   );
 
 const clampPositiveDelayMs = (value: number, fallback: number, max: number): number => {

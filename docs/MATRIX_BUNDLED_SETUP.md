@@ -177,6 +177,17 @@ Use a reverse proxy configuration aligned with Synapse deployment guidance and t
 
 In `relay` mode, the node-side reverse proxy runs loopback-only and the public TLS endpoint is terminated on the managed relay.
 
+### Bundled edge policy
+
+The bundled Caddy site renders the same path policy in every access and TLS mode (between the `# BEGIN matrix edge policy` / `# END matrix edge policy` markers in `reverse-proxy/Caddyfile`):
+
+- served: `/.well-known/matrix/client`, `/.well-known/matrix/server`, the onboarding page and API, and, proxied to Synapse, `/`, `/_matrix/client/*`, `/_matrix/media/*`, `/_matrix/static/*` and `/_synapse/client/*`
+- served only while federation is enabled: `/_matrix/federation/*` and `/_matrix/key/*`
+- every other path, including `/_synapse/admin/*` and any path with a `.` or `..` segment, gets a fixed `404` (`M_UNRECOGNIZED`, "Path not served by this proxy") from the proxy without reaching Synapse; the admin API stays on the loopback-only `http://127.0.0.1:8008` port the installer uses
+- request bodies are limited to 1 MiB, except media uploads (`/_matrix/media/*/upload`), which are limited to Synapse's `max_upload_size` (`50M`, i.e. 50 MiB); a declared over-size body gets `413` (`M_TOO_LARGE`) before anything is forwarded
+
+`sovereign-node reconfigure matrix --federation/--no-federation` rewrites the policy region and recreates the reverse-proxy container along with restarting Synapse.
+
 ## Synapse Configuration Defaults (Bundled Profile)
 
 The bundled profile should set conservative defaults:
@@ -184,7 +195,8 @@ The bundled profile should set conservative defaults:
 - closed registration (no public sign-up)
 - federation disabled unless explicitly enabled
 - explicit public base URL
-- media and upload limits appropriate for alert-room usage
+- media and upload limits appropriate for alert-room usage (`max_upload_size: "50M"`)
+- bounded password-login rate limits (`rc_login`): `address` 0.1/s with a burst of 10, `account` 0.05/s with a burst of 8, `failed_attempts` at Synapse's default of 0.17/s with a burst of 3; the installer waits out a `retry_after_ms` within a bounded total wait, and the setup sign-in reports a throttled check as `429 RATE_LIMITED`
 - logs enabled and persisted
 
 The installer should avoid leaving bootstrap registration enabled after account creation.
