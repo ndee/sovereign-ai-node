@@ -699,6 +699,19 @@ Constraints:
   to a dedicated empty directory (`<service home>/llm-task-workspace`, `0750`,
   service-owned) so `llm-task` calls never carry agent bootstrap files
   (`AGENTS.md`, `SOUL.md`, `TOOLS.md`, `USER.md`, `MEMORY.md`).
+- The managed OpenClaw config denies generic tools by default. Every
+  `agents.list[]` entry carries `tools.deny` with `exec`, `process`, `lobster`,
+  `browser`, `web_fetch` and `web_search`, minus the tools that agent opts into.
+  An agent opts in only through its bound tool templates: `allowedCommands`
+  grants `exec` (gateway host, allowlist security, no prompt; `process` stays
+  denied), and `openclawToolNames` grants the named tools (plus
+  `session_status`) in `tools.allow`. Top-level `tools.deny` holds the
+  default-denied tools that no agent opts into, because a top-level deny cannot be
+  re-allowed per agent. The config also sets `tools.elevated.enabled: false`
+  (no agent entry sets `elevated`), `tools.fs.workspaceOnly: true`,
+  `browser.enabled: false` (no browser control server) and
+  `discovery.mdns.mode: "off"` (the gateway does not advertise itself on the LAN;
+  the host's own `<hostname>.local` is unaffected).
 - `imap.password` MUST NOT be persisted if provided
 - `imap` may be omitted (pending IMAP mode)
 - `connectivity.mode = "relay"` requires a valid `relay` object
