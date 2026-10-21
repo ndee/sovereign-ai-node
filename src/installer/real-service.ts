@@ -7,6 +7,7 @@ import {
   mkdir,
   readdir,
   readFile,
+  realpath,
   rename,
   rm,
   stat,
@@ -310,6 +311,13 @@ import type {
 } from "./service.js";
 import { StubInstallerService } from "./stub-service.js";
 import {
+  buildBotServiceSandboxPaths,
+  buildGatewaySandboxPaths,
+  MATRIX_CRYPTO_RUNTIME_PACKAGE_DIR,
+  npmPrefixFromBinDir,
+  renderSystemdSandboxDirectives,
+} from "./systemd-sandbox.js";
+import {
   diffBotPackageSurfaces,
   diffToolTemplateSurfaces,
   type TemplateTransitionDiff,
@@ -358,6 +366,8 @@ type HostResourceContext = {
    * name (#232). Absent when it could not be resolved (no exec runner).
    */
   serviceNpmBinDir?: string;
+  /** Host programs a bot-declared service unit may start (see systemd-sandbox.ts). */
+  sandboxPrograms: readonly string[];
 };
 
 type MaterializedBotToolInstance = RuntimeConfig["sovereignTools"]["instances"][number] & {
@@ -478,11 +488,13 @@ const MAIL_SENTINEL_IMAP_CONFIGURED_KEY = "imapConfigured";
 const MAIL_SENTINEL_IMAP_PASSWORD_SECRET_KEY = "imapPassword";
 const SOVEREIGN_PINNED_LOBSTER_PACKAGE_NAME = "@clawdbot/lobster";
 const SOVEREIGN_PINNED_LOBSTER_VERSION = "2026.1.24";
+const SOVEREIGN_TOOL_EXECUTABLE_PATH = "/usr/local/bin/sovereign-tool";
+const SANDBOX_PROGRAM_SEARCH_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const SOVEREIGN_EXECUTABLE_PATHS: Record<string, string> = {
   "sovereign-node": "/usr/local/bin/sovereign-node",
   "sovereign-node-api": "/usr/local/bin/sovereign-node-api",
   "sovereign-node-onboarding-api": "/usr/local/bin/sovereign-node-onboarding-api",
-  "sovereign-tool": "/usr/local/bin/sovereign-tool",
+  "sovereign-tool": SOVEREIGN_TOOL_EXECUTABLE_PATH,
 };
 
 const DEFAULT_MATRIX_USER_INVITE_TTL_MINUTES = 1_440;
@@ -4271,6 +4283,7 @@ export class RealInstallerService implements InstallerService {
     const botStatus: CompiledBotStatus[] = [];
     const unmatchedSystemdBots: string[] = [];
     const serviceNpmBinDir = await this.resolveServiceNpmBinDir(runtimeConfig);
+    const sandboxPrograms = await this.resolveBotServiceSandboxPrograms(serviceNpmBinDir);
 
     for (const botPackage of botPackages) {
       const agents = runtimeConfig.openclawProfile.agents.filter(
@@ -4306,6 +4319,7 @@ export class RealInstallerService implements InstallerService {
             botInstance?.id ?? agent.id,
           ),
           ...(serviceNpmBinDir === undefined ? {} : { serviceNpmBinDir }),
+          sandboxPrograms,
         };
         for (const resource of botPackage.manifest.hostResources) {
           if (!this.isBotHostResourceEnabled(context, resource.enabledWhen)) {
@@ -4811,6 +4825,22 @@ export class RealInstallerService implements InstallerService {
       ...(resource.spec.restartSec === undefined
         ? []
         : [`RestartSec=${this.resolveHostResourceString(context, resource.spec.restartSec)}`]),
+      ...renderSystemdSandboxDirectives(
+        buildBotServiceSandboxPaths({
+          stateDir: this.paths.stateDir,
+          openclawServiceHome: this.paths.openclawServiceHome,
+          workspaces: [
+            context.agent.workspace,
+            ...(resource.spec.workingDirectory === undefined
+              ? []
+              : [this.resolveHostResourceString(context, resource.spec.workingDirectory)]),
+          ],
+          ...(context.serviceNpmBinDir === undefined
+            ? {}
+            : { serviceNpmPrefix: npmPrefixFromBinDir(context.serviceNpmBinDir) }),
+          programs: context.sandboxPrograms,
+        }),
+      ),
       "",
       "[Install]",
       ...resource.spec.wantedBy.map(
@@ -4849,6 +4879,73 @@ export class RealInstallerService implements InstallerService {
     const serviceIdentity = this.getConfiguredServiceIdentity(runtimeConfig);
     const serviceHome = await this.resolveServiceUserHome(serviceIdentity.user);
     return resolveServiceNpmBinDir(serviceHome ?? undefined);
+  }
+
+  // Programs every sandboxed unit may start: the node runtime, the
+  // /usr/bin/env that shebangs and ExecStart lines go through, and the
+  // root-owned sovereign-tool CLI together with its bash wrapper interpreter.
+  private async resolveSandboxBasePrograms(
+    searchPath: string,
+  ): Promise<{ node: string; programs: string[] }> {
+    const node = (await resolveExecutablePath("node", searchPath)) ?? "/usr/bin/node";
+    return {
+      node,
+      programs: [
+        node,
+        "/usr/bin/env",
+        (await resolveExecutablePath("bash", searchPath)) ?? "/usr/bin/bash",
+        SOVEREIGN_TOOL_EXECUTABLE_PATH,
+      ],
+    };
+  }
+
+  // Bot scan units also run lobster (covered by the npm prefix exec path) and
+  // lobster's exec stage, which feeds the classifier input through `cat`.
+  private async resolveBotServiceSandboxPrograms(
+    serviceNpmBinDir: string,
+    systemSearchPath: string = SANDBOX_PROGRAM_SEARCH_PATH,
+  ): Promise<string[]> {
+    const searchPath = [serviceNpmBinDir, systemSearchPath].join(":");
+    return [
+      ...(await this.resolveSandboxBasePrograms(searchPath)).programs,
+      (await resolveExecutablePath("cat", searchPath)) ?? "/usr/bin/cat",
+    ];
+  }
+
+  // Programs agents can make the gateway start. Today that is the exec tool:
+  // its allowlisted executables, plus the shell it runs every command through
+  // (`$SHELL -c` or `sh -c`). Any new way for an agent to start a host program
+  // must be listed here, or the gateway unit's ExecPaths= will refuse it.
+  private async listGatewaySandboxAgentPrograms(
+    runtimeConfig: RuntimeConfig,
+    searchPath: string,
+  ): Promise<string[]> {
+    const programs: string[] = [];
+    for (const agent of runtimeConfig.openclawProfile?.agents ?? []) {
+      programs.push(
+        ...(await this.listAgentExecAllowlistPatterns(runtimeConfig, agent.toolInstanceIds ?? [])),
+      );
+    }
+    if (programs.length === 0) {
+      return [];
+    }
+    return [(await resolveExecutablePath("sh", searchPath)) ?? "/bin/sh", ...programs];
+  }
+
+  private async resolveOpenClawPackageRoots(
+    openclawCommand: string,
+    serviceNpmBinDir: string,
+  ): Promise<string[]> {
+    const roots: string[] = [];
+    try {
+      // The bin entry is a symlink to openclaw.mjs at the package root.
+      roots.push(dirname(await realpath(openclawCommand)));
+    } catch {}
+    roots.push(
+      join(await this.resolveOpenClawGlobalRoot(), "openclaw"),
+      join(npmPrefixFromBinDir(serviceNpmBinDir), "lib", "node_modules", "openclaw"),
+    );
+    return roots;
   }
 
   private renderSystemdTimerResource(
@@ -10485,6 +10582,25 @@ export default function (api) {
       .join(":");
     const openclawCommand =
       (await resolveExecutablePath("openclaw", unitPathEnv)) ?? join(serviceNpmBinDir, "openclaw");
+    const { node: nodeCommand, programs: basePrograms } =
+      await this.resolveSandboxBasePrograms(unitPathEnv);
+    const sandboxPaths = buildGatewaySandboxPaths({
+      stateDir: this.paths.stateDir,
+      openclawServiceHome: this.paths.openclawServiceHome,
+      tempDir: managedTempDir,
+      agentWorkspaces: (runtimeConfig.openclawProfile?.agents ?? []).map(
+        (agent) => agent.workspace,
+      ),
+      serviceNpmPrefix: npmPrefixFromBinDir(serviceNpmBinDir),
+      openclawPackageRoots: await this.resolveOpenClawPackageRoots(
+        openclawCommand,
+        serviceNpmBinDir,
+      ),
+      programs: [
+        ...basePrograms,
+        ...(await this.listGatewaySandboxAgentPrograms(runtimeConfig, unitPathEnv)),
+      ],
+    });
     const unitName = SOVEREIGN_GATEWAY_SYSTEMD_UNIT;
     const waitsForLocalMatrix = shouldGateSystemGatewayOnLocalMatrix(
       runtimeConfig.matrix.adminBaseUrl,
@@ -10515,6 +10631,7 @@ export default function (api) {
       ...(waitsForLocalMatrix
         ? [
             `ExecStartPre=${renderSystemGatewayMatrixWaitCommand({
+              nodeCommand,
               adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
               attempts: SYSTEM_GATEWAY_MATRIX_WAIT_ATTEMPTS,
               delaySeconds: SYSTEM_GATEWAY_MATRIX_WAIT_DELAY_SECONDS,
@@ -10525,6 +10642,7 @@ export default function (api) {
       `ExecStart=${openclawCommand} gateway run --allow-unconfigured --bind loopback`,
       "Restart=always",
       "RestartSec=3",
+      ...renderSystemdSandboxDirectives(sandboxPaths),
       "",
       "[Install]",
       "WantedBy=multi-user.target",
@@ -13083,15 +13201,7 @@ export default function (api) {
    */
   private async ensureMatrixCryptoRuntimeWritable(runtimeConfig?: RuntimeConfig): Promise<void> {
     const globalRoot = await this.resolveOpenClawGlobalRoot();
-    const cryptoDir = join(
-      globalRoot,
-      "openclaw",
-      "extensions",
-      "matrix",
-      "node_modules",
-      "@matrix-org",
-      "matrix-sdk-crypto-nodejs",
-    );
+    const cryptoDir = join(globalRoot, "openclaw", MATRIX_CRYPTO_RUNTIME_PACKAGE_DIR);
 
     try {
       const dirStat = await stat(cryptoDir);

@@ -4805,7 +4805,13 @@ describe("RealInstallerService", () => {
       const unitRaw = await readFile(gatewayUnitPath, "utf8");
       expect(unitRaw).toContain("After=network-online.target docker.service");
       expect(unitRaw).toContain("Requires=docker.service");
-      expect(unitRaw).toContain("ExecStartPre=/usr/bin/env sh -lc");
+      // The wait runs on the unit's own node runtime, so it needs no shell or
+      // curl inside the ExecPaths= allow-list.
+      const waitNode = unitRaw.match(/^ExecStartPre=(\S+) -e "/m)?.[1];
+      expect(waitNode).toMatch(/node$/);
+      expect(unitRaw).not.toContain("sh -lc");
+      const execPaths = unitRaw.match(/^ExecPaths=(.*)$/m)?.[1]?.split(" ") ?? [];
+      expect(execPaths).toContain(`-${waitNode}`);
       expect(unitRaw).toContain("/_matrix/client/versions");
       expect(unitRaw).toContain("User=sovereign-node");
       expect(unitRaw).toContain("Group=sovereign-node");
@@ -16132,7 +16138,11 @@ describe("RealInstallerService bot unit PATH carries the service npm prefix (#23
     ) => string;
     resolveServiceNpmBinDir: (runtimeConfig: RuntimeConfig) => Promise<string | undefined>;
     renderSystemdServiceResource: (
-      context: { serviceNpmBinDir?: string },
+      context: {
+        serviceNpmBinDir?: string;
+        agent: { workspace: string };
+        sandboxPrograms: readonly string[];
+      },
       resource: Record<string, unknown>,
     ) => string;
   };
@@ -16215,11 +16225,18 @@ describe("RealInstallerService bot unit PATH carries the service npm prefix (#23
         desiredState: { enabled: false, active: false },
       },
     };
-    const rendered = internals.renderSystemdServiceResource({ serviceNpmBinDir: npmBin }, resource);
+    const sandboxContext = {
+      agent: { workspace: "/var/lib/sovereign-node/mail-sentinel/workspace" },
+      sandboxPrograms: ["/usr/bin/node"],
+    };
+    const rendered = internals.renderSystemdServiceResource(
+      { ...sandboxContext, serviceNpmBinDir: npmBin },
+      resource,
+    );
     expect(rendered).toContain(`Environment=PATH=${npmBin}:${systemPath}\n`);
     expect(rendered).toContain("Environment=HOME=/var/lib/sovereign-node/openclaw-home\n");
     // Without a resolved dir the manifest's literal PATH is rendered verbatim.
-    expect(internals.renderSystemdServiceResource({}, resource)).toContain(
+    expect(internals.renderSystemdServiceResource(sandboxContext, resource)).toContain(
       `Environment=PATH=${systemPath}\n`,
     );
   });
