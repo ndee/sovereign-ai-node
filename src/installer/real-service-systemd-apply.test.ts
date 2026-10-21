@@ -11,6 +11,7 @@ import type { OpenClawBootstrapper } from "../openclaw/bootstrap.js";
 import type { ImapTester } from "../system/imap.js";
 import type { BundledMatrixProvisioner } from "../system/matrix.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
+import { SYSTEMD_UNIT_HELPER_PATH } from "../system/privileged-helpers.js";
 import { RealInstallerService } from "./real-service.js";
 
 /**
@@ -271,7 +272,7 @@ describe("reconcileAgentWorkspaces systemd host resource convergence", () => {
     expect(serialized).not.toContain("systemctl daemon-reload");
   });
 
-  it("elevates unit writes through sudo -n tee when unprivileged", async () => {
+  it("elevates unit writes through the unit install helper when unprivileged", async () => {
     if (process.getuid?.() === 0) {
       // Under a root test runner the direct-write fast path always succeeds;
       // the elevation fallback is unreachable. Covered by the root test above.
@@ -284,11 +285,12 @@ describe("reconcileAgentWorkspaces systemd host resource convergence", () => {
 
     const serialized = calls.map((call) => [call.command, ...call.args].join(" "));
     expect(serialized).toContain(
-      `sudo -n tee ${join(systemdDir, "sovereign-fixture-bot-scan.service")}`,
+      `sudo -n ${SYSTEMD_UNIT_HELPER_PATH} sovereign-fixture-bot-scan.service`,
     );
     expect(serialized).toContain(
-      `sudo -n tee ${join(systemdDir, "sovereign-fixture-bot-scan.timer")}`,
+      `sudo -n ${SYSTEMD_UNIT_HELPER_PATH} sovereign-fixture-bot-scan.timer`,
     );
+    expect(serialized.some((line) => line.startsWith("sudo -n tee"))).toBe(false);
     expect(serialized).toContain("systemctl daemon-reload");
     expect(result.systemdUnits.applied).toEqual([
       "sovereign-fixture-bot-scan.service",

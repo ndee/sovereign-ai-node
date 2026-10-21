@@ -35,8 +35,13 @@ ensure_service_account() {
     fi
   fi
 
-  if getent group docker >/dev/null 2>&1; then
-    usermod -aG docker "$SERVICE_USER" || true
+  # The runtime API reaches the bundled Matrix stack through the root-owned
+  # bundled-matrix-docker helper, so the service user does not need the
+  # docker group. Earlier installs added it; take it away on update. The API
+  # service is restarted later in the run (install_systemd_unit), which is
+  # when the dropped group stops applying to the running process.
+  if id -nG "$SERVICE_USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+    gpasswd -d "$SERVICE_USER" docker >/dev/null
   fi
 }
 

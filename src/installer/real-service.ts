@@ -150,6 +150,10 @@ import type { OpenrouterKeyValidator } from "../system/openrouter.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
 import { formatGiB, parseDfAvailableBytes } from "../system/preflight.js";
 import {
+  reclaimOwnershipInvocation,
+  systemdUnitInstallInvocation,
+} from "../system/privileged-helpers.js";
+import {
   type AgentTemplateManifest,
   CORE_TEMPLATE_MANIFESTS,
   CORE_TRUSTED_TEMPLATE_KEYS,
@@ -10216,8 +10220,9 @@ export default function (api) {
    * writeFile first (fast path when running as root, e.g. the bootstrap
    * install context, or in unit tests where the test process owns the unit
    * dir). On EACCES/EPERM — which is what the unprivileged runtime API service
-   * hits — falls back to `sudo -n tee` against the scoped sudoers fragment
-   * dropped by configure_system_hygiene at install time. Throws on failure.
+   * hits — falls back to the root-owned install-systemd-unit helper, which
+   * validates the unit before writing it to the fixed systemd unit dir.
+   * Throws on failure.
    */
   private async writeSystemdUnitFileElevated(
     unitPath: string,
@@ -10231,19 +10236,18 @@ export default function (api) {
       if ((code !== "EACCES" && code !== "EPERM") || this.execRunner === null) {
         throw writeError;
       }
-      const teeResult = await this.execRunner.run({
-        command: "sudo",
-        args: ["-n", "tee", unitPath],
+      const helperResult = await this.execRunner.run({
+        ...systemdUnitInstallInvocation(basename(unitPath)),
         options: {
           input: unitContents,
           stdin: "pipe",
           timeout: 5_000,
         },
       });
-      if (teeResult.exitCode !== 0) {
+      if (helperResult.exitCode !== 0) {
         throw new Error(
-          `sudo tee ${unitPath} exited ${teeResult.exitCode}: ${truncateText(
-            teeResult.stderr,
+          `install-systemd-unit ${basename(unitPath)} exited ${helperResult.exitCode}: ${truncateText(
+            helperResult.stderr,
             400,
           )}`,
         );
@@ -13560,20 +13564,20 @@ export default function (api) {
   }
 
   /**
-   * Re-claim ownership of a path via the scoped sudoers fragment when
-   * mkdir/chmod hit EPERM/EACCES (e.g. the dir was created by the bootstrap
-   * install.sh as root and isn't writable to the runtime API user). No-op
+   * Hand a root-owned node directory back to the service user through the
+   * root-owned reclaim-ownership helper when mkdir/chmod hit EPERM/EACCES
+   * (e.g. the dir was created by the bootstrap install.sh as root). The
+   * helper only accepts a fixed set of node directories and always targets
+   * the configured service identity, which is the runtime API user. No-op
    * when already root or when sudo is unavailable.
    */
   private async sudoReclaimOwnership(path: string): Promise<boolean> {
     if (typeof process.getuid !== "function") return false;
     const myUid = process.getuid();
     if (myUid === 0) return false;
-    const myGid = (typeof process.getgid === "function" ? process.getgid() : null) ?? 0;
     if (this.execRunner === null) return false;
     const result = await this.execRunner.run({
-      command: "sudo",
-      args: ["-n", "chown", "-R", `${myUid}:${myGid}`, path],
+      ...reclaimOwnershipInvocation(path),
       options: { timeout: 30_000 },
     });
     if (result.exitCode !== 0) {
@@ -13583,7 +13587,7 @@ export default function (api) {
           exitCode: result.exitCode,
           stderr: truncateText(result.stderr, 400),
         },
-        "sudo chown reclaim failed",
+        "ownership reclaim helper failed",
       );
       return false;
     }
@@ -13609,37 +13613,6 @@ export default function (api) {
       }
     }
     return "/usr/lib/node_modules";
-  }
-
-  /**
-   * Reclaim ownership of a path for the configured SERVICE identity via the
-   * scoped sudoers fragment. Unlike sudoReclaimOwnership (which targets the
-   * current runtime uid), this targets the service uid:gid so a non-root
-   * runtime API re-install can hand a root-owned dir to the gateway user.
-   * No-op/false when sudo is unavailable or the runner is missing.
-   */
-  private async sudoChownToService(
-    path: string,
-    ownership: { uid: number; gid: number },
-  ): Promise<boolean> {
-    if (this.execRunner === null) return false;
-    const result = await this.execRunner.run({
-      command: "sudo",
-      args: ["-n", "chown", "-R", `${ownership.uid}:${ownership.gid}`, path],
-      options: { timeout: 30_000 },
-    });
-    if (result.exitCode !== 0) {
-      this.logger.warn(
-        {
-          path,
-          exitCode: result.exitCode,
-          stderr: truncateText(result.stderr, 400),
-        },
-        "sudo chown to service identity failed",
-      );
-      return false;
-    }
-    return true;
   }
 
   /**
@@ -13724,7 +13697,7 @@ export default function (api) {
     // when running as root (it returned null above), so reclaim the (root-owned)
     // dir for the runtime API user itself, which is the gateway service user.
     const targetOwnership = { uid: process.getuid(), gid: process.getgid() };
-    const reclaimed = await this.sudoChownToService(cryptoDir, targetOwnership);
+    const reclaimed = await this.sudoReclaimOwnership(cryptoDir);
     if (reclaimed) {
       this.logger.info(
         { cryptoDir, uid: targetOwnership.uid, gid: targetOwnership.gid },

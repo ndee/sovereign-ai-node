@@ -21,6 +21,11 @@ import {
 } from "../installer/real-service-shared.js";
 import type { Logger } from "../logging/logger.js";
 import type { ExecResult, ExecRunner } from "./exec.js";
+import {
+  bundledMatrixComposeInvocation,
+  type DockerAccess,
+  resolveDockerAccess,
+} from "./privileged-helpers.js";
 
 const SOVEREIGN_NODE_VERSION = "2.0.0";
 const COMPOSE_COMMAND_TIMEOUT_MS = 600_000;
@@ -41,6 +46,7 @@ export class RealBackupService implements BackupService {
     private readonly execRunner: ExecRunner,
     private readonly logger: Logger,
     private readonly paths: SovereignPaths,
+    private readonly dockerAccess: () => DockerAccess = () => resolveDockerAccess(),
   ) {}
 
   async create(options: { outputPath?: string }): Promise<BackupCreateResult> {
@@ -951,10 +957,29 @@ export class RealBackupService implements BackupService {
     trailingArgs: string[],
     extraOptions?: Record<string, unknown>,
   ): Promise<ExecResult> {
-    const commonArgs = ["compose", "-f", composeFilePath, "--project-directory", projectDir];
     const options = { cwd: projectDir, timeout: COMPOSE_COMMAND_TIMEOUT_MS, ...extraOptions };
+    const access = this.dockerAccess();
+    const invocation = bundledMatrixComposeInvocation({
+      access,
+      projectDir,
+      composeFilePath,
+      args: trailingArgs,
+    });
 
-    const dockerCompose = await this.safeExec("docker", [...commonArgs, ...trailingArgs], options);
+    const dockerCompose = await this.safeExec(invocation.command, invocation.args, options);
+    // The helper only drives the compose plugin, so the legacy standalone
+    // binary is tried only when docker is run directly.
+    if (access === "helper") {
+      if (dockerCompose.ok) {
+        return dockerCompose.result;
+      }
+      throw {
+        code: "BACKUP_COMPOSE_UNAVAILABLE",
+        message: "The bundled Matrix docker helper could not be executed",
+        retryable: false,
+        details: { dockerComposeError: dockerCompose.error },
+      };
+    }
     if (dockerCompose.ok && dockerCompose.result.exitCode === 0) {
       return dockerCompose.result;
     }

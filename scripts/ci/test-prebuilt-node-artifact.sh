@@ -81,6 +81,17 @@ make_package() {
   for lib in lib-log.sh lib-os.sh lib-runtime-deps.sh; do
     printf '%s\n' '# shellcheck shell=bash' > "$PACKAGE_DIR/scripts/install/$lib"
   done
+  mkdir -p "$PACKAGE_DIR/scripts/install/js/bin"
+  for helper in \
+    privileged-helper-config.mjs \
+    privileged-systemd-unit.mjs \
+    privileged-bundled-matrix-docker.mjs \
+    privileged-reclaim-ownership.mjs \
+    bin/privileged-systemd-unit.mjs \
+    bin/privileged-bundled-matrix-docker.mjs \
+    bin/privileged-reclaim-ownership.mjs; do
+    printf '%s\n' 'export {};' > "$PACKAGE_DIR/scripts/install/js/$helper"
+  done
 }
 
 pack_package() {

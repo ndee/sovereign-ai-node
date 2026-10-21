@@ -145,7 +145,14 @@ sync_prebuilt_node_artifact() (
     scripts/install-docker.sh \
     scripts/install/lib-log.sh \
     scripts/install/lib-os.sh \
-    scripts/install/lib-runtime-deps.sh; do
+    scripts/install/lib-runtime-deps.sh \
+    scripts/install/js/privileged-helper-config.mjs \
+    scripts/install/js/privileged-systemd-unit.mjs \
+    scripts/install/js/privileged-bundled-matrix-docker.mjs \
+    scripts/install/js/privileged-reclaim-ownership.mjs \
+    scripts/install/js/bin/privileged-systemd-unit.mjs \
+    scripts/install/js/bin/privileged-bundled-matrix-docker.mjs \
+    scripts/install/js/bin/privileged-reclaim-ownership.mjs; do
     [[ -f "${package_dir}/${required}" ]] ||
       die "Node artifact is missing required runtime payload: $required"
   done

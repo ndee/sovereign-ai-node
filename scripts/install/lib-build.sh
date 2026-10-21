@@ -198,71 +198,117 @@ configure_system_hygiene() {
   install -m 0644 "$APP_DIR/scripts/install/lib-runtime-deps.sh" \
     "$docker_helper_libs/lib-runtime-deps.sh"
 
-  # --- sudoers fragment: scoped passwordless sudo for the runtime API ---
-  # The sovereign-node-api service runs as ${SERVICE_USER} (non-root) and
-  # needs to install/start the OpenClaw gateway systemd unit during a
-  # bundled-Matrix install. Dropping a narrow sudoers rule lets it
-  # tee/move the unit file and run systemctl against that one unit, with
-  # no other sudo capabilities.
-  local sudoers_path="/etc/sudoers.d/sovereign-node-gateway"
-  install -d -m 0755 /etc/sudoers.d
-  cat > "$sudoers_path" <<EOF
-# Managed by sovereign-ai-node installer. Scoped sudo for the runtime
-# API service to manage the OpenClaw gateway and managed relay tunnel
-# systemd units and the bundled-Matrix project directory.
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/tee /etc/systemd/system/sovereign-openclaw-gateway.service
-${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl daemon-reload
-${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl restart sovereign-openclaw-gateway, /bin/systemctl restart sovereign-openclaw-gateway.service
-${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl enable --now sovereign-openclaw-gateway, /bin/systemctl enable --now sovereign-openclaw-gateway.service
-${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl is-active sovereign-openclaw-gateway, /bin/systemctl is-active sovereign-openclaw-gateway.service
-${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl status sovereign-openclaw-gateway, /bin/systemctl status sovereign-openclaw-gateway.service
-# Managed relay tunnel unit: the runtime API installs/starts this the same
-# way (sudo -n tee + sudo -n systemctl) when relay mode is enabled.
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/tee /etc/systemd/system/sovereign-matrix-relay-tunnel.service
-${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl restart sovereign-matrix-relay-tunnel, /bin/systemctl restart sovereign-matrix-relay-tunnel.service
-${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl enable --now sovereign-matrix-relay-tunnel, /bin/systemctl enable --now sovereign-matrix-relay-tunnel.service
-${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl is-active sovereign-matrix-relay-tunnel, /bin/systemctl is-active sovereign-matrix-relay-tunnel.service
-${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl status sovereign-matrix-relay-tunnel, /bin/systemctl status sovereign-matrix-relay-tunnel.service
-# Mail Sentinel scan schedule units: the runtime API's configure step
-# compiles these from the bot manifest and installs them the same elevated
-# way (sudo -n tee + sudo -n systemctl). Without these rules the wizard's
-# unprivileged install could never schedule the bot, leaving a device that
-# looks healthy and never scans mail (issue #224). Exact unit names only —
-# no wildcards, so no path-traversal surface.
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/tee /etc/systemd/system/sovereign-mail-sentinel-scan.service
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/tee /etc/systemd/system/sovereign-mail-sentinel-scan.timer
-${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl enable sovereign-mail-sentinel-scan.service, /bin/systemctl enable sovereign-mail-sentinel-scan.timer
-${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl restart sovereign-mail-sentinel-scan.service, /bin/systemctl restart sovereign-mail-sentinel-scan.timer
-${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl is-active sovereign-mail-sentinel-scan.service, /bin/systemctl is-active sovereign-mail-sentinel-scan.timer
-${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl is-enabled sovereign-mail-sentinel-scan.service, /bin/systemctl is-enabled sovereign-mail-sentinel-scan.timer
-# Allow re-claiming ownership of bundled-matrix project subdirectories
-# after docker-compose has touched them as root. Restricted to that
-# path; the *:* in the chown spec keeps it bounded to numeric uid:gid.
-${SERVICE_USER} ALL=(root) NOPASSWD: /bin/chown -R [0-9]*\:[0-9]* /var/lib/sovereign-node/bundled-matrix/*
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/chown -R [0-9]*\:[0-9]* /var/lib/sovereign-node/bundled-matrix/*
-# Allow handing the OpenClaw matrix extension's E2EE crypto runtime package
-# dir to the SERVICE_USER so the gateway can download matrix-sdk-crypto on
-# first start (issue #207). The dir lives under the root-owned npm global
-# prefix; cover both global prefixes. Bounded to numeric uid:gid + that path.
-${SERVICE_USER} ALL=(root) NOPASSWD: /bin/chown -R [0-9]*\:[0-9]* /usr/lib/node_modules/openclaw/extensions/matrix/node_modules/@matrix-org/matrix-sdk-crypto-nodejs
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/chown -R [0-9]*\:[0-9]* /usr/lib/node_modules/openclaw/extensions/matrix/node_modules/@matrix-org/matrix-sdk-crypto-nodejs
-${SERVICE_USER} ALL=(root) NOPASSWD: /bin/chown -R [0-9]*\:[0-9]* /usr/local/lib/node_modules/openclaw/extensions/matrix/node_modules/@matrix-org/matrix-sdk-crypto-nodejs
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/chown -R [0-9]*\:[0-9]* /usr/local/lib/node_modules/openclaw/extensions/matrix/node_modules/@matrix-org/matrix-sdk-crypto-nodejs
-# Allow re-claiming ownership of /etc/sovereign-node/secrets and its
-# entries when a previous run left them root-owned.
-${SERVICE_USER} ALL=(root) NOPASSWD: /bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets, /bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets/*
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets, /usr/bin/chown -R [0-9]*\:[0-9]* /etc/sovereign-node/secrets/*
-# Allow installing the Docker runtime via the helper script dropped at
-# install time. The helper is owned root:root and 0755, sources lib-os.sh
-# and lib-runtime-deps.sh, and runs install_docker_if_needed.
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/local/lib/sovereign-node/install-docker.sh
+  install_privileged_helpers
+  install_service_sudoers
+}
+
+# Root-owned helpers the runtime API reaches through sudo instead of raw
+# root commands: installing a managed systemd unit, running the bundled
+# Matrix stack's docker commands, and reclaiming ownership of a fixed set of
+# node directories. Each helper validates its arguments against a fixed list
+# and reads the service identity from a root-owned settings file, so nothing
+# the service user controls decides what runs as root.
+install_privileged_helpers() {
+  local helper_dir="/usr/local/lib/sovereign-node"
+  local module_dir="${helper_dir}/helpers"
+  local node_bin name module
+  node_bin="$(command -v node)" || die "node is required for the privileged helpers"
+
+  install -d -m 0755 "$helper_dir" "$module_dir" "$module_dir/bin"
+  install -m 0644 "$APP_DIR/scripts/install/js/privileged-helper-config.mjs" \
+    "$module_dir/privileged-helper-config.mjs"
+  for module in \
+    privileged-systemd-unit.mjs \
+    privileged-bundled-matrix-docker.mjs \
+    privileged-reclaim-ownership.mjs; do
+    install -m 0644 "$APP_DIR/scripts/install/js/$module" "$module_dir/$module"
+    install -m 0644 "$APP_DIR/scripts/install/js/bin/$module" "$module_dir/bin/$module"
+  done
+
+  local conf_tmp
+  conf_tmp="$(mktemp "${helper_dir}/.privileged-helpers.conf.XXXXXX")"
+  cat > "$conf_tmp" <<EOF
+# Managed by sovereign-ai-node installer. Read by the privileged helpers.
+SERVICE_USER=${SERVICE_USER}
+SERVICE_GROUP=${SERVICE_GROUP}
+SERVICE_UID=$(id -u "$SERVICE_USER")
+SERVICE_GID=$(getent group "$SERVICE_GROUP" | cut -d: -f3)
+STATE_DIR=/var/lib/sovereign-node
+CONFIG_DIR=/etc/sovereign-node
+APP_DIR=${APP_DIR}
 EOF
-  chmod 0440 "$sudoers_path"
-  # Validate; if invalid, remove so we don't break sudo entirely.
-  if ! visudo -cf "$sudoers_path" >/dev/null 2>&1; then
+  chmod 0644 "$conf_tmp"
+  mv -f "$conf_tmp" "${helper_dir}/privileged-helpers.conf"
+
+  for name in install-systemd-unit bundled-matrix-docker reclaim-ownership; do
+    case "$name" in
+      install-systemd-unit) module=privileged-systemd-unit.mjs ;;
+      bundled-matrix-docker) module=privileged-bundled-matrix-docker.mjs ;;
+      reclaim-ownership) module=privileged-reclaim-ownership.mjs ;;
+    esac
+    cat > "${helper_dir}/${name}" <<EOF
+#!/bin/sh
+# Managed by sovereign-ai-node installer. Runs with an empty environment so
+# nothing from the calling user reaches the node runtime.
+exec /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \\
+  "${node_bin}" "${module_dir}/bin/${module}" "\$@"
+EOF
+    chmod 0755 "${helper_dir}/${name}"
+  done
+}
+
+# Prints the sudoers fragment for the runtime API's service user. Every rule
+# names an exact command line or one of the root-owned helpers above; there
+# are no argument wildcards and no rule that writes a file chosen by the
+# caller.
+render_service_sudoers() {
+  local user="$1"
+  local helper_dir="/usr/local/lib/sovereign-node"
+  local unit
+  cat <<EOF
+# Managed by sovereign-ai-node installer. Scoped sudo for the runtime API
+# service: root-owned validating helpers plus exact systemctl commands for the
+# node's own units.
+${user} ALL=(root) NOPASSWD: ${helper_dir}/install-systemd-unit
+${user} ALL=(root) NOPASSWD: ${helper_dir}/bundled-matrix-docker
+${user} ALL=(root) NOPASSWD: ${helper_dir}/reclaim-ownership
+${user} ALL=(root) NOPASSWD: ${helper_dir}/install-docker.sh
+${user} ALL=(root) NOPASSWD: /bin/systemctl daemon-reload
+EOF
+  for unit in sovereign-openclaw-gateway sovereign-matrix-relay-tunnel; do
+    cat <<EOF
+${user} ALL=(root) NOPASSWD: /bin/systemctl restart ${unit}, /bin/systemctl restart ${unit}.service
+${user} ALL=(root) NOPASSWD: /bin/systemctl enable --now ${unit}, /bin/systemctl enable --now ${unit}.service
+${user} ALL=(root) NOPASSWD: /bin/systemctl is-active ${unit}, /bin/systemctl is-active ${unit}.service
+${user} ALL=(root) NOPASSWD: /bin/systemctl status ${unit}, /bin/systemctl status ${unit}.service
+EOF
+  done
+  unit=sovereign-mail-sentinel-scan
+  cat <<EOF
+${user} ALL=(root) NOPASSWD: /bin/systemctl enable ${unit}.service, /bin/systemctl enable ${unit}.timer
+${user} ALL=(root) NOPASSWD: /bin/systemctl restart ${unit}.service, /bin/systemctl restart ${unit}.timer
+${user} ALL=(root) NOPASSWD: /bin/systemctl is-active ${unit}.service, /bin/systemctl is-active ${unit}.timer
+${user} ALL=(root) NOPASSWD: /bin/systemctl is-enabled ${unit}.service, /bin/systemctl is-enabled ${unit}.timer
+EOF
+}
+
+# The fragment is validated with visudo before it replaces the installed one,
+# so a bad render never reaches /etc/sudoers.d. If it does not validate, the
+# old fragment is removed rather than left in place with its broader rules.
+install_service_sudoers() {
+  local sudoers_path="/etc/sudoers.d/sovereign-node-gateway"
+  local candidate
+  install -d -m 0755 /etc/sudoers.d
+  candidate="$(mktemp)"
+  render_service_sudoers "$SERVICE_USER" > "$candidate"
+  chmod 0440 "$candidate"
+  if visudo -cf "$candidate" >/dev/null 2>&1; then
+    install -m 0440 -o root -g root "$candidate" "$sudoers_path"
+  else
     rm -f "$sudoers_path"
     log "WARN: sudoers fragment for ${SERVICE_USER} failed validation; removed"
   fi
+  rm -f "$candidate"
 }
 
 install_request_template() {
