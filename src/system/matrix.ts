@@ -24,6 +24,13 @@ import {
   renderFallbackQrSvg,
   renderOnboardingPage,
 } from "./matrix-onboarding-page.js";
+import {
+  bundledMatrixComposeInvocation,
+  bundledMatrixDockerInvocation,
+  type DockerAccess,
+  reclaimOwnershipInvocation,
+  resolveDockerAccess,
+} from "./privileged-helpers.js";
 
 const MATRIX_INTERNAL_BASE_URL = "http://127.0.0.1:8008";
 const MATRIX_READY_TIMEOUT_MS = resolveDurationFromEnv(
@@ -201,6 +208,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     private readonly fetchImpl: FetchLike = defaultFetch,
     // Inject for tests; in production resolves to detectLanIPv4().
     private readonly lanIpProvider: () => string[] = detectLanIPv4,
+    private readonly dockerAccess: () => DockerAccess = () => resolveDockerAccess(),
   ) {}
 
   async provision(req: InstallRequest): Promise<BundledMatrixProvisionResult> {
@@ -242,23 +250,20 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     // postgres-data as root via volume bind, and on a re-run the API
     // service (running as a non-root user) can no longer mkdir siblings
     // under the now-root-owned project dir. Attempt the mkdir directly
-    // first; if EACCES, escalate via the scoped sudoers fragment to
-    // chown -R the project dir back to the caller, then retry.
+    // first; if EACCES, hand the project dir back to the service user
+    // through the root-owned reclaim-ownership helper, then retry.
     try {
       await mkdir(synapseDir, { recursive: true });
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code !== "EACCES" && code !== "EPERM") throw err;
-      const myUid = process.getuid?.() ?? 0;
-      const myGid = process.getgid?.() ?? 0;
       const sudoChown = await this.execRunner.run({
-        command: "sudo",
-        args: ["-n", "chown", "-R", `${myUid}:${myGid}`, projectDir],
+        ...reclaimOwnershipInvocation(projectDir),
         options: { timeout: 10_000 },
       });
       if (sudoChown.exitCode !== 0) {
         throw new Error(
-          `mkdir ${synapseDir} failed with EACCES and sudo chown fallback exited ${sudoChown.exitCode}: ${sudoChown.stderr}`,
+          `mkdir ${synapseDir} failed with EACCES and the ownership reclaim helper exited ${sudoChown.exitCode}: ${sudoChown.stderr}`,
         );
       }
       await mkdir(synapseDir, { recursive: true });
@@ -1304,11 +1309,12 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       if (target.state === "running" || name.length === 0) {
         continue;
       }
-      const probe = await this.safeExec(
-        "docker",
-        ["inspect", "--format", "{{.State.Error}}", name],
+      const invocation = bundledMatrixDockerInvocation({
+        access: this.dockerAccess(),
         projectDir,
-      );
+        args: ["inspect", "--format", "{{.State.Error}}", name],
+      });
+      const probe = await this.safeExec(invocation.command, invocation.args, projectDir);
       if (probe.ok && probe.result.exitCode === 0) {
         const text = probe.result.stdout.trim();
         if (text.length > 0) {
@@ -1329,17 +1335,18 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     projectDir: string,
     port: number,
   ): Promise<{ name: string; project: string } | undefined> {
-    const probe = await this.safeExec(
-      "docker",
-      [
+    const invocation = bundledMatrixDockerInvocation({
+      access: this.dockerAccess(),
+      projectDir,
+      args: [
         "ps",
         "--filter",
         `publish=${port}`,
         "--format",
         '{{.Names}}\t{{.Label "com.docker.compose.project"}}',
       ],
-      projectDir,
-    );
+    });
+    const probe = await this.safeExec(invocation.command, invocation.args, projectDir);
     if (!probe.ok || probe.result.exitCode !== 0) {
       return undefined;
     }
@@ -1729,8 +1736,8 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
 
   /**
    * Re-claim ownership of a path that may have been written by Docker as root
-   * (postgres-data, etc.). Uses the scoped sudoers fragment dropped at install
-   * time. No-op when running as root or when the path is already ours.
+   * (postgres-data, etc.) through the root-owned reclaim-ownership helper.
+   * No-op when running as root or when the path is already ours.
    */
   private async reclaimOwnership(path: string): Promise<void> {
     try {
@@ -1739,18 +1746,15 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     } catch {
       // continue — path is not (yet) writable to us
     }
-    const myUid = process.getuid?.() ?? 0;
-    const myGid = process.getgid?.() ?? 0;
-    if (myUid === 0) return;
+    if ((process.getuid?.() ?? 0) === 0) return;
     const result = await this.execRunner.run({
-      command: "sudo",
-      args: ["-n", "chown", "-R", `${myUid}:${myGid}`, path],
+      ...reclaimOwnershipInvocation(path),
       options: { timeout: 30_000 },
     });
     if (result.exitCode !== 0) {
       this.logger.warn(
         { path, exitCode: result.exitCode, stderr: result.stderr },
-        "sudo chown reclaim failed; subsequent operations may fail with EACCES",
+        "ownership reclaim failed; subsequent operations may fail with EACCES",
       );
     }
   }
@@ -2176,12 +2180,27 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     composeFilePath: string,
     trailingArgs: string[],
   ): Promise<ExecResult> {
-    const commonArgs = ["compose", "-f", composeFilePath, "--project-directory", projectDir];
-    const dockerCompose = await this.safeExec(
-      "docker",
-      [...commonArgs, ...trailingArgs],
+    const access = this.dockerAccess();
+    const invocation = bundledMatrixComposeInvocation({
+      access,
       projectDir,
-    );
+      composeFilePath,
+      args: trailingArgs,
+    });
+    const dockerCompose = await this.safeExec(invocation.command, invocation.args, projectDir);
+    // The helper only drives the compose plugin, so the legacy standalone
+    // binary is tried only when docker is run directly.
+    if (access === "helper") {
+      if (dockerCompose.ok) {
+        return dockerCompose.result;
+      }
+      throw {
+        code: "MATRIX_COMPOSE_UNAVAILABLE",
+        message: "The bundled Matrix docker helper could not be executed",
+        retryable: false,
+        details: { dockerComposeError: dockerCompose.error },
+      };
+    }
     if (dockerCompose.ok && dockerCompose.result.exitCode === 0) {
       return dockerCompose.result;
     }

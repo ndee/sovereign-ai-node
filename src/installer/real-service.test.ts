@@ -21,6 +21,10 @@ import type { ExecInput, ExecResult } from "../system/exec.js";
 import type { ImapTester } from "../system/imap.js";
 import type { BundledMatrixProvisioner, BundledMatrixProvisionResult } from "../system/matrix.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
+import {
+  RECLAIM_OWNERSHIP_HELPER_PATH,
+  SYSTEMD_UNIT_HELPER_PATH,
+} from "../system/privileged-helpers.js";
 import { RealInstallerService } from "./real-service.js";
 import type { RelayEnrollmentData } from "./real-service-relay-enrollment.js";
 import type { RuntimeConfig } from "./real-service-shared.js";
@@ -13809,10 +13813,10 @@ describe("ensureRelayTunnelService", () => {
 
   // Reproduces the real Pi failure: the unprivileged runtime API service cannot
   // write to /etc/systemd/system, so writeFile throws EACCES and the helper must
-  // fall back to `sudo -n tee`. Driven by a real read-only target dir — reliable
+  // fall back to the unit helper. Driven by a real read-only target dir — reliable
   // for any non-root uid (local dev and the non-root CI runner). Skipped under
   // root, where the kernel bypasses the directory permission bits.
-  it.skipIf(isRoot)("falls back to `sudo -n tee` when the unit write hits EACCES", async () => {
+  it.skipIf(isRoot)("falls back to the unit install helper on EACCES", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
     const systemdDir = join(tempRoot, "systemd");
     await mkdir(systemdDir, { recursive: true });
@@ -13824,7 +13828,7 @@ describe("ensureRelayTunnelService", () => {
       run: async (input) => {
         const serialized = [input.command, ...(input.args ?? [])].join(" ");
         execCommands.push(serialized);
-        if (input.command === "sudo" && input.args?.[1] === "tee") {
+        if (input.command === "sudo" && input.args?.[1] === SYSTEMD_UNIT_HELPER_PATH) {
           teeInputs.push(String(input.options?.input ?? ""));
           teeTargets.push(input.args?.[2]);
           return { command: serialized, exitCode: 0, stdout: "", stderr: "" };
@@ -13840,8 +13844,8 @@ describe("ensureRelayTunnelService", () => {
       expect(result).toBe(true);
       expect(teeInputs.length).toBe(1);
       expect(teeInputs[0]).toContain("Sovereign Matrix Relay Tunnel");
-      expect(teeTargets[0]).toBe(join(systemdDir, "sovereign-matrix-relay-tunnel.service"));
-      expect(execCommands.some((c) => c.startsWith("sudo -n tee"))).toBe(true);
+      expect(teeTargets[0]).toBe("sovereign-matrix-relay-tunnel.service");
+      expect(execCommands.some((c) => c.startsWith("sudo -n tee"))).toBe(false);
     } finally {
       await chmod(systemdDir, 0o700);
       delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
@@ -13957,34 +13961,31 @@ describe("ensureRelayTunnelService", () => {
     }
   });
 
-  it.skipIf(isRoot)(
-    "returns false when the privileged `sudo -n tee` write exits non-zero",
-    async () => {
-      const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
-      const systemdDir = join(tempRoot, "systemd");
-      await mkdir(systemdDir, { recursive: true });
-      process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
-      const service = buildService(buildPaths(tempRoot), {
-        run: async (input) => {
-          const serialized = [input.command, ...(input.args ?? [])].join(" ");
-          if (input.command === "sudo" && input.args?.[1] === "tee") {
-            return { command: serialized, exitCode: 1, stdout: "", stderr: "denied" };
-          }
-          return { command: serialized, exitCode: 0, stdout: "active", stderr: "" };
-        },
-      });
-      stubSecret(service, "secret-token");
-      await chmod(systemdDir, 0o500);
-      try {
-        const result = await invoke(service, buildRelayRuntimeConfig(buildPaths(tempRoot)));
-        expect(result).toBe(false);
-      } finally {
-        await chmod(systemdDir, 0o700);
-        delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
-        await rm(tempRoot, { recursive: true, force: true });
-      }
-    },
-  );
+  it.skipIf(isRoot)("returns false when the unit install helper exits non-zero", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
+    const systemdDir = join(tempRoot, "systemd");
+    await mkdir(systemdDir, { recursive: true });
+    process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR = systemdDir;
+    const service = buildService(buildPaths(tempRoot), {
+      run: async (input) => {
+        const serialized = [input.command, ...(input.args ?? [])].join(" ");
+        if (input.command === "sudo" && input.args?.[1] === SYSTEMD_UNIT_HELPER_PATH) {
+          return { command: serialized, exitCode: 1, stdout: "", stderr: "denied" };
+        }
+        return { command: serialized, exitCode: 0, stdout: "active", stderr: "" };
+      },
+    });
+    stubSecret(service, "secret-token");
+    await chmod(systemdDir, 0o500);
+    try {
+      const result = await invoke(service, buildRelayRuntimeConfig(buildPaths(tempRoot)));
+      expect(result).toBe(false);
+    } finally {
+      await chmod(systemdDir, 0o700);
+      delete process.env.SOVEREIGN_NODE_SYSTEMD_UNIT_DIR;
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
 
   it("returns false when systemctl cannot run (no exec runner)", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "relay-tunnel-test-"));
@@ -16545,7 +16546,7 @@ describe("ensureMatrixCryptoRuntimeWritable (issue #207)", () => {
     }
   });
 
-  it("issues sudo -n chown -R uid:gid for the crypto dir when running non-root", async () => {
+  it("reclaims the crypto dir through the ownership helper when non-root", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "crypto-writable-test-"));
     const cryptoDir = join(tempRoot, cryptoRelPath);
     await mkdir(cryptoDir, { recursive: true });
@@ -16570,7 +16571,7 @@ describe("ensureMatrixCryptoRuntimeWritable (issue #207)", () => {
       await withGlobalRoot(tempRoot, async () => {
         await expect(invoke(service)).resolves.toBeUndefined();
       });
-      expect(calls).toContain(`sudo -n chown -R 1234:4321 ${cryptoDir}`);
+      expect(calls).toContain(`sudo -n ${RECLAIM_OWNERSHIP_HELPER_PATH} ${cryptoDir}`);
     } finally {
       getuidMock?.mockRestore();
       getgidMock?.mockRestore();
@@ -16635,7 +16636,7 @@ describe("ensureMatrixCryptoRuntimeWritable (issue #207)", () => {
     try {
       await expect(invoke(service)).resolves.toBeUndefined();
       expect(calls).toContain("npm root -g");
-      expect(calls).toContain(`sudo -n chown -R 1234:1234 ${cryptoDir}`);
+      expect(calls).toContain(`sudo -n ${RECLAIM_OWNERSHIP_HELPER_PATH} ${cryptoDir}`);
     } finally {
       getuidMock?.mockRestore();
       getgidMock?.mockRestore();

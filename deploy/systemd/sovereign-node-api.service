@@ -20,9 +20,10 @@ Restart=on-failure
 RestartSec=2
 # NoNewPrivileges intentionally NOT set: the API service uses scoped
 # passwordless sudo (see /etc/sudoers.d/sovereign-node-gateway) to install
-# and manage the OpenClaw gateway systemd unit during install. Hardening
-# is preserved by the sudoers fragment limiting escalation to a fixed set
-# of commands against a single unit name.
+# and manage the node's own systemd units and the bundled Matrix stack.
+# Hardening is preserved by the sudoers fragment, which only allows exact
+# systemctl commands for the node's units and root-owned helpers that
+# validate every request against a fixed list.
 LimitNOFILE=65536
 
 [Install]

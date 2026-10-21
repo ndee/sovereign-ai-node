@@ -279,6 +279,11 @@ jobs:
         run: |
           curl -f --retry 3 --retry-delay 2 http://127.0.0.1:8008/_matrix/client/v3/login | jq .
 
+      # The service user reaches root only through the installed sudoers
+      # fragment and the root-owned helpers, and not through the docker group.
+      - name: Verify the service user's privileges and helpers
+        run: sudo env "PATH=$PATH" bash scripts/ci/verify-service-privileges.sh
+
       # Issue #235: a fresh install left mail-sentinel/workspace/data root-owned,
       # so the first scan (User=sovereign-node) died with EACCES on its state
       # lock until a later --update re-chowned the state dir.
