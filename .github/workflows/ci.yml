@@ -330,12 +330,13 @@ jobs:
 
       # A gateway that is up but never listens must be reported as not ready
       # (warn, exit 0 for this command) rather than as restarted. The drop-in
-      # keeps the unit active without ever opening the port.
+      # keeps the unit active without ever opening the port; it adds sleep to
+      # the unit's ExecPaths= allow-list, which refuses any other program.
       - name: Verify a gateway that never listens is reported as not ready
         run: |
           dropin=/etc/systemd/system/sovereign-openclaw-gateway.service.d
           sudo mkdir -p "$dropin"
-          printf '[Service]\nExecStart=\nExecStart=/bin/sleep 600\n' | sudo tee "$dropin/ci-never-listens.conf" > /dev/null
+          printf '[Service]\nExecPaths=/usr/bin/sleep\nExecStart=\nExecStart=/usr/bin/sleep 600\n' | sudo tee "$dropin/ci-never-listens.conf" > /dev/null
           rc=0
           sudo env "PATH=$PATH" SOVEREIGN_NODE_GATEWAY_READY_TIMEOUT_MS=30000 \
             sovereign-node reconfigure openrouter --model openrouter/ci-not-ready-probe --json \
