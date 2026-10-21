@@ -88,7 +88,12 @@ describe("typedToolBuildArgv", () => {
           ...FEEDBACK,
           params: {
             ...FEEDBACK.params,
-            alertId: { ...FEEDBACK.params!.alertId!, maxLength: undefined },
+            alertId: {
+              type: "string",
+              description: "Alert id",
+              pattern: "^[A-Za-z0-9._:-]+$",
+              argv: ["--alert-id", "{value}"],
+            },
           },
         },
         params: { alertId: "a 1", action: "important" },

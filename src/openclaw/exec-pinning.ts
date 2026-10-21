@@ -149,20 +149,31 @@ export const isPathWritableByServiceUser = async (
 
 /** Parse `openclaw approvals get --json` into allowlist patterns per agent key. */
 export const parseExecApprovalsSnapshot = (stdout: string): Record<string, string[]> | null => {
-  const start = stdout.indexOf("{");
-  const end = stdout.lastIndexOf("}");
-  if (start < 0 || end < start) {
-    return null;
-  }
+  // The snapshot is one JSON line, but CLI notices may surround it.
+  const candidates = [
+    stdout.slice(stdout.indexOf("{"), stdout.lastIndexOf("}") + 1),
+    ...stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("{"))
+      .reverse(),
+  ];
   let parsed: unknown;
-  try {
-    parsed = JSON.parse(stdout.slice(start, end + 1));
-  } catch {
+  for (const candidate of candidates) {
+    try {
+      parsed = JSON.parse(candidate);
+      break;
+    } catch {
+      parsed = undefined;
+    }
+  }
+  // Both candidates are brace-delimited, so anything that parsed is an object.
+  const snapshot = parsed as Record<string, unknown> | undefined;
+  if (typeof snapshot?.path !== "string") {
     return null;
   }
   const isRecord = (value: unknown): value is Record<string, unknown> =>
     value !== null && typeof value === "object" && !Array.isArray(value);
-  const snapshot = parsed as Record<string, unknown>;
   const file = isRecord(snapshot.file) ? snapshot.file : {};
   const agents = isRecord(file.agents) ? file.agents : {};
   const result: Record<string, string[]> = {};

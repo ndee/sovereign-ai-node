@@ -6139,9 +6139,9 @@ export default function (api) {
   private async listManagedScanAgents(
     runtimeConfig: RuntimeConfig,
     agents: RuntimeAgentEntry[],
-  ): Promise<Array<{ id: string; toolNames: string[] }>> {
+  ): Promise<Array<{ id: string; toolNames: string[]; model?: string }>> {
     const agentIds = new Set(agents.map((agent) => agent.id));
-    const scanAgents: Array<{ id: string; toolNames: string[] }> = [];
+    const scanAgents: Array<{ id: string; toolNames: string[]; model?: string }> = [];
     for (const agent of agents) {
       const toolNames = dedupeStrings(
         (await this.resolveBoundToolManifests(runtimeConfig, agent.toolInstanceIds ?? [])).flatMap(
@@ -6159,7 +6159,11 @@ export default function (api) {
         );
         continue;
       }
-      scanAgents.push({ id, toolNames });
+      scanAgents.push({
+        id,
+        toolNames,
+        ...(agent.model === undefined ? {} : { model: agent.model }),
+      });
     }
     return scanAgents;
   }
@@ -6180,7 +6184,7 @@ export default function (api) {
       "extensions",
       TYPED_TOOL_OPENCLAW_PLUGIN_ID,
     );
-    const tools = new Map<string, TypedToolPluginTool>();
+    const tools = new Map<string, TypedToolPluginTool & { templateRef: string }>();
     const scripts: Array<{ source: string; target: string }> = [];
     for (const agent of runtimeConfig.openclawProfile.agents) {
       for (const { tool, manifest } of await this.resolveBoundToolManifests(
@@ -6189,6 +6193,18 @@ export default function (api) {
       )) {
         const typedTool = manifest.openclawTypedTool;
         if (typedTool === undefined) {
+          continue;
+        }
+        const claimed = tools.get(typedTool.name);
+        if (claimed !== undefined && claimed.templateRef !== tool.templateRef) {
+          this.logger.warn(
+            {
+              toolName: typedTool.name,
+              templateRef: tool.templateRef,
+              claimedBy: claimed.templateRef,
+            },
+            "Typed tool name is already used by another tool template; not binding it",
+          );
           continue;
         }
         const botPackage = await this.findBotPackageByToolTemplateRef(tool.templateRef);
@@ -6211,11 +6227,12 @@ export default function (api) {
         // agent workspace, so no agent file tool can reach it.
         const target = join(extensionDir, "bin", tool.id, basename(typedTool.script));
         scripts.push({ source, target });
-        const entry: TypedToolPluginTool = tools.get(typedTool.name) ?? {
+        const entry = claimed ?? {
           name: typedTool.name,
           description: typedTool.description,
           operations: typedTool.operations,
           bindings: [],
+          templateRef: tool.templateRef,
         };
         entry.bindings.push({
           workspaceDir: agent.workspace,
@@ -6260,7 +6277,7 @@ export default function (api) {
           operatorUserIds: [runtimeConfig.matrix.operator.userId],
           confirmTtlMs: TYPED_TOOL_CONFIRM_TTL_MS,
           commandTimeoutMs: TYPED_TOOL_COMMAND_TIMEOUT_MS,
-          tools: Array.from(tools.values()),
+          tools: Array.from(tools.values(), ({ templateRef: _templateRef, ...tool }) => tool),
         }),
       },
       { name: "runtime.js", content: renderTypedToolPluginRuntime() },
@@ -13031,6 +13048,7 @@ export default function (api) {
           ...(await this.listManagedScanAgents(runtimeConfig, managedAgents)).map((scan) => ({
             id: scan.id,
             workspace: llmTaskWorkspaceDir,
+            ...(scan.model === undefined ? {} : { model: normalizeOpenClawAgentModel(scan.model) }),
             tools: buildOpenClawClosedToolPolicy(scan.toolNames),
           })),
         ],

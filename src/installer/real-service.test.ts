@@ -614,6 +614,7 @@ const writeBotRepoFixture = async (rootDir: string): Promise<void> => {
     displayName: "Typed Sentinel",
     description: "Fixture bot whose chat commands go through a typed tool.",
     defaultInstall: false,
+    agentTemplateModel: "qwen/qwen-2.5-32b-instruct",
     matrixMode: "dedicated-account",
     matrixRouting: { dm: { enabled: true }, alertRoom: { autoReply: true, requireMention: false } },
     toolTemplates: [
@@ -17065,6 +17066,7 @@ describe("typed tools, scan agents and exec pinning", () => {
       expect(scanAgent).toEqual({
         id: "typed-sentinel-scan",
         workspace: openclawConfig.agents.defaults.workspace,
+        model: "openrouter/qwen/qwen-2.5-32b-instruct",
         tools: { allow: ["llm-task", "session_status"], deny: CORE_GROUP_DENY },
       });
       expect(
@@ -17141,6 +17143,28 @@ describe("typed tools, scan agents and exec pinning", () => {
       expect(toolsMd).toContain("`/confirm <code>`");
       expect(toolsMd).not.toContain("command:");
       expect(toolsMd).not.toContain("sovereign-tool");
+
+      // An agent without its own model gets a scan agent on the default model.
+      const internals = service as unknown as {
+        readRuntimeConfig: () => Promise<RuntimeConfig>;
+        writeOpenClawRuntimeArtifacts: (config: RuntimeConfig) => Promise<void>;
+      };
+      const current = await internals.readRuntimeConfig();
+      await internals.writeOpenClawRuntimeArtifacts({
+        ...current,
+        openclawProfile: {
+          ...current.openclawProfile,
+          agents: current.openclawProfile.agents.map(({ model: _model, ...agent }) => agent),
+        },
+      });
+      const rerendered = JSON.parse(
+        await readFile(join(openclawHome, "openclaw.json5"), "utf8"),
+      ) as {
+        agents: { list: Array<{ id: string; model?: string }> };
+      };
+      expect(
+        rerendered.agents.list.find((agent) => agent.id === "typed-sentinel-scan"),
+      ).not.toHaveProperty("model");
     });
   });
 
@@ -17405,6 +17429,7 @@ describe("typed tools, scan agents and exec pinning", () => {
       };
       const runtimeConfig = {
         openclaw: { openclawHome: join(tempRoot, "home") },
+        matrix: { operator: { userId: "@operator:matrix.example.org" } },
         openclawProfile: {
           agents: [{ id: "x", workspace: join(tempRoot, "ws"), toolInstanceIds: ["t"] }],
         },
@@ -17420,6 +17445,35 @@ describe("typed tools, scan agents and exec pinning", () => {
         code: "TYPED_TOOL_SOURCE_UNAVAILABLE",
         message: "Typed tool script for 'typed-sentinel-tool@1.0.0' is outside its bot package",
       });
+      // A second template claiming the same tool name is not bound.
+      internals.resolveBoundToolManifests = async () => [
+        {
+          tool: { id: "t", templateRef: "typed-sentinel-tool@1.0.0" },
+          manifest: { openclawTypedTool: TYPED_SENTINEL_TOOL },
+        },
+        {
+          tool: { id: "u", templateRef: "other-tool@1.0.0" },
+          manifest: { openclawTypedTool: { ...TYPED_SENTINEL_TOOL, operations: [] } },
+        },
+      ];
+      await internals.writeManagedTypedToolExtension(runtimeConfig);
+      const written = JSON.parse(
+        await readFile(
+          join(tempRoot, "home", "extensions", "sovereign-typed-tools", "plugin-config.json"),
+          "utf8",
+        ),
+      ) as {
+        tools: Array<{
+          name: string;
+          operations: unknown[];
+          bindings: Array<{ toolInstanceId: string }>;
+        }>;
+      };
+      expect(written.tools).toHaveLength(1);
+      expect(written.tools[0]?.operations).toEqual(TYPED_SENTINEL_TOOL.operations);
+      expect(written.tools[0]?.bindings.map((binding) => binding.toolInstanceId)).toEqual(["t"]);
+      expect(written.tools[0]).not.toHaveProperty("templateRef");
+
       internals.listBotPackages = async () => [];
       internals.resolveBoundToolManifests = bound("workspace/bin/dist/typed-sentinel.js");
       await expect(internals.writeManagedTypedToolExtension(runtimeConfig)).rejects.toMatchObject({

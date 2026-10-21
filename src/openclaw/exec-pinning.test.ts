@@ -311,8 +311,12 @@ describe("parseExecApprovalsSnapshot", () => {
   });
 
   it("treats a snapshot without agents as empty and garbage as unreadable", () => {
-    expect(parseExecApprovalsSnapshot('{"exists":false}')).toEqual({});
-    expect(parseExecApprovalsSnapshot('{"file":{"agents":[]}}')).toEqual({});
+    expect(parseExecApprovalsSnapshot('{"path":"/x","exists":false}')).toEqual({});
+    expect(parseExecApprovalsSnapshot('{"path":"/x","file":{"agents":[]}}')).toEqual({});
+    expect(
+      parseExecApprovalsSnapshot('note {about} braces\n{"path":"/x","file":{"agents":{}}}\n'),
+    ).toEqual({});
+    expect(parseExecApprovalsSnapshot('{"error":"not a snapshot"}')).toBeNull();
     expect(parseExecApprovalsSnapshot("ok")).toBeNull();
     expect(parseExecApprovalsSnapshot("} {")).toBeNull();
     expect(parseExecApprovalsSnapshot("{not json}")).toBeNull();
