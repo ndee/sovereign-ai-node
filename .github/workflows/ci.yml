@@ -367,6 +367,12 @@ jobs:
           cat /tmp/ci-install-request.json 2>/dev/null | jq . || true
           echo "=== sovereign-node status ==="
           sudo env "PATH=$PATH" sovereign-node status --json 2>&1 || true
+          echo "=== gateway and scan units ==="
+          sudo cat /etc/systemd/system/sovereign-openclaw-gateway.service 2>/dev/null || true
+          sudo cat /etc/systemd/system/sovereign-mail-sentinel-scan.service 2>/dev/null || true
+          sudo systemctl status --no-pager sovereign-openclaw-gateway.service 2>&1 || true
+          sudo journalctl -u sovereign-openclaw-gateway.service -n 300 --no-pager 2>&1 || true
+          sudo journalctl -u sovereign-mail-sentinel-scan.service -n 100 --no-pager 2>&1 || true
           echo "=== docker compose logs ==="
           COMPOSE_DIR=$(find /etc/sovereign-node -name compose.yaml -exec dirname {} \; 2>/dev/null | head -1)
           if [ -n "$COMPOSE_DIR" ]; then
@@ -449,6 +455,12 @@ jobs:
           sudo cat /etc/sovereign-node/install-request.json 2>/dev/null | jq . || true
           echo "=== sovereign-node status ==="
           sudo env "PATH=$PATH" sovereign-node status --json 2>&1 || true
+          echo "=== gateway and scan units ==="
+          sudo cat /etc/systemd/system/sovereign-openclaw-gateway.service 2>/dev/null || true
+          sudo cat /etc/systemd/system/sovereign-mail-sentinel-scan.service 2>/dev/null || true
+          sudo systemctl status --no-pager sovereign-openclaw-gateway.service 2>&1 || true
+          sudo journalctl -u sovereign-openclaw-gateway.service -n 300 --no-pager 2>&1 || true
+          sudo journalctl -u sovereign-mail-sentinel-scan.service -n 100 --no-pager 2>&1 || true
           echo "=== docker compose logs ==="
           COMPOSE_DIR=$(find /etc/sovereign-node -name compose.yaml -exec dirname {} \; 2>/dev/null | head -1)
           if [ -n "$COMPOSE_DIR" ]; then
