@@ -252,6 +252,7 @@ export interface InstallerService {
   ): Promise<
     | { ok: true; username: string }
     | { ok: false; reason: "invalid" | "homeserver-unreachable" | "not-configured" }
+    | { ok: false; reason: "rate-limited"; retryAfterSeconds?: number }
   >;
   inviteMatrixUser(req: {
     username: string;

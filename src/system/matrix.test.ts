@@ -136,7 +136,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(homeserverText).toContain('public_baseurl: "http://matrix.local.test:8008/"');
       expect(homeserverText).toContain("allow_unsafe_locale: true");
       expect(homeserverText).toContain("rc_login:");
-      expect(homeserverText).toContain("per_second: 1000");
+      expect(homeserverText).not.toContain("per_second: 1000");
       const signingKey = await readFile(
         join(result.projectDir, "synapse", "matrix.local.test.signing.key"),
         "utf8",
