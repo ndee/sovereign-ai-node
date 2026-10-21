@@ -322,6 +322,12 @@ jobs:
           sudo env "PATH=$PATH" sovereign-node status --json > /tmp/status.json
           jq -e '.result.services[] | select(.kind == "openclaw") | .readiness == "ready"' /tmp/status.json
 
+      # Checked from inside the units' mount namespaces: no new privileges, no
+      # capabilities, a read-only system, no container-runtime socket and only
+      # the programs each unit needs.
+      - name: Verify the gateway and scan units run inside their systemd sandbox
+        run: sudo env "PATH=$PATH" bash scripts/ci/verify-systemd-sandbox.sh
+
       # A gateway that is up but never listens must be reported as not ready
       # (warn, exit 0 for this command) rather than as restarted. The drop-in
       # keeps the unit active without ever opening the port.

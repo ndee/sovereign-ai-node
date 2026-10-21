@@ -51,22 +51,30 @@ export const shouldGateSystemGatewayOnLocalMatrix = (adminBaseUrl: string): bool
   }
 };
 
+// Runs with the node runtime the unit already executes rather than a shell
+// with curl: the unit's ExecPaths= allow-list covers every command in it,
+// ExecStartPre= included. The script avoids "$", "%", backslashes and double
+// quotes so systemd passes it through unexpanded.
 export const renderSystemGatewayMatrixWaitCommand = (input: {
+  nodeCommand: string;
   adminBaseUrl: string;
   attempts: number;
   delaySeconds: number;
   timeoutSeconds: number;
 }): string => {
-  const versionsUrl = new URL(
-    "/_matrix/client/versions",
-    ensureTrailingSlash(input.adminBaseUrl),
-  ).toString();
-  return [
-    "/usr/bin/env",
-    "sh",
-    "-lc",
-    `'attempt=0; while [ "$attempt" -lt ${input.attempts} ]; do curl -fsS --max-time ${input.timeoutSeconds} "${versionsUrl}" >/dev/null 2>&1 && exit 0; attempt=$((attempt + 1)); sleep ${input.delaySeconds}; done; exit 1'`,
-  ].join(" ");
+  const versionsUrl = new URL("/_matrix/client/versions", ensureTrailingSlash(input.adminBaseUrl))
+    .toString()
+    .replaceAll("'", "%27")
+    .replaceAll("%", "%%");
+  const script = [
+    "(async()=>{",
+    `for(let i=0;i<${input.attempts};i++){`,
+    `try{const r=await fetch('${versionsUrl}',{signal:AbortSignal.timeout(${input.timeoutSeconds * 1000})});`,
+    "if(r.status<400)process.exit(0)}catch{}",
+    `await new Promise((d)=>setTimeout(d,${input.delaySeconds * 1000}))}`,
+    "process.exit(1)})()",
+  ].join("");
+  return `${input.nodeCommand} -e "${script}"`;
 };
 
 export const isBotConfigRecordMap = (value: unknown): value is Record<string, BotConfigRecord> => {
