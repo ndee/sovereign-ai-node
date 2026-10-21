@@ -699,6 +699,20 @@ Constraints:
   to a dedicated empty directory (`<service home>/llm-task-workspace`, `0750`,
   service-owned) so `llm-task` calls never carry agent bootstrap files
   (`AGENTS.md`, `SOUL.md`, `TOOLS.md`, `USER.md`, `MEMORY.md`).
+- The managed OpenClaw config denies generic tools by default. Every
+  `agents.list[]` entry carries `tools.deny` with `exec`, `process`, `lobster`,
+  `browser`, `web_fetch` and `web_search`, minus the tools that agent opts into
+  (agents with a closed tool policy, below, never opt into any of them).
+  An agent opts in only through its bound tool templates: `allowedCommands`
+  grants `exec` (gateway host, allowlist security, no prompt; `process` stays
+  denied), and `openclawToolNames` grants the named tools (plus
+  `session_status`) in `tools.allow`. Top-level `tools.deny` holds the
+  default-denied tools that no agent opts into, because a top-level deny cannot be
+  re-allowed per agent. The config also sets `tools.elevated.enabled: false`
+  (no agent entry sets `elevated`), `tools.fs.workspaceOnly: true`,
+  `browser.enabled: false` (no browser control server) and
+  `discovery.mdns.mode: "off"` (the gateway does not advertise itself on the LAN;
+  the host's own `<hostname>.local` is unaffected).
 - `imap.password` MUST NOT be persisted if provided
 - `imap` may be omitted (pending IMAP mode)
 - `connectivity.mode = "relay"` requires a valid `relay` object
@@ -747,7 +761,10 @@ update.
     keep an allow list. `tools.deny` holds every core tool group (`group:fs`,
     `group:runtime`, `group:web`, `group:memory`, `group:sessions`, `group:ui`,
     `group:messaging`, `group:automation`, `group:nodes`, `group:agents`,
-    `group:media`). No `allowedCommands` of any template bound to that agent are
+    `group:media`) plus the default-denied tools `exec`, `process`, `lobster`,
+    `browser`, `web_fetch` and `web_search`. Deny wins over allow, so the
+    agent is offered exactly its typed and named plugin tools; neither those nor
+    `llm-task` are ever in a deny list. No `allowedCommands` of any template bound to that agent are
     allowlisted for exec, and `TOOLS.md` documents only the OpenClaw tools.
 - **Scan agent** (`openclawScanAgent`): `{ toolNames }`, plugin tools only. Node
   adds an agent `<agent id>-scan` to `agents.list` with the `llm-task` workspace,
@@ -1028,6 +1045,25 @@ A cold OpenClaw gateway start loads and transpiles its bundled plugins before it
 - **wait:** poll every 2 s until the port answers or the deadline passes, returning as soon as it answers. The deadline defaults to 300 s and can be set with `SOVEREIGN_NODE_GATEWAY_READY_TIMEOUT_MS` (clamped to 30 s–900 s)
 - **fail fast:** the wait stops early when systemd reports the unit `failed`, or when its `NRestarts` grows during the wait (crash loop); that outcome is "unit failed to start", not "not ready yet"
 - **status:** `services[kind=openclaw].readiness` is `ready` when the port answers, `starting` when the unit is up but the port does not answer yet (health `degraded`, message `gateway starting (not listening yet)`), and `down` otherwise; `since` is the unit's `ActiveEnterTimestamp`
+
+## Gateway and Bot Unit Sandboxing
+
+The system-level gateway unit (`sovereign-openclaw-gateway.service`) and every bot-declared service unit (for example `sovereign-mail-sentinel-scan.service`) carry the same systemd sandbox, rendered by `src/installer/systemd-sandbox.ts`. The units are rewritten on install, update and reconfigure, so an upgraded node picks the sandbox up without manual steps. The OpenClaw user-unit path (`openclaw-gateway.service`) is not covered.
+
+- **privileges:** `NoNewPrivileges=yes`, `CapabilityBoundingSet=` (empty), `RestrictSUIDSGID=yes`, `LockPersonality=yes`, `RestrictNamespaces=yes`. `sudo` and other setuid programs cannot raise privileges from inside these units
+- **kernel and devices:** `PrivateDevices=yes`, `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`, `ProtectKernelLogs=yes`, `ProtectControlGroups=yes`
+- **network:** `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK`. `AF_NETLINK` is required: the gateway enumerates network interfaces when it loads, and Node throws when netlink sockets are denied
+- **filesystem:** `ProtectSystem=strict`, `PrivateTmp=yes`, and `ProtectHome=yes` (`read-only` when a needed path lies under `/home`, `/root` or `/run/user`, for example a root service user's npm prefix). `InaccessiblePaths=` hides `/run/docker.sock` and `/run/containerd/containerd.sock`
+- **writable (`ReadWritePaths=`):** the state dir, the OpenClaw service home and its managed temp dir, every agent workspace (workspaces outside the state dir included), and, for the gateway, the Matrix extension's native crypto package dir under each candidate OpenClaw package root (the extension downloads its native module there at start). Bot units get the state dir, the OpenClaw service home, the agent workspace and the unit's working directory
+- **pinned read-only (`ReadOnlyPaths=`):** the service user's npm prefix, which sits inside the writable state dir, so a unit cannot change the trees it may execute from. OpenClaw package roots outside it are read-only through `ProtectSystem=strict`. The Matrix crypto package dir stays writable inside either
+- **execution (`NoExecPaths=/`, `ExecPaths=`):** nothing may be executed or mapped as code except the library dirs (`/usr/lib`, `/usr/lib64`, `/lib`, `/lib64`), the node runtime resolved on the unit's `PATH`, `/usr/bin/env`, `bash` (the interpreter of the root-owned `/usr/local/bin/sovereign-tool` wrapper), `/usr/local/bin/sovereign-tool`, the `bin` and `lib` dirs of the service user's npm prefix (lobster, and openclaw on unprivileged installs) and the OpenClaw package roots (native addons included). Bot units add `cat`, which lobster's exec stage runs. The gateway adds, only while some agent has an exec allowlist, `sh` and `/bin/sh` (the exec tool runs commands through a shell, and each exec wrapper is a `#!/bin/sh` script), the agents' exec wrappers and the executables those wrappers run. While some agent is bound to a typed tool, it also adds the node runtime the typed tool starts its CLI with, as resolved on the unit's `PATH` and with symlinks resolved (what `process.execPath` reports); the CLI script itself is only read, from the OpenClaw home, and is not executable
+- **not set:** `MemoryDenyWriteExecute`, which breaks the V8 JIT
+
+Every path is rendered with systemd's `-` prefix, so a path missing on a given host is skipped rather than failing the unit. systemd keeps one mode per path, the most restrictive, so no path is listed both read-only and writable or executable; access is combined by nesting (the npm prefix read-only, its `bin` and `lib` executable inside it), and the renderer drops a read-only entry that repeats a writable or executable path. The gateway's local-Matrix `ExecStartPre=` wait runs on the unit's node runtime, not a shell with `curl`, because `ExecPaths=` applies to every command in the unit.
+
+**Extension point.** A change that lets the gateway start a new host program (a typed tool's CLI, an exec wrapper directory) must add that program to the gateway's program list (`listGatewaySandboxAgentPrograms` in `src/installer/real-service.ts`, which feeds `GatewaySandboxInput.programs`), or the program will fail to start with `EACCES`. Bot units take their program list from `resolveBotServiceSandboxPrograms`. The directive contract is pinned by `src/installer/systemd-sandbox.test.ts`, and CI's non-interactive install job checks the live units from inside their mount namespaces (`scripts/ci/verify-systemd-sandbox.sh`).
+
+**Behaviour changes.** The gateway's own file log (`/tmp/openclaw` by default) now lands in the unit's private `/tmp`, so it is gone after a restart; the journal is unaffected. Chat-driven node administration through the `sovereign-node` CLI (the non-default node-operator bot) can no longer change `/etc/sovereign-node` or use `sudo` from the gateway. OpenClaw plugins installed by hand under `~/.openclaw/extensions` cannot load native addons.
 
 ## Endpoint Request/Response Contracts
 

@@ -7,6 +7,7 @@ import {
   mkdir,
   readdir,
   readFile,
+  realpath,
   rename,
   rm,
   stat,
@@ -84,6 +85,7 @@ import {
 } from "../onboarding/setup-ui-bootstrap.js";
 import {
   buildOpenClawClosedToolPolicy,
+  type OpenClawClosedToolPolicy,
   resolveOpenClawScanAgentId,
 } from "../openclaw/agent-tool-policy.js";
 import {
@@ -337,6 +339,13 @@ import type {
 } from "./service.js";
 import { StubInstallerService } from "./stub-service.js";
 import {
+  buildBotServiceSandboxPaths,
+  buildGatewaySandboxPaths,
+  MATRIX_CRYPTO_RUNTIME_PACKAGE_DIR,
+  npmPrefixFromBinDir,
+  renderSystemdSandboxDirectives,
+} from "./systemd-sandbox.js";
+import {
   diffBotPackageSurfaces,
   diffToolTemplateSurfaces,
   type TemplateTransitionDiff,
@@ -385,6 +394,8 @@ type HostResourceContext = {
    * name (#232). Absent when it could not be resolved (no exec runner).
    */
   serviceNpmBinDir?: string;
+  /** Host programs a bot-declared service unit may start (see systemd-sandbox.ts). */
+  sandboxPrograms: readonly string[];
 };
 
 type MaterializedBotToolInstance = RuntimeConfig["sovereignTools"]["instances"][number] & {
@@ -397,6 +408,32 @@ type RequestedBotInstance = RuntimeBotInstance;
 
 const OPENCLAW_EXEC_TOOL_ID = "exec";
 const OPENCLAW_SESSION_STATUS_TOOL_ID = "session_status";
+// Generic side-effecting tools an agent only gets when one of its bound tool
+// templates opts in (exec through `allowedCommands`, the others by naming them
+// in `openclawToolNames`). Elevated host access is not a tool id: it is gated
+// by `tools.elevated.enabled`, which the managed config turns off.
+const OPENCLAW_DEFAULT_DENIED_TOOL_IDS = [
+  OPENCLAW_EXEC_TOOL_ID,
+  "process",
+  "lobster",
+  "browser",
+  "web_fetch",
+  "web_search",
+] as const;
+
+// The core groups of the closed policy already cover every default-denied core
+// tool; the explicit ids keep plugin tools such as lobster denied for the agent
+// even when another agent opts into them and they leave the top-level deny.
+const buildManagedClosedToolPolicy = (pluginToolNames: string[]): OpenClawClosedToolPolicy => {
+  const policy = buildOpenClawClosedToolPolicy(pluginToolNames);
+  return {
+    allow: policy.allow,
+    deny: [
+      ...policy.deny,
+      ...OPENCLAW_DEFAULT_DENIED_TOOL_IDS.filter((toolId) => !policy.allow.includes(toolId)),
+    ],
+  };
+};
 const OPENCLAW_STATUS_PROBE_TIMEOUT_MS = 5_000;
 // A warm `openclaw health` takes seconds on a fast host and far longer on a
 // small ARM board, because it loads every plugin before it answers.
@@ -493,11 +530,13 @@ const MAIL_SENTINEL_IMAP_CONFIGURED_KEY = "imapConfigured";
 const MAIL_SENTINEL_IMAP_PASSWORD_SECRET_KEY = "imapPassword";
 const SOVEREIGN_PINNED_LOBSTER_PACKAGE_NAME = "@clawdbot/lobster";
 const SOVEREIGN_PINNED_LOBSTER_VERSION = "2026.1.24";
+const SOVEREIGN_TOOL_EXECUTABLE_PATH = "/usr/local/bin/sovereign-tool";
+const SANDBOX_PROGRAM_SEARCH_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const SOVEREIGN_EXECUTABLE_PATHS: Record<string, string> = {
   "sovereign-node": "/usr/local/bin/sovereign-node",
   "sovereign-node-api": "/usr/local/bin/sovereign-node-api",
   "sovereign-node-onboarding-api": "/usr/local/bin/sovereign-node-onboarding-api",
-  "sovereign-tool": "/usr/local/bin/sovereign-tool",
+  "sovereign-tool": SOVEREIGN_TOOL_EXECUTABLE_PATH,
 };
 
 const DEFAULT_MATRIX_USER_INVITE_TTL_MINUTES = 1_440;
@@ -4320,6 +4359,7 @@ export class RealInstallerService implements InstallerService {
     const botStatus: CompiledBotStatus[] = [];
     const unmatchedSystemdBots: string[] = [];
     const serviceNpmBinDir = await this.resolveServiceNpmBinDir(runtimeConfig);
+    const sandboxPrograms = await this.resolveBotServiceSandboxPrograms(serviceNpmBinDir);
 
     for (const botPackage of botPackages) {
       const agents = runtimeConfig.openclawProfile.agents.filter(
@@ -4355,6 +4395,7 @@ export class RealInstallerService implements InstallerService {
             botInstance?.id ?? agent.id,
           ),
           ...(serviceNpmBinDir === undefined ? {} : { serviceNpmBinDir }),
+          sandboxPrograms,
         };
         for (const resource of botPackage.manifest.hostResources) {
           if (!this.isBotHostResourceEnabled(context, resource.enabledWhen)) {
@@ -4887,6 +4928,22 @@ export class RealInstallerService implements InstallerService {
       ...(resource.spec.restartSec === undefined
         ? []
         : [`RestartSec=${this.resolveHostResourceString(context, resource.spec.restartSec)}`]),
+      ...renderSystemdSandboxDirectives(
+        buildBotServiceSandboxPaths({
+          stateDir: this.paths.stateDir,
+          openclawServiceHome: this.paths.openclawServiceHome,
+          workspaces: [
+            context.agent.workspace,
+            ...(resource.spec.workingDirectory === undefined
+              ? []
+              : [this.resolveHostResourceString(context, resource.spec.workingDirectory)]),
+          ],
+          ...(context.serviceNpmBinDir === undefined
+            ? {}
+            : { serviceNpmPrefix: npmPrefixFromBinDir(context.serviceNpmBinDir) }),
+          programs: context.sandboxPrograms,
+        }),
+      ),
       "",
       "[Install]",
       ...resource.spec.wantedBy.map(
@@ -4925,6 +4982,109 @@ export class RealInstallerService implements InstallerService {
     const serviceIdentity = this.getConfiguredServiceIdentity(runtimeConfig);
     const serviceHome = await this.resolveServiceUserHome(serviceIdentity.user);
     return resolveServiceNpmBinDir(serviceHome ?? undefined);
+  }
+
+  // Programs every sandboxed unit may start: the node runtime, the
+  // /usr/bin/env that shebangs and ExecStart lines go through, and the
+  // root-owned sovereign-tool CLI together with its bash wrapper interpreter.
+  private async resolveSandboxBasePrograms(
+    searchPath: string,
+  ): Promise<{ node: string; programs: string[] }> {
+    const node = (await resolveExecutablePath("node", searchPath)) ?? "/usr/bin/node";
+    return {
+      node,
+      programs: [
+        node,
+        "/usr/bin/env",
+        (await resolveExecutablePath("bash", searchPath)) ?? "/usr/bin/bash",
+        SOVEREIGN_TOOL_EXECUTABLE_PATH,
+      ],
+    };
+  }
+
+  // Bot scan units also run lobster (covered by the npm prefix exec path) and
+  // lobster's exec stage, which feeds the classifier input through `cat`.
+  private async resolveBotServiceSandboxPrograms(
+    serviceNpmBinDir: string,
+    systemSearchPath: string = SANDBOX_PROGRAM_SEARCH_PATH,
+  ): Promise<string[]> {
+    const searchPath = [serviceNpmBinDir, systemSearchPath].join(":");
+    return [
+      ...(await this.resolveSandboxBasePrograms(searchPath)).programs,
+      (await resolveExecutablePath("cat", searchPath)) ?? "/usr/bin/cat",
+    ];
+  }
+
+  // Programs agents can make the gateway start:
+  // - the exec tool runs the root-owned wrapper of an allowlisted command
+  //   through the shell it starts every command with (`$SHELL -c` or
+  //   `sh -c`); the wrapper is a `#!/bin/sh` script that execs the command;
+  // - a typed tool runs its script with the gateway's own node binary, which
+  //   `process.execPath` reports with symlinks resolved.
+  // Any new way for an agent to start a host program must be listed here, or
+  // the gateway unit's ExecPaths= will refuse it.
+  private async listGatewaySandboxAgentPrograms(
+    runtimeConfig: RuntimeConfig,
+    searchPath: string,
+    nodeCommand: string,
+  ): Promise<string[]> {
+    const execPrograms: string[] = [];
+    let bindsTypedTool = false;
+    for (const agent of runtimeConfig.openclawProfile?.agents ?? []) {
+      for (const command of await this.listAgentExecAllowlistCommands(
+        runtimeConfig,
+        agent.toolInstanceIds ?? [],
+      )) {
+        const plan = this.planAgentExecWrapper(agent.id, command);
+        if (plan !== null) {
+          execPrograms.push(plan.path, plan.executable);
+        }
+      }
+      bindsTypedTool ||= await this.agentBindsTypedTool(runtimeConfig, agent.toolInstanceIds ?? []);
+    }
+    return [
+      ...(execPrograms.length === 0
+        ? []
+        : [
+            (await resolveExecutablePath("sh", searchPath)) ?? "/bin/sh",
+            "/bin/sh",
+            ...execPrograms,
+          ]),
+      ...(bindsTypedTool ? await this.resolveTypedToolSandboxPrograms(nodeCommand) : []),
+    ];
+  }
+
+  private async agentBindsTypedTool(
+    runtimeConfig: RuntimeConfig,
+    toolInstanceIds: string[],
+  ): Promise<boolean> {
+    return (await this.resolveBoundToolManifests(runtimeConfig, toolInstanceIds)).some(
+      ({ manifest }) => manifest.openclawTypedTool !== undefined,
+    );
+  }
+
+  private async resolveTypedToolSandboxPrograms(nodeCommand: string): Promise<string[]> {
+    try {
+      return Array.from(new Set([nodeCommand, await realpath(nodeCommand)]));
+    } catch {
+      return [nodeCommand];
+    }
+  }
+
+  private async resolveOpenClawPackageRoots(
+    openclawCommand: string,
+    serviceNpmBinDir: string,
+  ): Promise<string[]> {
+    const roots: string[] = [];
+    try {
+      // The bin entry is a symlink to openclaw.mjs at the package root.
+      roots.push(dirname(await realpath(openclawCommand)));
+    } catch {}
+    roots.push(
+      join(await this.resolveOpenClawGlobalRoot(), "openclaw"),
+      join(npmPrefixFromBinDir(serviceNpmBinDir), "lib", "node_modules", "openclaw"),
+    );
+    return roots;
   }
 
   private renderSystemdTimerResource(
@@ -6313,17 +6473,14 @@ export default function (api) {
     runtimeConfig: RuntimeConfig,
     toolInstanceIds: string[],
   ): Promise<{
-    allow: string[];
-    deny?: string[];
-    elevated?: {
-      enabled: boolean;
-    };
+    allow?: string[];
+    deny: string[];
     exec?: {
       host: "gateway";
       security: "allowlist";
       ask: "off";
     };
-  } | null> {
+  }> {
     const boundToolManifests = (
       await this.resolveBoundToolManifests(runtimeConfig, toolInstanceIds)
     ).map(({ manifest }) => manifest);
@@ -6334,22 +6491,20 @@ export default function (api) {
       manifest.openclawTypedTool === undefined ? [] : [manifest.openclawTypedTool.name],
     );
     if (typedToolNames.length > 0) {
-      return buildOpenClawClosedToolPolicy([...typedToolNames, ...openclawToolNames]);
+      return buildManagedClosedToolPolicy([...typedToolNames, ...openclawToolNames]);
     }
     const execPatterns = await this.listAgentExecAllowlistCommands(runtimeConfig, toolInstanceIds);
-    if (execPatterns.length === 0 && openclawToolNames.length === 0) {
-      return null;
-    }
     const allow = dedupeStrings([
       ...(openclawToolNames.length === 0 ? [] : [OPENCLAW_SESSION_STATUS_TOOL_ID]),
       ...openclawToolNames,
       ...(execPatterns.length === 0 ? [] : [OPENCLAW_EXEC_TOOL_ID]),
     ]);
+    // An explicit deny, unlike an allow list, survives OpenClaw dropping an
+    // allow list that names no core tool (which would expose every core tool).
+    const deny = OPENCLAW_DEFAULT_DENIED_TOOL_IDS.filter((toolId) => !allow.includes(toolId));
     return {
-      allow,
-      elevated: {
-        enabled: true,
-      },
+      ...(allow.length === 0 ? {} : { allow }),
+      deny,
       ...(execPatterns.length === 0
         ? {}
         : {
@@ -10865,6 +11020,25 @@ export default function (api) {
       .join(":");
     const openclawCommand =
       (await resolveExecutablePath("openclaw", unitPathEnv)) ?? join(serviceNpmBinDir, "openclaw");
+    const { node: nodeCommand, programs: basePrograms } =
+      await this.resolveSandboxBasePrograms(unitPathEnv);
+    const sandboxPaths = buildGatewaySandboxPaths({
+      stateDir: this.paths.stateDir,
+      openclawServiceHome: this.paths.openclawServiceHome,
+      tempDir: managedTempDir,
+      agentWorkspaces: (runtimeConfig.openclawProfile?.agents ?? []).map(
+        (agent) => agent.workspace,
+      ),
+      serviceNpmPrefix: npmPrefixFromBinDir(serviceNpmBinDir),
+      openclawPackageRoots: await this.resolveOpenClawPackageRoots(
+        openclawCommand,
+        serviceNpmBinDir,
+      ),
+      programs: [
+        ...basePrograms,
+        ...(await this.listGatewaySandboxAgentPrograms(runtimeConfig, unitPathEnv, nodeCommand)),
+      ],
+    });
     const unitName = SOVEREIGN_GATEWAY_SYSTEMD_UNIT;
     const waitsForLocalMatrix = shouldGateSystemGatewayOnLocalMatrix(
       runtimeConfig.matrix.adminBaseUrl,
@@ -10895,6 +11069,7 @@ export default function (api) {
       ...(waitsForLocalMatrix
         ? [
             `ExecStartPre=${renderSystemGatewayMatrixWaitCommand({
+              nodeCommand,
               adminBaseUrl: runtimeConfig.matrix.adminBaseUrl,
               attempts: SYSTEM_GATEWAY_MATRIX_WAIT_ATTEMPTS,
               delaySeconds: SYSTEM_GATEWAY_MATRIX_WAIT_DELAY_SECONDS,
@@ -10905,6 +11080,7 @@ export default function (api) {
       `ExecStart=${openclawCommand} gateway run --allow-unconfigured --bind loopback`,
       "Restart=always",
       "RestartSec=3",
+      ...renderSystemdSandboxDirectives(sandboxPaths),
       "",
       "[Install]",
       "WantedBy=multi-user.target",
@@ -12939,6 +13115,27 @@ export default function (api) {
       };
     }
 
+    const agentEntries = await Promise.all(
+      managedAgents.map(async (entry) => ({
+        entry,
+        tools: await this.buildOpenClawAgentToolPolicy(runtimeConfig, entry.toolInstanceIds ?? []),
+      })),
+    );
+    // Scan agents have no channel binding and no workspace files: a bot's
+    // scan reaches only the plugin tools its template names, through the
+    // gateway, and never shares a session with the chat agent.
+    const scanAgentEntries = (await this.listManagedScanAgents(runtimeConfig, managedAgents)).map(
+      (scan) => ({
+        id: scan.id,
+        workspace: llmTaskWorkspaceDir,
+        ...(scan.model === undefined ? {} : { model: normalizeOpenClawAgentModel(scan.model) }),
+        tools: buildManagedClosedToolPolicy(scan.toolNames),
+      }),
+    );
+    const agentOptInToolIds = new Set(
+      [...agentEntries, ...scanAgentEntries].flatMap(({ tools }) => tools.allow ?? []),
+    );
+
     const runtimePayload = {
       ...(preservedMeta === undefined ? {} : { meta: preservedMeta }),
       gateway: {
@@ -13025,33 +13222,38 @@ export default function (api) {
           ),
         },
         list: [
-          ...(await Promise.all(
-            managedAgents.map(async (entry) => {
-              const tools = await this.buildOpenClawAgentToolPolicy(
-                runtimeConfig,
-                entry.toolInstanceIds ?? [],
-              );
-              return {
-                id: entry.id,
-                workspace: entry.workspace,
-                ...(entry.default === true ? { default: true } : {}),
-                ...(entry.model === undefined
-                  ? {}
-                  : { model: normalizeOpenClawAgentModel(entry.model) }),
-                ...(tools === null ? {} : { tools }),
-              };
-            }),
-          )),
-          // Scan agents have no channel binding and no workspace files: a bot's
-          // scan reaches only the plugin tools its template names, through
-          // the gateway, and never shares a session with the chat agent.
-          ...(await this.listManagedScanAgents(runtimeConfig, managedAgents)).map((scan) => ({
-            id: scan.id,
-            workspace: llmTaskWorkspaceDir,
-            ...(scan.model === undefined ? {} : { model: normalizeOpenClawAgentModel(scan.model) }),
-            tools: buildOpenClawClosedToolPolicy(scan.toolNames),
+          ...agentEntries.map(({ entry, tools }) => ({
+            id: entry.id,
+            workspace: entry.workspace,
+            ...(entry.default === true ? { default: true } : {}),
+            ...(entry.model === undefined
+              ? {}
+              : { model: normalizeOpenClawAgentModel(entry.model) }),
+            tools,
           })),
+          ...scanAgentEntries,
         ],
+      },
+      // The pinned OpenClaw schema has no `agents.defaults.tools`, and a tool
+      // denied here cannot be re-allowed per agent, so this only denies the
+      // default-denied tools that no agent opts into; each agent's own deny
+      // list carries the rest.
+      tools: {
+        deny: OPENCLAW_DEFAULT_DENIED_TOOL_IDS.filter((toolId) => !agentOptInToolIds.has(toolId)),
+        elevated: {
+          enabled: false,
+        },
+        fs: {
+          workspaceOnly: true,
+        },
+      },
+      browser: {
+        enabled: false,
+      },
+      discovery: {
+        mdns: {
+          mode: "off" as const,
+        },
       },
       cron: {
         enabled: true,
@@ -13455,15 +13657,7 @@ export default function (api) {
    */
   private async ensureMatrixCryptoRuntimeWritable(runtimeConfig?: RuntimeConfig): Promise<void> {
     const globalRoot = await this.resolveOpenClawGlobalRoot();
-    const cryptoDir = join(
-      globalRoot,
-      "openclaw",
-      "extensions",
-      "matrix",
-      "node_modules",
-      "@matrix-org",
-      "matrix-sdk-crypto-nodejs",
-    );
+    const cryptoDir = join(globalRoot, "openclaw", MATRIX_CRYPTO_RUNTIME_PACKAGE_DIR);
 
     try {
       const dirStat = await stat(cryptoDir);

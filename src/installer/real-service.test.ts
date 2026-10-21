@@ -2744,9 +2744,7 @@ describe("RealInstallerService", () => {
             workspace?: string;
             tools?: {
               allow?: string[];
-              elevated?: {
-                enabled?: boolean;
-              };
+              deny?: string[];
               exec?: {
                 host?: string;
                 security?: string;
@@ -2760,6 +2758,9 @@ describe("RealInstallerService", () => {
             models?: Record<string, { params?: { provider?: Record<string, unknown> } }>;
           };
         };
+        tools?: unknown;
+        browser?: unknown;
+        discovery?: unknown;
         plugins?: {
           allow?: string[];
           entries?: Record<string, { enabled?: boolean; config?: unknown }>;
@@ -2854,25 +2855,34 @@ describe("RealInstallerService", () => {
       expect(
         openclawConfig.agents?.list?.every((entry) => Object.hasOwn(entry, "matrix") === false),
       ).toBe(true);
+      // Mail Sentinel's tool template opts into exec (allowedCommands) and
+      // lobster/llm-task (openclawToolNames); every other default-denied tool
+      // stays denied, and elevated access is never granted per agent.
       expect(openclawConfig.agents?.list).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
             id: "mail-sentinel",
             model: "openrouter/qwen/qwen-2.5-32b-instruct",
-            tools: expect.objectContaining({
-              allow: expect.arrayContaining(["exec", "session_status", "lobster", "llm-task"]),
-              elevated: {
-                enabled: true,
-              },
+            tools: {
+              allow: ["exec", "llm-task", "lobster", "session_status"],
+              deny: ["process", "browser", "web_fetch", "web_search"],
               exec: {
                 host: "gateway",
                 security: "allowlist",
                 ask: "off",
               },
-            }),
+            },
           }),
         ]),
       );
+      expect(JSON.stringify(openclawConfig.agents?.list)).not.toContain("elevated");
+      expect(openclawConfig.tools).toEqual({
+        deny: ["process", "browser", "web_fetch", "web_search"],
+        elevated: { enabled: false },
+        fs: { workspaceOnly: true },
+      });
+      expect(openclawConfig.browser).toEqual({ enabled: false });
+      expect(openclawConfig.discovery).toEqual({ mdns: { mode: "off" } });
       expect(openclawConfig.agents?.defaults?.model).toBe("openrouter/qwen/qwen-2.5-7b-instruct");
       // Strict OpenRouter privacy routing is the default and reaches the
       // request body via agents.defaults.models[<model>].params.provider,
@@ -3106,9 +3116,11 @@ describe("RealInstallerService", () => {
             model?: string;
             tools?: {
               allow?: string[];
+              deny?: string[];
             };
           }>;
         };
+        tools?: { deny?: string[] };
       };
       expect(openclawConfig.plugins?.allow).toEqual(
         expect.arrayContaining(["matrix", "guarded-json-state"]),
@@ -3136,6 +3148,15 @@ describe("RealInstallerService", () => {
       expect(bitcoinAgent?.tools?.allow).not.toEqual(
         expect.arrayContaining(["read", "write", "edit", "exec"]),
       );
+      expect(bitcoinAgent?.tools?.deny).toEqual([
+        "exec",
+        "process",
+        "lobster",
+        "browser",
+        "web_fetch",
+        "web_search",
+      ]);
+      expect(openclawConfig.tools?.deny).toEqual(bitcoinAgent?.tools?.deny);
 
       const runtimeConfigRaw = await readFile(paths.configPath, "utf8");
       const runtimeConfig = JSON.parse(runtimeConfigRaw) as {
@@ -4935,7 +4956,13 @@ describe("RealInstallerService", () => {
       const unitRaw = await readFile(gatewayUnitPath, "utf8");
       expect(unitRaw).toContain("After=network-online.target docker.service");
       expect(unitRaw).toContain("Requires=docker.service");
-      expect(unitRaw).toContain("ExecStartPre=/usr/bin/env sh -lc");
+      // The wait runs on the unit's own node runtime, so it needs no shell or
+      // curl inside the ExecPaths= allow-list.
+      const waitNode = unitRaw.match(/^ExecStartPre=(\S+) -e "/m)?.[1];
+      expect(waitNode).toMatch(/node$/);
+      expect(unitRaw).not.toContain("sh -lc");
+      const execPaths = unitRaw.match(/^ExecPaths=(.*)$/m)?.[1]?.split(" ") ?? [];
+      expect(execPaths).toContain(`-${waitNode}`);
       expect(unitRaw).toContain("/_matrix/client/versions");
       expect(unitRaw).toContain("User=sovereign-node");
       expect(unitRaw).toContain("Group=sovereign-node");
@@ -11775,6 +11802,27 @@ describe("RealInstallerService", () => {
       expect(updated.restartRequiredServices).toEqual([]);
       expect(gatewayRestartCalls).toBe(1);
 
+      const openclawConfig = JSON.parse(
+        await readFile(join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"), "utf8"),
+      ) as {
+        agents?: { list?: Array<{ id?: string; tools?: unknown }> };
+        tools?: { deny?: string[] };
+      };
+      // An agent without bound tool templates opts into nothing.
+      expect(
+        openclawConfig.agents?.list?.find((agent) => agent.id === "ops-helper")?.tools,
+      ).toEqual({
+        deny: ["exec", "process", "lobster", "browser", "web_fetch", "web_search"],
+      });
+      expect(openclawConfig.tools?.deny).toEqual([
+        "exec",
+        "process",
+        "lobster",
+        "browser",
+        "web_fetch",
+        "web_search",
+      ]);
+
       const removed = await service.deleteManagedAgent({ id: "ops-helper" });
       expect(removed.deleted).toBe(true);
       expect(removed.restartRequiredServices).toEqual(["openclaw-gateway"]);
@@ -11984,6 +12032,17 @@ describe("RealInstallerService", () => {
           command.startsWith("openclaw approvals allowlist add --agent node-operator "),
         ),
       ).toBe(true);
+      const openclawConfig = JSON.parse(
+        await readFile(join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"), "utf8"),
+      ) as { agents?: { list?: Array<{ id?: string; tools?: unknown }> } };
+      // allowedCommands opt the agent into exec only; process stays denied.
+      expect(
+        openclawConfig.agents?.list?.find((agent) => agent.id === "node-operator")?.tools,
+      ).toEqual({
+        allow: ["exec"],
+        deny: ["process", "lobster", "browser", "web_fetch", "web_search"],
+        exec: { host: "gateway", security: "allowlist", ask: "off" },
+      });
       expect(
         (await stat(join(paths.stateDir, "node-operator", "workspace", ".openclaw"))).isDirectory(),
       ).toBe(true);
@@ -16250,7 +16309,11 @@ describe("RealInstallerService bot unit PATH carries the service npm prefix (#23
     ) => string;
     resolveServiceNpmBinDir: (runtimeConfig: RuntimeConfig) => Promise<string | undefined>;
     renderSystemdServiceResource: (
-      context: { serviceNpmBinDir?: string },
+      context: {
+        serviceNpmBinDir?: string;
+        agent: { workspace: string };
+        sandboxPrograms: readonly string[];
+      },
       resource: Record<string, unknown>,
     ) => string;
   };
@@ -16333,11 +16396,18 @@ describe("RealInstallerService bot unit PATH carries the service npm prefix (#23
         desiredState: { enabled: false, active: false },
       },
     };
-    const rendered = internals.renderSystemdServiceResource({ serviceNpmBinDir: npmBin }, resource);
+    const sandboxContext = {
+      agent: { workspace: "/var/lib/sovereign-node/mail-sentinel/workspace" },
+      sandboxPrograms: ["/usr/bin/node"],
+    };
+    const rendered = internals.renderSystemdServiceResource(
+      { ...sandboxContext, serviceNpmBinDir: npmBin },
+      resource,
+    );
     expect(rendered).toContain(`Environment=PATH=${npmBin}:${systemPath}\n`);
     expect(rendered).toContain("Environment=HOME=/var/lib/sovereign-node/openclaw-home\n");
     // Without a resolved dir the manifest's literal PATH is rendered verbatim.
-    expect(internals.renderSystemdServiceResource({}, resource)).toContain(
+    expect(internals.renderSystemdServiceResource(sandboxContext, resource)).toContain(
       `Environment=PATH=${systemPath}\n`,
     );
   });
@@ -17008,6 +17078,15 @@ describe("typed tools, scan agents and exec pinning", () => {
     "group:agents",
     "group:media",
   ];
+  const CLOSED_AGENT_DENY = [
+    ...CORE_GROUP_DENY,
+    "exec",
+    "process",
+    "lobster",
+    "browser",
+    "web_fetch",
+    "web_search",
+  ];
 
   it("gives a typed-tool bot a closed chat agent, a tool-less scan agent and no exec", async () => {
     await withRuntime(async ({ tempRoot, paths }) => {
@@ -17049,6 +17128,7 @@ describe("typed tools, scan agents and exec pinning", () => {
           list: Array<{ id: string; workspace: string; tools?: Record<string, unknown> }>;
         };
         bindings?: Array<{ agentId: string }>;
+        tools: { deny: string[] };
         plugins: {
           allow: string[];
           load?: { paths: string[] };
@@ -17058,7 +17138,7 @@ describe("typed tools, scan agents and exec pinning", () => {
       const chatAgent = openclawConfig.agents.list.find((agent) => agent.id === "typed-sentinel");
       expect(chatAgent?.tools).toEqual({
         allow: ["typed_sentinel", "session_status"],
-        deny: CORE_GROUP_DENY,
+        deny: CLOSED_AGENT_DENY,
       });
       const scanAgent = openclawConfig.agents.list.find(
         (agent) => agent.id === "typed-sentinel-scan",
@@ -17067,8 +17147,17 @@ describe("typed tools, scan agents and exec pinning", () => {
         id: "typed-sentinel-scan",
         workspace: openclawConfig.agents.defaults.workspace,
         model: "openrouter/qwen/qwen-2.5-32b-instruct",
-        tools: { allow: ["llm-task", "session_status"], deny: CORE_GROUP_DENY },
+        tools: { allow: ["llm-task", "session_status"], deny: CLOSED_AGENT_DENY },
       });
+      // The shared deny list never takes the typed tool or llm-task away.
+      expect(openclawConfig.tools.deny).toEqual([
+        "exec",
+        "process",
+        "lobster",
+        "browser",
+        "web_fetch",
+        "web_search",
+      ]);
       expect(
         openclawConfig.bindings?.some((binding) => binding.agentId === "typed-sentinel-scan"),
       ).toBe(false);
