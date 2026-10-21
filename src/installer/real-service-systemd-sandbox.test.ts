@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { SovereignPaths } from "../config/paths.js";
 import { createLogger } from "../logging/logger.js";
+import { MANAGED_EXEC_WRAPPER_ROOT, planExecWrapper } from "../openclaw/exec-pinning.js";
 import type { ExecInput, ExecResult } from "../system/exec.js";
 import { RealInstallerService } from "./real-service.js";
 import type { RuntimeConfig } from "./real-service-shared.js";
@@ -13,11 +14,17 @@ import { renderSystemGatewayMatrixWaitCommand } from "./real-service-utils.js";
 
 type Internals = {
   ensureSystemGatewayServiceFallback(config: RuntimeConfig): Promise<{ ready: boolean }>;
-  listGatewaySandboxAgentPrograms(config: RuntimeConfig, searchPath: string): Promise<string[]>;
-  listAgentExecAllowlistPatterns(
+  listGatewaySandboxAgentPrograms(
+    config: RuntimeConfig,
+    searchPath: string,
+    nodeCommand: string,
+  ): Promise<string[]>;
+  listAgentExecAllowlistCommands(
     config: RuntimeConfig,
     toolInstanceIds: string[],
   ): Promise<string[]>;
+  agentBindsTypedTool(config: RuntimeConfig, toolInstanceIds: string[]): Promise<boolean>;
+  resolveTypedToolSandboxPrograms(nodeCommand: string): Promise<string[]>;
   renderSystemdServiceResource(
     context: {
       serviceNpmBinDir?: string;
@@ -212,45 +219,108 @@ describe("sovereign-openclaw-gateway unit sandbox", () => {
     expect(unit).toMatch(/^ExecStartPre=\/usr\/bin\/node -e "/m);
   });
 
-  it("lets agents start their exec allowlist through the shell only when they have one", async () => {
+  it("lets agents start their exec wrappers through the shell only when they have one", async () => {
     const service = makeService();
     const internals = service as unknown as Internals;
-    vi.spyOn(internals, "listAgentExecAllowlistPatterns").mockImplementation(
+    const command = "/usr/local/bin/sovereign-tool node-operator status --instance {id}";
+    vi.spyOn(internals, "listAgentExecAllowlistCommands").mockImplementation(
       async (_config, toolInstanceIds) =>
-        toolInstanceIds.map((id) => `/var/lib/sovereign-node/${id}/workspace/bin/${id}.js`),
+        toolInstanceIds.flatMap((id) =>
+          id === "node-operator" ? [command] : id === "relative" ? ["bin/relative.js"] : [],
+        ),
     );
+    vi.spyOn(internals, "agentBindsTypedTool").mockResolvedValue(false);
     await installTools();
     await writeFile(join(toolBin, "sh"), "#!/bin/sh\n", { mode: 0o755 });
+    const node = join(toolBin, "node");
 
-    expect(await internals.listGatewaySandboxAgentPrograms(runtimeConfig("x"), toolBin)).toEqual(
-      [],
-    );
+    expect(
+      await internals.listGatewaySandboxAgentPrograms(runtimeConfig("x"), toolBin, node),
+    ).toEqual([]);
     expect(
       await internals.listGatewaySandboxAgentPrograms(
-        runtimeConfig("x", [{ id: "plain", workspace: "/w" }]),
+        runtimeConfig("x", [
+          { id: "plain", workspace: "/w" },
+          { id: "relative", workspace: "/r", toolInstanceIds: ["relative"] },
+        ]),
         toolBin,
+        node,
       ),
     ).toEqual([]);
+    const wrapper = planExecWrapper({
+      wrapperRoot: MANAGED_EXEC_WRAPPER_ROOT,
+      agentId: "node-operator",
+      command,
+    });
     const withExec = runtimeConfig("x", [
       { id: "plain", workspace: "/w" },
-      { id: "mail-sentinel", workspace: "/m", toolInstanceIds: ["mail-sentinel"] },
+      { id: "node-operator", workspace: "/n", toolInstanceIds: ["node-operator"] },
     ]);
-    expect(await internals.listGatewaySandboxAgentPrograms(withExec, toolBin)).toEqual([
+    // The wrapper runs under its `#!/bin/sh` line and execs the command itself.
+    expect(await internals.listGatewaySandboxAgentPrograms(withExec, toolBin, node)).toEqual([
       join(toolBin, "sh"),
-      "/var/lib/sovereign-node/mail-sentinel/workspace/bin/mail-sentinel.js",
-    ]);
-    expect(await internals.listGatewaySandboxAgentPrograms(withExec, "")).toEqual([
       "/bin/sh",
-      "/var/lib/sovereign-node/mail-sentinel/workspace/bin/mail-sentinel.js",
+      wrapper?.path,
+      "/usr/local/bin/sovereign-tool",
+    ]);
+    expect(await internals.listGatewaySandboxAgentPrograms(withExec, "", node)).toEqual([
+      "/bin/sh",
+      "/bin/sh",
+      wrapper?.path,
+      "/usr/local/bin/sovereign-tool",
     ]);
 
     process.env.PATH = toolBin;
     const execPaths =
       (await render(service, withExec)).match(/^ExecPaths=(.*)$/m)?.[1]?.split(" ") ?? [];
     expect(execPaths).toContain(`-${join(toolBin, "sh")}`);
-    expect(execPaths).toContain(
-      "-/var/lib/sovereign-node/mail-sentinel/workspace/bin/mail-sentinel.js",
+    expect(execPaths).toContain("-/bin/sh");
+    expect(execPaths).toContain(`-${wrapper?.path}`);
+  });
+
+  it("lets a typed tool start its CLI with the gateway's node binary", async () => {
+    const service = makeService();
+    const internals = service as unknown as Internals;
+    vi.spyOn(internals, "listAgentExecAllowlistCommands").mockResolvedValue([]);
+    vi.spyOn(internals, "agentBindsTypedTool").mockImplementation(
+      async (_config, toolInstanceIds) => toolInstanceIds.includes("mail-sentinel-core"),
     );
+    await installTools();
+    // The typed tool spawns `process.execPath`, which is the node binary with
+    // symlinks resolved, so a node on PATH that is a symlink adds its target.
+    const nodeDist = join(tempRoot, "node-dist", "bin");
+    await mkdir(nodeDist, { recursive: true });
+    await rm(join(toolBin, "node"));
+    await writeFile(join(nodeDist, "node"), "#!/bin/sh\n", { mode: 0o755 });
+    await symlink(join(nodeDist, "node"), join(toolBin, "node"));
+    const typed = runtimeConfig("x", [
+      { id: "plain", workspace: "/w" },
+      { id: "mail-sentinel", workspace: "/m", toolInstanceIds: ["mail-sentinel-core"] },
+    ]);
+
+    expect(
+      await internals.listGatewaySandboxAgentPrograms(
+        runtimeConfig("x", [{ id: "plain", workspace: "/w", toolInstanceIds: ["other"] }]),
+        toolBin,
+        join(toolBin, "node"),
+      ),
+    ).toEqual([]);
+    expect(
+      await internals.listGatewaySandboxAgentPrograms(typed, toolBin, join(toolBin, "node")),
+    ).toEqual([join(toolBin, "node"), join(nodeDist, "node")]);
+    expect(await internals.resolveTypedToolSandboxPrograms(join(tempRoot, "missing-node"))).toEqual(
+      [join(tempRoot, "missing-node")],
+    );
+
+    process.env.PATH = toolBin;
+    const unit = await render(service, typed);
+    const execPaths = unit.match(/^ExecPaths=(.*)$/m)?.[1]?.split(" ") ?? [];
+    expect(execPaths).toContain(`-${join(toolBin, "node")}`);
+    expect(execPaths).toContain(`-${join(nodeDist, "node")}`);
+    // The CLI script itself is only read by node: it lives in the OpenClaw
+    // home, which stays readable, and is never added to the exec set.
+    expect(unit).toMatch(new RegExp(`^ReadWritePaths=.* -${paths.openclawServiceHome}( |$)`, "m"));
+    expect(execPaths.some((path) => path.startsWith(`-${paths.openclawServiceHome}`))).toBe(false);
   });
 });
 
@@ -331,6 +401,35 @@ describe("bot service unit sandbox", () => {
         " -/var/lib/sovereign-node/.npm-global/bin -/var/lib/sovereign-node/.npm-global/lib",
       ].join(""),
     ]);
+  });
+
+  it("lets the scan unit start the Mail Sentinel CLI that the typed tool also runs", async () => {
+    const internals = service();
+    const binDir = await mkdtemp(join(tmpdir(), "sovereign-sandbox-scan-cli-"));
+    try {
+      await writeFile(join(binDir, "node"), "#!/bin/sh\n", { mode: 0o755 });
+      const unit = internals.renderSystemdServiceResource(
+        {
+          serviceNpmBinDir: binDir,
+          agent: { workspace },
+          sandboxPrograms: await internals.resolveBotServiceSandboxPrograms(binDir, ""),
+        },
+        scanResource(workspace),
+      );
+      const execPaths = unit.match(/^ExecPaths=(.*)$/m)?.[1]?.split(" ") ?? [];
+      // ExecStart goes through env to the node on the unit PATH, and the CLI's
+      // status reads start the sovereign-tool CLI.
+      expect(unit).toContain(`ExecStart=/usr/bin/env node ${workspace}/bin/mail-sentinel.js scan`);
+      expect(execPaths).toEqual(
+        expect.arrayContaining([
+          "-/usr/bin/env",
+          `-${join(binDir, "node")}`,
+          "-/usr/local/bin/sovereign-tool",
+        ]),
+      );
+    } finally {
+      await rm(binDir, { recursive: true, force: true });
+    }
   });
 
   it("needs no working directory to sandbox a unit", () => {

@@ -60,11 +60,22 @@ nsenter --target "$pid" --mount -- "$node_bin" "$probe" "$(jq -nc \
   refused: [["/usr/bin/curl", "--version"], ["/usr/bin/cat", "/dev/null"]],
   unreachable: (if $docker then [$sock] else [] end)
 }')"
+# A typed tool runs its CLI the way the gateway's plugin does: the gateway's own
+# node binary (process.execPath, i.e. $node_bin) with the node-copied script.
+typed_tool_cli="$(find "$openclaw_home/.openclaw/extensions/sovereign-typed-tools/bin" \
+  -name mail-sentinel.js -print -quit 2>/dev/null || true)"
+typed_tool_checks='[]'
+if [[ -n "$typed_tool_cli" ]]; then
+  typed_tool_checks="$(jq -nc --arg node "$node_bin" --arg cli "$typed_tool_cli" \
+    '[[$node, $cli, "version", "--json"]]')"
+else
+  echo "::notice::no Mail Sentinel typed tool CLI is installed; skipping the typed tool check"
+fi
 nsenter --target "$pid" --mount --setuid "$uid" --setgid "$gid" -- "$node_bin" "$probe" "$(jq -nc \
   --arg home "$openclaw_home" --arg tmp "$openclaw_home/tmp" --arg data "$workspace/data" \
-  --arg node "$node_bin" '{
+  --arg node "$node_bin" --argjson typed "$typed_tool_checks" '{
   writable: [$home, $tmp, $data],
-  allowed: [[$node, "-e", "0"], ["/usr/local/bin/sovereign-tool", "--version"]]
+  allowed: ([[$node, "-e", "0"], ["/usr/local/bin/sovereign-tool", "--version"]] + $typed)
 }')"
 
 echo "== $scan_unit =="

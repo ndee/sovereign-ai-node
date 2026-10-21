@@ -1,6 +1,8 @@
 import type { KeyObject } from "node:crypto";
 import { createHash, createPublicKey, verify } from "node:crypto";
 
+import type { ScanAgentTemplate, TypedToolTemplate } from "../bots/typed-tool-schema.js";
+
 export type TemplateSignature = {
   algorithm: "ed25519";
   keyId: string;
@@ -19,6 +21,8 @@ export type ToolTemplateManifest = {
   openclawPlugins?: string[];
   openclawBundledPlugins?: string[];
   openclawToolNames?: string[];
+  openclawTypedTool?: TypedToolTemplate;
+  openclawScanAgent?: ScanAgentTemplate;
   signature: TemplateSignature;
 };
 

@@ -71,6 +71,7 @@ describe("spawn cwd coverage across src/", () => {
     "src/bots/catalog.ts",
     "src/cli/commands/update.ts",
     "src/installer/real-service-guarded-json-state-plugin.ts",
+    "src/installer/real-service-typed-tool-plugin.ts",
     "src/installer/real-service.ts",
     "src/support/collectors.ts",
   ];

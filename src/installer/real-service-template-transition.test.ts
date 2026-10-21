@@ -60,6 +60,7 @@ type FixtureTemplateShape = {
   botVersion: string;
   capabilities: string[];
   allowedCommands: string[];
+  typedOperations?: string[];
 };
 
 const V1: FixtureTemplateShape = {
@@ -98,6 +99,23 @@ const fixtureManifest = (shape: FixtureTemplateShape): string =>
           description: "Fixture tool",
           capabilities: shape.capabilities,
           allowedCommands: shape.allowedCommands,
+          ...(shape.typedOperations === undefined
+            ? {}
+            : {
+                openclawBundledPlugins: ["llm-task"],
+                openclawTypedTool: {
+                  name: "fixture_tool",
+                  description: "Fixture typed tool",
+                  script: "workspace/bin/fixture.js",
+                  operations: shape.typedOperations.map((name) => ({
+                    name,
+                    description: name,
+                    effect: "read",
+                    argv: [name, "--instance", "<tool-instance-id>", "--json"],
+                  })),
+                },
+                openclawScanAgent: { toolNames: ["llm-task"] },
+              }),
         },
       ],
       toolInstances: [{ id: "fixture-core", templateRef: "fixture-tool@1.0.0" }],
@@ -392,6 +410,38 @@ describe("verified-release template pin transition", () => {
     // A later plain reconcile now succeeds: pin == trusted template.
     const followUp = await makeService().reconcileAgentWorkspaces();
     expect(followUp.templateTransitions).toEqual([]);
+  });
+
+  it("reports typed operations that a release adds to a typed tool", async () => {
+    const typedV1: FixtureTemplateShape = {
+      botVersion: "1.0.0",
+      capabilities: ["fixture.read"],
+      allowedCommands: [],
+      typedOperations: ["read"],
+    };
+    const typedV2: FixtureTemplateShape = {
+      ...typedV1,
+      botVersion: "1.0.1",
+      typedOperations: ["read", "status"],
+    };
+    await writeCatalog(typedV1);
+    const previousManifest = fixtureManifest(typedV1);
+    await writeConfig(await pinEntriesFor());
+    await writeCatalog(typedV2);
+    const { pkg } = await loadIdentities();
+    const authorizationPath = await writeAuthorization({
+      manifestFileSha256: pkg.manifestFileSha256,
+      botVersion: typedV2.botVersion,
+      previousManifest,
+    });
+
+    const result = await makeService([currentUid]).reconcileAgentWorkspaces({
+      releaseAuthorizationPath: authorizationPath,
+    });
+
+    const transition = result.templateTransitions.find((entry) => entry.kind === "tool");
+    expect(transition?.commandsAdded).toEqual(["fixture_tool:status (read)"]);
+    expect(transition?.commandsRemoved).toEqual([]);
   });
 
   it("hard-fails on forged or wrong authorizations without mutating pins", async () => {

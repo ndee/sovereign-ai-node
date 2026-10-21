@@ -701,7 +701,8 @@ Constraints:
   (`AGENTS.md`, `SOUL.md`, `TOOLS.md`, `USER.md`, `MEMORY.md`).
 - The managed OpenClaw config denies generic tools by default. Every
   `agents.list[]` entry carries `tools.deny` with `exec`, `process`, `lobster`,
-  `browser`, `web_fetch` and `web_search`, minus the tools that agent opts into.
+  `browser`, `web_fetch` and `web_search`, minus the tools that agent opts into
+  (agents with a closed tool policy, below, never opt into any of them).
   An agent opts in only through its bound tool templates: `allowedCommands`
   grants `exec` (gateway host, allowlist security, no prompt; `process` stays
   denied), and `openclawToolNames` grants the named tools (plus
@@ -720,6 +721,73 @@ Constraints:
 - relay enrollment is skipped when `relay.hostname`, `relay.publicBaseUrl`, and `relay.tunnel` are already populated
 - relay hostname selection is installer-managed; user-provided relay slugs are not part of the public contract
 - `matrix.federationEnabled` defaults to `false`
+
+#### Agent tool surface: typed tools, scan agents and exec pinning
+
+A bot tool template opts an agent into tools in one of three ways. The managed
+OpenClaw config is rendered from these declarations on every configure and
+update.
+
+- **Typed tool** (`openclawTypedTool`): `{ name, description, script,
+  operations[] }`. Node generates the `sovereign-typed-tools` OpenClaw plugin
+  (`<openclaw home>/extensions/sovereign-typed-tools`, loaded through
+  `plugins.load.paths`) and registers one tool per typed tool name. Each
+  operation declares `name`, `description`, `effect` (`read` | `change`), a fixed
+  `argv` (where `<tool-instance-id>` is the bound instance), optional `params`
+  (`type` `string` | `boolean`, `description`, optional `enum`, `pattern`,
+  `maxLength` ≤ 500, and the `argv` fragment `["--flag", "{value}"]` or
+  `["--flag"]`), `required`, `exactlyOneOf`, `confirm` (`"always"` or
+  `{ param, values }`) and `confirmPreviewArgv` (flags appended for a
+  side-effect-free preview of a change that needs confirmation).
+  - The plugin never starts a shell. It copies `script` from the bot package
+    into its own extension directory, outside every agent workspace, and runs it
+    with the gateway's node binary, a fixed argv, a fixed `PATH` and
+    `SOVEREIGN_NODE_CONFIG`. String values are length-limited, may not contain
+    control characters or start with `-`, and are always passed as a single
+    argv element after their flag.
+  - A `change` operation runs only when the runtime-supplied requester of the
+    turn is the node operator (`matrix.operator.userId`). Turns that no Matrix
+    user started, and turns started by anyone else, are refused.
+  - A `change` operation with a matching `confirm` only records a pending change
+    (`<openclaw home>/state/sovereign-typed-tools/pending.json`, `0600`) and
+    returns a six-character code, plus the CLI's own preview when the operation
+    declares `confirmPreviewArgv` (a failing preview records nothing). Nothing changes until the same operator sends
+    `/confirm <code>` within 15 minutes. That command is an OpenClaw plugin
+    command, handled before any model turn, so a model can neither propose and
+    confirm in one turn nor confirm at all.
+  - An agent bound to a typed tool gets a closed tool policy:
+    `tools.allow` holds the typed tool names, any plugin tools from
+    `openclawToolNames`, and `session_status` as the core anchor OpenClaw needs to
+    keep an allow list. `tools.deny` holds every core tool group (`group:fs`,
+    `group:runtime`, `group:web`, `group:memory`, `group:sessions`, `group:ui`,
+    `group:messaging`, `group:automation`, `group:nodes`, `group:agents`,
+    `group:media`) plus the default-denied tools `exec`, `process`, `lobster`,
+    `browser`, `web_fetch` and `web_search`. Deny wins over allow, so the
+    agent is offered exactly its typed and named plugin tools; neither those nor
+    `llm-task` are ever in a deny list. No `allowedCommands` of any template bound to that agent are
+    allowlisted for exec, and `TOOLS.md` documents only the OpenClaw tools.
+- **Scan agent** (`openclawScanAgent`): `{ toolNames }`, plugin tools only. Node
+  adds an agent `<agent id>-scan` to `agents.list` with the `llm-task` workspace,
+  no channel binding and the closed tool policy for `toolNames`. The bound tool
+  instance's config gets `scanAgentId`, so the bot's own scan can use that
+  agent's session instead of the chat agent's. A scan agent also makes the
+  installer provide the lobster CLI.
+- **Shell commands** (`allowedCommands`, for templates without a typed tool):
+  each command is pinned by a root-owned wrapper
+  (`/usr/local/lib/sovereign-node/exec-wrappers/<agent id>/<command>-<hash>`,
+  `0755`) that fixes the full argv, takes exactly the declared placeholders as
+  arguments and refuses arguments starting with `-`. The exec allowlist holds
+  only those wrapper paths, and `TOOLS.md` documents the wrapper together with
+  the command it runs. A command is not allowlisted when the service user can
+  modify the executable or the wrapper (it owns, or may write, the path or any
+  directory above it), or when the wrapper is missing or outdated and the
+  installer is not running as root. Executables inside an agent workspace are
+  therefore never allowlisted.
+- The exec approvals store is reconciled to exactly that set on every
+  configure and update (`openclaw approvals get --json`, then
+  `approvals allowlist remove` / `add`). Entries from earlier versions, from
+  removed tools and for the wildcard agent (`*`) are removed. If the store cannot
+  be read, the step fails instead of leaving unknown entries in place.
 
 #### Relay TLS mode (legacy http vs. TLS-passthrough)
 
@@ -988,7 +1056,7 @@ The system-level gateway unit (`sovereign-openclaw-gateway.service`) and every b
 - **filesystem:** `ProtectSystem=strict`, `PrivateTmp=yes`, and `ProtectHome=yes` (`read-only` when a needed path lies under `/home`, `/root` or `/run/user`, for example a root service user's npm prefix). `InaccessiblePaths=` hides `/run/docker.sock` and `/run/containerd/containerd.sock`
 - **writable (`ReadWritePaths=`):** the state dir, the OpenClaw service home and its managed temp dir, every agent workspace (workspaces outside the state dir included), and, for the gateway, the Matrix extension's native crypto package dir under each candidate OpenClaw package root (the extension downloads its native module there at start). Bot units get the state dir, the OpenClaw service home, the agent workspace and the unit's working directory
 - **pinned read-only (`ReadOnlyPaths=`):** the service user's npm prefix, which sits inside the writable state dir, so a unit cannot change the trees it may execute from. OpenClaw package roots outside it are read-only through `ProtectSystem=strict`. The Matrix crypto package dir stays writable inside either
-- **execution (`NoExecPaths=/`, `ExecPaths=`):** nothing may be executed or mapped as code except the library dirs (`/usr/lib`, `/usr/lib64`, `/lib`, `/lib64`), the node runtime resolved on the unit's `PATH`, `/usr/bin/env`, `bash` (the interpreter of the root-owned `/usr/local/bin/sovereign-tool` wrapper), `/usr/local/bin/sovereign-tool`, the `bin` and `lib` dirs of the service user's npm prefix (lobster, and openclaw on unprivileged installs) and the OpenClaw package roots (native addons included). Bot units add `cat`, which lobster's exec stage runs. The gateway adds the exec tool's allowlisted executables and `sh` (the exec tool runs commands through a shell) only while some agent has an exec allowlist
+- **execution (`NoExecPaths=/`, `ExecPaths=`):** nothing may be executed or mapped as code except the library dirs (`/usr/lib`, `/usr/lib64`, `/lib`, `/lib64`), the node runtime resolved on the unit's `PATH`, `/usr/bin/env`, `bash` (the interpreter of the root-owned `/usr/local/bin/sovereign-tool` wrapper), `/usr/local/bin/sovereign-tool`, the `bin` and `lib` dirs of the service user's npm prefix (lobster, and openclaw on unprivileged installs) and the OpenClaw package roots (native addons included). Bot units add `cat`, which lobster's exec stage runs. The gateway adds, only while some agent has an exec allowlist, `sh` and `/bin/sh` (the exec tool runs commands through a shell, and each exec wrapper is a `#!/bin/sh` script), the agents' exec wrappers and the executables those wrappers run. While some agent is bound to a typed tool, it also adds the node runtime the typed tool starts its CLI with, as resolved on the unit's `PATH` and with symlinks resolved (what `process.execPath` reports); the CLI script itself is only read, from the OpenClaw home, and is not executable
 - **not set:** `MemoryDenyWriteExecute`, which breaks the V8 JIT
 
 Every path is rendered with systemd's `-` prefix, so a path missing on a given host is skipped rather than failing the unit. systemd keeps one mode per path, the most restrictive, so no path is listed both read-only and writable or executable; access is combined by nesting (the npm prefix read-only, its `bin` and `lib` executable inside it), and the renderer drops a read-only entry that repeats a writable or executable path. The gateway's local-Matrix `ExecStartPre=` wait runs on the unit's node runtime, not a shell with `curl`, because `ExecPaths=` applies to every command in the unit.
