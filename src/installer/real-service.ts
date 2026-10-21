@@ -370,6 +370,18 @@ type RequestedBotInstance = RuntimeBotInstance;
 
 const OPENCLAW_EXEC_TOOL_ID = "exec";
 const OPENCLAW_SESSION_STATUS_TOOL_ID = "session_status";
+// Generic side-effecting tools an agent only gets when one of its bound tool
+// templates opts in (exec through `allowedCommands`, the others by naming them
+// in `openclawToolNames`). Elevated host access is not a tool id: it is gated
+// by `tools.elevated.enabled`, which the managed config turns off.
+const OPENCLAW_DEFAULT_DENIED_TOOL_IDS = [
+  OPENCLAW_EXEC_TOOL_ID,
+  "process",
+  "lobster",
+  "browser",
+  "web_fetch",
+  "web_search",
+] as const;
 const OPENCLAW_STATUS_PROBE_TIMEOUT_MS = 5_000;
 // A warm `openclaw health` takes seconds on a fast host and far longer on a
 // small ARM board, because it loads every plugin before it answers.
@@ -6047,16 +6059,14 @@ export default function (api) {
     runtimeConfig: RuntimeConfig,
     toolInstanceIds: string[],
   ): Promise<{
-    allow: string[];
-    elevated?: {
-      enabled: boolean;
-    };
+    allow?: string[];
+    deny: string[];
     exec?: {
       host: "gateway";
       security: "allowlist";
       ask: "off";
     };
-  } | null> {
+  }> {
     const boundToolManifests = await Promise.all(
       this.resolveBoundToolInstances(runtimeConfig, toolInstanceIds).map(
         async (tool) => await this.resolveInstalledToolTemplate(runtimeConfig, tool.templateRef),
@@ -6066,19 +6076,17 @@ export default function (api) {
       boundToolManifests.flatMap((manifest) => manifest.openclawToolNames ?? []),
     );
     const execPatterns = await this.listAgentExecAllowlistPatterns(runtimeConfig, toolInstanceIds);
-    if (execPatterns.length === 0 && openclawToolNames.length === 0) {
-      return null;
-    }
     const allow = dedupeStrings([
       ...(openclawToolNames.length === 0 ? [] : [OPENCLAW_SESSION_STATUS_TOOL_ID]),
       ...openclawToolNames,
       ...(execPatterns.length === 0 ? [] : [OPENCLAW_EXEC_TOOL_ID]),
     ]);
+    // An explicit deny, unlike an allow list, survives OpenClaw dropping an
+    // allow list that names no core tool (which would expose every core tool).
+    const deny = OPENCLAW_DEFAULT_DENIED_TOOL_IDS.filter((toolId) => !allow.includes(toolId));
     return {
-      allow,
-      elevated: {
-        enabled: true,
-      },
+      ...(allow.length === 0 ? {} : { allow }),
+      deny,
       ...(execPatterns.length === 0
         ? {}
         : {
@@ -12551,6 +12559,14 @@ export default function (api) {
       };
     }
 
+    const agentEntries = await Promise.all(
+      managedAgents.map(async (entry) => ({
+        entry,
+        tools: await this.buildOpenClawAgentToolPolicy(runtimeConfig, entry.toolInstanceIds ?? []),
+      })),
+    );
+    const agentOptInToolIds = new Set(agentEntries.flatMap(({ tools }) => tools.allow ?? []));
+
     const runtimePayload = {
       ...(preservedMeta === undefined ? {} : { meta: preservedMeta }),
       gateway: {
@@ -12636,23 +12652,34 @@ export default function (api) {
               : undefined,
           ),
         },
-        list: await Promise.all(
-          managedAgents.map(async (entry) => {
-            const tools = await this.buildOpenClawAgentToolPolicy(
-              runtimeConfig,
-              entry.toolInstanceIds ?? [],
-            );
-            return {
-              id: entry.id,
-              workspace: entry.workspace,
-              ...(entry.default === true ? { default: true } : {}),
-              ...(entry.model === undefined
-                ? {}
-                : { model: normalizeOpenClawAgentModel(entry.model) }),
-              ...(tools === null ? {} : { tools }),
-            };
-          }),
-        ),
+        list: agentEntries.map(({ entry, tools }) => ({
+          id: entry.id,
+          workspace: entry.workspace,
+          ...(entry.default === true ? { default: true } : {}),
+          ...(entry.model === undefined ? {} : { model: normalizeOpenClawAgentModel(entry.model) }),
+          tools,
+        })),
+      },
+      // The pinned OpenClaw schema has no `agents.defaults.tools`, and a tool
+      // denied here cannot be re-allowed per agent, so this only denies the
+      // default-denied tools that no agent opts into; each agent's own deny
+      // list carries the rest.
+      tools: {
+        deny: OPENCLAW_DEFAULT_DENIED_TOOL_IDS.filter((toolId) => !agentOptInToolIds.has(toolId)),
+        elevated: {
+          enabled: false,
+        },
+        fs: {
+          workspaceOnly: true,
+        },
+      },
+      browser: {
+        enabled: false,
+      },
+      discovery: {
+        mdns: {
+          mode: "off" as const,
+        },
       },
       cron: {
         enabled: true,
