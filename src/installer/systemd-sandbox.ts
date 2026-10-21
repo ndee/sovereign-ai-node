@@ -4,6 +4,11 @@ import { dirname, join, posix } from "node:path";
  * Filesystem view of a sandboxed unit. Every path is rendered with systemd's
  * "-" prefix, so a path that does not exist on a given host is skipped rather
  * than failing the unit with 226/NAMESPACE.
+ *
+ * systemd keeps a single mode per path, the most restrictive one, so a path
+ * listed both read-only and executable ends up not executable. Each list
+ * therefore names distinct paths, and nesting combines them: a deeper entry
+ * changes only its own flag and inherits the rest from the enclosing mount.
  */
 export type SystemdSandboxPaths = {
   /** Writable under ProtectSystem=strict. */
@@ -11,7 +16,7 @@ export type SystemdSandboxPaths = {
   /**
    * Read-only even when nested inside a writable path. Used for the trees the
    * unit may execute from, so the unit cannot plant a program it may then run.
-   * A deeper ReadWritePaths entry still wins over these.
+   * A deeper ReadWritePaths or ExecPaths entry still applies inside them.
    */
   readOnlyPaths: readonly string[];
   /** The only paths the unit may execute or map executable code from. */
@@ -80,7 +85,12 @@ const renderPathList = (paths: readonly string[]): string =>
  * the V8 JIT needs writable executable memory.
  */
 export const renderSystemdSandboxDirectives = (paths: SystemdSandboxPaths): string[] => {
-  const readOnlyPaths = dedupeSandboxPaths(paths.readOnlyPaths);
+  // A read-only entry repeating a writable or executable path would silently
+  // take that path's access away (see SystemdSandboxPaths), so it is dropped.
+  const widerPaths = new Set(dedupeSandboxPaths([...paths.readWritePaths, ...paths.execPaths]));
+  const readOnlyPaths = dedupeSandboxPaths(paths.readOnlyPaths).filter(
+    (path) => !widerPaths.has(path),
+  );
   // ProtectHome=yes hides these roots entirely and nothing can be re-exposed
   // beneath it, so a unit that needs a path there gets a read-only view with
   // its writable paths nested inside.
@@ -117,9 +127,13 @@ export const renderSystemdSandboxDirectives = (paths: SystemdSandboxPaths): stri
 export const npmPrefixFromBinDir = (binDir: string): string =>
   dirname(normalizeSandboxPath(binDir));
 
+// The prefix itself is pinned read-only and its bin and lib dirs are the
+// executable entries nested inside it.
+const npmPrefixExecPaths = (prefix: string): string[] => [join(prefix, "bin"), join(prefix, "lib")];
+
 // The Matrix extension downloads its native crypto module into this package
 // directory when the gateway starts, so it stays writable (and executable,
-// through the package root) inside an otherwise read-only package tree.
+// inherited from the package root) inside an otherwise read-only tree.
 export const MATRIX_CRYPTO_RUNTIME_PACKAGE_DIR = join(
   "extensions",
   "matrix",
@@ -153,8 +167,14 @@ export const buildGatewaySandboxPaths = (input: GatewaySandboxInput): SystemdSan
     ...input.agentWorkspaces,
     ...input.openclawPackageRoots.map((root) => join(root, MATRIX_CRYPTO_RUNTIME_PACKAGE_DIR)),
   ],
-  readOnlyPaths: [input.serviceNpmPrefix, ...input.openclawPackageRoots],
-  execPaths: [...input.programs, input.serviceNpmPrefix, ...input.openclawPackageRoots],
+  readOnlyPaths: [input.serviceNpmPrefix],
+  // Package roots outside the npm prefix are already read-only under
+  // ProtectSystem=strict; those inside it are pinned through the prefix.
+  execPaths: [
+    ...input.programs,
+    ...npmPrefixExecPaths(input.serviceNpmPrefix),
+    ...input.openclawPackageRoots,
+  ],
 });
 
 export type BotServiceSandboxInput = {
@@ -171,6 +191,6 @@ export const buildBotServiceSandboxPaths = (input: BotServiceSandboxInput): Syst
   return {
     readWritePaths: [input.stateDir, input.openclawServiceHome, ...input.workspaces],
     readOnlyPaths: npmPrefix,
-    execPaths: [...input.programs, ...npmPrefix],
+    execPaths: [...input.programs, ...npmPrefix.flatMap(npmPrefixExecPaths)],
   };
 };

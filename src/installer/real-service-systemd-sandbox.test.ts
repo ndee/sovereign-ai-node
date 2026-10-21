@@ -172,7 +172,7 @@ describe("sovereign-openclaw-gateway unit sandbox", () => {
         ` -${join(packageRoot, crypto)}`,
         ` -${join(globalRoot, "openclaw", crypto)}`,
       ].join(""),
-      `ReadOnlyPaths=-${npmPrefix} -${packageRoot} -${join(globalRoot, "openclaw")}`,
+      `ReadOnlyPaths=-${npmPrefix}`,
       "InaccessiblePaths=-/run/docker.sock -/run/containerd/containerd.sock",
       "NoExecPaths=/",
       [
@@ -181,7 +181,8 @@ describe("sovereign-openclaw-gateway unit sandbox", () => {
         " -/usr/bin/env",
         ` -${join(toolBin, "bash")}`,
         " -/usr/local/bin/sovereign-tool",
-        ` -${npmPrefix}`,
+        ` -${join(npmPrefix, "bin")}`,
+        ` -${join(npmPrefix, "lib")}`,
         ` -${packageRoot}`,
         ` -${join(globalRoot, "openclaw")}`,
       ].join(""),
@@ -203,7 +204,8 @@ describe("sovereign-openclaw-gateway unit sandbox", () => {
       "-/usr/bin/env",
       "-/usr/bin/bash",
       "-/usr/local/bin/sovereign-tool",
-      `-${npmPrefix}`,
+      `-${join(npmPrefix, "bin")}`,
+      `-${join(npmPrefix, "lib")}`,
       `-${join(globalRoot, "openclaw")}`,
       `-${packageRoot}`,
     ]);
@@ -326,7 +328,7 @@ describe("bot service unit sandbox", () => {
       [
         "ExecPaths=-/usr/lib -/usr/lib64 -/lib -/lib64",
         " -/usr/bin/node -/usr/bin/env -/usr/bin/bash -/usr/local/bin/sovereign-tool -/usr/bin/cat",
-        " -/var/lib/sovereign-node/.npm-global",
+        " -/var/lib/sovereign-node/.npm-global/bin -/var/lib/sovereign-node/.npm-global/lib",
       ].join(""),
     ]);
   });

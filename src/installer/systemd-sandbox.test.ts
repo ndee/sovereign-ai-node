@@ -62,6 +62,19 @@ describe("renderSystemdSandboxDirectives", () => {
     expect(directiveNames(lines)).not.toContain("ReadOnlyPaths");
   });
 
+  // systemd keeps one mode per path, the most restrictive, so a read-only
+  // duplicate would make an executable or writable path lose that access.
+  it("drops a read-only entry that repeats a writable or executable path", () => {
+    const lines = renderSystemdSandboxDirectives({
+      readWritePaths: ["/srv/state"],
+      readOnlyPaths: ["/srv/state/", "/opt/tool", "/srv/pinned"],
+      execPaths: ["/opt/tool"],
+    });
+    expect(lines).toContain("ReadOnlyPaths=-/srv/pinned");
+    expect(lines).toContain("ReadWritePaths=-/srv/state");
+    expect(lines).toContain("ExecPaths=-/usr/lib -/usr/lib64 -/lib -/lib64 -/opt/tool");
+  });
+
   it("normalizes, de-duplicates and drops empty or relative paths, keeping first-seen order", () => {
     const lines = renderSystemdSandboxDirectives({
       readWritePaths: ["/var/lib/b/", " /var/lib/a ", "/var/lib/b", "", "rel", "/var/lib/./a"],
@@ -114,7 +127,7 @@ describe("npmPrefixFromBinDir", () => {
 });
 
 describe("buildGatewaySandboxPaths", () => {
-  it("makes state, workspaces and the Matrix crypto runtime writable and pins executable trees read-only", () => {
+  it("makes state, workspaces and the Matrix crypto runtime writable and pins the npm prefix read-only", () => {
     const paths = buildGatewaySandboxPaths({
       stateDir: "/var/lib/sovereign-node",
       openclawServiceHome: "/var/lib/sovereign-node/openclaw-home",
@@ -132,11 +145,12 @@ describe("buildGatewaySandboxPaths", () => {
         "/srv/workspaces/mail-sentinel",
         `/usr/lib/node_modules/openclaw/${MATRIX_CRYPTO_RUNTIME_PACKAGE_DIR}`,
       ],
-      readOnlyPaths: ["/var/lib/sovereign-node/.npm-global", "/usr/lib/node_modules/openclaw"],
+      readOnlyPaths: ["/var/lib/sovereign-node/.npm-global"],
       execPaths: [
         "/usr/bin/node",
         "/usr/bin/env",
-        "/var/lib/sovereign-node/.npm-global",
+        "/var/lib/sovereign-node/.npm-global/bin",
+        "/var/lib/sovereign-node/.npm-global/lib",
         "/usr/lib/node_modules/openclaw",
       ],
     });
@@ -163,7 +177,11 @@ describe("buildBotServiceSandboxPaths", () => {
         "/var/lib/sovereign-node/mail-sentinel/workspace",
       ],
       readOnlyPaths: ["/var/lib/sovereign-node/.npm-global"],
-      execPaths: ["/usr/bin/node", "/var/lib/sovereign-node/.npm-global"],
+      execPaths: [
+        "/usr/bin/node",
+        "/var/lib/sovereign-node/.npm-global/bin",
+        "/var/lib/sovereign-node/.npm-global/lib",
+      ],
     });
   });
 
