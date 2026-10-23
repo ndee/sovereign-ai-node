@@ -123,8 +123,8 @@ describe("parseRequest", () => {
         "register_new_matrix_user",
         "-u",
         "operator",
-        "-p",
-        "s3cret pass",
+        "--password-file",
+        "/dev/stdin",
         "-a",
         "-c",
         "/data/homeserver.yaml",
@@ -140,8 +140,8 @@ describe("parseRequest", () => {
         "register_new_matrix_user",
         "-u",
         "mail-sentinel",
-        "-p",
-        "x",
+        "--password-file",
+        "/dev/stdin",
         "--no-admin",
         "-c",
         "/data/homeserver.yaml",
@@ -179,8 +179,8 @@ describe("parseRequest", () => {
         "register_new_matrix_user",
         "-u",
         "Operator!",
-        "-p",
-        "x",
+        "--password-file",
+        "/dev/stdin",
         "-a",
         "-c",
         "/data/homeserver.yaml",
@@ -195,8 +195,8 @@ describe("parseRequest", () => {
         "register_new_matrix_user",
         "-u",
         "op",
-        "-p",
-        "",
+        "--password-file",
+        "/etc/shadow",
         "--admin",
         "-c",
         "/etc/shadow",
@@ -205,6 +205,38 @@ describe("parseRequest", () => {
     ],
   ])("refuses compose %j", (args) => {
     expect(() => parseRequest([PROJECT, "compose", ...args])).toThrow(/not one of the fixed forms/);
+  });
+
+  const registerWith = (secretArgs) => [
+    "exec",
+    "-T",
+    "synapse",
+    "register_new_matrix_user",
+    "-u",
+    "operator",
+    ...secretArgs,
+    "-a",
+    "-c",
+    "/data/homeserver.yaml",
+    "http://127.0.0.1:8008",
+  ];
+
+  it.each([
+    [["-p", "planted-secret-value"]],
+    [["--password", "planted-secret-value"]],
+    [["--password=planted-secret-value"]],
+    [["--password-file", "/dev/stdin", "-k", "planted-secret-value"]],
+    [["--password-file", "/dev/stdin", "--shared-secret=planted-secret-value"]],
+  ])("refuses a secret carried in the arguments %j without echoing it", (secretArgs) => {
+    const argv = [PROJECT, "compose", ...registerWith(secretArgs)];
+    expect(() => parseRequest(argv)).toThrow(/must be passed on stdin/);
+    expect(() => parseRequest(argv)).not.toThrow(/planted-secret-value/);
+  });
+
+  it("does not echo arguments that follow an unknown register form", () => {
+    expect(() =>
+      parseRequest([PROJECT, "compose", "exec", "-T", "synapse", "register_new_matrix_user", "planted-secret-value"]),
+    ).toThrow(/^(?![\s\S]*planted-secret-value)[\s\S]*not one of the fixed forms/);
   });
 
   it("accepts the two read-only docker queries", () => {
