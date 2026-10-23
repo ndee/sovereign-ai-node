@@ -8,8 +8,9 @@
 # other commit must stop the run here, before a tag or draft exists.
 #
 # Appends proceed=true or proceed=false to $GITHUB_OUTPUT and exits 0 for
-# either decision. Exits non-zero only when the state cannot be read, so the
-# step fails closed without running Release Please.
+# either decision. Exits non-zero when the state cannot be read, including a
+# pending release PR whose merge commit is not a full SHA, so the step fails
+# closed without running Release Please.
 
 set -euo pipefail
 
@@ -57,9 +58,10 @@ for number in $candidates; do
     printf 'invalid pull request number: %s\n' "$number" >&2
     exit 1
   }
+  # API version 2026-03-10 no longer returns merge_commit_sha for pulls.
   pr_tsv="$(gh api \
     -H 'Accept: application/vnd.github+json' \
-    -H 'X-GitHub-Api-Version: 2026-03-10' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
     "repos/$GITHUB_REPOSITORY/pulls/$number" \
     --jq '[.base.ref, .head.ref, (.merged | tostring), (.merge_commit_sha // "")] | @tsv')" || {
       printf 'failed to read pull request #%s\n' "$number" >&2
@@ -70,8 +72,19 @@ for number in $candidates; do
   [[ "$base_ref" == "main" && "$head_ref" == "$RELEASE_BRANCH_PREFIX"* && "$merged" == "true" ]] ||
     continue
   pending=$((pending + 1))
+  if [[ ! "$merge_sha" =~ ^[0-9a-f]{40}$ ]]; then
+    message="Release held: cannot read the merge commit of merged release PR #$number"
+    message+=" (merge_commit_sha: ${merge_sha:-<missing>})."
+    message+=" Release Please did not run, so no tag or draft release was created."
+    message+=" See docs/RELEASING.md (Held release)."
+    printf '::error::%s\n' "$message"
+    if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+      printf '%s\n' "$message" >>"$GITHUB_STEP_SUMMARY"
+    fi
+    exit 1
+  fi
   if [[ "$merge_sha" != "$VALIDATED_SHA" ]]; then
-    mismatched+=("#$number merged at ${merge_sha:-<unknown>}")
+    mismatched+=("#$number merged at $merge_sha")
   fi
 done
 

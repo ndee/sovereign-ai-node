@@ -88,7 +88,11 @@ pull() {
 run_check() {
   local label="$1"
   export GITHUB_OUTPUT="$WORK_DIR/$label.output"
-  export GITHUB_STEP_SUMMARY="$WORK_DIR/$label.summary"
+  if [[ "${NO_STEP_SUMMARY:-false}" == "true" ]]; then
+    unset GITHUB_STEP_SUMMARY
+  else
+    export GITHUB_STEP_SUMMARY="$WORK_DIR/$label.summary"
+  fi
   : >"$GITHUB_OUTPUT"
   set +e
   bash "$CHECK" "${CHECK_SHA:-$VALIDATED}" >"$WORK_DIR/$label.out" 2>"$WORK_DIR/$label.err"
@@ -159,6 +163,10 @@ pull 314 c9e08e0
 expect_unreadable_merge_sha short_merge_sha c9e08e0
 pull 314 ABCDEF0123456789ABCDEF0123456789ABCDEF01
 expect_unreadable_merge_sha uppercase_merge_sha ABCDEF0123456789ABCDEF0123456789ABCDEF01
+pull 314 ""
+NO_STEP_SUMMARY=true expect_error missing_merge_sha_without_summary
+grep -q '^::error::Release held: cannot read the merge commit' \
+  "$WORK_DIR/missing_merge_sha_without_summary.out"
 
 # Two pending release PRs: any mismatch holds, and every one is named.
 issues 314 320
