@@ -16,6 +16,7 @@ by the `.github/workflows/release.yml` workflow.
 
 * **installer:** narrow the service user's sudo rules and drop the container-runtime group ([#313](https://github.com/ndee/sovereign-ai-node/issues/313)) ([432ac0f](https://github.com/ndee/sovereign-ai-node/commit/432ac0fd4a826fb23b3eca600c8303ac2d80cc00))
 * **matrix:** harden the bundled homeserver's reverse-proxy edge ([#305](https://github.com/ndee/sovereign-ai-node/issues/305)) ([3467285](https://github.com/ndee/sovereign-ai-node/commit/34672856dc0500c6aa954a56124ed7cb7cd95200)), closes [#304](https://github.com/ndee/sovereign-ai-node/issues/304)
+* **openclaw:** typed tool for bot commands and a dedicated scan agent ([#309](https://github.com/ndee/sovereign-ai-node/issues/309)) ([ffd5c6c](https://github.com/ndee/sovereign-ai-node/commit/ffd5c6cb2f64f8cbd84f29ec9598603887725965))
 
 ## [2.10.0](https://github.com/ndee/sovereign-ai-node/compare/v2.9.0...v2.10.0) (2026-10-21)
 
