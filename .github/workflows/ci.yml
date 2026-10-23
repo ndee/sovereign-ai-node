@@ -210,6 +210,9 @@ jobs:
       - name: Verify CI-gated release publication
         run: bash scripts/release/test-release-workflow-gate.sh
 
+      - name: Verify a release is only created for the validated main
+        run: bash scripts/release/test-check-pending-release-pr.sh
+
       - name: Build and test exact Node release assets
         env:
           RUNNER_TEMP: ${{ runner.temp }}
