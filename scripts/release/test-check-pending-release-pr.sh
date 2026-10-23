@@ -35,7 +35,13 @@ case "$args" in
     number="${args##*pulls/}"
     number="${number%% *}"
     [[ "${MOCK_PULL_FAILURE:-}" != "$number" ]] || exit 17
-    jq -r "$jq_filter" "$MOCK_PULLS/$number.json"
+    # Like GitHub: API version 2026-03-10 omits merge_commit_sha from pulls.
+    case "$args" in
+      *"X-GitHub-Api-Version: 2022-11-28"*) shape='.' ;;
+      *"X-GitHub-Api-Version: 2026-03-10"*) shape='del(.merge_commit_sha)' ;;
+      *) printf 'unexpected API version: %s\n' "$args" >&2; exit 64 ;;
+    esac
+    jq "$shape" "$MOCK_PULLS/$number.json" | jq -r "$jq_filter"
     ;;
   *) printf 'unexpected gh invocation: %s\n' "$args" >&2; exit 64 ;;
 esac
@@ -63,14 +69,19 @@ issues() {
 }
 
 # pull <number> <merge-sha> [head-ref] [base-ref] [merged]
+# A merge-sha of "" omits the field, "null" sends it as null.
 pull() {
   jq -n \
+    --argjson number "$1" \
     --arg sha "$2" \
     --arg head "${3:-$RELEASE_BRANCH}" \
     --arg base "${4:-main}" \
     --argjson merged "${5:-true}" \
-    '{base: {ref: $base}, head: {ref: $head}, merged: $merged,
-      merge_commit_sha: (if $sha == "" then null else $sha end)}' \
+    '{number: $number, state: "closed", merged: $merged,
+      merged_at: (if $merged then "2026-10-21T15:44:38Z" else null end),
+      base: {ref: $base}, head: {ref: $head}}
+     + (if $sha == "" then {} elif $sha == "null" then {merge_commit_sha: null}
+        else {merge_commit_sha: $sha} end)' \
     >"$MOCK_PULLS/$1.json"
 }
 
@@ -130,10 +141,24 @@ grep -q "^::warning::Release held: merged release PR #314 merged at $OTHER but C
   "$WORK_DIR/merged_at_older_commit.out"
 grep -q '^Release held: merged release PR #314' "$WORK_DIR/merged_at_older_commit.summary"
 
-# A missing merge commit cannot match the validated main.
+# A merge commit that cannot be read fails closed, distinct from a mismatch.
+expect_unreadable_merge_sha() {
+  local label="$1" shown="$2"
+  expect_error "$label"
+  grep -qF "::error::Release held: cannot read the merge commit of merged release PR #314 (merge_commit_sha: $shown). Release Please did not run, so no tag or draft release was created." \
+    "$WORK_DIR/$label.out"
+  grep -qF 'Release held: cannot read the merge commit of merged release PR #314' \
+    "$WORK_DIR/$label.summary"
+  ! grep -q 'but CI validated main' "$WORK_DIR/$label.out"
+}
 pull 314 ""
-expect_decision missing_merge_sha false
-grep -q '#314 merged at <unknown>' "$WORK_DIR/missing_merge_sha.out"
+expect_unreadable_merge_sha missing_merge_sha '<missing>'
+pull 314 null
+expect_unreadable_merge_sha null_merge_sha '<missing>'
+pull 314 c9e08e0
+expect_unreadable_merge_sha short_merge_sha c9e08e0
+pull 314 ABCDEF0123456789ABCDEF0123456789ABCDEF01
+expect_unreadable_merge_sha uppercase_merge_sha ABCDEF0123456789ABCDEF0123456789ABCDEF01
 
 # Two pending release PRs: any mismatch holds, and every one is named.
 issues 314 320
