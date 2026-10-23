@@ -11051,8 +11051,15 @@ export default function (api) {
     const unitPathEnv = [serviceNpmBinDir, ...this.serviceProgramSearchPath.split(":")]
       .filter((entry, index, entries) => entry.length > 0 && entries.indexOf(entry) === index)
       .join(":");
+    // A root install leaves OpenClaw in the installing npm's global prefix,
+    // which need not be on the system path (a CI tool-cache Node, say).
     const openclawCommand =
-      (await resolveExecutablePath("openclaw", unitPathEnv)) ?? join(serviceNpmBinDir, "openclaw");
+      (await resolveExecutablePath("openclaw", unitPathEnv)) ??
+      (await resolveExecutablePath(
+        "openclaw",
+        join(dirname(dirname(await this.resolveOpenClawGlobalRoot())), "bin"),
+      )) ??
+      join(serviceNpmBinDir, "openclaw");
     const basePrograms = await this.resolveSandboxBasePrograms(unitPathEnv, nodeCommand);
     const sandboxPaths = buildGatewaySandboxPaths({
       stateDir: this.paths.stateDir,

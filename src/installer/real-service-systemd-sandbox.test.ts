@@ -259,6 +259,25 @@ describe("sovereign-openclaw-gateway unit sandbox", () => {
     expect(unit).not.toContain(callerDir);
   });
 
+  it("starts the OpenClaw that a root install left in the installing npm's global prefix", async () => {
+    await mkdir(toolBin, { recursive: true });
+    await writeFile(join(toolBin, "node"), "#!/bin/sh\n", { mode: 0o755 });
+    const npmGlobalPrefix = join(tempRoot, "toolcache", "node", "x64");
+    const globalPackage = join(npmGlobalPrefix, "lib", "node_modules", "openclaw");
+    await mkdir(globalPackage, { recursive: true });
+    await writeFile(join(globalPackage, "openclaw.mjs"), "#!/usr/bin/env node\n", { mode: 0o755 });
+    await mkdir(join(npmGlobalPrefix, "bin"));
+    await symlink(join(globalPackage, "openclaw.mjs"), join(npmGlobalPrefix, "bin", "openclaw"));
+    process.env.SOVEREIGN_NODE_OPENCLAW_GLOBAL_ROOT = join(npmGlobalPrefix, "lib", "node_modules");
+
+    const unit = await render(makeService(), runtimeConfig("http://127.0.0.1:8008"));
+
+    expect(unit).toContain(`\nExecStart=${join(npmGlobalPrefix, "bin", "openclaw")} gateway run`);
+    expect(unit).toContain(`\nEnvironment=PATH=${join(npmPrefix, "bin")}:${toolBin}\n`);
+    expect(unit).toContain(`\nExecStartPre=${join(toolBin, "node")} -e "`);
+    expect(unit).toMatch(new RegExp(`^ExecPaths=.* -${globalPackage}( |$)`, "m"));
+  });
+
   it("refuses to install the unit when no system node exists", async () => {
     await installTools();
     const systemBin = join(tempRoot, "system-bin");
