@@ -114,15 +114,17 @@ export const COMPOSE_FORMS = [
     accepts: (a) => a.length === 2 && a[0] === "restart" && SERVICE_NAME.test(a[1]),
     services: (a) => [a[1]],
   },
+  // The password is read from the helper's stdin, which runAsRoot hands to
+  // `docker compose exec`: sudo records the full command line, so a secret
+  // must never be one of these arguments.
   {
     id: "register-user",
     accepts: (a) =>
       a.length === 12 &&
       exact(["exec", "-T", "synapse", "register_new_matrix_user", "-u"])(a.slice(0, 5)) &&
       MATRIX_LOCALPART.test(a[5]) &&
-      a[6] === "-p" &&
-      a[7].length > 0 &&
-      a[7].length <= 1024 &&
+      a[6] === "--password-file" &&
+      a[7] === "/dev/stdin" &&
       (a[8] === "-a" || a[8] === "--no-admin") &&
       a[9] === "-c" &&
       a[10] === "/data/homeserver.yaml" &&
@@ -142,15 +144,29 @@ export const COMPOSE_FORMS = [
   })),
 ];
 
+const SECRET_FLAGS = new Set(["-p", "--password", "-k", "--shared-secret"]);
+const isSecretArgument = (arg) => SECRET_FLAGS.has(arg.split("=")[0]);
+
+// A refused register command may still carry a password in an unexpected
+// position, and the refusal reaches the caller's logs, so its arguments are
+// not echoed.
+const describeRefusedArgs = (args) =>
+  args.includes("register_new_matrix_user")
+    ? "register_new_matrix_user with an unexpected argument list"
+    : args.join(" ");
+
 export const parseRequest = (argv) => {
   const [projectDir, verb, ...rest] = argv;
   if (projectDir === undefined || verb === undefined) {
     refuse("usage: bundled-matrix-docker <project-dir> compose|inspect|ps <args...>");
   }
+  if (rest.some(isSecretArgument)) {
+    refuse("secrets must be passed on stdin, not as command arguments");
+  }
   if (verb === "compose") {
     const form = COMPOSE_FORMS.find((candidate) => candidate.accepts(rest));
     if (form === undefined) {
-      refuse(`compose command is not one of the fixed forms: ${rest.join(" ")}`);
+      refuse(`compose command is not one of the fixed forms: ${describeRefusedArgs(rest)}`);
     }
     return { projectDir, kind: "compose", form, args: rest };
   }
@@ -165,7 +181,7 @@ export const parseRequest = (argv) => {
       return { projectDir, kind: "ps", args: ["ps", ...rest] };
     }
   }
-  refuse(`docker command is not one of the fixed forms: ${[verb, ...rest].join(" ")}`);
+  refuse(`docker command is not one of the fixed forms: ${describeRefusedArgs([verb, ...rest])}`);
 };
 
 const assertRealDirectory = (path, lstat) => {

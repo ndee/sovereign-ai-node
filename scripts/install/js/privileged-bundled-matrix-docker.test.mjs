@@ -233,6 +233,12 @@ describe("parseRequest", () => {
     expect(() => parseRequest(argv)).not.toThrow(/planted-secret-value/);
   });
 
+  it("refuses a secret flag on the read-only docker queries too", () => {
+    expect(() => parseRequest([PROJECT, "ps", "-p", "planted-secret-value"])).toThrow(
+      /must be passed on stdin/,
+    );
+  });
+
   it("does not echo arguments that follow an unknown register form", () => {
     expect(() =>
       parseRequest([PROJECT, "compose", "exec", "-T", "synapse", "register_new_matrix_user", "planted-secret-value"]),

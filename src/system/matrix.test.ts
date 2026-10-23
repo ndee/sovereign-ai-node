@@ -973,6 +973,11 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(registerCalls).toHaveLength(2);
       expect(registerCalls.some((call) => (call.args ?? []).includes("-a"))).toBe(true);
       expect(registerCalls.some((call) => (call.args ?? []).includes("--no-admin"))).toBe(true);
+      for (const call of registerCalls) {
+        expect(call.args ?? []).not.toContain(operatorPassword);
+        expect(call.args ?? []).toEqual(expect.arrayContaining(["--password-file", "/dev/stdin"]));
+      }
+      expect(registerCalls[0]?.options).toMatchObject({ input: operatorPassword, stdin: "pipe" });
 
       expect(recordedFetchUrls.some((url) => url.endsWith("/_matrix/client/v3/login"))).toBe(true);
       expect(recordedFetchUrls.some((url) => url.endsWith("/_matrix/client/v3/createRoom"))).toBe(

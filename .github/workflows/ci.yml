@@ -282,6 +282,11 @@ jobs:
         run: |
           curl -f --retry 3 --retry-delay 2 http://127.0.0.1:8008/_matrix/client/v3/login | jq .
 
+      # Secrets must not travel in the process arguments of privileged calls:
+      # sudo records those, so they would surface in the journal.
+      - name: Verify no install credential is in a log or job record
+        run: sudo env "PATH=$PATH" bash scripts/ci/verify-no-credential-residue.sh
+
       # The service user reaches root only through the installed sudoers
       # fragment and the root-owned helpers, and not through the docker group.
       - name: Verify the service user's privileges and helpers

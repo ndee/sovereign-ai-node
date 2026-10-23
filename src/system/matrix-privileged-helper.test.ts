@@ -208,7 +208,10 @@ describe("DockerComposeBundledMatrixProvisioner with the bundled-matrix-docker h
       const registerCalls = sudoCalls.filter((call) =>
         call.args?.includes("register_new_matrix_user"),
       );
-      expect(registerCalls.map((call) => call.options?.input)).toEqual([secrets[0], secrets[1]]);
+      expect(registerCalls.map((call) => call.options)).toEqual([
+        expect.objectContaining({ input: secrets[0], stdin: "pipe" }),
+        expect.objectContaining({ input: secrets[1], stdin: "pipe" }),
+      ]);
       for (const call of registerCalls) {
         expect(call.args).toEqual([
           "-n",

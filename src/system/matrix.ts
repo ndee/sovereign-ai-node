@@ -1389,8 +1389,10 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       "register_new_matrix_user",
       "-u",
       input.localpart,
-      "-p",
-      input.password,
+      // On stdin, not argv: the helper runs under sudo, which logs the
+      // whole command line.
+      "--password-file",
+      "/dev/stdin",
       ...(input.admin ? ["-a"] : ["--no-admin"]),
       "-c",
       "/data/homeserver.yaml",
@@ -1402,6 +1404,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         provision.projectDir,
         provision.composeFilePath,
         args,
+        { input: input.password },
       );
     } catch (error) {
       throw {
@@ -2251,6 +2254,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     projectDir: string,
     composeFilePath: string,
     trailingArgs: string[],
+    extraOptions?: { input: string },
   ): Promise<ExecResult> {
     const access = this.dockerAccess();
     const invocation = bundledMatrixComposeInvocation({
@@ -2259,7 +2263,12 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       composeFilePath,
       args: trailingArgs,
     });
-    const dockerCompose = await this.safeExec(invocation.command, invocation.args, projectDir);
+    const dockerCompose = await this.safeExec(
+      invocation.command,
+      invocation.args,
+      projectDir,
+      extraOptions,
+    );
     // The helper only drives the compose plugin, so the legacy standalone
     // binary is tried only when docker is run directly.
     if (access === "helper") {
@@ -2278,7 +2287,12 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     }
 
     const legacyArgs = ["-f", composeFilePath, ...trailingArgs];
-    const dockerComposeLegacy = await this.safeExec("docker-compose", legacyArgs, projectDir);
+    const dockerComposeLegacy = await this.safeExec(
+      "docker-compose",
+      legacyArgs,
+      projectDir,
+      extraOptions,
+    );
     if (dockerComposeLegacy.ok && dockerComposeLegacy.result.exitCode === 0) {
       return dockerComposeLegacy.result;
     }
@@ -2305,6 +2319,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     command: string,
     args: string[],
     cwd: string,
+    extraOptions?: { input: string },
   ): Promise<{ ok: true; result: ExecResult } | { ok: false; error: string }> {
     try {
       const result = await this.execRunner.run({
@@ -2313,6 +2328,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         options: {
           cwd,
           timeout: MATRIX_COMPOSE_COMMAND_TIMEOUT_MS,
+          ...(extraOptions === undefined ? {} : { input: extraOptions.input, stdin: "pipe" }),
         },
       });
       return { ok: true, result };
