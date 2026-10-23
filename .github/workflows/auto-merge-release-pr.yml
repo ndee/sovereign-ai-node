@@ -30,96 +30,72 @@ name: Auto-merge release PR
 # authenticates with RELEASE_PLEASE_TOKEN, which acts as `ndee` — the same
 # identity a human PR carries — so author cannot distinguish generated from
 # hand-written. Every other PR in this repo is untouched by this workflow.
+#
+# UP TO DATE WITH MAIN. The ruleset does not require branches to be up to
+# date, so GitHub would merge a release PR whose changelog predates newer main
+# commits, and the release notes would miss them. The decision script arms the
+# PR only while it is exactly Release Please's one commit on the current main,
+# and every push to main re-runs it so a PR that fell behind is disarmed.
+# Release Please rebuilds the PR on each validated main (`always-update` in
+# release-please-config.json); that push re-runs this and re-arms it. A main
+# push that lands while the release PR's last required check is finishing can
+# still be merged past before the disarm runs; only the ruleset's "require
+# branches to be up to date" setting closes that window, and it applies to
+# every PR.
+#
+# The job checks out the base branch only (the default for
+# pull_request_target and push) to run the trusted decision script; PR code
+# is never checked out or executed.
 
 on:
   pull_request_target:
     types: [opened, reopened, synchronize, ready_for_review]
+  push:
+    branches: [main]
 
 permissions:
   contents: read
-  pull-requests: write
+  pull-requests: read
 
+# Every arm/disarm decision for the release PR is serialized in one group, and
+# each run re-reads the live state, so whichever run is last decides. Other
+# PRs get their own group so they can never displace a queued release decision.
 concurrency:
-  group: auto-merge-release-${{ github.event.pull_request.number }}
+  group: >-
+    ${{ (github.event_name == 'push' ||
+         github.event.pull_request.head.ref ==
+           'release-please--branches--main--components--sovereign-ai-node')
+        && 'auto-merge-release-pr'
+        || format('auto-merge-release-other-{0}', github.event.pull_request.number) }}
   cancel-in-progress: false
 
 jobs:
   arm:
     name: Arm auto-merge on the release PR
-    # Belt and braces: the ref is asserted here AND re-asserted from the API in
-    # the step below. This `if` is the cheap filter; the step is the one that
+    # Belt and braces: the ref is asserted here AND re-asserted from the API by
+    # the script. This `if` is the cheap filter; the script is the one that
     # actually decides, because it reads the ref back from the API rather than
     # trusting event payload fields.
     if: >-
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.base.ref == 'main' &&
-      github.event.pull_request.head.ref ==
-        'release-please--branches--main--components--sovereign-ai-node' &&
-      github.event.pull_request.draft == false
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request_target' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.base.ref == 'main' &&
+       github.event.pull_request.head.ref ==
+         'release-please--branches--main--components--sovereign-ai-node')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Verify this really is the generated release PR
-        id: verify
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Arm or disarm auto-merge on the release PR
         env:
           GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
-          EXPECT_REF: release-please--branches--main--components--sovereign-ai-node
-        run: |
-          set -euo pipefail
-          # Re-read from the API. pull_request_target runs with a writable
-          # token, so nothing here may depend on attacker-influenced payload
-          # fields without confirming them against the server's own view.
-          read -r head_ref base_ref same_repo draft state <<<"$(
-            gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" \
-              --jq '[.head.ref, .base.ref,
-                     (.head.repo.full_name == "'"${GITHUB_REPOSITORY}"'"),
-                     .draft, .state] | @tsv'
-          )"
-          [[ "$head_ref" == "$EXPECT_REF" ]] || {
-            echo "::notice::PR #${PR} head '${head_ref}' is not the release branch; nothing to do."
-            echo 'proceed=false' >> "$GITHUB_OUTPUT"; exit 0; }
-          [[ "$base_ref" == "main" ]] || {
-            echo "::error::release PR targets '${base_ref}', not main."; exit 1; }
-          [[ "$same_repo" == "true" ]] || {
-            echo "::error::release branch is not from this repository."; exit 1; }
-          [[ "$draft" == "false" && "$state" == "open" ]] || {
-            echo "::notice::PR #${PR} is draft or not open; nothing to do."
-            echo 'proceed=false' >> "$GITHUB_OUTPUT"; exit 0; }
-
-          # A release PR only ever moves the version bump. Anything else on this
-          # branch means something other than Release Please wrote to it, and it
-          # must not merge itself.
-          mapfile -t files < <(
-            gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files" \
-              --jq '.[].filename'
-          )
-          (( ${#files[@]} > 0 )) || { echo "::error::no files reported."; exit 1; }
-          for f in "${files[@]}"; do
-            case "$f" in
-              .release-please-manifest.json|CHANGELOG.md|package.json) ;;
-              *) echo "::error::release PR changes '${f}', which a version bump never touches."
-                 exit 1 ;;
-            esac
-          done
-          printf 'files: %s\n' "${files[*]}"
-          echo 'proceed=true' >> "$GITHUB_OUTPUT"
-
-      - name: Enable auto-merge
-        if: steps.verify.outputs.proceed == 'true'
-        env:
           # A PAT, not the built-in token: a merge performed by GITHUB_TOKEN
           # does not emit the push event that the Release Please workflow's
           # `workflow_run` trigger keys on, so the release would never publish.
-          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          # NO --admin. The ruleset's required status checks are the gate, and
-          # --admin is precisely the flag that bypasses them. --auto queues the
-          # merge for GitHub to perform once those checks pass; if they fail,
-          # the PR stays open.
-          gh pr merge "$PR" -R "$GITHUB_REPOSITORY" --squash --auto
-          gh pr view "$PR" -R "$GITHUB_REPOSITORY" \
-            --json autoMergeRequest,mergeStateStatus \
-            --jq '"auto-merge armed: \(.autoMergeRequest != null), state: \(.mergeStateStatus)"'
+        run: bash scripts/release/auto-merge-release-pr.sh ${PR:+"$PR"}
