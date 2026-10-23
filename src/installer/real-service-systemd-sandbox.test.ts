@@ -1,4 +1,14 @@
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -65,6 +75,8 @@ describe("sovereign-openclaw-gateway unit sandbox", () => {
   beforeEach(async () => {
     // realpath: the unit lists resolved package roots, and tmpdir() may be a symlink.
     tempRoot = await realpath(await mkdtemp(join(tmpdir(), "sovereign-sandbox-test-")));
+    // mkdtemp creates 0700; the gateway only takes a node every user can reach.
+    await chmod(tempRoot, 0o755);
     serviceHome = join(tempRoot, "svc-home");
     npmPrefix = join(serviceHome, ".npm-global");
     packageRoot = join(npmPrefix, "lib", "node_modules", "openclaw");
@@ -97,12 +109,15 @@ describe("sovereign-openclaw-gateway unit sandbox", () => {
     await rm(tempRoot, { recursive: true, force: true });
   });
 
-  const makeService = (): RealInstallerService =>
-    new RealInstallerService(createLogger(), paths, {
+  const makeService = (
+    options: { systemSearchPath?: string; calls?: string[] } = {},
+  ): RealInstallerService => {
+    const service = new RealInstallerService(createLogger(), paths, {
       fetchImpl: async () => new Response("", { status: 200 }),
       execRunner: {
         run: async ({ command, args }: ExecInput): Promise<ExecResult> => {
           const serialized = [command, ...(args ?? [])].join(" ");
+          options.calls?.push(serialized);
           return {
             command: serialized,
             exitCode: 0,
@@ -115,6 +130,10 @@ describe("sovereign-openclaw-gateway unit sandbox", () => {
         },
       },
     } as unknown as ConstructorParameters<typeof RealInstallerService>[2]);
+    (service as unknown as { serviceProgramSearchPath: string }).serviceProgramSearchPath =
+      options.systemSearchPath ?? toolBin;
+    return service;
+  };
 
   const runtimeConfig = (adminBaseUrl: string, agents?: unknown[]): RuntimeConfig =>
     ({
@@ -148,7 +167,6 @@ describe("sovereign-openclaw-gateway unit sandbox", () => {
 
   it("confines the gateway to its state, workspaces and the programs it is known to start", async () => {
     await installTools();
-    process.env.PATH = toolBin;
     const workspace = join(tempRoot, "workspaces", "mail-sentinel");
     const unit = await render(
       makeService(),
@@ -198,8 +216,9 @@ describe("sovereign-openclaw-gateway unit sandbox", () => {
     expect(sectionLines(unit, "[Service]", "[Install]")).toContain("Restart=always");
   });
 
-  it("falls back to the distribution paths when nothing resolves on the unit PATH", async () => {
-    process.env.PATH = "";
+  it("falls back to the distribution paths for programs missing from the system path", async () => {
+    await mkdir(toolBin, { recursive: true });
+    await writeFile(join(toolBin, "node"), "#!/bin/sh\n", { mode: 0o755 });
     const unit = await render(makeService(), runtimeConfig("http://127.0.0.1:8008"));
     const execPaths = unit.match(/^ExecPaths=(.*)$/m)?.[1]?.split(" ") ?? [];
     expect(execPaths).toEqual([
@@ -207,7 +226,7 @@ describe("sovereign-openclaw-gateway unit sandbox", () => {
       "-/usr/lib64",
       "-/lib",
       "-/lib64",
-      "-/usr/bin/node",
+      `-${join(toolBin, "node")}`,
       "-/usr/bin/env",
       "-/usr/bin/bash",
       "-/usr/local/bin/sovereign-tool",
@@ -216,7 +235,73 @@ describe("sovereign-openclaw-gateway unit sandbox", () => {
       `-${join(globalRoot, "openclaw")}`,
       `-${packageRoot}`,
     ]);
-    expect(unit).toMatch(/^ExecStartPre=\/usr\/bin\/node -e "/m);
+    expect(unit).toContain(`\nExecStartPre=${join(toolBin, "node")} -e "`);
+  });
+
+  it("keeps the installer's own PATH and node out of the unit", async () => {
+    await installTools();
+    // A version-manager or CI tool-cache node sits first on the caller's PATH,
+    // inside a directory only the installing user can enter.
+    const callerDir = join(tempRoot, "caller-home");
+    const callerBin = join(callerDir, "toolcache", "node", "bin");
+    await mkdir(callerBin, { recursive: true });
+    for (const program of ["node", "bash", "sh", "openclaw"]) {
+      await writeFile(join(callerBin, program), "#!/bin/sh\n", { mode: 0o755 });
+    }
+    await chmod(callerDir, 0o700);
+    process.env.PATH = `${callerBin}:/usr/bin:/bin`;
+
+    const unit = await render(makeService(), runtimeConfig("http://127.0.0.1:8008"));
+
+    expect(unit).toContain(`\nEnvironment=PATH=${join(npmPrefix, "bin")}:${toolBin}\n`);
+    expect(unit).toContain(`\nExecStartPre=${join(toolBin, "node")} -e "`);
+    expect(unit).toContain(`\nExecStart=${join(npmPrefix, "bin", "openclaw")} gateway run`);
+    expect(unit).not.toContain(callerDir);
+  });
+
+  it("refuses to install the unit when no system node exists", async () => {
+    await installTools();
+    const systemBin = join(tempRoot, "system-bin");
+    await mkdir(systemBin);
+    const calls: string[] = [];
+    const service = makeService({ systemSearchPath: systemBin, calls });
+
+    await expect(
+      (service as unknown as Internals).ensureSystemGatewayServiceFallback(
+        runtimeConfig("http://127.0.0.1:8008"),
+      ),
+    ).rejects.toMatchObject({
+      code: "OPENCLAW_GATEWAY_NODE_UNAVAILABLE",
+      retryable: false,
+      message: `No node executable found on the system search path ${systemBin}; the OpenClaw gateway runs as sovereign-node and needs a system-wide Node.js runtime`,
+      details: { searchPath: systemBin, serviceUser: "sovereign-node", problems: [] },
+    });
+    expect(calls.filter((call) => call.includes("systemctl"))).toEqual([]);
+    await expect(access(unitPath)).rejects.toThrow();
+  });
+
+  it("refuses to install the unit when the system node is private to another user", async () => {
+    await installTools();
+    const privateDir = join(tempRoot, "private");
+    await mkdir(join(privateDir, "bin"), { recursive: true });
+    await writeFile(join(privateDir, "bin", "node"), "#!/bin/sh\n", { mode: 0o755 });
+    await chmod(privateDir, 0o700);
+    const systemBin = join(tempRoot, "system-bin");
+    await mkdir(systemBin);
+    await symlink(join(privateDir, "bin", "node"), join(systemBin, "node"));
+    const calls: string[] = [];
+    const service = makeService({ systemSearchPath: systemBin, calls });
+
+    await expect(
+      (service as unknown as Internals).ensureSystemGatewayServiceFallback(
+        runtimeConfig("http://127.0.0.1:8008"),
+      ),
+    ).rejects.toMatchObject({
+      code: "OPENCLAW_GATEWAY_NODE_UNAVAILABLE",
+      message: `No node executable on the system search path ${systemBin} is usable by the service user sovereign-node: ${join(systemBin, "node")} resolves to ${join(privateDir, "bin", "node")}, but ${privateDir} (mode 0700) is not executable by the service user`,
+    });
+    expect(calls.filter((call) => call.includes("systemctl"))).toEqual([]);
+    await expect(access(unitPath)).rejects.toThrow();
   });
 
   it("lets agents start their exec wrappers through the shell only when they have one", async () => {
@@ -270,7 +355,6 @@ describe("sovereign-openclaw-gateway unit sandbox", () => {
       "/usr/local/bin/sovereign-tool",
     ]);
 
-    process.env.PATH = toolBin;
     const execPaths =
       (await render(service, withExec)).match(/^ExecPaths=(.*)$/m)?.[1]?.split(" ") ?? [];
     expect(execPaths).toContain(`-${join(toolBin, "sh")}`);
@@ -312,7 +396,6 @@ describe("sovereign-openclaw-gateway unit sandbox", () => {
       [join(tempRoot, "missing-node")],
     );
 
-    process.env.PATH = toolBin;
     const unit = await render(service, typed);
     const execPaths = unit.match(/^ExecPaths=(.*)$/m)?.[1]?.split(" ") ?? [];
     expect(execPaths).toContain(`-${join(toolBin, "node")}`);
