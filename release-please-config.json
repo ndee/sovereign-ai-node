@@ -2,6 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
   "pull-request-title-pattern": "chore: release ${version}",
   "pull-request-footer": "## Validation\n\nCI-only: automated version/changelog update; release workflow rebuilds and tests the exact commit before publishing.",
+  "always-update": true,
   "packages": {
     ".": {
       "release-type": "node",

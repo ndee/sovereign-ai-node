@@ -120,9 +120,21 @@ jobs:
           CI_HEAD_SHA: ${{ steps.ci.outputs.sha }}
         run: bash scripts/release/require-successful-main-ci.sh "$CI_RUN_ID" "$CI_HEAD_SHA"
 
+      # Release Please tags and drafts a merged release PR at that PR's own
+      # merge commit, before any later step can object. Only let it run when
+      # that commit is the CI-validated main; otherwise end the run here,
+      # with no tag or draft created.
+      - name: Hold release unless the merged release PR is the validated main
+        id: pending
+        if: github.event_name == 'workflow_run'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_HEAD_SHA: ${{ steps.ci.outputs.sha }}
+        run: bash scripts/release/check-pending-release-pr.sh "$CI_HEAD_SHA"
+
       - name: Open or advance the release PR
         id: release
-        if: github.event_name == 'workflow_run'
+        if: github.event_name == 'workflow_run' && steps.pending.outputs.proceed == 'true'
         uses: googleapis/release-please-action@v5
         with:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
@@ -140,6 +152,7 @@ jobs:
       # while workflow_dispatch can also re-verify an already-published release.
       - name: Resolve release state and immutable tag
         id: resolve
+        if: steps.pending.outputs.proceed != 'false'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           EVENT_NAME: ${{ github.event_name }}

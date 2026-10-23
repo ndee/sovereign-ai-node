@@ -19,6 +19,11 @@ Thanks for contributing to sovereign-ai-node.
   for what CI runs.
 - Make sure the change is covered by tests where applicable.
 
+## Releases
+
+Releases are cut by automation from `main`; see [docs/RELEASING.md](docs/RELEASING.md)
+for the chain, its checks, and what a held release means.
+
 ## Labels and automation
 
 The `lifecycle:` labels are managed as code and partly automated; see

@@ -44,7 +44,7 @@ Each `recoverJsonObject` JS heredoc (currently at lines 3170, 3246, 3348, 3411, 
 
 Top-level global-variable declarations and `DEFAULT_*` constants (lines 1–79 ish) stay in `install.sh` because they are read by multiple libraries; document them in a short comment block.
 
-**Curl-pipe — release-artefact model.** The repo holds `scripts/install.sh` (a thin orchestrator) and `scripts/install/lib-*.sh` (the libraries it sources at runtime). Release Please creates a tag and draft release only when its release PR merges; `release.yml` then builds and contract-tests the npm package and self-contained `install.sh`, attaches them with `component-release.json`, and publishes only after all assets are present.
+**Curl-pipe — release-artefact model.** The repo holds `scripts/install.sh` (a thin orchestrator) and `scripts/install/lib-*.sh` (the libraries it sources at runtime). Release Please creates a tag and draft release only when its release PR merges and that merge commit is the CI-validated `main` (see `docs/RELEASING.md`); `release.yml` then builds and contract-tests the npm package and self-contained `install.sh`, attaches them with `component-release.json`, and publishes only after all assets are present.
 
 - README's curl command points at `https://github.com/ndee/sovereign-ai-node/releases/latest/download/install.sh` (tag-pinned). The previous `raw.githubusercontent.com/.../main/scripts/install.sh` URL is intentionally broken — the orchestrator on `main` cannot run via curl-pipe because the libs aren't reachable that way. Migration is documented in release notes.
 - Local-checkout installs (`sudo bash scripts/install.sh --source-dir "$(pwd)"`) keep working unchanged — the orchestrator finds `scripts/install/lib-*.sh` next to itself.
