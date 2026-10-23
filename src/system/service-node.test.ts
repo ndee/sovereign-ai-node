@@ -55,7 +55,7 @@ describe("resolveServiceNode", () => {
       ok: false,
       searchPath: systemBin,
       problems: [
-        `${join(systemBin, "node")} resolves to ${privateNode}, but ${privateDir} (mode 0700) is not executable by the service user`,
+        `${join(systemBin, "node")} (resolves to ${privateNode}) is not executable by the service user: ${privateDir} (mode 0700) lacks the execute bit for other users`,
       ],
     });
 
@@ -73,7 +73,9 @@ describe("resolveServiceNode", () => {
     expect(await resolveServiceNode(systemBin)).toEqual({
       ok: false,
       searchPath: systemBin,
-      problems: [`${join(systemBin, "node")} (mode 0750) is not executable by the service user`],
+      problems: [
+        `${join(systemBin, "node")} is not executable by the service user: ${join(systemBin, "node")} (mode 0750) lacks the execute bit for other users`,
+      ],
     });
   });
 

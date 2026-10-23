@@ -75,6 +75,15 @@ describe("OpenClaw CLI run as the service user", () => {
     ]);
   });
 
+  it("leaves a CLI that is not on the caller's PATH to sudo's own lookup", async () => {
+    await writeFile(join(systemBin, "node"), "#!/bin/sh\n", { mode: 0o755 });
+    process.env.PATH = systemBin;
+
+    const [call] = await runOpenClaw();
+
+    expect(call?.args?.slice(4)).toEqual(["openclaw", "config", "get"]);
+  });
+
   it("leaves the CLI to its own interpreter line when no system node is usable", async () => {
     const [call] = await runOpenClaw();
 

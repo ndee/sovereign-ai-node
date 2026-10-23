@@ -273,7 +273,7 @@ describe("sovereign-openclaw-gateway unit sandbox", () => {
     ).rejects.toMatchObject({
       code: "OPENCLAW_GATEWAY_NODE_UNAVAILABLE",
       retryable: false,
-      message: `No node executable found on the system search path ${systemBin}; the OpenClaw gateway runs as sovereign-node and needs a system-wide Node.js runtime`,
+      message: `The OpenClaw gateway runs as sovereign-node, but no node executable was found on the system search path ${systemBin}; install a system-wide Node.js runtime`,
       details: { searchPath: systemBin, serviceUser: "sovereign-node", problems: [] },
     });
     expect(calls.filter((call) => call.includes("systemctl"))).toEqual([]);
@@ -298,7 +298,7 @@ describe("sovereign-openclaw-gateway unit sandbox", () => {
       ),
     ).rejects.toMatchObject({
       code: "OPENCLAW_GATEWAY_NODE_UNAVAILABLE",
-      message: `No node executable on the system search path ${systemBin} is usable by the service user sovereign-node: ${join(systemBin, "node")} resolves to ${join(privateDir, "bin", "node")}, but ${privateDir} (mode 0700) is not executable by the service user`,
+      message: `The OpenClaw gateway runs as sovereign-node, but no node on the system search path ${systemBin} is usable: ${join(systemBin, "node")} (resolves to ${join(privateDir, "bin", "node")}) is not executable by the service user: ${privateDir} (mode 0700) lacks the execute bit for other users`,
     });
     expect(calls.filter((call) => call.includes("systemctl"))).toEqual([]);
     await expect(access(unitPath)).rejects.toThrow();

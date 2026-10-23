@@ -4,6 +4,7 @@ import { delimiter, join } from "node:path";
 
 import type { Logger } from "../logging/logger.js";
 import { type ExecResult, type ExecRunner, PRIVILEGE_DROP_SPAWN_CWD } from "../system/exec.js";
+import { resolveServiceNodeCommand } from "../system/service-node.js";
 import { resolveOpenClawSpawnLookupPath } from "./bootstrap.js";
 
 const OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS = 90_000;
@@ -392,7 +393,7 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
         "--",
         "/usr/bin/env",
         ...sudoGatewayEnv,
-        process.execPath,
+        await resolveServiceNodeCommand(),
         sudoGatewayCommand,
         ...args,
       ],

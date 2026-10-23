@@ -11,6 +11,13 @@ import { GATEWAY_READY_TIMEOUT_ENV, type GatewayReadinessOutcome } from "./gatew
 import { RealInstallerService } from "./real-service.js";
 import type { RuntimeConfig } from "./real-service-shared.js";
 
+// The gateway unit takes the host's system node; these tests are about other
+// behaviour and must not depend on whether the test host has one.
+vi.mock("../system/service-node.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../system/service-node.js")>()),
+  resolveServiceNode: async () => ({ ok: true, path: "/usr/bin/node" }),
+}));
+
 const GATEWAY_URL = "http://127.0.0.1:18789/";
 
 type Responder = (serialized: string, input: ExecInput) => Partial<ExecResult> | "throw";
