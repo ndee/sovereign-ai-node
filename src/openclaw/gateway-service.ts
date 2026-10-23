@@ -4,6 +4,7 @@ import { delimiter, join } from "node:path";
 
 import type { Logger } from "../logging/logger.js";
 import { type ExecResult, type ExecRunner, PRIVILEGE_DROP_SPAWN_CWD } from "../system/exec.js";
+import { resolveServiceNodeCommand } from "../system/service-node.js";
 import { isRetryableExecFailure, resolveOpenClawSpawnLookupPath } from "./bootstrap.js";
 
 const OPENCLAW_GATEWAY_COMMAND_TIMEOUT_MS = 120_000;
@@ -110,7 +111,7 @@ export class ShellOpenClawGatewayServiceManager implements OpenClawGatewayServic
         "--",
         "/usr/bin/env",
         ...sudoGatewayEnv,
-        process.execPath,
+        await resolveServiceNodeCommand(),
         sudoGatewayCommand,
         ...args,
       ],

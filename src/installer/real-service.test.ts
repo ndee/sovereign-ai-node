@@ -31,6 +31,13 @@ import type { RelayEnrollmentData } from "./real-service-relay-enrollment.js";
 import type { RuntimeConfig } from "./real-service-shared.js";
 import type { InstallerService } from "./service.js";
 
+// The gateway unit takes the host's system node; these tests are about other
+// behaviour and must not depend on whether the test host has one.
+vi.mock("../system/service-node.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../system/service-node.js")>()),
+  resolveServiceNode: async () => ({ ok: true, path: "/usr/bin/node" }),
+}));
+
 // Any HTTP response from the gateway's loopback port means it is listening.
 const gatewayListeningFetch = async (): Promise<Response> => new Response("", { status: 200 });
 
@@ -4014,15 +4021,14 @@ describe("RealInstallerService", () => {
       unit = await render();
       expect(unit).toContain(`ExecStart=${join(npmBin, "openclaw")} gateway run`);
 
-      // A PATH that already carries the prefix is not duplicated.
-      process.env.PATH = `${npmBin}:/usr/bin`;
+      // The caller's PATH never reaches the unit, whatever it carries.
+      const systemPath = `${npmBin}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n`;
+      process.env.PATH = `${npmBin}:/opt/caller/bin`;
       unit = await render();
-      expect(unit).toContain(`Environment=PATH=${npmBin}:/usr/bin\n`);
-
-      // No PATH at all: fall back to the standard system dirs.
+      expect(unit).toContain(`Environment=PATH=${systemPath}`);
       delete process.env.PATH;
       unit = await render();
-      expect(unit).toContain(`Environment=PATH=${npmBin}:/usr/local/sbin:`);
+      expect(unit).toContain(`Environment=PATH=${systemPath}`);
     } finally {
       process.env.PATH = priorPath;
       if (priorUnitPath === undefined) {
