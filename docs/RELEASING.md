@@ -62,6 +62,12 @@ merged release PR still labelled `autorelease: pending` was merged at any other
 commit than the validated `main`, Release Please does not run. The run ends
 successfully with a "Release held" warning, and no tag or draft is created.
 
+If the merge commit of such a release PR cannot be read as a full commit SHA,
+the check cannot compare it. The step fails with a "cannot read the merge
+commit" error and Release Please does not run either. The check reads pull
+requests with API version `2022-11-28`, because version `2026-03-10` no longer
+returns `merge_commit_sha`.
+
 ### Retry of the CI jobs read
 
 The CI check reads the jobs of the CI run from the GitHub API. Right after a run
@@ -75,12 +81,48 @@ entry, fails at once.
 ## Held release
 
 A "Release held" warning means a release PR was merged and a newer commit landed
-on `main` before the release run for the merge commit. The release stays
-pending. The workflow does not change labels, tags or releases, so resolving it
-is a maintainer decision.
+on `main` before the release run for the merge commit. A "Release held: cannot
+read the merge commit" error means the check could not read the release PR's
+merge commit at all. In both cases the release stays pending. The workflow does
+not change labels, tags or releases, so resolving it is a maintainer decision.
 
-To avoid it, merge nothing into `main` from the moment the release PR merges
-until its release is published.
+To avoid the warning, merge nothing into `main` from the moment the release PR
+merges until its release is published.
+
+### Checks
+
+1. Read the release PR's merge commit with the API version the check uses:
+
+   ```bash
+   gh api -H 'X-GitHub-Api-Version: 2022-11-28' \
+     repos/OWNER/REPO/pulls/NUMBER --jq '.merge_commit_sha'
+   ```
+
+   It must print a full 40-character SHA. If it does not, every later run fails
+   the same way. Take the merge commit from `git log origin/main` instead (the
+   `chore: release X.Y.Z (#NUMBER)` commit) and use the manual recovery below.
+2. Compare that SHA with the "CI validated main" SHA in the warning, and with
+   `git rev-parse origin/main`. Equal values mean the release commit is the
+   current `main`; different values mean newer commits landed after it.
+3. Confirm that no tag `vX.Y.Z` and no release for that version exist yet
+   (`git ls-remote --tags origin vX.Y.Z`, `gh release list`).
+
+### Manual recovery
+
+The release workflow can finish an existing draft release when it is started by
+hand with the `tag` input. It does not create the tag or the draft in that mode,
+so those come first:
+
+1. Create the tag `vX.Y.Z` at the release PR's merge commit, and a **draft**
+   release for that tag whose target is the full merge commit SHA. Use the
+   version's `CHANGELOG.md` section as the release notes.
+2. Relabel the release PR from `autorelease: pending` to `autorelease: tagged`,
+   which is what Release Please does after it creates a release. Otherwise every
+   later run holds again on the same PR.
+3. Run the release workflow on `main` with `tag` set to `vX.Y.Z`. It requires a
+   successful CI push run for the current `main`, checks that the tag is an
+   ancestor of `main` and matches the draft's target, then builds the assets
+   from the tagged commit, attaches them and publishes the release.
 
 ## Changelog corrections
 
