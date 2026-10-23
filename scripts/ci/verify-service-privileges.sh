@@ -86,6 +86,29 @@ else
     "$docker_helper" "$project_dir" compose exec -T synapse sh
   expect_status "a project outside the bundled-matrix root is refused" 2 \
     "$docker_helper" /etc compose ps -a
+
+  register_args=(exec -T synapse register_new_matrix_user -u ci-stdin-check)
+  register_tail=(--no-admin -c /data/homeserver.yaml http://127.0.0.1:8008)
+  expect_status "a password argument to register_new_matrix_user is refused" 2 \
+    "$docker_helper" "$project_dir" compose "${register_args[@]}" -p not-a-real-password \
+    "${register_tail[@]}"
+  stdin_password="ci_$(head -c 24 /dev/urandom | base64 | tr -d '/+=')"
+  if printf '%s' "$stdin_password" |
+    as_service sudo -n "$docker_helper" "$project_dir" compose "${register_args[@]}" \
+      --password-file /dev/stdin "${register_tail[@]}" >/dev/null &&
+    jq -n --rawfile password <(printf '%s' "$stdin_password") \
+      '{type: "m.login.password", identifier: {type: "m.id.user", user: "ci-stdin-check"}, password: $password}' |
+    curl -fsS -H 'Content-Type: application/json' --data @- \
+      http://127.0.0.1:8008/_matrix/client/v3/login | jq -e '.access_token | length > 0' >/dev/null; then
+    pass "a password on stdin registers a user through the helper"
+  else
+    fail "a password on stdin does not register a user through the helper"
+  fi
+  if journalctl --no-pager -o cat | grep -qF -f <(printf '%s\n' "$stdin_password"); then
+    fail "the stdin password reached the journal"
+  else
+    pass "the stdin password is not in the journal"
+  fi
 fi
 
 unit_helper="$HELPERS/install-systemd-unit"

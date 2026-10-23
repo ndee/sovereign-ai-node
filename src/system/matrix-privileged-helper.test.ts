@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -79,13 +79,16 @@ type PrivateProvisioner = {
 
 const harness = async (
   respond: (input: ExecInput) => Partial<ExecResult> | Promise<Partial<ExecResult>>,
+  fetchImpl?: (url: string, init?: RequestInit) => Promise<Response>,
 ) => {
   const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-helper-test-"));
   const calls: string[][] = [];
+  const inputs: ExecInput[] = [];
   const execRunner: ExecRunner = {
     run: async (input) => {
       const argv = [input.command, ...(input.args ?? [])];
       calls.push(argv);
+      inputs.push(input);
       return {
         command: argv.join(" "),
         exitCode: 0,
@@ -99,18 +102,48 @@ const harness = async (
     execRunner,
     createLogger(),
     buildPaths(tempRoot),
-    undefined,
+    fetchImpl,
     undefined,
     () => "helper",
   );
   return {
     tempRoot,
     calls,
+    inputs,
     provisioner,
     priv: provisioner as unknown as PrivateProvisioner,
     cleanup: () => rm(tempRoot, { recursive: true, force: true }),
   };
 };
+
+const jsonResponse = (payload: unknown): Response =>
+  new Response(JSON.stringify(payload), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+
+const fakeHomeserver = async (url: string, init?: RequestInit): Promise<Response> => {
+  if (url.endsWith("/_matrix/key/v2/server")) {
+    return jsonResponse({ server_name: "matrix.local.test", valid_until_ts: 0, verify_keys: {} });
+  }
+  if (url.endsWith("/_matrix/client/v3/login")) {
+    const body = JSON.parse(String(init?.body)) as { identifier: { user: string } };
+    const localpart = body.identifier.user;
+    return jsonResponse({
+      access_token: `token-${localpart}`,
+      user_id: `@${localpart}:matrix.local.test`,
+    });
+  }
+  return jsonResponse({ versions: ["v1.1"] });
+};
+
+const composePsRunning = [
+  { Service: "postgres", State: "running", Status: "Up (healthy)" },
+  { Service: "synapse", State: "running", Status: "Up (healthy)" },
+  { Service: "reverse-proxy", State: "running", Status: "Up (healthy)" },
+]
+  .map((entry) => JSON.stringify(entry))
+  .join("\n");
 
 describe("DockerComposeBundledMatrixProvisioner with the bundled-matrix-docker helper", () => {
   afterEach(() => {
@@ -132,6 +165,73 @@ describe("DockerComposeBundledMatrixProvisioner with the bundled-matrix-docker h
       expect(h.calls.some((argv) => argv[0] === "docker" || argv[0] === "docker-compose")).toBe(
         false,
       );
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it("keeps account passwords and the registration secret out of every sudo argv", async () => {
+    const h = await harness(
+      (input) => (input.args?.includes("--format") ? { stdout: composePsRunning } : {}),
+      fakeHomeserver,
+    );
+    try {
+      const req = buildInstallRequest();
+      const provision = await h.provisioner.provision(req);
+      const accounts = await h.provisioner.bootstrapAccounts(req, provision);
+
+      const readSecretRef = async (ref: string) =>
+        (await readFile(ref.slice("file:".length), "utf8")).trim();
+      const homeserverYaml = await readFile(
+        join(provision.projectDir, "synapse", "homeserver.yaml"),
+        "utf8",
+      );
+      const sharedSecret = /registration_shared_secret: "([^"]+)"/.exec(homeserverYaml)?.[1];
+      const secrets = [
+        await readSecretRef(accounts.operator.passwordSecretRef),
+        await readSecretRef(accounts.bot.passwordSecretRef),
+        sharedSecret ?? "",
+      ];
+      for (const secret of secrets) {
+        expect(secret.length).toBeGreaterThan(8);
+      }
+
+      const sudoCalls = h.inputs.filter((input) => input.command === "sudo");
+      expect(sudoCalls.length).toBeGreaterThan(0);
+      for (const call of sudoCalls) {
+        const argv = (call.args ?? []).join(" ");
+        for (const secret of secrets) {
+          expect(argv).not.toContain(secret);
+        }
+      }
+
+      const registerCalls = sudoCalls.filter((call) =>
+        call.args?.includes("register_new_matrix_user"),
+      );
+      expect(registerCalls.map((call) => call.options)).toEqual([
+        expect.objectContaining({ input: secrets[0], stdin: "pipe" }),
+        expect.objectContaining({ input: secrets[1], stdin: "pipe" }),
+      ]);
+      for (const call of registerCalls) {
+        expect(call.args).toEqual([
+          "-n",
+          BUNDLED_MATRIX_DOCKER_HELPER_PATH,
+          provision.projectDir,
+          "compose",
+          "exec",
+          "-T",
+          "synapse",
+          "register_new_matrix_user",
+          "-u",
+          expect.any(String),
+          "--password-file",
+          "/dev/stdin",
+          expect.stringMatching(/^(-a|--no-admin)$/),
+          "-c",
+          "/data/homeserver.yaml",
+          provision.adminBaseUrl,
+        ]);
+      }
     } finally {
       await h.cleanup();
     }
