@@ -49,19 +49,57 @@ export const reconfigureMatrixRequestSchema = z.object({
   bots: botsInstallInputSchema.partial().optional(),
 });
 
+// Reconfigure may narrow the routing restrictions (a provider allow-list, or
+// re-asserting a strict value) but never loosen them: opting out of the strict
+// profile stays an explicit install-time decision. Unknown keys are rejected so
+// a misspelt field cannot be silently dropped.
+export const reconfigureOpenrouterPrivacySchema = z
+  .object({
+    zdr: z
+      .boolean()
+      .refine((value) => value, {
+        message: "openrouter.privacy.zdr cannot be turned off through reconfigure",
+      })
+      .optional(),
+    dataCollection: z
+      .enum(["deny", "allow"])
+      .refine((value) => value === "deny", {
+        message: 'openrouter.privacy.dataCollection cannot be set to "allow" through reconfigure',
+      })
+      .optional(),
+    allowFallbacks: z
+      .boolean()
+      .refine((value) => !value, {
+        message: "openrouter.privacy.allowFallbacks cannot be turned on through reconfigure",
+      })
+      .optional(),
+    only: z
+      .array(
+        z.string().trim().min(1, {
+          message: "openrouter.privacy.only entries must be non-empty provider slugs",
+        }),
+      )
+      .optional(),
+  })
+  .strict();
+
 export const reconfigureOpenrouterRequestSchema = z.object({
   openrouter: z
     .object({
       model: z.string().min(1).optional(),
       apiKey: z.string().min(1).optional(),
       secretRef: z.string().min(1).optional(),
+      privacy: reconfigureOpenrouterPrivacySchema.optional(),
     })
     .refine(
       (value) =>
-        value.model !== undefined || value.apiKey !== undefined || value.secretRef !== undefined,
+        value.model !== undefined ||
+        value.apiKey !== undefined ||
+        value.secretRef !== undefined ||
+        value.privacy !== undefined,
       {
         message:
-          "Provide at least one of openrouter.model, openrouter.apiKey, or openrouter.secretRef",
+          "Provide at least one of openrouter.model, openrouter.apiKey, openrouter.secretRef, or openrouter.privacy",
         path: ["model"],
       },
     )
