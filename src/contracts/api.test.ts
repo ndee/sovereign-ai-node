@@ -80,6 +80,13 @@ describe("reconfigureOpenrouterRequestSchema privacy", () => {
     expect(parse(privacy).success).toBe(false);
   });
 
+  it("still rejects apiKey together with secretRef", () => {
+    const result = parse({ only: ["together"] }, { apiKey: "sk-or-new", secretRef: "file:/k" });
+    expect(messages(result)).toEqual([
+      "Provide openrouter.apiKey or openrouter.secretRef, not both",
+    ]);
+  });
+
   it("still requires at least one field", () => {
     const result = reconfigureOpenrouterRequestSchema.safeParse({ openrouter: {} });
     expect(result.success).toBe(false);

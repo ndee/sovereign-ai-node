@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createServer as createTlsServer } from "node:tls";
 
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { LoadedBotPackage } from "../bots/catalog.js";
 import type { SovereignPaths } from "../config/paths.js";
@@ -11656,6 +11656,15 @@ describe("RealInstallerService", () => {
   describe("reconfigureOpenrouter routing restrictions", () => {
     const strict = { zdr: true, dataCollection: "deny", allowFallbacks: false };
     const strictRouting = { data_collection: "deny", zdr: true, allow_fallbacks: false };
+
+    // The runtime fixtures reference the key as env:OPENROUTER_API_KEY.
+    beforeEach(() => {
+      vi.stubEnv("OPENROUTER_API_KEY", "sk-or-test");
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
 
     const setup = async (
       options: { openrouterPrivacy?: Record<string, unknown>; requestPrivacy?: unknown } = {},

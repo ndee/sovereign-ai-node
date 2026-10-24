@@ -89,6 +89,27 @@ export const resolveOpenRouterPrivacy = (input: unknown): OpenRouterPrivacyConfi
   };
 };
 
+/**
+ * Apply a post-install update onto the current block. Fields the update
+ * omits keep their current value, so an allow-list survives a change to the
+ * other fields; an empty `only` clears the allow-list.
+ */
+export const mergeOpenRouterPrivacy = (
+  current: OpenRouterPrivacyConfig,
+  update: OpenRouterPrivacyInput,
+): OpenRouterPrivacyConfig =>
+  resolveOpenRouterPrivacy({
+    ...current,
+    ...Object.fromEntries(Object.entries(update).filter(([, value]) => value !== undefined)),
+  });
+
+export const sameOpenRouterPrivacy = (
+  left: OpenRouterPrivacyConfig,
+  right: OpenRouterPrivacyConfig,
+): boolean =>
+  JSON.stringify(buildOpenRouterProviderRouting(left)) ===
+  JSON.stringify(buildOpenRouterProviderRouting(right));
+
 /** Render the OpenRouter request-body `provider` block. */
 export const buildOpenRouterProviderRouting = (
   privacy: OpenRouterPrivacyConfig,
