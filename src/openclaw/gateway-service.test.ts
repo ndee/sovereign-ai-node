@@ -6,11 +6,15 @@ import { describe, expect, it } from "vitest";
 
 import { createLogger } from "../logging/logger.js";
 import type { ExecInput, ExecResult, ExecRunner } from "../system/exec.js";
+import { resolveServiceNodeCommand } from "../system/service-node.js";
 import { resolveOpenClawSpawnLookupPath } from "./bootstrap.js";
 import {
   isSystemdBusUnavailableMessage,
   ShellOpenClawGatewayServiceManager,
 } from "./gateway-service.js";
+
+// The service user runs the system node, never the node that started the installer.
+const serviceNode = await resolveServiceNodeCommand();
 
 describe("ShellOpenClawGatewayServiceManager", () => {
   it("runs openclaw gateway install with optional --force", async () => {
@@ -137,7 +141,7 @@ describe("ShellOpenClawGatewayServiceManager", () => {
           "OPENCLAW_CONFIG=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5",
           "OPENCLAW_CONFIG_PATH=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5",
           "SOVEREIGN_NODE_CONFIG=/etc/sovereign-node/config.json5",
-          process.execPath,
+          serviceNode,
           resolvedOpenclaw,
           "gateway",
           "install",

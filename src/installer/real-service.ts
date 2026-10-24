@@ -16,7 +16,7 @@ import {
 } from "node:fs/promises";
 import { request as httpsRequest } from "node:https";
 import { isIPv4 } from "node:net";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { connect as tlsConnect } from "node:tls";
 import type {
   BotCatalog,
@@ -153,6 +153,7 @@ import {
   reclaimOwnershipInvocation,
   systemdUnitInstallInvocation,
 } from "../system/privileged-helpers.js";
+import { resolveServiceNode, SYSTEM_PROGRAM_SEARCH_PATH } from "../system/service-node.js";
 import {
   type AgentTemplateManifest,
   CORE_TEMPLATE_MANIFESTS,
@@ -535,7 +536,6 @@ const MAIL_SENTINEL_IMAP_PASSWORD_SECRET_KEY = "imapPassword";
 const SOVEREIGN_PINNED_LOBSTER_PACKAGE_NAME = "@clawdbot/lobster";
 const SOVEREIGN_PINNED_LOBSTER_VERSION = "2026.1.24";
 const SOVEREIGN_TOOL_EXECUTABLE_PATH = "/usr/local/bin/sovereign-tool";
-const SANDBOX_PROGRAM_SEARCH_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const SOVEREIGN_EXECUTABLE_PATHS: Record<string, string> = {
   "sovereign-node": "/usr/local/bin/sovereign-node",
   "sovereign-node-api": "/usr/local/bin/sovereign-node-api",
@@ -702,6 +702,11 @@ export class RealInstallerService implements InstallerService {
   // Candidate machine-id paths for resolveStableInstallationId, in priority
   // order. A protected field (not a direct constant read) only so tests can
   // redirect them to point at temp files and exercise the persisted fallback.
+  // Where the gateway unit and the OpenClaw CLI run as the service user find
+  // their programs. A protected field (not a direct constant read) only so
+  // tests can point it at a temp directory.
+  protected serviceProgramSearchPath = SYSTEM_PROGRAM_SEARCH_PATH;
+
   protected machineIdCandidatePaths: readonly string[] = [
     "/etc/machine-id",
     "/var/lib/dbus/machine-id",
@@ -5006,30 +5011,27 @@ export class RealInstallerService implements InstallerService {
   // Programs every sandboxed unit may start: the node runtime, the
   // /usr/bin/env that shebangs and ExecStart lines go through, and the
   // root-owned sovereign-tool CLI together with its bash wrapper interpreter.
-  private async resolveSandboxBasePrograms(
-    searchPath: string,
-  ): Promise<{ node: string; programs: string[] }> {
-    const node = (await resolveExecutablePath("node", searchPath)) ?? "/usr/bin/node";
-    return {
+  private async resolveSandboxBasePrograms(searchPath: string, node: string): Promise<string[]> {
+    return [
       node,
-      programs: [
-        node,
-        "/usr/bin/env",
-        (await resolveExecutablePath("bash", searchPath)) ?? "/usr/bin/bash",
-        SOVEREIGN_TOOL_EXECUTABLE_PATH,
-      ],
-    };
+      "/usr/bin/env",
+      (await resolveExecutablePath("bash", searchPath)) ?? "/usr/bin/bash",
+      SOVEREIGN_TOOL_EXECUTABLE_PATH,
+    ];
   }
 
   // Bot scan units also run lobster (covered by the npm prefix exec path) and
   // lobster's exec stage, which feeds the classifier input through `cat`.
   private async resolveBotServiceSandboxPrograms(
     serviceNpmBinDir: string,
-    systemSearchPath: string = SANDBOX_PROGRAM_SEARCH_PATH,
+    systemSearchPath: string = SYSTEM_PROGRAM_SEARCH_PATH,
   ): Promise<string[]> {
     const searchPath = [serviceNpmBinDir, systemSearchPath].join(":");
     return [
-      ...(await this.resolveSandboxBasePrograms(searchPath)).programs,
+      ...(await this.resolveSandboxBasePrograms(
+        searchPath,
+        (await resolveExecutablePath("node", searchPath)) ?? "/usr/bin/node",
+      )),
       (await resolveExecutablePath("cat", searchPath)) ?? "/usr/bin/cat",
     ];
   }
@@ -8866,6 +8868,11 @@ export default function (api) {
       shouldRunOpenClawAsServiceUser && command === "openclaw"
         ? ((await resolveExecutablePath(command)) ?? command)
         : command;
+    // The CLI's `#!/usr/bin/env node` line would pick the first node on the
+    // preserved caller PATH, which the service user may be unable to execute.
+    const serviceNode = shouldRunOpenClawAsServiceUser
+      ? await resolveServiceNode(this.serviceProgramSearchPath)
+      : null;
     const effectiveCommand = shouldRunOpenClawAsServiceUser ? "sudo" : command;
     const effectiveArgs = shouldRunOpenClawAsServiceUser
       ? [
@@ -8873,6 +8880,7 @@ export default function (api) {
           openclawServiceUser,
           "--preserve-env=HOME,OPENCLAW_HOME,OPENCLAW_CONFIG,OPENCLAW_CONFIG_PATH,SOVEREIGN_NODE_CONFIG,SOVEREIGN_NODE_SERVICE_USER,SOVEREIGN_NODE_SERVICE_GROUP,CI,TMPDIR,TMP,TEMP,PATH",
           "--",
+          ...(serviceNode?.ok === true && isAbsolute(delegatedCommand) ? [serviceNode.path] : []),
           delegatedCommand,
           ...args,
         ]
@@ -11023,18 +11031,36 @@ export default function (api) {
     // a CLI reconfigure under sudo's secure_path lacks `.npm-global/bin`, which
     // would render a bare `ExecStart=openclaw` (203/EXEC restart loop, #285).
     const serviceNpmBinDir = await this.resolveServiceNpmBinDir(runtimeConfig);
-    const unitPathEnv = [
-      serviceNpmBinDir,
-      ...(process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin").split(
-        ":",
-      ),
-    ]
+    const serviceNode = await resolveServiceNode(this.serviceProgramSearchPath);
+    if (!serviceNode.ok) {
+      throw {
+        code: "OPENCLAW_GATEWAY_NODE_UNAVAILABLE",
+        message:
+          serviceNode.problems.length === 0
+            ? `The OpenClaw gateway runs as ${serviceIdentity.user}, but no node executable was found on the system search path ${serviceNode.searchPath}; install a system-wide Node.js runtime`
+            : `The OpenClaw gateway runs as ${serviceIdentity.user}, but no node on the system search path ${serviceNode.searchPath} is usable: ${serviceNode.problems.join("; ")}`,
+        retryable: false,
+        details: {
+          searchPath: serviceNode.searchPath,
+          serviceUser: serviceIdentity.user,
+          problems: serviceNode.problems,
+        },
+      };
+    }
+    const nodeCommand = serviceNode.path;
+    const unitPathEnv = [serviceNpmBinDir, ...this.serviceProgramSearchPath.split(":")]
       .filter((entry, index, entries) => entry.length > 0 && entries.indexOf(entry) === index)
       .join(":");
+    // A root install leaves OpenClaw in the installing npm's global prefix,
+    // which need not be on the system path (a CI tool-cache Node, say).
     const openclawCommand =
-      (await resolveExecutablePath("openclaw", unitPathEnv)) ?? join(serviceNpmBinDir, "openclaw");
-    const { node: nodeCommand, programs: basePrograms } =
-      await this.resolveSandboxBasePrograms(unitPathEnv);
+      (await resolveExecutablePath("openclaw", unitPathEnv)) ??
+      (await resolveExecutablePath(
+        "openclaw",
+        join(dirname(dirname(await this.resolveOpenClawGlobalRoot())), "bin"),
+      )) ??
+      join(serviceNpmBinDir, "openclaw");
+    const basePrograms = await this.resolveSandboxBasePrograms(unitPathEnv, nodeCommand);
     const sandboxPaths = buildGatewaySandboxPaths({
       stateDir: this.paths.stateDir,
       openclawServiceHome: this.paths.openclawServiceHome,

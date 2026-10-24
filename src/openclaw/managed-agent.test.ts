@@ -2,8 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import { createLogger } from "../logging/logger.js";
 import type { ExecInput, ExecResult, ExecRunner } from "../system/exec.js";
+import { resolveServiceNodeCommand } from "../system/service-node.js";
 import { resolveOpenClawSpawnLookupPath } from "./bootstrap.js";
 import { ShellOpenClawManagedAgentRegistrar } from "./managed-agent.js";
+
+// The service user runs the system node, never the node that started the installer.
+const serviceNode = await resolveServiceNodeCommand();
 
 /**
  * The PATH a privilege-dropped OpenClaw spawn carries.
@@ -372,7 +376,7 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
           }
           if (
             serialized.startsWith(
-              `sudo -u runner -- /usr/bin/env CI=1 PATH=${sudoLookupPath} XDG_RUNTIME_DIR=/run/user/1001 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus OPENCLAW_HOME=/var/lib/sovereign-node/openclaw-home/.openclaw OPENCLAW_CONFIG=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 OPENCLAW_CONFIG_PATH=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 SOVEREIGN_NODE_CONFIG=/etc/sovereign-node/config.json5 ${process.execPath} `,
+              `sudo -u runner -- /usr/bin/env CI=1 PATH=${sudoLookupPath} XDG_RUNTIME_DIR=/run/user/1001 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus OPENCLAW_HOME=/var/lib/sovereign-node/openclaw-home/.openclaw OPENCLAW_CONFIG=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 OPENCLAW_CONFIG_PATH=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 SOVEREIGN_NODE_CONFIG=/etc/sovereign-node/config.json5 ${serviceNode} `,
             ) &&
             serialized.endsWith(" cron list --json")
           ) {
@@ -487,7 +491,7 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
           }
           if (
             serialized.startsWith(
-              `sudo -u runner -- /usr/bin/env CI=1 PATH=${sudoLookupPath} XDG_RUNTIME_DIR=/run/user/1001 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus OPENCLAW_HOME=/var/lib/sovereign-node/openclaw-home/.openclaw OPENCLAW_CONFIG=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 OPENCLAW_CONFIG_PATH=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 SOVEREIGN_NODE_CONFIG=/etc/sovereign-node/config.json5 ${process.execPath} `,
+              `sudo -u runner -- /usr/bin/env CI=1 PATH=${sudoLookupPath} XDG_RUNTIME_DIR=/run/user/1001 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus OPENCLAW_HOME=/var/lib/sovereign-node/openclaw-home/.openclaw OPENCLAW_CONFIG=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 OPENCLAW_CONFIG_PATH=/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5 SOVEREIGN_NODE_CONFIG=/etc/sovereign-node/config.json5 ${serviceNode} `,
             )
           ) {
             return {
@@ -597,7 +601,7 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
           }
           if (
             serialized.startsWith(
-              `sudo -u sovereign-node -- /usr/bin/env CI=1 OPENCLAW_HOME=/var/lib/sovereign-node/openclaw-home OPENCLAW_CONFIG=/var/lib/sovereign-node/openclaw-home/openclaw.json5 OPENCLAW_CONFIG_PATH=/var/lib/sovereign-node/openclaw-home/openclaw.json5 SOVEREIGN_NODE_CONFIG=/etc/sovereign-node/config.json5 ${process.execPath} `,
+              `sudo -u sovereign-node -- /usr/bin/env CI=1 OPENCLAW_HOME=/var/lib/sovereign-node/openclaw-home OPENCLAW_CONFIG=/var/lib/sovereign-node/openclaw-home/openclaw.json5 OPENCLAW_CONFIG_PATH=/var/lib/sovereign-node/openclaw-home/openclaw.json5 SOVEREIGN_NODE_CONFIG=/etc/sovereign-node/config.json5 ${serviceNode} `,
             )
           ) {
             return {
