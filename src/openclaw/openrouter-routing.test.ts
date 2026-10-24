@@ -5,7 +5,9 @@ import {
   buildOpenClawOpenRouterModelsParams,
   buildOpenRouterProviderRouting,
   DEFAULT_OPENROUTER_PRIVACY,
+  mergeOpenRouterPrivacy,
   resolveOpenRouterPrivacy,
+  sameOpenRouterPrivacy,
 } from "./openrouter-routing.js";
 
 describe("resolveOpenRouterPrivacy", () => {
@@ -47,6 +49,65 @@ describe("resolveOpenRouterPrivacy", () => {
     ).toEqual(DEFAULT_OPENROUTER_PRIVACY);
     expect(resolveOpenRouterPrivacy({ only: [] })).toEqual(DEFAULT_OPENROUTER_PRIVACY);
     expect(resolveOpenRouterPrivacy({ only: ["  "] })).toEqual(DEFAULT_OPENROUTER_PRIVACY);
+  });
+});
+
+describe("mergeOpenRouterPrivacy", () => {
+  const current = {
+    zdr: true,
+    dataCollection: "deny" as const,
+    allowFallbacks: false,
+    only: ["together"],
+  };
+
+  it("keeps every field the update omits", () => {
+    expect(mergeOpenRouterPrivacy(current, {})).toEqual(current);
+    expect(mergeOpenRouterPrivacy(current, { zdr: true, only: undefined })).toEqual(current);
+  });
+
+  it("replaces the allow-list, trimmed and de-duplicated", () => {
+    expect(
+      mergeOpenRouterPrivacy(current, { only: [" deepinfra ", "fireworks", "deepinfra"] }),
+    ).toEqual({ ...current, only: ["deepinfra", "fireworks"] });
+  });
+
+  it("clears the allow-list on an empty list", () => {
+    expect(mergeOpenRouterPrivacy(current, { only: [] })).toEqual(DEFAULT_OPENROUTER_PRIVACY);
+  });
+
+  it("keeps an install-time opt-out the update does not touch", () => {
+    const optedOut = { zdr: false, dataCollection: "allow" as const, allowFallbacks: true };
+    expect(mergeOpenRouterPrivacy(optedOut, { only: ["together"] })).toEqual({
+      ...optedOut,
+      only: ["together"],
+    });
+    expect(mergeOpenRouterPrivacy(optedOut, { zdr: true })).toEqual({ ...optedOut, zdr: true });
+  });
+});
+
+describe("sameOpenRouterPrivacy", () => {
+  it("compares the rendered routing blocks", () => {
+    expect(
+      sameOpenRouterPrivacy(DEFAULT_OPENROUTER_PRIVACY, { ...DEFAULT_OPENROUTER_PRIVACY }),
+    ).toBe(true);
+    expect(
+      sameOpenRouterPrivacy(
+        { ...DEFAULT_OPENROUTER_PRIVACY, only: ["together"] },
+        { ...DEFAULT_OPENROUTER_PRIVACY, only: ["together"] },
+      ),
+    ).toBe(true);
+    expect(
+      sameOpenRouterPrivacy(DEFAULT_OPENROUTER_PRIVACY, {
+        ...DEFAULT_OPENROUTER_PRIVACY,
+        only: ["together"],
+      }),
+    ).toBe(false);
+    expect(
+      sameOpenRouterPrivacy(DEFAULT_OPENROUTER_PRIVACY, {
+        ...DEFAULT_OPENROUTER_PRIVACY,
+        zdr: false,
+      }),
+    ).toBe(false);
   });
 });
 

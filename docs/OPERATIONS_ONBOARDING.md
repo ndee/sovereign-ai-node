@@ -246,7 +246,15 @@ Set the fields under `openrouter.privacy` in the install request (or in
 out explicitly, e.g. `"privacy": { "zdr": false, "allowFallbacks": true }`. Pick
 models (default and per-bot) that have an eligible endpoint
 (`https://openrouter.ai/api/v1/endpoints/zdr`); the bundled default
-`qwen/qwen-2.5-7b-instruct` does. `llm-task` additionally runs in a
+`qwen/qwen-2.5-7b-instruct` does.
+
+After install, `sovereign-node reconfigure openrouter --provider-only together,deepinfra`
+(or `POST /api/reconfigure/openrouter` with `openrouter.privacy.only`) sets the provider
+allowlist without a model change; `--provider-only ""` clears it. This path can only narrow
+the restrictions: it rejects `zdr: false`, `dataCollection: "allow"` and
+`allowFallbacks: true`, and keeps an existing allowlist when only the model or key changes.
+
+`llm-task` additionally runs in a
 dedicated empty workspace (`<service home>/llm-task-workspace`) so no bot
 instructions or memory files are prepended to classification prompts.
 
@@ -386,6 +394,7 @@ The operator can use the local web UI (Pro) or the CLI:
 |---|---|---|
 | Mail protocol (IMAP ↔ POP3), server, port, TLS, email address / username, password, IMAP folder | yes | web UI *Settings → Mail connection*, or `sovereign-node reconfigure imap …` |
 | OpenRouter API key, default model | yes | web UI *Settings → LLM provider*, or `sovereign-node reconfigure openrouter …` |
+| OpenRouter provider allowlist | yes | `sovereign-node reconfigure openrouter --provider-only <slugs>` (narrow only; see *OpenRouter privacy routing*) |
 | Matrix federation | yes | `sovereign-node reconfigure matrix --federation/--no-federation` |
 | Mail Sentinel poll interval, lookback, reminders, digest | yes | `sovereign-node mail-sentinels update <id> …` |
 | Node name (relay slug), homeserver domain, Matrix URL | **no** (read-only) | the homeserver identity, relay assignment and TLS certificate are keyed to it; changing it is a re-install/migration |

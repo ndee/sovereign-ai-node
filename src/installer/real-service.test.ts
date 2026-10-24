@@ -5,11 +5,15 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createServer as createTlsServer } from "node:tls";
 
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { LoadedBotPackage } from "../bots/catalog.js";
 import type { SovereignPaths } from "../config/paths.js";
-import type { InstallJobStatusResponse, InstallRequest } from "../contracts/index.js";
+import type {
+  InstallJobStatusResponse,
+  InstallRequest,
+  ReconfigureOpenrouterRequest,
+} from "../contracts/index.js";
 import { createLogger } from "../logging/logger.js";
 import type {
   OpenClawBootstrapper,
@@ -11653,6 +11657,226 @@ describe("RealInstallerService", () => {
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
+  });
+
+  describe("reconfigureOpenrouter routing restrictions", () => {
+    const strict = { zdr: true, dataCollection: "deny", allowFallbacks: false };
+    const strictRouting = { data_collection: "deny", zdr: true, allow_fallbacks: false };
+
+    // The runtime fixtures reference the key as env:OPENROUTER_API_KEY.
+    beforeEach(() => {
+      vi.stubEnv("OPENROUTER_API_KEY", "sk-or-test");
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    const setup = async (
+      options: { openrouterPrivacy?: Record<string, unknown>; requestPrivacy?: unknown } = {},
+    ) => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+      const paths = buildReconfigurePaths(tempRoot);
+      await writeRuntimeArtifacts(
+        paths,
+        options.openrouterPrivacy === undefined
+          ? {}
+          : { openrouterPrivacy: options.openrouterPrivacy },
+      );
+      const requestPath = join(dirname(paths.configPath), "install-request.json");
+      const request = buildReconfigureRequest();
+      if (options.requestPrivacy !== undefined) {
+        (request.openrouter as Record<string, unknown>).privacy = options.requestPrivacy;
+      }
+      await writeFile(requestPath, `${JSON.stringify(request, null, 2)}\n`, "utf8");
+      const validate = vi.fn(async () => ({ ok: true }));
+      const service = await buildReconfigureService(paths, {
+        openrouterKeyValidator: { validate },
+      });
+      const runtimeConfigPath = join(paths.openclawServiceHome, ".openclaw", "openclaw.json5");
+      const read = async () => ({
+        config: JSON.parse(await readFile(paths.configPath, "utf8")) as {
+          openrouter: { model: string; privacy?: unknown };
+        },
+        models: (
+          JSON.parse(await readFile(runtimeConfigPath, "utf8")) as {
+            agents: { defaults: { models: Record<string, { params?: { provider?: unknown } }> } };
+          }
+        ).agents.defaults.models,
+        request: JSON.parse(await readFile(requestPath, "utf8")) as {
+          openrouter: { model?: string; privacy?: unknown };
+        },
+      });
+      return { tempRoot, paths, service, validate, read };
+    };
+
+    it("sets the provider allow-list without a model change and writes it through", async () => {
+      const { tempRoot, service, read } = await setup();
+      try {
+        const result = await service.reconfigureOpenrouter({
+          openrouter: { privacy: { only: [" together ", "deepinfra", "together"] } },
+        });
+
+        expect(result.changed).toEqual(["openrouter.privacy", "request.openrouter.privacy"]);
+        expect(result.restartRequiredServices).toEqual(["openclaw-gateway"]);
+        const { config, models, request } = await read();
+        const privacy = { ...strict, only: ["together", "deepinfra"] };
+        expect(config.openrouter.model).toBe("qwen/qwen-2.5-7b-instruct");
+        expect(config.openrouter.privacy).toEqual(privacy);
+        expect(models["openrouter/qwen/qwen-2.5-7b-instruct"]?.params?.provider).toEqual({
+          ...strictRouting,
+          only: ["together", "deepinfra"],
+        });
+        expect(request.openrouter.privacy).toEqual(privacy);
+        expect(request.openrouter.model).toBe(buildReconfigureRequest().openrouter.model);
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps an existing allow-list on a model-only change", async () => {
+      const { tempRoot, service, read } = await setup({
+        openrouterPrivacy: { ...strict, only: ["together"] },
+        requestPrivacy: { only: ["together"] },
+      });
+      try {
+        const result = await service.reconfigureOpenrouter({
+          openrouter: { model: "openai/gpt-5" },
+        });
+
+        expect(result.changed).toEqual(["openrouter.model", "request.openrouter.model"]);
+        const { config, models, request } = await read();
+        expect(config.openrouter.privacy).toEqual({ ...strict, only: ["together"] });
+        expect(models["openrouter/openai/gpt-5"]?.params?.provider).toEqual({
+          ...strictRouting,
+          only: ["together"],
+        });
+        expect(request.openrouter.privacy).toEqual({ only: ["together"] });
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("reports nothing to change when the allow-list already matches", async () => {
+      const { tempRoot, paths, service } = await setup({
+        openrouterPrivacy: { ...strict, only: ["together"] },
+        requestPrivacy: { only: ["together"] },
+      });
+      try {
+        const before = await readFile(paths.configPath, "utf8");
+        const result = await service.reconfigureOpenrouter({
+          openrouter: { privacy: { only: ["together"], zdr: true } },
+        });
+
+        expect(result.changed).toEqual([]);
+        expect(result.restartRequiredServices).toEqual([]);
+        expect(await readFile(paths.configPath, "utf8")).toBe(before);
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("clears the allow-list on an empty list", async () => {
+      const { tempRoot, service, read } = await setup({
+        openrouterPrivacy: { ...strict, only: ["together"] },
+        requestPrivacy: { only: ["together"] },
+      });
+      try {
+        const result = await service.reconfigureOpenrouter({
+          openrouter: { privacy: { only: [] } },
+        });
+
+        expect(result.changed).toEqual(["openrouter.privacy", "request.openrouter.privacy"]);
+        const { config, models, request } = await read();
+        expect(config.openrouter.privacy).toEqual(strict);
+        expect(models["openrouter/qwen/qwen-2.5-7b-instruct"]?.params?.provider).toEqual(
+          strictRouting,
+        );
+        expect(request.openrouter.privacy).toEqual(strict);
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("leaves a saved request that already carries the allow-list untouched", async () => {
+      const { tempRoot, service, read } = await setup({
+        requestPrivacy: { only: ["together"] },
+      });
+      try {
+        const result = await service.reconfigureOpenrouter({
+          openrouter: { privacy: { only: ["together"] } },
+        });
+
+        expect(result.changed).toEqual(["openrouter.privacy"]);
+        expect(result.validation).toContainEqual(
+          expect.objectContaining({
+            id: "install-request-sync",
+            message: "Saved install request already matched the current OpenRouter settings",
+          }),
+        );
+        expect((await read()).request.openrouter.privacy).toEqual({ only: ["together"] });
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps an install-time opt-out and only ever tightens it", async () => {
+      const optedOut = { zdr: false, dataCollection: "allow", allowFallbacks: true };
+      const { tempRoot, service, read } = await setup({ openrouterPrivacy: optedOut });
+      try {
+        await service.reconfigureOpenrouter({ openrouter: { privacy: { only: ["together"] } } });
+        expect((await read()).config.openrouter.privacy).toEqual({
+          ...optedOut,
+          only: ["together"],
+        });
+
+        await service.reconfigureOpenrouter({
+          openrouter: { privacy: { zdr: true, dataCollection: "deny", allowFallbacks: false } },
+        });
+        const { config, models } = await read();
+        expect(config.openrouter.privacy).toEqual({ ...strict, only: ["together"] });
+        expect(models["openrouter/qwen/qwen-2.5-7b-instruct"]?.params?.provider).toEqual({
+          ...strictRouting,
+          only: ["together"],
+        });
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it.each([
+      [{ zdr: false }, "openrouter.privacy.zdr cannot be turned off through reconfigure"],
+      [
+        { dataCollection: "allow" },
+        'openrouter.privacy.dataCollection cannot be set to "allow" through reconfigure',
+      ],
+      [
+        { allowFallbacks: true },
+        "openrouter.privacy.allowFallbacks cannot be turned on through reconfigure",
+      ],
+      [{ only: [""] }, "openrouter.privacy.only entries must be non-empty provider slugs"],
+    ])("rejects %j and writes nothing", async (privacy, message) => {
+      const { tempRoot, paths, service, validate } = await setup();
+      try {
+        const before = await readFile(paths.configPath, "utf8");
+        await expect(
+          service.reconfigureOpenrouter({
+            openrouter: {
+              apiKey: "sk-or-new",
+              privacy: privacy as ReconfigureOpenrouterRequest["openrouter"]["privacy"],
+            },
+          }),
+        ).rejects.toMatchObject({
+          code: "OPENROUTER_PRIVACY_INVALID",
+          retryable: false,
+          message: expect.stringContaining(message),
+        });
+        expect(validate).not.toHaveBeenCalled();
+        expect(await readFile(paths.configPath, "utf8")).toBe(before);
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
   });
 
   it("provisions Matrix identity for created managed agents and exposes matrixUserId", async () => {

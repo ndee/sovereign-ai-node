@@ -178,3 +178,110 @@ describe("reconfigure imap", () => {
     expect(process.exitCode).toBe(0);
   });
 });
+
+describe("reconfigure openrouter", () => {
+  let priorExitCode: typeof process.exitCode;
+
+  beforeEach(() => {
+    priorExitCode = process.exitCode;
+    process.exitCode = undefined;
+  });
+
+  afterEach(() => {
+    process.exitCode = priorExitCode;
+  });
+
+  const openrouterResult: ReconfigureResult = {
+    target: "openrouter",
+    changed: ["openrouter.privacy"],
+    restartRequiredServices: [],
+    validation: [],
+  };
+
+  const runOpenrouter = async (args: string[]) => {
+    const reconfigureOpenrouter = vi.fn(async () => openrouterResult);
+    const app = { installerService: { reconfigureOpenrouter } } as unknown as AppContainer;
+    const program = new Command();
+    program.exitOverride();
+    registerReconfigureCommand(program, app);
+    let out = "";
+    const capture = (chunk: unknown) => {
+      out += String(chunk);
+      return true;
+    };
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(capture);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(capture);
+    try {
+      await program.parseAsync(["node", "test", "reconfigure", "openrouter", ...args, "--json"]);
+    } finally {
+      stdout.mockRestore();
+      stderr.mockRestore();
+    }
+    return {
+      reconfigureOpenrouter,
+      envelope: JSON.parse(out) as { ok: boolean; error?: { message: string } },
+    };
+  };
+
+  it("sets the provider allow-list without touching the model or key", async () => {
+    const { reconfigureOpenrouter, envelope } = await runOpenrouter([
+      "--provider-only",
+      " together, deepinfra ,,",
+    ]);
+
+    expect(reconfigureOpenrouter).toHaveBeenCalledWith({
+      openrouter: { privacy: { only: ["together", "deepinfra"] } },
+    });
+    expect(envelope.ok).toBe(true);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("clears the allow-list with an empty value", async () => {
+    const { reconfigureOpenrouter } = await runOpenrouter(["--provider-only", ""]);
+
+    expect(reconfigureOpenrouter).toHaveBeenCalledWith({
+      openrouter: { privacy: { only: [] } },
+    });
+  });
+
+  it("passes model, key and secret ref through unchanged", async () => {
+    const { reconfigureOpenrouter } = await runOpenrouter([
+      "--model",
+      "openai/gpt-5",
+      "--api-key",
+      "sk-or-new",
+    ]);
+    expect(reconfigureOpenrouter).toHaveBeenCalledWith({
+      openrouter: { model: "openai/gpt-5", apiKey: "sk-or-new" },
+    });
+
+    const second = await runOpenrouter(["--secret-ref", "file:/tmp/key"]);
+    expect(second.reconfigureOpenrouter).toHaveBeenCalledWith({
+      openrouter: { secretRef: "file:/tmp/key" },
+    });
+  });
+
+  it("requires at least one setting", async () => {
+    const { reconfigureOpenrouter, envelope } = await runOpenrouter([]);
+
+    expect(reconfigureOpenrouter).not.toHaveBeenCalled();
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error?.message).toBe(
+      "Provide at least one of --model, --api-key, --secret-ref, or --provider-only",
+    );
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("rejects --api-key together with --secret-ref", async () => {
+    const { reconfigureOpenrouter, envelope } = await runOpenrouter([
+      "--api-key",
+      "sk-or-new",
+      "--secret-ref",
+      "file:/tmp/key",
+    ]);
+
+    expect(reconfigureOpenrouter).not.toHaveBeenCalled();
+    expect(envelope.error?.message).toBe("Use either --api-key or --secret-ref, not both");
+    expect(process.exitCode).toBe(1);
+  });
+});

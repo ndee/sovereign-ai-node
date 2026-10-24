@@ -454,9 +454,11 @@ Behavior:
 
 Purpose:
 
-- update OpenRouter model and/or API key for the bundled deployment profile
+- update OpenRouter model, API key and/or provider allow-list for the bundled deployment profile
 
 Behavior:
+
+- `--provider-only <slugs>` sets the OpenRouter provider allow-list (`openrouter.privacy.only`) from a comma-separated list; blank entries are dropped, and an empty value (`--provider-only ""`) clears the allow-list. The routing restrictions follow the rules of `POST /api/reconfigure/openrouter`
 
 - a new `--api-key` is validated against OpenRouter's key endpoint (`GET /api/v1/auth/key`, no completion, no credit usage) before anything is written; a rejected key returns `changed = []` with an `openrouter-key` check of `fail` and keeps the previous key
 - the key is stored at `/etc/sovereign-node/secrets/openrouter-api-key` (mode `0600`); it is never logged and never echoed in results
@@ -1279,7 +1281,7 @@ Response:
 
 Purpose:
 
-- update OpenRouter model and/or secret reference for the active installation
+- update OpenRouter model, secret reference and/or routing restrictions for the active installation
 
 Request body:
 
@@ -1289,14 +1291,40 @@ type ReconfigureOpenrouterRequest = {
     model?: string;
     apiKey?: string; // transient only
     secretRef?: string;
+    // OpenRouter routing restrictions; can only be narrowed here (see below):
+    privacy?: {
+      zdr?: true;
+      dataCollection?: "deny";
+      allowFallbacks?: false;
+      only?: string[]; // provider allowlist (OpenRouter provider slugs); [] clears it
+    };
   };
 };
 ```
 
 Constraints:
 
-- at least one of `model`, `apiKey`, or `secretRef` is required
+- at least one of `model`, `apiKey`, `secretRef`, or `privacy` is required
 - `apiKey` and `secretRef` must not both be set in the same request
+- `privacy` is the install contract's `openrouter.privacy` block, but this path can only
+  narrow it. `zdr: false`, `dataCollection: "allow"` and `allowFallbacks: true` are
+  rejected with a validation error (HTTP 400; `OPENROUTER_PRIVACY_INVALID` when the
+  installer service is called directly) and nothing is written. Re-asserting the strict
+  values (`zdr: true`, `dataCollection: "deny"`, `allowFallbacks: false`) is accepted
+- unknown keys in `privacy` are rejected, as are empty or blank `only` entries; entries
+  are trimmed and de-duplicated
+- the block is merged onto the current one: a field the request omits keeps its current
+  value, so changing only the model (or only the key) keeps an existing allow-list, and an
+  allow-list can be set without a model change. `only: []` clears the allow-list. An
+  install-time opt-out from the strict profile is kept unless the request re-asserts the
+  strict value; weakening the profile stays an install-time decision (`openrouter.privacy`
+  in the install request, whose validation is unchanged)
+- a changed block is written to `openrouter.privacy` in `sovereign-node.json5`, rendered into
+  `agents.defaults.models["openrouter/<model>"].params.provider` for every OpenRouter model
+  in use (as at install), and synced into the saved install request
+  (`request.openrouter.privacy`), and the OpenClaw gateway is restarted. `changed` reports
+  `openrouter.privacy` and `request.openrouter.privacy`; asking for the block already in
+  place changes and restarts nothing
 
 Response:
 

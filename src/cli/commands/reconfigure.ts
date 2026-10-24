@@ -38,6 +38,7 @@ type ReconfigureOpenrouterOptions = {
   model?: string;
   apiKey?: string;
   secretRef?: string;
+  providerOnly?: string;
   json?: boolean;
 };
 
@@ -161,19 +162,32 @@ export const registerReconfigureCommand = (program: Command, app: AppContainer):
 
   reconfigure
     .command("openrouter")
-    .description("Set the OpenRouter model and/or API key for the installed runtime")
+    .description(
+      "Set the OpenRouter model, API key and/or provider allow-list for the installed runtime",
+    )
     .option("--model <model>", "OpenRouter model id")
     .option(
       "--api-key <key>",
       "OpenRouter API key (writes /etc/sovereign-node/secrets/openrouter-api-key)",
     )
     .option("--secret-ref <ref>", "Existing secret ref to use instead of writing a new key")
+    .option(
+      "--provider-only <slugs>",
+      'Comma-separated OpenRouter provider allow-list (e.g. "together,deepinfra"); an empty value clears it',
+    )
     .option("--json", "Emit JSON output")
     .action(async (opts: ReconfigureOpenrouterOptions) => {
       const command = "reconfigure openrouter";
       try {
-        if (opts.model === undefined && opts.apiKey === undefined && opts.secretRef === undefined) {
-          throw new Error("Provide at least one of --model, --api-key, or --secret-ref");
+        if (
+          opts.model === undefined &&
+          opts.apiKey === undefined &&
+          opts.secretRef === undefined &&
+          opts.providerOnly === undefined
+        ) {
+          throw new Error(
+            "Provide at least one of --model, --api-key, --secret-ref, or --provider-only",
+          );
         }
         if (opts.apiKey !== undefined && opts.secretRef !== undefined) {
           throw new Error("Use either --api-key or --secret-ref, not both");
@@ -183,6 +197,16 @@ export const registerReconfigureCommand = (program: Command, app: AppContainer):
             ...(opts.model === undefined ? {} : { model: opts.model }),
             ...(opts.apiKey === undefined ? {} : { apiKey: opts.apiKey }),
             ...(opts.secretRef === undefined ? {} : { secretRef: opts.secretRef }),
+            ...(opts.providerOnly === undefined
+              ? {}
+              : {
+                  privacy: {
+                    only: opts.providerOnly
+                      .split(",")
+                      .map((slug) => slug.trim())
+                      .filter((slug) => slug.length > 0),
+                  },
+                }),
           },
         });
         writeCliSuccess(command, result, reconfigureResultSchema, Boolean(opts.json));

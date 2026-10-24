@@ -33,15 +33,16 @@ import type {
 } from "../bots/host-resources.js";
 import { getNodeBuildInfo } from "../build-info.js";
 import type { SovereignPaths } from "../config/paths.js";
-import type {
-  PreflightRequest,
-  ReconfigureImapRequest,
-  ReconfigureMatrixRequest,
-  ReconfigureOpenrouterRequest,
-  TestAlertRequest,
-  TestImapRequest,
-  TestMatrixRequest,
-  TestOpenrouterRequest,
+import {
+  type PreflightRequest,
+  type ReconfigureImapRequest,
+  type ReconfigureMatrixRequest,
+  type ReconfigureOpenrouterRequest,
+  reconfigureOpenrouterPrivacySchema,
+  type TestAlertRequest,
+  type TestImapRequest,
+  type TestMatrixRequest,
+  type TestOpenrouterRequest,
 } from "../contracts/api.js";
 import { type CheckResult, CONTRACT_VERSION, type ComponentHealth } from "../contracts/common.js";
 import {
@@ -123,7 +124,10 @@ import type {
 } from "../openclaw/managed-agent.js";
 import {
   buildOpenClawOpenRouterModelsParams,
+  mergeOpenRouterPrivacy,
+  type OpenRouterPrivacyConfig,
   resolveOpenRouterPrivacy,
+  sameOpenRouterPrivacy,
 } from "../openclaw/openrouter-routing.js";
 import {
   TYPED_TOOL_CONFIRM_COMMAND,
@@ -2326,6 +2330,20 @@ export class RealInstallerService implements InstallerService {
   }
 
   async reconfigureOpenrouter(req: ReconfigureOpenrouterRequest): Promise<ReconfigureResult> {
+    // Re-checked here, not only at the HTTP boundary: the CLI and library
+    // callers reach this method directly, and the strict-default rule must
+    // hold for every caller.
+    const privacyUpdate =
+      req.openrouter.privacy === undefined
+        ? undefined
+        : reconfigureOpenrouterPrivacySchema.safeParse(req.openrouter.privacy);
+    if (privacyUpdate !== undefined && !privacyUpdate.success) {
+      throw {
+        code: "OPENROUTER_PRIVACY_INVALID",
+        message: privacyUpdate.error.issues.map((issue) => issue.message).join("; "),
+        retryable: false,
+      };
+    }
     const runtimeConfig = await this.readRuntimeConfig();
     // Validate a replacement key before anything is written: a rejected key
     // leaves the previous working key in place.
@@ -2387,13 +2405,22 @@ export class RealInstallerService implements InstallerService {
       credentialsChanged = nextSecretRef !== runtimeConfig.openrouter.apiKeySecretRef;
     }
 
-    const runtimeChanged = modelChanged || credentialsChanged;
+    const nextPrivacy =
+      privacyUpdate === undefined
+        ? runtimeConfig.openrouter.privacy
+        : mergeOpenRouterPrivacy(runtimeConfig.openrouter.privacy, privacyUpdate.data);
+    const privacyChanged = !sameOpenRouterPrivacy(nextPrivacy, runtimeConfig.openrouter.privacy);
+
+    const runtimeChanged = modelChanged || credentialsChanged || privacyChanged;
     const changed: string[] = [];
     if (modelChanged) {
       changed.push("openrouter.model");
     }
     if (credentialsChanged) {
       changed.push("openrouter.apiKeySecretRef");
+    }
+    if (privacyChanged) {
+      changed.push("openrouter.privacy");
     }
 
     let gatewayReadiness: GatewayReadinessOutcome | undefined;
@@ -2402,6 +2429,9 @@ export class RealInstallerService implements InstallerService {
       openrouterConfig.provider = "openrouter";
       openrouterConfig.model = nextModel;
       openrouterConfig.apiKeySecretRef = nextSecretRef;
+      if (privacyChanged) {
+        openrouterConfig.privacy = nextPrivacy;
+      }
       delete openrouterConfig.apiKey;
       parsed.openrouter = openrouterConfig;
       parsed.generatedAt = now();
@@ -2413,6 +2443,7 @@ export class RealInstallerService implements InstallerService {
           ...runtimeConfig.openrouter,
           model: nextModel,
           apiKeySecretRef: nextSecretRef,
+          privacy: nextPrivacy,
         },
       };
       await this.writeOpenClawRuntimeArtifacts(nextRuntimeConfig);
@@ -2423,8 +2454,10 @@ export class RealInstallerService implements InstallerService {
     const requestUpdate = await this.updateInstallRequestOpenrouter({
       model: nextModel,
       secretRef: nextSecretRef,
+      privacy: nextPrivacy,
       modelChanged,
       credentialsChanged,
+      privacyChanged,
     });
     changed.push(...requestUpdate.changed);
 
@@ -12010,8 +12043,10 @@ export default function (api) {
   private async updateInstallRequestOpenrouter(input: {
     model: string;
     secretRef: string;
+    privacy: OpenRouterPrivacyConfig;
     modelChanged: boolean;
     credentialsChanged: boolean;
+    privacyChanged: boolean;
   }): Promise<{ changed: string[]; validation: CheckResult[] }> {
     const requestPath = this.getInstallRequestPath();
     let raw = "";
@@ -12074,6 +12109,16 @@ export default function (api) {
       requestPayload.openrouter.secretRef = input.secretRef;
       delete requestPayload.openrouter.apiKey;
       changed.push("request.openrouter.secretRef");
+    }
+    if (
+      input.privacyChanged &&
+      !sameOpenRouterPrivacy(
+        resolveOpenRouterPrivacy(requestPayload.openrouter.privacy),
+        input.privacy,
+      )
+    ) {
+      requestPayload.openrouter.privacy = input.privacy;
+      changed.push("request.openrouter.privacy");
     }
 
     if (changed.length === 0) {
