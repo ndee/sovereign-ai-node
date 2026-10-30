@@ -1,3 +1,4 @@
+import { realpath } from "node:fs/promises";
 import { dirname, join, posix } from "node:path";
 
 /**
@@ -31,6 +32,11 @@ export const SYSTEMD_SANDBOX_LIBRARY_EXEC_PATHS: readonly string[] = [
   "/lib",
   "/lib64",
 ];
+
+// Rust coreutils keeps every utility here and links /usr/bin/<name> to it, so
+// the library grant above would let a unit start all of them. A unit may only
+// start the ones whose resolved path it lists (see withProgramRealPaths).
+export const SYSTEMD_SANDBOX_LIBRARY_NO_EXEC_PATHS: readonly string[] = ["/usr/lib/cargo"];
 
 export const SYSTEMD_SANDBOX_INACCESSIBLE_PATHS: readonly string[] = [
   "/run/docker.sock",
@@ -115,9 +121,25 @@ export const renderSystemdSandboxDirectives = (paths: SystemdSandboxPaths): stri
     `ReadWritePaths=${renderPathList(paths.readWritePaths)}`,
     ...(readOnlyPaths.length === 0 ? [] : [`ReadOnlyPaths=${renderPathList(readOnlyPaths)}`]),
     `InaccessiblePaths=${renderPathList(SYSTEMD_SANDBOX_INACCESSIBLE_PATHS)}`,
-    "NoExecPaths=/",
+    `NoExecPaths=/ ${renderPathList(SYSTEMD_SANDBOX_LIBRARY_NO_EXEC_PATHS)}`,
     `ExecPaths=${renderPathList([...SYSTEMD_SANDBOX_LIBRARY_EXEC_PATHS, ...paths.execPaths])}`,
   ];
+};
+
+/**
+ * Each program followed by the file it resolves to. The kernel checks exec
+ * permission on that file, which may sit in a tree the unit cannot execute
+ * from as a whole. A program that cannot be resolved is kept as given.
+ */
+export const withProgramRealPaths = async (programs: readonly string[]): Promise<string[]> => {
+  const paths: string[] = [];
+  for (const program of programs) {
+    paths.push(program);
+    try {
+      paths.push(await realpath(program));
+    } catch {}
+  }
+  return Array.from(new Set(paths));
 };
 
 /**
