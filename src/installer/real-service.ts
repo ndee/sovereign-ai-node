@@ -358,6 +358,7 @@ import {
   MATRIX_CRYPTO_RUNTIME_PACKAGE_DIR,
   npmPrefixFromBinDir,
   renderSystemdSandboxDirectives,
+  withProgramRealPaths,
 } from "./systemd-sandbox.js";
 import {
   diffBotPackageSurfaces,
@@ -5027,13 +5028,13 @@ export class RealInstallerService implements InstallerService {
     systemSearchPath: string = SYSTEM_PROGRAM_SEARCH_PATH,
   ): Promise<string[]> {
     const searchPath = [serviceNpmBinDir, systemSearchPath].join(":");
-    return [
+    return withProgramRealPaths([
       ...(await this.resolveSandboxBasePrograms(
         searchPath,
         (await resolveExecutablePath("node", searchPath)) ?? "/usr/bin/node",
       )),
       (await resolveExecutablePath("cat", searchPath)) ?? "/usr/bin/cat",
-    ];
+    ]);
   }
 
   // Programs agents can make the gateway start:
@@ -11071,10 +11072,10 @@ export default function (api) {
         openclawCommand,
         serviceNpmBinDir,
       ),
-      programs: [
+      programs: await withProgramRealPaths([
         ...basePrograms,
         ...(await this.listGatewaySandboxAgentPrograms(runtimeConfig, unitPathEnv, nodeCommand)),
-      ],
+      ]),
     });
     const unitName = SOVEREIGN_GATEWAY_SYSTEMD_UNIT;
     const waitsForLocalMatrix = shouldGateSystemGatewayOnLocalMatrix(

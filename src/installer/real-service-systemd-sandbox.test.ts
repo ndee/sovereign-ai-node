@@ -22,6 +22,25 @@ import { RealInstallerService } from "./real-service.js";
 import type { RuntimeConfig } from "./real-service-shared.js";
 import { renderSystemGatewayMatrixWaitCommand } from "./real-service-utils.js";
 
+// What a system program resolves to on the simulated host; a program that is
+// not listed resolves to itself, as with GNU coreutils.
+const hostProgramLinks = vi.hoisted(() => new Map<string, string>());
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    // System programs resolve through the fixture, so the rendered units do
+    // not depend on which coreutils the machine running the tests has.
+    realpath: async (path: string) =>
+      /^\/(usr|bin)\//.test(path) ? (hostProgramLinks.get(path) ?? path) : actual.realpath(path),
+  };
+});
+
+afterEach(() => {
+  hostProgramLinks.clear();
+});
+
 type Internals = {
   ensureSystemGatewayServiceFallback(config: RuntimeConfig): Promise<{ ready: boolean }>;
   listGatewaySandboxAgentPrograms(
@@ -199,7 +218,7 @@ describe("sovereign-openclaw-gateway unit sandbox", () => {
       ].join(""),
       `ReadOnlyPaths=-${npmPrefix}`,
       "InaccessiblePaths=-/run/docker.sock -/run/containerd/containerd.sock",
-      "NoExecPaths=/",
+      "NoExecPaths=/ -/usr/lib/cargo",
       [
         "ExecPaths=-/usr/lib -/usr/lib64 -/lib -/lib64",
         ` -${join(toolBin, "node")}`,
@@ -214,6 +233,37 @@ describe("sovereign-openclaw-gateway unit sandbox", () => {
     ]);
     // The sandbox sits in [Service], ahead of the install section.
     expect(sectionLines(unit, "[Service]", "[Install]")).toContain("Restart=always");
+  });
+
+  it("allow-lists the file each program resolves to on a host with Rust coreutils", async () => {
+    await installTools();
+    // A program on the system path may itself be a link into another tree.
+    const coreutils = join(tempRoot, "cargo", "bin", "coreutils");
+    await mkdir(coreutils, { recursive: true });
+    await rm(join(toolBin, "bash"));
+    await writeFile(join(coreutils, "bash"), "#!/bin/sh\n", { mode: 0o755 });
+    await symlink(join(coreutils, "bash"), join(toolBin, "bash"));
+    hostProgramLinks.set("/usr/bin/env", "/usr/lib/cargo/bin/coreutils/env");
+
+    const unit = await render(makeService(), runtimeConfig("http://127.0.0.1:8008"));
+
+    expect(unit).toMatch(/^NoExecPaths=\/ -\/usr\/lib\/cargo$/m);
+    expect(unit.match(/^ExecPaths=(.*)$/m)?.[1]?.split(" ")).toEqual([
+      "-/usr/lib",
+      "-/usr/lib64",
+      "-/lib",
+      "-/lib64",
+      `-${join(toolBin, "node")}`,
+      "-/usr/bin/env",
+      "-/usr/lib/cargo/bin/coreutils/env",
+      `-${join(toolBin, "bash")}`,
+      `-${join(coreutils, "bash")}`,
+      "-/usr/local/bin/sovereign-tool",
+      `-${join(npmPrefix, "bin")}`,
+      `-${join(npmPrefix, "lib")}`,
+      `-${packageRoot}`,
+      `-${join(globalRoot, "openclaw")}`,
+    ]);
   });
 
   it("falls back to the distribution paths for programs missing from the system path", async () => {
@@ -374,10 +424,13 @@ describe("sovereign-openclaw-gateway unit sandbox", () => {
       "/usr/local/bin/sovereign-tool",
     ]);
 
+    // The shell the wrapper names is a link to the shell that actually runs.
+    hostProgramLinks.set("/bin/sh", "/usr/bin/dash");
     const execPaths =
       (await render(service, withExec)).match(/^ExecPaths=(.*)$/m)?.[1]?.split(" ") ?? [];
     expect(execPaths).toContain(`-${join(toolBin, "sh")}`);
     expect(execPaths).toContain("-/bin/sh");
+    expect(execPaths).toContain("-/usr/bin/dash");
     expect(execPaths).toContain(`-${wrapper?.path}`);
   });
 
@@ -496,7 +549,7 @@ describe("bot service unit sandbox", () => {
       `ReadWritePaths=-/var/lib/sovereign-node -/var/lib/sovereign-node/openclaw-home -${workspace}`,
       "ReadOnlyPaths=-/var/lib/sovereign-node/.npm-global",
       "InaccessiblePaths=-/run/docker.sock -/run/containerd/containerd.sock",
-      "NoExecPaths=/",
+      "NoExecPaths=/ -/usr/lib/cargo",
       [
         "ExecPaths=-/usr/lib -/usr/lib64 -/lib -/lib64",
         " -/usr/bin/node -/usr/bin/env -/usr/bin/bash -/usr/local/bin/sovereign-tool -/usr/bin/cat",
@@ -559,7 +612,7 @@ describe("bot service unit sandbox", () => {
 
   it("resolves the scan unit's programs from the service npm prefix and the system PATH", async () => {
     const internals = service();
-    const binDir = await mkdtemp(join(tmpdir(), "sovereign-sandbox-programs-"));
+    const binDir = await realpath(await mkdtemp(join(tmpdir(), "sovereign-sandbox-programs-")));
     try {
       expect(await internals.resolveBotServiceSandboxPrograms(join(binDir, "missing"), "")).toEqual(
         [
@@ -579,6 +632,43 @@ describe("bot service unit sandbox", () => {
         join(binDir, "bash"),
         "/usr/local/bin/sovereign-tool",
         join(binDir, "cat"),
+      ]);
+    } finally {
+      await rm(binDir, { recursive: true, force: true });
+    }
+  });
+
+  it("adds the file each scan unit program resolves to on a host with Rust coreutils", async () => {
+    const internals = service();
+    const binDir = await realpath(await mkdtemp(join(tmpdir(), "sovereign-sandbox-uutils-")));
+    try {
+      hostProgramLinks.set("/usr/bin/env", "/usr/lib/cargo/bin/coreutils/env");
+      hostProgramLinks.set("/usr/bin/cat", "/usr/lib/cargo/bin/coreutils/cat");
+      expect(await internals.resolveBotServiceSandboxPrograms(join(binDir, "missing"), "")).toEqual(
+        [
+          "/usr/bin/node",
+          "/usr/bin/env",
+          "/usr/lib/cargo/bin/coreutils/env",
+          "/usr/bin/bash",
+          "/usr/local/bin/sovereign-tool",
+          "/usr/bin/cat",
+          "/usr/lib/cargo/bin/coreutils/cat",
+        ],
+      );
+      // lobster finds cat on the unit PATH, where it may be a link as well.
+      const coreutils = join(binDir, "cargo", "bin", "coreutils");
+      await mkdir(coreutils, { recursive: true });
+      await writeFile(join(coreutils, "cat"), "#!/bin/sh\n", { mode: 0o755 });
+      await symlink(join(coreutils, "cat"), join(binDir, "cat"));
+      await writeFile(join(binDir, "node"), "#!/bin/sh\n", { mode: 0o755 });
+      expect(await internals.resolveBotServiceSandboxPrograms(binDir, "")).toEqual([
+        join(binDir, "node"),
+        "/usr/bin/env",
+        "/usr/lib/cargo/bin/coreutils/env",
+        "/usr/bin/bash",
+        "/usr/local/bin/sovereign-tool",
+        join(binDir, "cat"),
+        join(coreutils, "cat"),
       ]);
     } finally {
       await rm(binDir, { recursive: true, force: true });
