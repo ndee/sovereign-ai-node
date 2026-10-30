@@ -9,6 +9,13 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 From this point forward, GitHub Release notes are auto-generated from commit history
 by the `.github/workflows/release.yml` workflow.
 
+## [2.12.1](https://github.com/ndee/sovereign-ai-node/compare/v2.12.0...v2.12.1) (2026-10-30)
+
+
+### Bug Fixes
+
+* **installer:** allow-list each sandboxed program by its resolved path ([#330](https://github.com/ndee/sovereign-ai-node/issues/330)) ([7ef7d73](https://github.com/ndee/sovereign-ai-node/commit/7ef7d73976e3ac5bf5a1168c6d76e249a417b213))
+
 ## [2.12.0](https://github.com/ndee/sovereign-ai-node/compare/v2.11.2...v2.12.0) (2026-10-24)
 
 
