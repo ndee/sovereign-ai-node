@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   buildBotServiceSandboxPaths,
@@ -6,7 +6,30 @@ import {
   MATRIX_CRYPTO_RUNTIME_PACKAGE_DIR,
   npmPrefixFromBinDir,
   renderSystemdSandboxDirectives,
+  withProgramRealPaths,
 } from "./systemd-sandbox.js";
+
+// Path -> what realpath() returns for it (null: it cannot be resolved). A path
+// that is not listed resolves to itself.
+const hostRealPaths = vi.hoisted(() => new Map<string, string | null>());
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    realpath: async (path: string) => {
+      const resolved = hostRealPaths.has(path) ? hostRealPaths.get(path) : path;
+      if (resolved === null || resolved === undefined) {
+        throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
+      }
+      return resolved;
+    },
+  };
+});
+
+afterEach(() => {
+  hostRealPaths.clear();
+});
 
 const directiveNames = (lines: string[]): string[] =>
   lines.map((line) => line.slice(0, line.indexOf("=")));
@@ -39,7 +62,7 @@ describe("renderSystemdSandboxDirectives", () => {
       "ReadWritePaths=-/var/lib/sovereign-node",
       "ReadOnlyPaths=-/var/lib/sovereign-node/.npm-global",
       "InaccessiblePaths=-/run/docker.sock -/run/containerd/containerd.sock",
-      "NoExecPaths=/",
+      "NoExecPaths=/ -/usr/lib/cargo",
       "ExecPaths=-/usr/lib -/usr/lib64 -/lib -/lib64 -/usr/bin/node",
     ]);
   });
@@ -114,6 +137,60 @@ describe("renderSystemdSandboxDirectives", () => {
       execPaths: [],
     });
     expect(lines).toContain("ProtectHome=yes");
+  });
+});
+
+describe("withProgramRealPaths", () => {
+  it("keeps the program list as it is on a host with GNU coreutils", async () => {
+    expect(await withProgramRealPaths(["/usr/bin/node", "/usr/bin/env", "/usr/bin/cat"])).toEqual([
+      "/usr/bin/node",
+      "/usr/bin/env",
+      "/usr/bin/cat",
+    ]);
+  });
+
+  it("adds the file each program resolves to on a host with Rust coreutils", async () => {
+    hostRealPaths.set("/usr/bin/env", "/usr/lib/cargo/bin/coreutils/env");
+    hostRealPaths.set("/usr/bin/cat", "/usr/lib/cargo/bin/coreutils/cat");
+    expect(await withProgramRealPaths(["/usr/bin/node", "/usr/bin/env", "/usr/bin/cat"])).toEqual([
+      "/usr/bin/node",
+      "/usr/bin/env",
+      "/usr/lib/cargo/bin/coreutils/env",
+      "/usr/bin/cat",
+      "/usr/lib/cargo/bin/coreutils/cat",
+    ]);
+  });
+
+  it("lists each path once, in the order it is first seen", async () => {
+    hostRealPaths.set("/bin/sh", "/usr/bin/dash");
+    hostRealPaths.set("/usr/bin/sh", "/usr/bin/dash");
+    expect(
+      await withProgramRealPaths(["/bin/sh", "/usr/bin/sh", "/usr/bin/dash", "/bin/sh"]),
+    ).toEqual(["/bin/sh", "/usr/bin/dash", "/usr/bin/sh"]);
+  });
+
+  it("keeps a program it cannot resolve as given", async () => {
+    hostRealPaths.set("/usr/local/bin/sovereign-tool", null);
+    expect(await withProgramRealPaths(["/usr/local/bin/sovereign-tool", "/usr/bin/node"])).toEqual([
+      "/usr/local/bin/sovereign-tool",
+      "/usr/bin/node",
+    ]);
+  });
+
+  // The Rust coreutils directory sits inside the library grant, so it is only
+  // closed again by the deeper NoExecPaths entry; each program the unit runs
+  // is re-opened by its own, deeper still, ExecPaths entry.
+  it("lets a unit run the coreutils programs it names and no others", async () => {
+    hostRealPaths.set("/usr/bin/cat", "/usr/lib/cargo/bin/coreutils/cat");
+    const lines = renderSystemdSandboxDirectives({
+      readWritePaths: ["/var/lib/x"],
+      readOnlyPaths: [],
+      execPaths: await withProgramRealPaths(["/usr/bin/cat"]),
+    });
+    expect(lines).toContain("NoExecPaths=/ -/usr/lib/cargo");
+    expect(lines).toContain(
+      "ExecPaths=-/usr/lib -/usr/lib64 -/lib -/lib64 -/usr/bin/cat -/usr/lib/cargo/bin/coreutils/cat",
+    );
   });
 });
 
