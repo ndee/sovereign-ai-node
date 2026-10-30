@@ -1,0 +1,3 @@
+export const SOVEREIGN_DEV_STATE_DIR_NAME = ".sovereign-node-dev";
+
+export const DEV_STATE_FALLBACK_ENV = "SOVEREIGN_NODE_DEV_STATE_FALLBACK";
