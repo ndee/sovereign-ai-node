@@ -377,6 +377,12 @@ If the simple flow fails, the operator should check these first:
 - when Proton Bridge is used in validation flows, validate it on a fresh VM
 - alert room target and bot membership
 
+### State directory not writable
+
+An install or update step that fails with `MATRIX_STATE_DIR_UNWRITABLE`, `INSTALL_JOBS_DIR_UNWRITABLE` or `SECRETS_DIR_UNWRITABLE` means the service user cannot create or write one of its state directories (`/var/lib/sovereign-node/bundled-matrix`, `/var/lib/sovereign-node/install-jobs`, `/etc/sovereign-node/secrets`). The error names the directory, the user it must belong to, the required mode, and the exact `sudo mkdir` / `chown` / `chmod` command to run before retrying. The node never relocates these directories elsewhere on its own.
+
+Developer checkouts that cannot write the system paths opt in to a local fallback under `<cwd>/.sovereign-node-dev/` with `SOVEREIGN_NODE_DEV_STATE_FALLBACK=1`. The `pnpm dev:api` and `pnpm dev:cli` scripts set it; nothing in the installed node does.
+
 ## Related Docs
 
 - `docs/ARCHITECTURE.md`

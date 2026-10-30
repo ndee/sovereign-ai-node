@@ -68,8 +68,8 @@
     "./public/setup-ui/*": "./public/setup-ui/*"
   },
   "scripts": {
-    "dev:cli": "tsx src/bin/sovereign-node.ts",
-    "dev:api": "tsx src/bin/sovereign-node-api.ts",
+    "dev:cli": "SOVEREIGN_NODE_DEV_STATE_FALLBACK=1 tsx src/bin/sovereign-node.ts",
+    "dev:api": "SOVEREIGN_NODE_DEV_STATE_FALLBACK=1 tsx src/bin/sovereign-node-api.ts",
     "dev:tool": "tsx src/bin/sovereign-tool.ts",
     "build": "tsup",
     "postbuild": "node -e \"require('node:fs').cpSync('public','dist/public',{recursive:true})\"",
