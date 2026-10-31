@@ -159,6 +159,11 @@ import {
 } from "../system/privileged-helpers.js";
 import { resolveServiceNode, SYSTEM_PROGRAM_SEARCH_PATH } from "../system/service-node.js";
 import {
+  DEV_STATE_FALLBACK_ENV,
+  devStateFallbackDir,
+  stateDirUnwritableError,
+} from "../system/state-dir.js";
+import {
   type AgentTemplateManifest,
   CORE_TEMPLATE_MANIFESTS,
   CORE_TRUSTED_TEMPLATE_KEYS,
@@ -593,44 +598,6 @@ type StagedTemplatePinTransition = {
 type ReconcileTransitionContext = {
   authorization: ReleaseAuthorization;
   transitions: Map<string, StagedTemplatePinTransition>;
-};
-
-/**
- * The scaffold/dev marker directory. A developer running the API out of a
- * checkout keeps state under `<cwd>/.sovereign-node-dev`; an installed node
- * writes to `/etc/sovereign-node` and `/var/lib/sovereign-node` and has no
- * such directory anywhere near its working directory.
- */
-export const SOVEREIGN_DEV_STATE_DIR_NAME = ".sovereign-node-dev";
-
-/**
- * Whether a cwd-relative fallback for a privileged state directory is allowed.
- *
- * The fallback exists for a real reason — `npm run dev:api` from a checkout
- * cannot write to `/etc/sovereign-node/secrets`, and refusing to start there
- * would make the scaffold unusable. But it used to trigger on *any* error,
- * which meant a production permissions fault silently relocated the secrets
- * directory into the process working directory and logged it at `debug`.
- * Nothing surfaced it.
- *
- * Gating on the marker directory keeps the dev path working (it is created by
- * the dev flow, and re-created here once opted in) while making the same
- * failure on a real node fail loudly instead of relocating secrets.
- */
-export const devStateFallbackDir = async (
-  segment: string,
-  cwd: string = process.cwd(),
-): Promise<string | null> => {
-  const marker = resolve(cwd, SOVEREIGN_DEV_STATE_DIR_NAME);
-  try {
-    const stats = await stat(marker);
-    if (!stats.isDirectory()) {
-      return null;
-    }
-  } catch {
-    return null;
-  }
-  return join(marker, segment);
 };
 
 export class RealInstallerService implements InstallerService {
@@ -10549,19 +10516,17 @@ export default function (api) {
       this.resolvedInstallJobsDir = this.paths.installJobsDir;
       return this.resolvedInstallJobsDir;
     } catch (error) {
-      const fallback = await devStateFallbackDir("install-jobs");
+      const fallback = devStateFallbackDir("install-jobs");
       if (fallback === null) {
-        // Not a scaffold checkout: this is a real node whose install-jobs dir
-        // is unusable. Relocating it under the working directory would hide a
-        // permissions fault, so surface the original error instead.
-        this.logger.error(
-          {
-            installJobsDir: this.paths.installJobsDir,
-            error: error instanceof Error ? error.message : String(error),
-          },
-          "Install jobs dir is not writable and no scaffold/dev fallback applies",
-        );
-        throw error;
+        const failure = stateDirUnwritableError({
+          code: "INSTALL_JOBS_DIR_UNWRITABLE",
+          label: "Install jobs directory",
+          dir: this.paths.installJobsDir,
+          mode: 0o700,
+          cause: error,
+        });
+        this.logger.error(failure.details, "Install jobs dir is not writable");
+        throw failure;
       }
       await this.ensurePrivateDir(fallback);
       this.logger.warn(
@@ -10570,7 +10535,7 @@ export default function (api) {
           fallbackInstallJobsDir: fallback,
           error: error instanceof Error ? error.message : String(error),
         },
-        "Install jobs dir is not writable; using local fallback for scaffold/dev execution",
+        `Install jobs dir is not writable; using dev fallback (${DEV_STATE_FALLBACK_ENV}=1)`,
       );
       this.resolvedInstallJobsDir = fallback;
       return fallback;
@@ -13827,20 +13792,20 @@ export default function (api) {
       this.resolvedSecretsDir = this.paths.secretsDir;
       return this.resolvedSecretsDir;
     } catch (error) {
-      const fallback = await devStateFallbackDir("secrets");
+      const fallback = devStateFallbackDir("secrets");
       if (fallback === null) {
         // Secrets are the most damaging thing to relocate silently: the node
         // would keep running while writing credentials somewhere nobody is
-        // looking, at whatever mode the cwd allows. On a real node an
-        // unusable secrets dir is a hard failure, not a redirect.
-        this.logger.error(
-          {
-            secretsDir: this.paths.secretsDir,
-            error: error instanceof Error ? error.message : String(error),
-          },
-          "Secrets dir is not writable and no scaffold/dev fallback applies",
-        );
-        throw error;
+        // looking, at whatever mode the cwd allows.
+        const failure = stateDirUnwritableError({
+          code: "SECRETS_DIR_UNWRITABLE",
+          label: "Secrets directory",
+          dir: this.paths.secretsDir,
+          mode: 0o700,
+          cause: error,
+        });
+        this.logger.error(failure.details, "Secrets dir is not writable");
+        throw failure;
       }
       await mkdir(fallback, { recursive: true });
       await chmod(fallback, 0o700);
@@ -13850,7 +13815,7 @@ export default function (api) {
           fallbackSecretsDir: fallback,
           error: error instanceof Error ? error.message : String(error),
         },
-        "Secrets dir is not writable; using local fallback for scaffold/dev execution",
+        `Secrets dir is not writable; using dev fallback (${DEV_STATE_FALLBACK_ENV}=1)`,
       );
       this.resolvedSecretsDir = fallback;
       return fallback;

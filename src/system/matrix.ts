@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { access, chmod, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import type { SovereignPaths } from "../config/paths.js";
 import type { TestMatrixRequest } from "../contracts/api.js";
 import type { CheckResult } from "../contracts/common.js";
@@ -31,6 +31,11 @@ import {
   reclaimOwnershipInvocation,
   resolveDockerAccess,
 } from "./privileged-helpers.js";
+import {
+  DEV_STATE_FALLBACK_ENV,
+  devStateFallbackDir,
+  stateDirUnwritableError,
+} from "./state-dir.js";
 
 const MATRIX_INTERNAL_BASE_URL = "http://127.0.0.1:8008";
 const MATRIX_READY_TIMEOUT_MS = resolveDurationFromEnv(
@@ -2352,15 +2357,26 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       this.resolvedBaseDir = preferred;
       return preferred;
     } catch (error) {
-      const fallback = resolve(process.cwd(), ".sovereign-node-dev", "bundled-matrix");
+      const fallback = devStateFallbackDir("bundled-matrix");
+      if (fallback === null) {
+        const failure = stateDirUnwritableError({
+          code: "MATRIX_STATE_DIR_UNWRITABLE",
+          label: "Bundled Matrix state directory",
+          dir: preferred,
+          mode: 0o750,
+          cause: error,
+        });
+        this.logger.error(failure.details, "Bundled Matrix state dir is not writable");
+        throw failure;
+      }
       await mkdir(fallback, { recursive: true });
-      this.logger.debug(
+      this.logger.warn(
         {
           preferredMatrixStateDir: preferred,
           fallbackMatrixStateDir: fallback,
           error: error instanceof Error ? error.message : String(error),
         },
-        "Bundled Matrix state dir is not writable; using local fallback for scaffold/dev execution",
+        `Bundled Matrix state dir is not writable; using dev fallback (${DEV_STATE_FALLBACK_ENV}=1)`,
       );
       this.resolvedBaseDir = fallback;
       return fallback;
