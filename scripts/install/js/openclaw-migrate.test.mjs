@@ -189,6 +189,8 @@ exit 64`,
     "lobster.js",
     `S=${JSON.stringify(state)}
 printf 'lobster %s\\n' "$*" >>"$S/calls.log"
+# The token must reach lobster in its environment, never in a command line.
+ps -o args= -p "$PPID" 2>/dev/null | grep -qF "${SECRETS.gateway}" && echo leaked >>"$S/token-in-argv"
 case "$1" in
   "commands.list | json")
     [ -e "$S/lobster-broken" ] && { echo "SyntaxError"; exit 1; }
@@ -374,6 +376,7 @@ describe("openclaw-migrate.sh happy path", () => {
     expect(isActive(fx, SCAN_TIMER)).toBe(true);
     expect(r.result.lobster.detail).toContain("HTTP 404");
     expect(r.result.lobster.detail).toContain("llm-task on agent:mail-sentinel:main: HTTP 400");
+    expect(existsSync(join(fx.state, "token-in-argv"))).toBe(false);
     expect(r.result.doctor.runs.map((d) => `${d.version}/${d.phase}`)).toEqual([`${TARGET}/config`, `${TARGET}/matrix`]);
   });
 

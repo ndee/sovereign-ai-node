@@ -1115,15 +1115,18 @@ step_health() {
   done
 }
 
-# Calls /tools/invoke through lobster the way the bots do (token via the
-# environment, never argv) and prints the HTTP status it got, or nothing
+# Calls /tools/invoke through lobster the way the bots do (token in
+# CLAWD_TOKEN) and prints the HTTP status it got, or nothing
 # when the gateway was not reachable at all.
 lobster_invoke_status() {
   local token="$1" tool="$2" out="$3" session="${4:-}" rc
-  as_user "$SERVICE_USER" env -i HOME="$SERVICE_HOME" PATH="$UNIT_PATH" \
-    CLAWD_URL="${GATEWAY_URL%/}" CLAWD_TOKEN="$token" \
-    timeout -k 5 "$CMD_TIMEOUT" "$LOBSTER_BIN" \
-    "clawd.invoke --tool $tool --action json --args-json {}${session:+ --session-key $session}" </dev/null >"$out" 2>&1
+  # The token arrives on stdin and is exported inside the service user's
+  # shell, so it is never part of an argument list visible in /proc.
+  # shellcheck disable=SC2016
+  as_user "$SERVICE_USER" env -i HOME="$SERVICE_HOME" PATH="$UNIT_PATH" CLAWD_URL="${GATEWAY_URL%/}" \
+    timeout -k 5 "$CMD_TIMEOUT" bash -c 'IFS= read -r CLAWD_TOKEN; export CLAWD_TOKEN; exec "$@" </dev/null' _ \
+    "$LOBSTER_BIN" "clawd.invoke --tool $tool --action json --args-json {}${session:+ --session-key $session}" \
+    <<<"$token" >"$out" 2>&1
   rc=$?
   log_output "$out"
   if ((rc == 0)); then
