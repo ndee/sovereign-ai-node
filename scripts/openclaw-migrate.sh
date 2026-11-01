@@ -444,13 +444,22 @@ record_active_units() {
   done < <(units_in_stop_order)
 }
 
-# Starts the gateway, then whatever scan unit was running before. A scan
-# service with a timer is left to its timer: it is a one-shot job.
+# Starts the gateway, then every scan unit that was running before plus every
+# enabled scan timer (a resumed run finds them stopped by the earlier run). A
+# scan service with a timer is left to its timer: it is a one-shot job.
 start_units() {
   local u rc=0
+  local -a wanted=()
   systemctl start "$GATEWAY_UNIT" >>"$LOG_FILE" 2>&1 || rc=1
   for u in "${ACTIVE_UNITS[@]}"; do
-    [[ "$u" == "$GATEWAY_UNIT" ]] && continue
+    [[ "$u" == "$GATEWAY_UNIT" ]] || wanted+=("$u")
+  done
+  for u in "${SCAN_UNITS[@]}"; do
+    if [[ "$u" == *.timer ]] && systemctl_quiet is-enabled "$u" && [[ " ${wanted[*]} " != *" $u "* ]]; then
+      wanted+=("$u")
+    fi
+  done
+  for u in "${wanted[@]}"; do
     if [[ "$u" == *.service && -e "$UNIT_DIR/${u%.service}.timer" ]]; then
       continue
     fi

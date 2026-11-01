@@ -223,6 +223,8 @@ exit 64`,
   write(join(units, SCAN_SERVICE), "[Service]\nType=oneshot\n");
   writeFileSync(join(state, "active", GATEWAY), "");
   if (scanActive) writeFileSync(join(state, "active", SCAN_TIMER), "");
+  mkdirSync(join(state, "enabled"), { recursive: true });
+  writeFileSync(join(state, "enabled", SCAN_TIMER), "");
 
   // Host tool stubs.
   stub(
@@ -232,6 +234,7 @@ exit 64`,
 unit="\${@: -1}"
 case "$1" in
   is-active) [ -e "$S/active/$unit" ]; exit ;;
+  is-enabled) [ -e "$S/enabled/$unit" ]; exit ;;
   stop) [ -e "$S/stop-fail" ] && exit 1; rm -f "$S/active/$unit"; exit 0 ;;
   start)
     [ -e "$S/start-fail" ] && exit 1
@@ -663,6 +666,9 @@ describe("openclaw-migrate.sh re-runs", () => {
     expect(r.status).toBe(0);
     expect(r.result).toMatchObject({ ok: true, resumed: true, from: FROM });
     expect(r.result.backup.path).toBe(first.result.backup.path);
+    // The failed run left the timer stopped; the resumed run starts it again.
+    expect(isActive(fx, SCAN_TIMER)).toBe(true);
+    expect(isActive(fx, GATEWAY)).toBe(true);
     expect(r.calls.some((c) => c.startsWith("npm install"))).toBe(false);
     expect(r.result.steps.find((s) => s.name === "upgrade")).toMatchObject({ skipped: true });
   });
