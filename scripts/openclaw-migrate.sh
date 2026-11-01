@@ -35,6 +35,8 @@ NODE_MAX_EXCLUSIVE="${OPENCLAW_MIGRATE_NODE_MAX_EXCLUSIVE:-23.0.0}"
 # 2026.6 release (doctor --fix, then one gateway start) first.
 STAGE_VERSION="${OPENCLAW_MIGRATE_STAGE_VERSION:-2026.6.35}"
 STAGE_SETTLE="${OPENCLAW_MIGRATE_STAGE_SETTLE:-30}"
+# auto: stage only when a legacy Matrix store is found; always / never force it.
+STAGE_MODE="${OPENCLAW_MIGRATE_STAGE:-auto}"
 MIN_FREE_BYTES="${OPENCLAW_MIGRATE_MIN_FREE_BYTES:-1073741824}"
 DOCTOR_TIMEOUT="${OPENCLAW_MIGRATE_DOCTOR_TIMEOUT:-600}"
 CMD_TIMEOUT="${OPENCLAW_MIGRATE_CMD_TIMEOUT:-180}"
@@ -79,7 +81,7 @@ NPM_OWNER=""
 NODE_BIN=""
 NODE_VERSION=""
 NODE_NEEDS_UPGRADE=0
-FLAT_MATRIX_STORE=""
+LEGACY_MATRIX_STORE=""
 LOBSTER_BIN=""
 SCAN_UNITS=()
 ACTIVE_UNITS=()
@@ -227,15 +229,22 @@ version_cmp() {
 version_lt() { [[ "$(version_cmp "$1" "$2")" == "-1" ]]; }
 
 json_field() {
-  # json_field <file> <dotted.path> — prints the value or nothing.
+  # json_field <file> <dotted.path> — prints the value or nothing. JSON5 (the
+  # OpenClaw config format) is read with the json5 copy OpenClaw ships.
   "$NODE_BIN" -e '
     const fs = require("node:fs");
+    const parse = (text) => {
+      try { return JSON.parse(text); } catch (err) {
+        try { return require(require("node:path").join(process.argv[3], "node_modules", "json5")).parse(text); }
+        catch { throw err; }
+      }
+    };
     try {
-      let v = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      let v = parse(fs.readFileSync(process.argv[1], "utf8"));
       for (const k of process.argv[2].split(".")) v = v == null ? undefined : v[k];
       if (v !== undefined && v !== null) process.stdout.write(String(v));
     } catch {}
-  ' "$1" "$2"
+  ' "$1" "$2" "${PKG_DIR:-/nonexistent}"
 }
 
 unit_value() {
@@ -614,23 +623,36 @@ discover() {
   fi
 
   discover_scan_units
-  detect_flat_matrix_store
+  detect_legacy_matrix_store
   discover_lobster
   return 0
 }
 
-# The pre-account Matrix layout kept its sync store and crypto directory
-# directly under <state>/matrix/. Later releases only read the per-account
-# layout (<state>/matrix/accounts/...), which the 6.x doctor migrates to.
-detect_flat_matrix_store() {
+# Matrix state only the 2026.6/2026.7 plugin still migrates: the original
+# flat layout (<state>/matrix/bot-storage.json, <state>/matrix/crypto) and the
+# rust crypto store of the old bot SDK (bot-sdk.json or
+# matrix-sdk-crypto.sqlite3 in any account's crypto dir), whose room keys the
+# 2026.6 plugin prepares for recovery. Later plugins carry neither migration.
+detect_legacy_matrix_store() {
   local m="$STATE_DIR/matrix" candidate
-  FLAT_MATRIX_STORE=""
-  for candidate in "$m/bot-storage.json" "$m/crypto" "$m/storage.json" "$m/sync-store.json"; do
+  LEGACY_MATRIX_STORE=""
+  for candidate in "$m/bot-storage.json" "$m/crypto"; do
     if [[ -e "$candidate" ]]; then
-      FLAT_MATRIX_STORE="$candidate"
+      LEGACY_MATRIX_STORE="$candidate"
       return 0
     fi
   done
+  [[ -d "$m" ]] || return 0
+  LEGACY_MATRIX_STORE="$(find "$m" -maxdepth 8 \( -name bot-sdk.json -o -name matrix-sdk-crypto.sqlite3 \) -print -quit 2>/dev/null)"
+}
+
+# Whether this run passes through the stage release.
+needs_stage() {
+  case "$STAGE_MODE" in
+    always) return 0 ;;
+    never) return 1 ;;
+  esac
+  [[ -n "$LEGACY_MATRIX_STORE" ]] && version_lt "${FROM_VERSION:-0}" "$STAGE_VERSION"
 }
 
 discover_lobster() {
@@ -664,7 +686,7 @@ step_preflight() {
   log "openclaw: $FROM_VERSION at $PKG_DIR (prefix $NPM_PREFIX, owner $NPM_OWNER)"
   log "service: user $SERVICE_USER, home $SERVICE_HOME, state $STATE_DIR, config $CONFIG_PATH"
   log "node: $NODE_VERSION ($NODE_BIN); required >=$NODE_MIN <$NODE_MAX_EXCLUSIVE"
-  log "scan units: ${SCAN_UNITS[*]:-none}; flat matrix store: ${FLAT_MATRIX_STORE:-none}; lobster: ${LOBSTER_BIN:-not found}"
+  log "scan units: ${SCAN_UNITS[*]:-none}; legacy matrix store: ${LEGACY_MATRIX_STORE:-none}; lobster: ${LOBSTER_BIN:-not found}"
 
   if ! [[ -d "$STATE_DIR" ]]; then
     STEP_DETAIL="OpenClaw state dir $STATE_DIR does not exist"
@@ -925,7 +947,7 @@ step_stage() {
   install_matrix_plugin "$STAGE_VERSION" || return 1
   run_doctor "$STAGE_VERSION" matrix || return 1
   run_stage_gateway || return 1
-  STEP_DETAIL="ran $STAGE_VERSION (doctor, matrix plugin, one gateway start) to migrate the flat Matrix store ($FLAT_MATRIX_STORE)"
+  STEP_DETAIL="ran $STAGE_VERSION (doctor, matrix plugin, one gateway start) to migrate the legacy Matrix store (${LEGACY_MATRIX_STORE:-forced})"
 }
 
 step_upgrade() {
@@ -1128,7 +1150,7 @@ step_lobster() {
     return 1
   fi
   token="$(openclaw_cli "$CMD_TIMEOUT" config get gateway.auth.token 2>/dev/null | tail -n 1 | tr -d '"[:space:]')"
-  if [[ -z "$token" || "$token" == *undefined* || "$token" == *null* || "$token" == *redacted* ]]; then
+  if [[ -z "$token" || "$token" == *undefined* || "$token" == *null* || "${token,,}" == *redacted* ]]; then
     token="$(json_field "$CONFIG_PATH" gateway.auth.token)"
   fi
   status="$(lobster_invoke_status "$token" sovereign_migrate_probe "$out")"
@@ -1166,7 +1188,7 @@ OpenClaw migration plan (dry run; nothing is changed)
   state dir:         ${STATE_DIR:-unknown}
   node:              ${NODE_VERSION:-unknown} (${NODE_BIN:-not found}); required >=$NODE_MIN <$NODE_MAX_EXCLUSIVE
   units:             $GATEWAY_UNIT ${SCAN_UNITS[*]:-}
-  flat matrix store: ${FLAT_MATRIX_STORE:-none}
+  legacy matrix:     ${LEGACY_MATRIX_STORE:-none} (stage mode $STAGE_MODE)
   lobster:           ${LOBSTER_BIN:-not found}
   backup root:       $BACKUP_ROOT
 EOF
@@ -1188,10 +1210,10 @@ EOF
   else
     plan_line "node: apt-get install --only-upgrade nodejs"
   fi
-  if [[ -n "$FLAT_MATRIX_STORE" ]] && version_lt "${FROM_VERSION:-0}" "$STAGE_VERSION"; then
+  if needs_stage; then
     plan_line "stage: npm install -g openclaw@$STAGE_VERSION; openclaw $DOCTOR_ARGS; openclaw ${MATRIX_PLUGIN_ARGS//%VERSION%/$STAGE_VERSION}; doctor again; start the gateway once (${STAGE_SETTLE}s) and stop it"
   else
-    plan_line "stage: skip (no flat Matrix store)"
+    plan_line "stage: skip (no legacy Matrix store; stage mode $STAGE_MODE)"
   fi
   plan_line "upgrade: npm install -g openclaw@$TARGET (prefix ${NPM_PREFIX:-unknown})"
   plan_line "shrinkwrap: write $OUT_DIR/npm-shrinkwrap.json from the installed tree"
@@ -1333,7 +1355,14 @@ main() {
 
   run_step stop step_stop
   if ((RESUMING == 1)); then
-    skip_step backup "resuming; backup from the first run: ${BACKUP_PATH:-none recorded}"
+    if [[ -n "$BACKUP_PATH" ]]; then
+      skip_step backup "resuming; backup from the first run: $BACKUP_PATH"
+    else
+      # The target is installed but no run of this script recorded a backup:
+      # take one now, before doctor rewrites the state.
+      run_step backup step_backup
+      write_marker in-progress
+    fi
     skip_step node "resuming"
     skip_step stage "resuming"
     skip_step upgrade "openclaw@$TARGET already installed"
@@ -1345,10 +1374,10 @@ main() {
     else
       skip_step node "node $NODE_VERSION already in range"
     fi
-    if [[ -n "$FLAT_MATRIX_STORE" ]] && version_lt "$FROM_VERSION" "$STAGE_VERSION"; then
+    if needs_stage; then
       run_step stage step_stage
     else
-      skip_step stage "no flat Matrix store to migrate"
+      skip_step stage "no legacy Matrix store to migrate (stage mode $STAGE_MODE)"
     fi
     run_step upgrade step_upgrade
   fi

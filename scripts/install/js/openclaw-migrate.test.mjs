@@ -4,7 +4,7 @@
 // fixture's state directory: the script runs OpenClaw under `env -i`, so
 // environment variables would not reach the stubs.
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -17,11 +17,32 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// Each case runs the real script end to end (a few seconds on a busy runner).
+vi.setConfig({ testTimeout: 90_000 });
+
+// Asynchronous on purpose: a synchronous spawn blocks the worker's event loop
+// long enough for vitest's own RPC to time out.
+const exec = (command, args, options) =>
+  new Promise((resolve, reject) => {
+    const child = spawn(command, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.setEncoding("utf8").on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "openclaw-migrate.sh");
 const FROM = "2026.3.13";
@@ -77,6 +98,7 @@ const hiddenLockfile = (version, depVersion = "1.0.0") =>
 
 const makeFixture = ({
   flatMatrixStore = false,
+  legacyCrypto = false,
   nodeVersion = "22.22.3",
   scanActive = true,
   homeserver = "http://127.0.0.1:8008",
@@ -117,12 +139,12 @@ case "$1 \${2:-}" in
     [ -e "$S/doctor-fail-$v" ] && { echo "doctor failed"; exit 3; }
     [ -e "$S/doctor-matrix-fail" ] && [ -e "$S/plugin-installed" ] && { echo "matrix migration failed"; exit 4; }
     echo "doctor: migrated config (token=$OPENROUTER_API_KEY)"
-    echo '{"migrated":true}' >"$HOME/.openclaw/openclaw.json5"
+    mkdir -p "$HOME/.openclaw/state" && echo "$v" >"$HOME/.openclaw/state/openclaw.sqlite"
     exit 0 ;;
   "config validate")
     [ -e "$S/validate-fail" ] && { echo "config invalid"; exit 1; }
     echo "config ok"; exit 0 ;;
-  "config get") echo "\\"${SECRETS.gateway}\\""; exit 0 ;;
+  "config get") [ -e "$S/config-get-redacted" ] && { echo "__OPENCLAW_REDACTED__"; exit 0; }; echo "\\"${SECRETS.gateway}\\""; exit 0 ;;
   "config set") [ -e "$S/config-set-fail" ] && exit 1; echo "updated $3"; exit 0 ;;
   "plugins install") [ -e "$S/plugin-fail" ] && { echo "npm ERR! 404"; exit 1; }; touch "$S/plugin-installed"; echo "installed $3"; exit 0 ;;
   "matrix verify") [ -e "$S/matrix-fail" ] && { echo "matrix: server device unknown"; exit 1; }; echo "matrix: verified"; exit 0 ;;
@@ -142,6 +164,11 @@ exit 64`,
   write(join(home, ".openclaw", "agents", "main", "sessions.json"), "{}\n");
   if (flatMatrixStore) {
     write(join(home, ".openclaw", "matrix", "bot-storage.json"), "{}\n");
+  }
+  const accountDir = join(home, ".openclaw", "matrix", "accounts", "default", "127.0.0.1__bot", "0123456789abcdef");
+  write(join(accountDir, "bot-storage.json"), "{}\n");
+  if (legacyCrypto) {
+    write(join(accountDir, "crypto", "bot-sdk.json"), "{}\n");
   }
   write(
     join(home, "gateway.env"),
@@ -263,11 +290,9 @@ exec ${JSON.stringify(process.execPath)} "$@"`,
 
 const flag = (fx, name, content = "") => writeFileSync(join(fx.state, name), content);
 
-const run = (fx, args = ["--target", TARGET, "--out", fx.out], extraEnv = {}) => {
+const run = async (fx, args = ["--target", TARGET, "--out", fx.out], extraEnv = {}) => {
   writeFileSync(join(fx.state, "calls.log"), "");
-  const result = spawnSync("bash", [SCRIPT, ...args], {
-    encoding: "utf8",
-    timeout: 60_000,
+  const result = await exec("bash", [SCRIPT, ...args], {
     env: {
       PATH: `${fx.bin}:${process.env.PATH}`,
       HOME: fx.root,
@@ -317,9 +342,9 @@ const ALL_STEPS = [
 ];
 
 describe("openclaw-migrate.sh happy path", () => {
-  it("migrates, writes the contracted result.json and leaves the units running", () => {
+  it("migrates, writes the contracted result.json and leaves the units running", async () => {
     const fx = makeFixture();
-    const r = run(fx);
+    const r = await run(fx);
     expect(r.stderr).toBe("");
     expect(r.status).toBe(0);
     expect(r.result).toMatchObject({
@@ -349,34 +374,34 @@ describe("openclaw-migrate.sh happy path", () => {
     expect(r.result.doctor.runs.map((d) => `${d.version}/${d.phase}`)).toEqual([`${TARGET}/config`, `${TARGET}/matrix`]);
   });
 
-  it("leaves a public homeserver without the private-network opt-in", () => {
+  it("leaves a public homeserver without the private-network opt-in", async () => {
     const fx = makeFixture({ homeserver: "https://matrix.example.org" });
-    const r = run(fx);
+    const r = await run(fx);
     expect(r.status).toBe(0);
     expect(r.calls.some((c) => c.includes("config set"))).toBe(false);
     expect(r.calls.some((c) => c.includes("plugins install"))).toBe(true);
   });
 
-  it("can skip the Matrix plugin install and force the private-network opt-in", () => {
+  it("can skip the Matrix plugin install and force the private-network opt-in", async () => {
     const fx = makeFixture({ homeserver: "https://matrix.example.org" });
-    const r = run(fx, undefined, { OPENCLAW_MIGRATE_MATRIX_PLUGIN_ARGS: "" });
+    const r = await run(fx, undefined, { OPENCLAW_MIGRATE_MATRIX_PLUGIN_ARGS: "" });
     expect(r.status).toBe(0);
     expect(r.calls.some((c) => c.includes("plugins install") || c.includes("config set"))).toBe(false);
     expect(r.result.steps.find((s) => s.name === "matrix-plugin").detail).toBe("matrix plugin install disabled");
   });
 
   for (const homeserver of ["http://matrix-synapse:8008", "http://[::1]:8008", "http://172.20.0.2:8008", "https://synapse.local"]) {
-    it(`treats ${homeserver} as a private homeserver`, () => {
+    it(`treats ${homeserver} as a private homeserver`, async () => {
       const fx = makeFixture({ homeserver });
-      const r = run(fx);
+      const r = await run(fx);
       expect(r.status).toBe(0);
       expect(r.calls.some((c) => c.includes("dangerouslyAllowPrivateNetwork"))).toBe(true);
     });
   }
 
-  it("runs every OpenClaw command with stdin closed, as the gateway's user and environment", () => {
+  it("runs every OpenClaw command with stdin closed, as the gateway's user and environment", async () => {
     const fx = makeFixture();
-    const r = run(fx);
+    const r = await run(fx);
     const openclawCalls = r.calls.filter((c) => c.startsWith("openclaw@"));
     expect(openclawCalls.length).toBeGreaterThan(0);
     for (const call of openclawCalls) {
@@ -397,9 +422,9 @@ describe("openclaw-migrate.sh happy path", () => {
     );
   });
 
-  it("keeps secrets out of migration.log and result.json", () => {
+  it("keeps secrets out of migration.log and result.json", async () => {
     const fx = makeFixture();
-    const r = run(fx);
+    const r = await run(fx);
     expect(r.log).toContain("<redacted>");
     const resultText = readFileSync(join(fx.out, "result.json"), "utf8");
     for (const secret of Object.values(SECRETS)) {
@@ -409,10 +434,10 @@ describe("openclaw-migrate.sh happy path", () => {
     }
   });
 
-  it("takes the backup before any change and the archive holds the pre-migration state", () => {
+  it("takes the backup before any change and the archive holds the pre-migration state", async () => {
     const fx = makeFixture();
     const before = readFileSync(join(fx.home, ".openclaw", "openclaw.json5"), "utf8");
-    const r = run(fx);
+    const r = await run(fx);
     const firstChange = r.calls.findIndex((c) => c.startsWith("npm ") || / doctor /.test(c));
     expect(firstChange).toBeGreaterThan(-1);
     expect(r.calls[firstChange]).toMatch(/^npm install -g openclaw@2026\.8\.35 backups=1$/);
@@ -425,15 +450,18 @@ describe("openclaw-migrate.sh happy path", () => {
     const tar = spawnSync("tar", ["-xzf", r.result.backup.path, "-C", extract]);
     expect(tar.status).toBe(0);
     expect(readFileSync(join(extract, ".openclaw", "openclaw.json5"), "utf8")).toBe(before);
-    expect(readFileSync(join(fx.home, ".openclaw", "openclaw.json5"), "utf8")).not.toBe(before);
+    expect(existsSync(join(extract, ".openclaw", "agents", "main", "sessions.json"))).toBe(true);
+    // doctor migrated state after the backup was taken, so only the live tree has it.
+    expect(existsSync(join(extract, ".openclaw", "state", "openclaw.sqlite"))).toBe(false);
+    expect(existsSync(join(fx.home, ".openclaw", "state", "openclaw.sqlite"))).toBe(true);
     expect(existsSync(r.result.backup.package_path)).toBe(true);
     expect(statSync(dirname(r.result.backup.path)).mode & 0o777).toBe(0o700);
     expect(statSync(r.result.backup.path).mode & 0o777).toBe(0o600);
   });
 
-  it("writes npm-shrinkwrap.json from the installed tree", () => {
+  it("writes npm-shrinkwrap.json from the installed tree", async () => {
     const fx = makeFixture();
-    const r = run(fx);
+    const r = await run(fx);
     const shrinkwrap = JSON.parse(readFileSync(join(fx.out, "npm-shrinkwrap.json"), "utf8"));
     expect(shrinkwrap).toMatchObject({ name: "openclaw", version: TARGET, lockfileVersion: 3 });
     expect(shrinkwrap.packages[""]).toMatchObject({ name: "openclaw", version: TARGET, dependencies: { dep: "^1.0.0" } });
@@ -443,9 +471,9 @@ describe("openclaw-migrate.sh happy path", () => {
     expect(r.result.shrinkwrap).toEqual({ source: "npm-hidden-lockfile+installed-tree", packages: 2 });
   });
 
-  it("stops at 6.x and runs doctor there when the legacy flat Matrix store exists", () => {
+  it("stops at 6.x and runs doctor there when the legacy flat Matrix store exists", async () => {
     const fx = makeFixture({ flatMatrixStore: true });
-    const r = run(fx);
+    const r = await run(fx);
     expect(r.status).toBe(0);
     const installs = r.calls.filter((c) => c.startsWith("npm install"));
     expect(installs.map((c) => c.split(" ")[3])).toEqual([`openclaw@${STAGE}`, `openclaw@${TARGET}`]);
@@ -469,10 +497,10 @@ describe("openclaw-migrate.sh happy path", () => {
     expect(r.calls.slice(stageStart, targetInstall)).toContain(`systemctl stop ${GATEWAY}`);
   });
 
-  it("upgrades Node 22 first when it is below the required minimum", () => {
+  it("upgrades Node 22 first when it is below the required minimum", async () => {
     const fx = makeFixture({ nodeVersion: "22.16.0" });
     flag(fx, "node-upgrade-to", "22.22.3");
-    const r = run(fx);
+    const r = await run(fx);
     expect(r.status).toBe(0);
     expect(r.result.steps.find((s) => s.name === "node")).toMatchObject({ ok: true, detail: "node 22.22.3" });
     const aptIndex = r.calls.findIndex((c) => c.startsWith("apt-get") && c.includes("install"));
@@ -482,11 +510,42 @@ describe("openclaw-migrate.sh happy path", () => {
   });
 });
 
+describe("openclaw-migrate.sh stage selection", () => {
+  const stageRan = (r) => r.calls.some((c) => c.startsWith(`npm install -g openclaw@${STAGE}`));
+
+  it("stops at 6.x for the old bot SDK crypto store in a per-account dir", async () => {
+    const fx = makeFixture({ legacyCrypto: true });
+    const r = await run(fx);
+    expect(r.status).toBe(0);
+    expect(stageRan(r)).toBe(true);
+    expect(r.result.steps.find((s) => s.name === "stage").detail).toContain("crypto/bot-sdk.json");
+  });
+
+  it("skips the stage for a per-account store without legacy crypto", async () => {
+    const fx = makeFixture();
+    const r = await run(fx);
+    expect(stageRan(r)).toBe(false);
+  });
+
+  it("can force the stage on or off", async () => {
+    const forced = makeFixture();
+    const on = await run(forced, undefined, { OPENCLAW_MIGRATE_STAGE: "always" });
+    expect(on.status).toBe(0);
+    expect(stageRan(on)).toBe(true);
+    expect(on.result.steps.find((s) => s.name === "stage").detail).toContain("forced");
+
+    const skipped = makeFixture({ flatMatrixStore: true });
+    const off = await run(skipped, undefined, { OPENCLAW_MIGRATE_STAGE: "never" });
+    expect(off.status).toBe(0);
+    expect(stageRan(off)).toBe(false);
+  });
+});
+
 describe("openclaw-migrate.sh interactive doctor", () => {
-  it("fails and reports a prompt that met EOF on stdin", () => {
+  it("fails and reports a prompt that met EOF on stdin", async () => {
     const fx = makeFixture();
     flag(fx, "doctor-prompt");
-    const r = run(fx);
+    const r = await run(fx);
     expect(r.status).toBe(1);
     expect(r.result).toMatchObject({ ok: false, failed_step: "doctor", doctor: { interactive_prompt_seen: true } });
     expect(r.result.doctor.runs).toEqual([
@@ -496,11 +555,11 @@ describe("openclaw-migrate.sh interactive doctor", () => {
     expect(r.log).not.toContain("answered");
   });
 
-  it("fails on a doctor that hangs instead of waiting for it", () => {
+  it("fails on a doctor that hangs instead of waiting for it", async () => {
     const fx = makeFixture();
     flag(fx, "doctor-hang");
     const started = Date.now();
-    const r = run(fx, undefined, { OPENCLAW_MIGRATE_DOCTOR_TIMEOUT: "1" });
+    const r = await run(fx, undefined, { OPENCLAW_MIGRATE_DOCTOR_TIMEOUT: "1" });
     expect(Date.now() - started).toBeLessThan(25_000);
     expect(r.status).toBe(1);
     expect(r.result.doctor).toMatchObject({ interactive_prompt_seen: true });
@@ -508,9 +567,9 @@ describe("openclaw-migrate.sh interactive doctor", () => {
     expect(r.result.steps.at(-1)).toMatchObject({ name: "doctor", ok: false });
   });
 
-  it("fails on a prompt even when doctor exits 0", () => {
+  it("fails on a prompt even when doctor exits 0", async () => {
     const fx = makeFixture();
-    const r = run(fx, undefined, { OPENCLAW_MIGRATE_DOCTOR_ARGS: "doctor --fix", OPENCLAW_MIGRATE_PROMPT_REGEX: "doctor: migrated" });
+    const r = await run(fx, undefined, { OPENCLAW_MIGRATE_DOCTOR_ARGS: "doctor --fix", OPENCLAW_MIGRATE_PROMPT_REGEX: "doctor: migrated" });
     expect(r.status).toBe(1);
     expect(r.result.doctor.interactive_prompt_seen).toBe(true);
     expect(r.result.doctor.runs[0]).toMatchObject({ exit: 0, interactive_prompt_seen: true });
@@ -549,11 +608,11 @@ describe("openclaw-migrate.sh failing steps", () => {
   ];
 
   for (const c of cases) {
-    it(`stops at a failing ${c.step}${c.name ? ` (${c.name})` : ""} and fails closed`, () => {
+    it(`stops at a failing ${c.step}${c.name ? ` (${c.name})` : ""} and fails closed`, async () => {
       const fx = makeFixture(c.fixture);
       c.setup?.(fx);
       const args = ["--out", fx.out, ...(c.args ?? ["--target", TARGET])];
-      const r = run(fx, args, c.env?.(fx) ?? {});
+      const r = await run(fx, args, c.env?.(fx) ?? {});
       expect(r.status).toBe(1);
       expect(r.result.ok).toBe(false);
       expect(r.result.failed_step).toBe(c.step);
@@ -575,12 +634,12 @@ describe("openclaw-migrate.sh failing steps", () => {
 });
 
 describe("openclaw-migrate.sh re-runs", () => {
-  it("is a no-op success on an already migrated node", () => {
+  it("is a no-op success on an already migrated node", async () => {
     const fx = makeFixture();
-    expect(run(fx).status).toBe(0);
+    expect((await run(fx)).status).toBe(0);
     const before = readFileSync(join(fx.home, ".openclaw", "openclaw.json5"), "utf8");
     const backups = readdirSync(fx.backup);
-    const r = run(fx);
+    const r = await run(fx);
     expect(r.status).toBe(0);
     expect(r.result).toMatchObject({ ok: true, already_migrated: true, from: FROM, target: TARGET });
     expect(r.result.backup.path).toMatch(/openclaw-state\.tar\.gz$/);
@@ -594,13 +653,13 @@ describe("openclaw-migrate.sh re-runs", () => {
     expect(existsSync(join(fx.out, "npm-shrinkwrap.json"))).toBe(true);
   });
 
-  it("resumes after a failure that happened past the package upgrade", () => {
+  it("resumes after a failure that happened past the package upgrade", async () => {
     const fx = makeFixture();
     flag(fx, "validate-fail");
-    const first = run(fx);
+    const first = await run(fx);
     expect(first.status).toBe(1);
     rmSync(join(fx.state, "validate-fail"));
-    const r = run(fx);
+    const r = await run(fx);
     expect(r.status).toBe(0);
     expect(r.result).toMatchObject({ ok: true, resumed: true, from: FROM });
     expect(r.result.backup.path).toBe(first.result.backup.path);
@@ -608,11 +667,24 @@ describe("openclaw-migrate.sh re-runs", () => {
     expect(r.result.steps.find((s) => s.name === "upgrade")).toMatchObject({ skipped: true });
   });
 
-  it("refuses to run while another migration holds the lock", () => {
+  it("backs up first when the target is installed but no run recorded a backup", async () => {
+    const fx = makeFixture();
+    writeFileSync(join(fx.pkg, "package.json"), packageJson("openclaw", TARGET));
+    const r = await run(fx);
+    expect(r.status).toBe(0);
+    expect(r.result).toMatchObject({ ok: true, resumed: true, from: TARGET });
+    expect(r.result.steps.find((s) => s.name === "backup").skipped).toBeUndefined();
+    expect(existsSync(r.result.backup.path)).toBe(true);
+    expect(r.calls.some((c) => c.startsWith("npm install"))).toBe(false);
+    const listing = spawnSync("tar", ["-tzf", r.result.backup.path], { encoding: "utf8" }).stdout;
+    expect(listing).toContain(".openclaw/openclaw.json5");
+    expect(listing).not.toContain(".openclaw/state/openclaw.sqlite");
+  });
+
+  it("refuses to run while another migration holds the lock", async () => {
     const fx = makeFixture();
     const lock = join(fx.root, "migrate.lock");
-    const holder = spawnSync("flock", ["-n", lock, "bash", SCRIPT, "--target", TARGET, "--out", fx.out], {
-      encoding: "utf8",
+    const holder = await exec("flock", ["-n", lock, "bash", SCRIPT, "--target", TARGET, "--out", fx.out], {
       env: {
         PATH: `${fx.bin}:${process.env.PATH}`,
         TMPDIR: fx.root,
@@ -629,11 +701,28 @@ describe("openclaw-migrate.sh re-runs", () => {
   });
 });
 
+describe("openclaw-migrate.sh gateway token", () => {
+  it("reads a JSON5 config with OpenClaw's json5 when the CLI hides the token", async () => {
+    const fx = makeFixture();
+    const json5 = dirname(dirname(createRequire(import.meta.url).resolve("json5")));
+    symlinkSync(json5, join(fx.pkg, "node_modules", "json5"));
+    writeFileSync(
+      join(fx.home, ".openclaw", "openclaw.json5"),
+      `// managed\n{ gateway: { auth: { token: "${SECRETS.gateway}", }, }, }\n`,
+    );
+    flag(fx, "config-get-redacted");
+    const r = await run(fx, undefined, { OPENCLAW_MIGRATE_STAGE: "never", OPENCLAW_MIGRATE_MATRIX_PLUGIN_ARGS: "" });
+    expect(r.status).toBe(0);
+    expect(r.result.lobster).toMatchObject({ ok: true });
+    expect(r.result.lobster.detail).toContain("HTTP 404");
+  });
+});
+
 describe("openclaw-migrate.sh --dry-run", () => {
-  it("prints the plan and touches nothing", () => {
+  it("prints the plan and touches nothing", async () => {
     const fx = makeFixture({ flatMatrixStore: true, nodeVersion: "22.16.0" });
     const before = readFileSync(join(fx.home, ".openclaw", "openclaw.json5"), "utf8");
-    const r = run(fx, ["--target", TARGET, "--out", fx.out, "--dry-run"]);
+    const r = await run(fx, ["--target", TARGET, "--out", fx.out, "--dry-run"]);
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("dry run");
     expect(r.stdout).toContain(`installed:         ${FROM}`);
@@ -648,19 +737,19 @@ describe("openclaw-migrate.sh --dry-run", () => {
     expect(isActive(fx, GATEWAY)).toBe(true);
   });
 
-  it("reports a node it cannot inspect without failing", () => {
+  it("reports a node it cannot inspect without failing", async () => {
     const fx = makeFixture();
     rmSync(join(fx.units, GATEWAY));
-    const r = run(fx, ["--dry-run", "--target", TARGET, "--out", fx.out]);
+    const r = await run(fx, ["--dry-run", "--target", TARGET, "--out", fx.out]);
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("discovery error");
     expect(r.calls).toEqual([]);
   });
 
-  it("plans a verification-only run on an already migrated node", () => {
+  it("plans a verification-only run on an already migrated node", async () => {
     const fx = makeFixture();
-    expect(run(fx).status).toBe(0);
-    const r = run(fx, ["--dry-run", "--target", TARGET, "--out", fx.out]);
+    expect((await run(fx)).status).toBe(0);
+    const r = await run(fx, ["--dry-run", "--target", TARGET, "--out", fx.out]);
     expect(r.stdout).toContain("already migrated");
     expect(r.calls).toEqual([]);
   });
@@ -675,26 +764,26 @@ describe("openclaw-migrate.sh arguments", () => {
     ["dangling --target", ["--target"]],
   ];
   for (const [name, args] of usage) {
-    it(`exits 2 on ${name}`, () => {
+    it(`exits 2 on ${name}`, async () => {
       const fx = makeFixture();
-      const r = run(fx, args);
+      const r = await run(fx, args);
       expect(r.status).toBe(2);
       expect(r.stderr).toContain("Usage:");
       expect(r.calls).toEqual([]);
     });
   }
 
-  it("accepts --key=value forms and prints help", () => {
+  it("accepts --key=value forms and prints help", async () => {
     const fx = makeFixture();
-    expect(run(fx, ["--help"]).stdout).toContain("--target <version>");
-    const r = run(fx, [`--target=${TARGET}`, `--out=${fx.out}`, "--dry-run"]);
+    expect((await run(fx, ["--help"])).stdout).toContain("--target <version>");
+    const r = await run(fx, [`--target=${TARGET}`, `--out=${fx.out}`, "--dry-run"]);
     expect(r.status).toBe(0);
   });
 
-  it("refuses to run as a non-root user unless told it is a test", () => {
+  it("refuses to run as a non-root user unless told it is a test", async () => {
     const fx = makeFixture();
     if (process.getuid?.() === 0) return;
-    const r = run(fx, undefined, { OPENCLAW_MIGRATE_ALLOW_NON_ROOT: "0" });
+    const r = await run(fx, undefined, { OPENCLAW_MIGRATE_ALLOW_NON_ROOT: "0" });
     expect(r.status).toBe(2);
     expect(r.stderr).toContain("run as root");
   });
