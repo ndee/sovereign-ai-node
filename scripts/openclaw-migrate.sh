@@ -81,6 +81,8 @@ NPM_OWNER=""
 NODE_BIN=""
 NODE_VERSION=""
 NODE_NEEDS_UPGRADE=0
+NODE_DISCOVERED=0
+NODE_UPGRADED=false
 LEGACY_MATRIX_STORE=""
 LOBSTER_BIN=""
 SCAN_UNITS=()
@@ -504,7 +506,8 @@ RESULT_JS='
 const fs = require("node:fs");
 const [stepsFile, out, ok, target, from, backupPath, backupBytes, backupSourceBytes, pkgBackup,
   promptSeen, runsFile, lobVersion, lobOk, lobDetail, swSource, swPackages, message, failedStep,
-  unitsRestarted, startedAt, dryRun, alreadyDone, resumed, schema] = process.argv.slice(1);
+  unitsRestarted, startedAt, dryRun, alreadyDone, resumed, schema, nodeVersion, nodeOk,
+  nodeUpgraded] = process.argv.slice(1);
 const steps = [];
 try {
   for (const line of fs.readFileSync(stepsFile, "utf8").split("\n")) {
@@ -532,6 +535,7 @@ const result = {
   steps,
   lobster: { version: lobVersion || null, ok: lobOk === "true", ...(lobDetail ? { detail: lobDetail } : {}) },
   doctor: { interactive_prompt_seen: promptSeen === "true", runs },
+  node: { version: nodeVersion || null, ok: nodeOk === "true", upgraded: nodeUpgraded === "true" },
   backup: { path: backupPath || null, bytes: Number(backupBytes) || 0,
     source_bytes: Number(backupSourceBytes) || 0, package_path: pkgBackup || null },
   shrinkwrap: { source: swSource || null, packages: Number(swPackages) || 0 },
@@ -549,7 +553,14 @@ fs.renameSync(out + ".tmp", out);
 '
 
 write_result() {
-  local ok="$1"
+  local ok="$1" node_version="" node_ok=false
+  # Read again so the result reflects the runtime the gateway is left on. The
+  # provisional writer before discovery is not the gateway's node.
+  if ((NODE_DISCOVERED == 1)); then
+    node_version="$("$NODE_BIN" -v 2>/dev/null)"
+    node_version="${node_version#v}"
+    node_in_range "$node_version" && node_ok=true
+  fi
   "$NODE_BIN" -e "$RESULT_JS" \
     "$STEPS_FILE" "$OUT_DIR/result.json" "$ok" "$TARGET" "$FROM_VERSION" \
     "$BACKUP_PATH" "$BACKUP_BYTES" "$BACKUP_SOURCE_BYTES" "$PKG_BACKUP_PATH" \
@@ -557,7 +568,8 @@ write_result() {
     "$SHRINKWRAP_SOURCE" "$SHRINKWRAP_PACKAGES" "$FINAL_MESSAGE" "$FAILED_STEP" \
     "$UNITS_RESTARTED" "$STARTED_AT" "$DRY_RUN" \
     "$([[ $ALREADY_DONE == 1 ]] && echo true || echo false)" \
-    "$([[ $RESUMING == 1 ]] && echo true || echo false)" "$RESULT_SCHEMA"
+    "$([[ $RESUMING == 1 ]] && echo true || echo false)" "$RESULT_SCHEMA" \
+    "$node_version" "$node_ok" "$NODE_UPGRADED"
 }
 
 finish() {
@@ -568,7 +580,7 @@ finish() {
   else
     # Without a usable node there is no JSON writer; emit a minimal result.
     # TARGET is validated against a version pattern, so it needs no escaping.
-    printf '{"ok":false,"target":"%s","from":null,"steps":[],"lobster":{"version":null,"ok":false},"doctor":{"interactive_prompt_seen":false},"backup":{"path":null,"bytes":0},"failed_step":"%s","message":"no node runtime found to write the full result"}\n' \
+    printf '{"ok":false,"target":"%s","from":null,"steps":[],"lobster":{"version":null,"ok":false},"node":{"version":null,"ok":false,"upgraded":false},"doctor":{"interactive_prompt_seen":false},"backup":{"path":null,"bytes":0},"failed_step":"%s","message":"no node runtime found to write the full result"}\n' \
       "$TARGET" "${FAILED_STEP:-preflight}" >"$OUT_DIR/result.json"
   fi
   [[ -n "$WORK_DIR" ]] && rm -rf "$WORK_DIR"
@@ -623,6 +635,7 @@ discover() {
     DISCOVERY_ERROR="no node executable on the gateway PATH ($UNIT_PATH)"
     return 1
   fi
+  NODE_DISCOVERED=1
   NODE_VERSION="$("$NODE_BIN" -v 2>/dev/null)"
   NODE_VERSION="${NODE_VERSION#v}"
   FROM_VERSION="$(installed_openclaw_version)"
@@ -803,7 +816,7 @@ step_backup() {
 step_node() {
   # A newer Node 22 still runs the installed OpenClaw, so this step does not
   # count as touching the old tree.
-  local out="$WORK_DIR/apt.out"
+  local out="$WORK_DIR/apt.out" before="$NODE_VERSION"
   {
     DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 update -y &&
       DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y --only-upgrade nodejs
@@ -812,6 +825,7 @@ step_node() {
   log_output "$out"
   NODE_VERSION="$("$NODE_BIN" -v 2>/dev/null)"
   NODE_VERSION="${NODE_VERSION#v}"
+  [[ -n "$NODE_VERSION" && "$NODE_VERSION" != "$before" ]] && NODE_UPGRADED=true
   if ((rc != 0)); then
     STEP_DETAIL="apt-get upgrade of nodejs failed (exit $rc)"
     return 1
@@ -1375,7 +1389,13 @@ main() {
       run_step backup step_backup
       write_marker in-progress
     fi
-    skip_step node "resuming"
+    # A resumed run still runs doctor and starts the gateway on this Node, so
+    # it needs the same range check as a first run.
+    if ((NODE_NEEDS_UPGRADE == 1)); then
+      run_step node step_node
+    else
+      skip_step node "resuming; node $NODE_VERSION already in range"
+    fi
     skip_step stage "resuming"
     skip_step upgrade "openclaw@$TARGET already installed"
   else

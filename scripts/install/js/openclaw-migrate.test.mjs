@@ -361,6 +361,7 @@ describe("openclaw-migrate.sh happy path", () => {
       already_migrated: false,
       failed_step: null,
     });
+    expect(r.result.node).toEqual({ version: "22.22.3", ok: true, upgraded: false });
     expect(stepNames(r)).toEqual(ALL_STEPS);
     for (const step of r.result.steps) {
       expect(step).toEqual(expect.objectContaining({ ok: true, seconds: expect.any(Number) }));
@@ -509,6 +510,7 @@ describe("openclaw-migrate.sh happy path", () => {
     const r = await run(fx);
     expect(r.status).toBe(0);
     expect(r.result.steps.find((s) => s.name === "node")).toMatchObject({ ok: true, detail: "node 22.22.3" });
+    expect(r.result.node).toEqual({ version: "22.22.3", ok: true, upgraded: true });
     const aptIndex = r.calls.findIndex((c) => c.startsWith("apt-get") && c.includes("install"));
     const npmIndex = r.calls.findIndex((c) => c.startsWith("npm install"));
     expect(aptIndex).toBeGreaterThan(-1);
@@ -585,12 +587,22 @@ describe("openclaw-migrate.sh interactive doctor", () => {
 describe("openclaw-migrate.sh failing steps", () => {
   const cases = [
     { step: "preflight", setup: (fx) => rmSync(join(fx.home, ".openclaw"), { recursive: true }), touched: false, stopped: false },
-    { step: "preflight", name: "node above range", fixture: { nodeVersion: "24.1.0" }, touched: false, stopped: false },
+    { step: "preflight", name: "node above range", fixture: { nodeVersion: "24.1.0" }, node: { version: "24.1.0", ok: false, upgraded: false }, touched: false, stopped: false },
+    { step: "preflight", name: "no gateway unit", setup: (fx) => rmSync(join(fx.units, GATEWAY)), node: { version: null, ok: false, upgraded: false }, touched: false, stopped: false },
     { step: "preflight", name: "downgrade", args: ["--target", "2026.3.1"], touched: false, stopped: false },
     { step: "stop", setup: (fx) => flag(fx, "stop-fail"), touched: false, stopped: true },
     { step: "backup", env: (fx) => ({ OPENCLAW_MIGRATE_BACKUP_ROOT: join(fx.home, "gateway.env", "x") }), touched: false, stopped: true },
-    { step: "node", fixture: { nodeVersion: "22.16.0" }, setup: (fx) => flag(fx, "apt-fail"), touched: false, stopped: true },
-    { step: "node", name: "node still too old", fixture: { nodeVersion: "22.16.0" }, touched: false, stopped: true },
+    { step: "node", fixture: { nodeVersion: "22.16.0" }, setup: (fx) => flag(fx, "apt-fail"), node: { version: "22.16.0", ok: false, upgraded: false }, touched: false, stopped: true },
+    { step: "node", name: "node still too old", fixture: { nodeVersion: "22.16.0" }, node: { version: "22.16.0", ok: false, upgraded: false }, touched: false, stopped: true },
+    {
+      step: "node",
+      name: "upgraded but still too old",
+      fixture: { nodeVersion: "22.16.0" },
+      setup: (fx) => flag(fx, "node-upgrade-to", "22.22.2"),
+      node: { version: "22.22.2", ok: false, upgraded: true },
+      touched: false,
+      stopped: true,
+    },
     { step: "stage", fixture: { flatMatrixStore: true }, setup: (fx) => flag(fx, `npm-fail-${STAGE}`), touched: true },
     { step: "stage", name: "6.x doctor fails", fixture: { flatMatrixStore: true }, setup: (fx) => flag(fx, `doctor-fail-${STAGE}`), touched: true },
     { step: "stage", name: "6.x matrix plugin fails", fixture: { flatMatrixStore: true }, setup: (fx) => flag(fx, "plugin-fail"), touched: true },
@@ -624,6 +636,7 @@ describe("openclaw-migrate.sh failing steps", () => {
       expect(r.result.failed_step).toBe(c.step);
       expect(r.result.steps.at(-1)).toMatchObject({ name: c.step, ok: false });
       expect(r.result.message).toBeTruthy();
+      expect(r.result.node).toEqual(c.node ?? { version: c.fixture?.nodeVersion ?? "22.22.3", ok: true, upgraded: false });
       if (!c.touched) {
         expect(installedVersion(fx)).toBe(FROM);
         expect(r.calls.some((call) => call.startsWith("npm install"))).toBe(false);
@@ -648,6 +661,7 @@ describe("openclaw-migrate.sh re-runs", () => {
     const r = await run(fx);
     expect(r.status).toBe(0);
     expect(r.result).toMatchObject({ ok: true, already_migrated: true, from: FROM, target: TARGET });
+    expect(r.result.node).toEqual({ version: "22.22.3", ok: true, upgraded: false });
     expect(r.result.backup.path).toMatch(/openclaw-state\.tar\.gz$/);
     expect(stepNames(r)).toEqual(ALL_STEPS);
     for (const name of ["stop", "backup", "node", "stage", "upgrade", "doctor", "config-validate", "matrix-verify", "start"]) {
@@ -674,6 +688,48 @@ describe("openclaw-migrate.sh re-runs", () => {
     expect(isActive(fx, GATEWAY)).toBe(true);
     expect(r.calls.some((c) => c.startsWith("npm install"))).toBe(false);
     expect(r.result.steps.find((s) => s.name === "upgrade")).toMatchObject({ skipped: true });
+    expect(r.result.steps.find((s) => s.name === "node")).toMatchObject({ ok: true, skipped: true });
+    expect(r.calls.some((c) => c.startsWith("apt-get"))).toBe(false);
+    expect(r.result.node).toEqual({ version: "22.22.3", ok: true, upgraded: false });
+  });
+
+  it("upgrades a Node below the minimum before resuming", async () => {
+    const fx = makeFixture();
+    flag(fx, "validate-fail");
+    expect((await run(fx)).status).toBe(1);
+    rmSync(join(fx.state, "validate-fail"));
+    flag(fx, "node-version", "22.16.0");
+    flag(fx, "node-upgrade-to", "22.22.3");
+    const r = await run(fx);
+    expect(r.status).toBe(0);
+    expect(r.result).toMatchObject({ ok: true, resumed: true });
+    expect(r.result.steps.find((s) => s.name === "node")).toMatchObject({ ok: true, detail: "node 22.22.3" });
+    expect(r.result.steps.find((s) => s.name === "node").skipped).toBeUndefined();
+    expect(r.result.node).toEqual({ version: "22.22.3", ok: true, upgraded: true });
+    const aptIndex = r.calls.findIndex((c) => c.startsWith("apt-get") && c.includes("install"));
+    const doctorIndex = r.calls.findIndex((c) => c.includes(" doctor "));
+    expect(aptIndex).toBeGreaterThan(-1);
+    expect(aptIndex).toBeLessThan(doctorIndex);
+  });
+
+  it("fails closed when a resumed run finds Node below the minimum and cannot upgrade it", async () => {
+    const fx = makeFixture();
+    flag(fx, "validate-fail");
+    expect((await run(fx)).status).toBe(1);
+    rmSync(join(fx.state, "validate-fail"));
+    flag(fx, "node-version", "22.16.0");
+    const r = await run(fx);
+    expect(r.status).toBe(1);
+    expect(r.result).toMatchObject({ ok: false, resumed: true, failed_step: "node", units_restarted_on_old_version: false });
+    expect(r.result.steps.at(-1)).toMatchObject({
+      name: "node",
+      ok: false,
+      detail: "node is 22.16.0 after the upgrade; need >=22.22.3 <23.0.0 (install it from a repository that carries it)",
+    });
+    expect(r.result.node).toEqual({ version: "22.16.0", ok: false, upgraded: false });
+    expect(r.calls.some((c) => c.includes(" doctor "))).toBe(false);
+    expect(isActive(fx, GATEWAY)).toBe(false);
+    expect(r.result.message).toContain("NOT restarted");
   });
 
   it("backs up first when the target is installed but no run recorded a backup", async () => {
@@ -706,6 +762,7 @@ describe("openclaw-migrate.sh re-runs", () => {
     expect(holder.status).toBe(1);
     const result = JSON.parse(readFileSync(join(fx.out, "result.json"), "utf8"));
     expect(result).toMatchObject({ ok: false, failed_step: "lock" });
+    expect(result.node).toEqual({ version: null, ok: false, upgraded: false });
     expect(installedVersion(fx)).toBe(FROM);
   });
 });
