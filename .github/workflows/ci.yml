@@ -168,6 +168,9 @@ jobs:
         # scripts/install/lib-build.sh or the exec targets drift (past install regression).
         run: bash scripts/ci/test-wrapper-bin-parity.sh
 
+      - name: Install E2E jobs pre-pull the pinned Synapse image
+        run: bash scripts/ci/test-synapse-prepull.sh
+
       - name: API starts and responds on /healthz
         run: |
           pnpm dev:api &
