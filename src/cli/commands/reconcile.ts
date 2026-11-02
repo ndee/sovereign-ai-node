@@ -38,6 +38,17 @@ const reconcileResultSchema = z
       })
       .strict()
       .nullable(),
+    runtimeRefresh: z
+      .object({
+        rendered: z.boolean(),
+        restarted: z.boolean(),
+        ready: z.boolean(),
+        waitedMs: z.number(),
+        invocationId: z.string().nullable(),
+      })
+      .strict()
+      .nullable()
+      .optional(),
   })
   .strict();
 
@@ -57,6 +68,12 @@ const reconcileResultSchema = z
  * TEMPLATE_PIN_MISMATCH refusal. There is deliberately no flag that trusts
  * the local checkout, and none may be added.
  *
+ * `--refresh-runtime` is for updaters that replaced the node package in place:
+ * after the workspaces it re-renders the OpenClaw runtime artifacts, restarts
+ * the gateway and waits for it, and reports the outcome as `runtimeRefresh`. A
+ * gateway that does not become ready fails with GATEWAY_REFRESH_FAILED. Without
+ * the flag the gateway is left alone.
+ *
  * Exposed as a CLI command rather than an HTTP route on purpose: the updater
  * restarts the Pro API immediately after installing, so an in-flight HTTP call
  * would race that restart. It is also safe to run by hand on a device that has
@@ -71,18 +88,28 @@ export const registerReconcileCommand = (program: Command, app: AppContainer): v
       "--release-authorization <path>",
       "Root-owned verified-release attestation authorizing template pin transitions",
     )
-    .action(async (opts: { json?: boolean; releaseAuthorization?: string }) => {
-      const command = "reconcile";
-      try {
-        const result = await app.installerService.reconcileAgentWorkspaces(
-          opts.releaseAuthorization === undefined
-            ? undefined
-            : { releaseAuthorizationPath: opts.releaseAuthorization },
-        );
-        writeCliSuccess(command, result, reconcileResultSchema, Boolean(opts.json));
-      } catch (error) {
-        writeCliError(command, error, Boolean(opts.json));
-        process.exitCode = 1;
-      }
-    });
+    .option(
+      "--refresh-runtime",
+      "Also re-render the OpenClaw runtime and restart the gateway, failing if it does not become ready",
+    )
+    .action(
+      async (opts: { json?: boolean; releaseAuthorization?: string; refreshRuntime?: boolean }) => {
+        const command = "reconcile";
+        const options = {
+          ...(opts.releaseAuthorization === undefined
+            ? {}
+            : { releaseAuthorizationPath: opts.releaseAuthorization }),
+          ...(opts.refreshRuntime === true ? { refreshRuntime: true } : {}),
+        };
+        try {
+          const result = await app.installerService.reconcileAgentWorkspaces(
+            Object.keys(options).length === 0 ? undefined : options,
+          );
+          writeCliSuccess(command, result, reconcileResultSchema, Boolean(opts.json));
+        } catch (error) {
+          writeCliError(command, error, Boolean(opts.json));
+          process.exitCode = 1;
+        }
+      },
+    );
 };

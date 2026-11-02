@@ -25,7 +25,9 @@ type Internals = {
   ): Promise<GatewayReadinessOutcome>;
 };
 
-const readyOutcome = (overrides: Partial<GatewayReadinessOutcome> = {}): GatewayReadinessOutcome => ({
+const readyOutcome = (
+  overrides: Partial<GatewayReadinessOutcome> = {},
+): GatewayReadinessOutcome => ({
   unitStarted: true,
   ready: true,
   waitedMs: 4_321,
@@ -195,11 +197,7 @@ describe("reconcileAgentWorkspaces runtime refresh", () => {
 
   it.each([
     ["the gateway reports no unit", undefined, () => ({})],
-    [
-      "systemctl cannot be run",
-      "sovereign-openclaw-gateway.service",
-      () => "throw" as const,
-    ],
+    ["systemctl cannot be run", "sovereign-openclaw-gateway.service", () => "throw" as const],
     ["systemctl show fails", "sovereign-openclaw-gateway.service", () => ({ exitCode: 1 })],
     [
       "the unit has no invocation id",
@@ -208,7 +206,8 @@ describe("reconcileAgentWorkspaces runtime refresh", () => {
     ],
   ])("reports a null invocation id when %s", async (_label, unit, respond) => {
     const { service, refresh } = makeService(respond);
-    refresh.mockResolvedValue(readyOutcome(unit === undefined ? { unit: undefined } : { unit }));
+    const { unit: _systemUnit, ...withoutUnit } = readyOutcome();
+    refresh.mockResolvedValue(unit === undefined ? withoutUnit : readyOutcome({ unit }));
 
     const result = await service.reconcileAgentWorkspaces({ refreshRuntime: true });
 
@@ -221,17 +220,15 @@ describe("reconcileAgentWorkspaces runtime refresh", () => {
       readyOutcome({ ready: false, waitedMs: 300_000, lastProbe: "ECONNREFUSED" }),
     );
 
-    await expect(service.reconcileAgentWorkspaces({ refreshRuntime: true })).rejects.toMatchObject(
-      {
-        code: "GATEWAY_REFRESH_FAILED",
-        retryable: true,
-        message: expect.stringContaining("not listening after 300 s"),
-        details: {
-          step: "openclaw-runtime",
-          gateway: { unitStarted: true, ready: false, waitedMs: 300_000 },
-        },
+    await expect(service.reconcileAgentWorkspaces({ refreshRuntime: true })).rejects.toMatchObject({
+      code: "GATEWAY_REFRESH_FAILED",
+      retryable: true,
+      message: expect.stringContaining("not listening after 300 s"),
+      details: {
+        step: "openclaw-runtime",
+        gateway: { unitStarted: true, ready: false, waitedMs: 300_000 },
       },
-    );
+    });
   });
 
   it("fails with GATEWAY_REFRESH_FAILED when the gateway restart throws", async () => {
@@ -242,29 +239,25 @@ describe("reconcileAgentWorkspaces runtime refresh", () => {
       retryable: true,
     });
 
-    await expect(service.reconcileAgentWorkspaces({ refreshRuntime: true })).rejects.toMatchObject(
-      {
-        code: "GATEWAY_REFRESH_FAILED",
-        message: expect.stringContaining("OpenClaw gateway unit failed to start"),
-        details: {
-          step: "openclaw-runtime",
-          cause: { code: "OPENCLAW_GATEWAY_RESTART_FAILED" },
-        },
+    await expect(service.reconcileAgentWorkspaces({ refreshRuntime: true })).rejects.toMatchObject({
+      code: "GATEWAY_REFRESH_FAILED",
+      message: expect.stringContaining("OpenClaw gateway unit failed to start"),
+      details: {
+        step: "openclaw-runtime",
+        cause: { code: "OPENCLAW_GATEWAY_RESTART_FAILED" },
       },
-    );
+    });
   });
 
   it("fails with GATEWAY_REFRESH_FAILED and never restarts when the render throws", async () => {
     const { service, write, refresh } = makeService();
     write.mockRejectedValue(new Error("EACCES: openclaw.json5"));
 
-    await expect(service.reconcileAgentWorkspaces({ refreshRuntime: true })).rejects.toMatchObject(
-      {
-        code: "GATEWAY_REFRESH_FAILED",
-        message: expect.stringContaining("EACCES: openclaw.json5"),
-        details: { step: "openclaw-runtime", cause: { message: "EACCES: openclaw.json5" } },
-      },
-    );
+    await expect(service.reconcileAgentWorkspaces({ refreshRuntime: true })).rejects.toMatchObject({
+      code: "GATEWAY_REFRESH_FAILED",
+      message: expect.stringContaining("EACCES: openclaw.json5"),
+      details: { step: "openclaw-runtime", cause: { message: "EACCES: openclaw.json5" } },
+    });
     expect(refresh).not.toHaveBeenCalled();
   });
 

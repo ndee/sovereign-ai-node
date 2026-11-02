@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -438,10 +439,9 @@ describe("OpenClaw gateway readiness", () => {
         const restart = vi.fn(async () => {});
         const service = makeService({ listening: () => true, gateway: { restart } });
 
-        const outcome = await internals(service).refreshGatewayAfterRuntimeConfig(
-          runtimeConfig(),
-          { preferInstalledSystemUnit: true },
-        );
+        const outcome = await internals(service).refreshGatewayAfterRuntimeConfig(runtimeConfig(), {
+          preferInstalledSystemUnit: true,
+        });
 
         expect(outcome).toMatchObject({ ready: true, unit: "sovereign-openclaw-gateway.service" });
         expect(restart).not.toHaveBeenCalled();
@@ -461,13 +461,29 @@ describe("OpenClaw gateway readiness", () => {
         const restart = vi.fn(async () => {});
         const service = makeService({ listening: () => true, gateway: { restart } });
 
-        const outcome = await internals(service).refreshGatewayAfterRuntimeConfig(
-          runtimeConfig(),
-          { preferInstalledSystemUnit: true },
-        );
+        const outcome = await internals(service).refreshGatewayAfterRuntimeConfig(runtimeConfig(), {
+          preferInstalledSystemUnit: true,
+        });
 
         expect(restart).toHaveBeenCalledTimes(1);
         expect(outcome.unit).toBe("openclaw-gateway.service");
+      });
+
+      it("looks for the system unit in the systemd unit directory by default", async () => {
+        asServiceUser();
+        delete process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH;
+        const restart = vi.fn(async () => {});
+        const service = makeService({ listening: () => true, gateway: { restart } });
+
+        const outcome = await internals(service).refreshGatewayAfterRuntimeConfig(runtimeConfig(), {
+          preferInstalledSystemUnit: true,
+        });
+
+        const installed = existsSync("/etc/systemd/system/sovereign-openclaw-gateway.service");
+        expect(restart).toHaveBeenCalledTimes(installed ? 0 : 1);
+        expect(outcome.unit).toBe(
+          installed ? "sovereign-openclaw-gateway.service" : "openclaw-gateway.service",
+        );
       });
 
       it("keeps the user-service restart for callers that do not ask for it", async () => {
