@@ -53,8 +53,8 @@ jobs:
             setup-ui
           requireScope: false
 
-  # Path awareness keeps the three installer e2e jobs (~16 job-minutes) off
-  # draft or install-irrelevant pull requests. Every main push runs all three:
+  # Path awareness keeps the installer e2e jobs (~16 job-minutes, plus the upgrade) off
+  # draft or install-irrelevant pull requests. Every main push runs all of them:
   # a successful CI workflow is the release publication gate, so none of its
   # installer coverage may be skipped on a release-capable commit.
   changes:
@@ -590,6 +590,156 @@ jobs:
           echo "=== request file ==="
           cat /tmp/ci-install-request.json 2>/dev/null | jq . || true
 
+  # Upgrade in place from the previous published release to this change, the
+  # path an installed node takes with `sovereign-node update`. Proves that the
+  # bundled Synapse migrates its existing database, keeps rooms and history,
+  # and still delivers alerts before a release built from this change ships.
+  e2e_upgrade:
+    name: E2E Upgrade (previous release to this change)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    needs: [test, changes]
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      (needs.changes.outputs.install_relevant == 'true' &&
+       github.event.pull_request.draft == false)
+    env:
+      PREVIOUS_RELEASE: v2.12.2
+      PREVIOUS_DIR: /tmp/previous-release
+      UPGRADE_DIR: /tmp/upgrade-e2e
+      UPGRADE_HELPER: scripts/e2e/synapse-upgrade-e2e.sh
+      # Warn once the measured migration comes this close to the readiness
+      # deadline a real update would enforce.
+      MIGRATION_WARN_MARGIN_SECONDS: "300"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Unit-test the upgrade helpers
+        run: bash scripts/e2e/test-synapse-upgrade-e2e.sh
+
+      # The tag's commit must be the one its published release was built from.
+      - name: Fetch the previous release
+        run: |
+          git clone --depth 1 --branch "$PREVIOUS_RELEASE" \
+            https://github.com/ndee/sovereign-ai-node "$PREVIOUS_DIR"
+          mkdir -p "$UPGRADE_DIR"
+          curl -fsSL -o "$UPGRADE_DIR/component-release.json" \
+            "https://github.com/ndee/sovereign-ai-node/releases/download/${PREVIOUS_RELEASE}/component-release.json"
+          jq . "$UPGRADE_DIR/component-release.json"
+          jq -e --arg tag "$PREVIOUS_RELEASE" --arg sha "$(git -C "$PREVIOUS_DIR" rev-parse HEAD)" \
+            '.tag == $tag and .commitSha == $sha' "$UPGRADE_DIR/component-release.json" > /dev/null
+
+          previous_image="$(bash "$UPGRADE_HELPER" expected-image "$PREVIOUS_DIR/src/system/matrix.ts")"
+          expected_image="$(bash "$UPGRADE_HELPER" expected-image src/system/matrix.ts)"
+          ready_timeout_ms="$(bash "$UPGRADE_HELPER" ready-timeout-ms src/system/matrix.ts)"
+          echo "previous release Synapse image: $previous_image"
+          echo "this change's Synapse image:    $expected_image"
+          {
+            echo "PREVIOUS_SYNAPSE_IMAGE=$previous_image"
+            echo "EXPECTED_SYNAPSE_IMAGE=$expected_image"
+            echo "UPGRADE_READY_TIMEOUT_MS=$ready_timeout_ms"
+          } >> "$GITHUB_ENV"
+
+      - name: Clone bot catalog repo
+        run: |
+          BOT_REF="${GITHUB_HEAD_REF:-main}"
+          if git ls-remote --exit-code --heads https://github.com/ndee/sovereign-ai-bots "$BOT_REF" >/dev/null 2>&1; then
+            git clone --depth 1 --branch "$BOT_REF" https://github.com/ndee/sovereign-ai-bots /tmp/sovereign-ai-bots
+          else
+            git clone --depth 1 https://github.com/ndee/sovereign-ai-bots /tmp/sovereign-ai-bots
+          fi
+
+      # Only the previous release's images: the new Synapse image is pulled by
+      # the update itself, as it would be on an installed node.
+      - name: Pre-pull Docker images
+        run: |
+          docker pull postgres:16-alpine &
+          docker pull "$PREVIOUS_SYNAPSE_IMAGE" &
+          wait
+
+      - name: Install the previous release (install.sh, non-interactive)
+        run: |
+          cp "$PREVIOUS_DIR/test/fixtures/ci-install-request.json" /tmp/ci-install-request.json
+          sudo env "PATH=$PATH" bash "$PREVIOUS_DIR/scripts/install.sh" \
+            --source-dir "$PREVIOUS_DIR" \
+            --bots-source-dir /tmp/sovereign-ai-bots \
+            --request-file /tmp/ci-install-request.json \
+            --install \
+            --non-interactive
+          # `sovereign-node update` re-runs the installer against the saved request.
+          sudo test -s /etc/sovereign-node/install-request.json
+        timeout-minutes: 15
+
+      - name: Verify the previous release runs its Synapse
+        run: |
+          bash "$UPGRADE_HELPER" snapshot "$UPGRADE_DIR/pre.json"
+          jq -e --arg img "$PREVIOUS_SYNAPSE_IMAGE" --arg v "$(bash "$UPGRADE_HELPER" image-version "$PREVIOUS_SYNAPSE_IMAGE")" \
+            '.image == $img and .synapseVersion == $v and .dbSchemaVersion == .codeSchemaVersion' \
+            "$UPGRADE_DIR/pre.json" > /dev/null
+
+      - name: Create rooms and message history before the upgrade
+        run: sudo env "PATH=$PATH" bash "$UPGRADE_HELPER" seed "$UPGRADE_DIR/state.json"
+
+      - name: Build this change's bundled install.sh
+        run: bash scripts/install/build.sh "$UPGRADE_DIR/install.sh"
+
+      - name: Upgrade in place with sovereign-node update
+        run: |
+          bash "$UPGRADE_HELPER" run-update "$UPGRADE_DIR/install.sh" "$GITHUB_WORKSPACE" \
+            /tmp/sovereign-ai-bots "$EXPECTED_SYNAPSE_IMAGE" "$UPGRADE_DIR/watch.json"
+        timeout-minutes: 35
+
+      - name: Record the Synapse migration duration
+        id: migration
+        run: |
+          bash "$UPGRADE_HELPER" snapshot "$UPGRADE_DIR/post.json"
+          bash "$UPGRADE_HELPER" report "$UPGRADE_DIR/watch.json" "$UPGRADE_READY_TIMEOUT_MS" \
+            "$MIGRATION_WARN_MARGIN_SECONDS" "$UPGRADE_DIR/pre.json" "$UPGRADE_DIR/post.json"
+
+      - name: Verify Synapse runs the pinned image on a migrated database
+        run: |
+          bash "$UPGRADE_HELPER" verify-image "$EXPECTED_SYNAPSE_IMAGE" \
+            "$UPGRADE_DIR/pre.json" "$UPGRADE_DIR/post.json"
+
+      - name: Verify the pre-upgrade rooms and history are readable
+        run: sudo env "PATH=$PATH" bash "$UPGRADE_HELPER" verify-history "$UPGRADE_DIR/state.json"
+
+      - name: Verify a test alert reaches the operator as a mention
+        run: sudo env "PATH=$PATH" bash "$UPGRADE_HELPER" verify-alert "$UPGRADE_DIR/state.json"
+
+      - name: Restart Synapse twice and require a clean start each time
+        run: |
+          bash "$UPGRADE_HELPER" restarts 2
+          sudo env "PATH=$PATH" bash "$UPGRADE_HELPER" verify-history "$UPGRADE_DIR/state.json"
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== upgrade watcher ==="
+          cat "$UPGRADE_DIR/watch.json" 2>/dev/null || true
+          echo "=== snapshots ==="
+          cat "$UPGRADE_DIR/pre.json" "$UPGRADE_DIR/post.json" 2>/dev/null || true
+          echo "=== sovereign-node status ==="
+          sudo env "PATH=$PATH" sovereign-node status --json 2>&1 || true
+          echo "=== latest install job ==="
+          job="$(sudo sh -c 'ls -t /var/lib/sovereign-node/install-jobs/*.json 2>/dev/null | head -n 1')"
+          if [ -n "$job" ]; then
+            sudo jq '.response.job | {state, steps: [.steps[] | {id, state}]}' "$job" || true
+          fi
+          echo "=== docker ps -a ==="
+          docker ps -a || true
+          echo "=== synapse logs ==="
+          for c in $(docker ps -aq --filter label=com.docker.compose.service=synapse); do
+            docker logs --tail 300 "$c" 2>&1 || true
+          done
+
   # The release workflow consumes only successful push runs whose sentinel
   # passed. Keep this explicit instead of relying on the workflow's aggregate
   # conclusion: skipped jobs otherwise count as a successful workflow.
@@ -608,13 +758,14 @@ jobs:
       - e2e_noninteractive
       - e2e_interactive
       - e2e_rerun_after_partial_failure
+      - e2e_upgrade
     env:
       REQUIRED_RESULTS: ${{ toJSON(needs) }}
     steps:
       - name: Require every main validation job to pass
         run: |
           jq -e '
-            length == 10 and
+            length == 11 and
             all(.[]; .result == "success")
           ' <<<"$REQUIRED_RESULTS" >/dev/null || {
             echo "::error::A required main CI job failed, was cancelled, or was skipped."
