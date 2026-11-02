@@ -262,14 +262,14 @@ grep -q 'Current main .* has no successful completed push CI run' "$RELEASE_WORK
   exit 1
 }
 
-[[ "$(grep -c "github.event_name == 'push' ||" "$CI_WORKFLOW")" == "3" ]] || {
-  printf 'all three installer E2Es must run on every main push\n' >&2
+[[ "$(grep -c "github.event_name == 'push' ||" "$CI_WORKFLOW")" == "4" ]] || {
+  printf 'all four installer E2Es (three installs, one upgrade) must run on every main push\n' >&2
   exit 1
 }
 grep -q '^  release_gate:$' "$CI_WORKFLOW"
 grep -q "^    if: always() && github.event_name == 'push'$" "$CI_WORKFLOW"
-[[ "$(sed -n '/^  release_gate:/,$p' "$CI_WORKFLOW" | grep -c '^      - e2e_')" == "3" ]] || {
-  printf 'Release Gate must depend on all three installer E2Es\n' >&2
+[[ "$(sed -n '/^  release_gate:/,$p' "$CI_WORKFLOW" | grep -c '^      - e2e_')" == "4" ]] || {
+  printf 'Release Gate must depend on all four installer E2Es\n' >&2
   exit 1
 }
 

@@ -1442,6 +1442,7 @@ export class RealInstallerService implements InstallerService {
           body: JSON.stringify({
             msgtype: "m.text",
             body: req.text ?? `Sovereign test alert (${now()})`,
+            "m.mentions": { user_ids: [config.matrix.operator.userId] },
           }),
         });
 
