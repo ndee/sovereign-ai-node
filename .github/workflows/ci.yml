@@ -252,10 +252,12 @@ jobs:
             git clone --depth 1 https://github.com/ndee/sovereign-ai-bots /tmp/sovereign-ai-bots
           fi
 
+      # Warm the cache with the image the product pins, read from its source.
       - name: Pre-pull Docker images
         run: |
+          synapse_image="$(bash scripts/e2e/synapse-upgrade-e2e.sh expected-image src/system/matrix.ts)"
           docker pull postgres:16-alpine &
-          docker pull matrixdotorg/synapse:v1.125.0 &
+          docker pull "$synapse_image" &
           wait
 
       - name: Run full installer (install.sh, non-interactive)
@@ -424,10 +426,12 @@ jobs:
             git clone --depth 1 https://github.com/ndee/sovereign-ai-bots /tmp/sovereign-ai-bots
           fi
 
+      # Warm the cache with the image the product pins, read from its source.
       - name: Pre-pull Docker images
         run: |
+          synapse_image="$(bash scripts/e2e/synapse-upgrade-e2e.sh expected-image src/system/matrix.ts)"
           docker pull postgres:16-alpine &
-          docker pull matrixdotorg/synapse:v1.125.0 &
+          docker pull "$synapse_image" &
           wait
 
       - name: Run full installer (install.sh, interactive)
@@ -512,10 +516,12 @@ jobs:
             git clone --depth 1 https://github.com/ndee/sovereign-ai-bots /tmp/sovereign-ai-bots
           fi
 
+      # Warm the cache with the image the product pins, read from its source.
       - name: Pre-pull Docker images
         run: |
+          synapse_image="$(bash scripts/e2e/synapse-upgrade-e2e.sh expected-image src/system/matrix.ts)"
           docker pull postgres:16-alpine &
-          docker pull matrixdotorg/synapse:v1.125.0 &
+          docker pull "$synapse_image" &
           wait
 
       # Reproduce issue #179: a leftover install from a *different* compose
