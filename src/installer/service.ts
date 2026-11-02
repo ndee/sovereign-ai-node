@@ -41,6 +41,21 @@ export type ManagedAgent = {
 export type ReconcileAgentWorkspacesOptions = {
   /** Path to a root-owned verified-release authorization attestation. */
   releaseAuthorizationPath?: string;
+  /**
+   * After the workspace reconcile, re-render the OpenClaw runtime artifacts,
+   * restart the gateway and wait for it. A gateway that does not become ready
+   * fails the reconcile with GATEWAY_REFRESH_FAILED.
+   */
+  refreshRuntime?: boolean;
+};
+
+export type ReconcileRuntimeRefreshReport = {
+  rendered: boolean;
+  restarted: boolean;
+  ready: boolean;
+  waitedMs: number;
+  /** systemd InvocationID of the gateway after the restart, when readable. */
+  invocationId: string | null;
 };
 
 /** One template pin transitioned under verified-release authorization. */
@@ -79,6 +94,11 @@ export type ReconcileAgentWorkspacesResult = {
     artifactSha256: string;
     runId: string;
   } | null;
+  /**
+   * Present only when `refreshRuntime` was requested; null when the host has
+   * no core config yet, so there is no runtime to refresh.
+   */
+  runtimeRefresh?: ReconcileRuntimeRefreshReport | null;
 };
 
 export type ManagedAgentListResult = {
@@ -327,7 +347,8 @@ export interface InstallerService {
   /**
    * Re-apply every managed agent's workspace files from the installed bot
    * catalog. Used after an update replaces the catalog, so the code systemd
-   * runs matches the code that was installed. Does not restart the gateway.
+   * runs matches the code that was installed. Does not restart the gateway
+   * unless `refreshRuntime` is set.
    *
    * With `releaseAuthorizationPath` set (root-owned attestation written by
    * the verified updater), a template pin whose trusted manifest changed as
