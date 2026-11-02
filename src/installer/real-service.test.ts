@@ -17832,3 +17832,65 @@ describe("typed tools, scan agents and exec pinning", () => {
     });
   });
 });
+
+describe("RealInstallerService.testAlert", () => {
+  it("mentions the operator through m.mentions so the alert notifies without body-text push rules", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-test-alert-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+    await writeRuntimeArtifacts(paths);
+
+    const sent: Array<{ url: string; authorization: string | null; body: unknown }> = [];
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {} as unknown as OpenClawBootstrapper,
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      preflightChecker: {} as unknown as HostPreflightChecker,
+      imapTester: {} as unknown as ImapTester,
+      matrixProvisioner: {} as unknown as BundledMatrixProvisioner,
+      fetchImpl: async (url, init) => {
+        if (url.includes("/send/m.room.message/")) {
+          sent.push({
+            url,
+            authorization: new Headers(init?.headers).get("Authorization"),
+            body: JSON.parse(String(init?.body)),
+          });
+          return new Response(JSON.stringify({ event_id: "$evt1" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+
+    try {
+      const result = await service.testAlert({ text: "Disk almost full" });
+
+      expect(result.delivered).toBe(true);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]?.url).toContain(`/rooms/${encodeURIComponent("!alerts:matrix.example.org")}/`);
+      expect(sent[0]?.authorization).toBe("Bearer bot-token");
+      // Synapse 1.164 drops the legacy display-name/user-name body matching
+      // (MSC4210); an intentional mention is what triggers a highlight now.
+      expect(sent[0]?.body).toEqual({
+        msgtype: "m.text",
+        body: "Disk almost full",
+        "m.mentions": { user_ids: ["@operator:matrix.example.org"] },
+      });
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
