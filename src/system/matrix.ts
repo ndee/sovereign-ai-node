@@ -42,6 +42,16 @@ const MATRIX_READY_TIMEOUT_MS = resolveDurationFromEnv(
   "SOVEREIGN_MATRIX_READY_TIMEOUT_MS",
   600_000,
 );
+// Synapse applies pending schema deltas before it opens its listener, so after
+// an image upgrade the readiness probe fails for as long as the migration runs.
+// Its length on slow storage (an SD card on a single-board computer) is not
+// known in advance, so an existing homeserver database gets a much longer
+// deadline than a fresh install. The deadline only bounds how long a stuck
+// start takes to be reported; a healthy start returns as soon as it answers.
+const MATRIX_UPGRADE_READY_TIMEOUT_MS = resolveDurationFromEnv(
+  "SOVEREIGN_MATRIX_UPGRADE_READY_TIMEOUT_MS",
+  30 * 60_000,
+);
 const MATRIX_READY_POLL_INTERVAL_MS = 1_500;
 const MATRIX_READY_HEARTBEAT_MS = 30_000;
 const MATRIX_HTTP_TIMEOUT_MS = 8_000;
@@ -52,7 +62,10 @@ const MATRIX_COMPOSE_COMMAND_TIMEOUT_MS = resolveDurationFromEnv(
   "SOVEREIGN_MATRIX_COMPOSE_TIMEOUT_MS",
   600_000,
 );
-const DEFAULT_SYNAPSE_IMAGE = "matrixdotorg/synapse:v1.125.0";
+// Pinned by the multi-arch index digest (linux/amd64 + linux/arm64) so every
+// node runs the exact image that was validated, whatever the tag points at.
+const DEFAULT_SYNAPSE_IMAGE =
+  "matrixdotorg/synapse:v1.164.1@sha256:fa4aa980f279bcf26d4e7ecc2a2c9a701c73f2ebe8841da9bdcf3b2fdf693d75";
 const DEFAULT_CADDY_IMAGE = "caddy:2.10.2-alpine";
 // Custom Caddy image built with the deSEC DNS-01 plugin (xcaddy). Used ONLY in
 // relay TLS-passthrough mode, where the node terminates its own TLS via
@@ -138,6 +151,9 @@ export type BundledMatrixProvisionResult = {
   // Relay TLS-passthrough: the node terminates its own TLS (deSEC DNS-01) and
   // the relay forwards the encrypted stream by SNI. false for all legacy modes.
   passthrough: boolean;
+  // A previous run already provisioned this homeserver, so starting it may
+  // first migrate that database to the bundled Synapse's schema.
+  existingDatabase?: boolean;
 };
 
 type MatrixBootstrapAccount = {
@@ -508,6 +524,8 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       federationEnabled,
       tlsMode,
       passthrough,
+      existingDatabase:
+        existingPostgresPassword !== undefined && existingPostgresPassword.length > 0,
     };
   }
 
@@ -1545,8 +1563,9 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     onProgress?: MatrixProgressReporter,
   ): Promise<void> {
     const baseUrl = provision.adminBaseUrl;
+    const timeoutMs = resolveSynapseReadyTimeoutMs(provision.existingDatabase === true);
     const startedAt = Date.now();
-    const deadline = startedAt + MATRIX_READY_TIMEOUT_MS;
+    const deadline = startedAt + timeoutMs;
     let lastError = "unknown";
     let lastHeartbeatAt = 0;
 
@@ -1600,7 +1619,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       retryable: true,
       details: {
         baseUrl,
-        timeoutMs: MATRIX_READY_TIMEOUT_MS,
+        timeoutMs,
         lastError,
       },
     };
@@ -2678,6 +2697,11 @@ const renderSigningKey = (): string => {
   const seed = randomBytes(32).toString("base64").replace(/=+$/g, "");
   return `${keyType} ${keyId} ${seed}`;
 };
+
+export const resolveSynapseReadyTimeoutMs = (existingDatabase: boolean): number =>
+  existingDatabase
+    ? Math.max(MATRIX_READY_TIMEOUT_MS, MATRIX_UPGRADE_READY_TIMEOUT_MS)
+    : MATRIX_READY_TIMEOUT_MS;
 
 const resolveSynapseImage = (): string => {
   const configured = process.env.SOVEREIGN_MATRIX_SYNAPSE_IMAGE?.trim();

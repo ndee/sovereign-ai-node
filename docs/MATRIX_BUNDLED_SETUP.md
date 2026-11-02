@@ -201,6 +201,24 @@ The bundled profile should set conservative defaults:
 
 The installer should avoid leaving bootstrap registration enabled after account creation.
 
+## Bundled Synapse Version and Upgrades
+
+The bundled stack runs `matrixdotorg/synapse:v1.164.1`, pinned by its multi-arch index digest (linux/amd64 and linux/arm64). `SOVEREIGN_MATRIX_SYNAPSE_IMAGE` overrides the image for testing.
+
+Upgrading an existing node from Synapse 1.125 to 1.164 happens in one step on the next install or update run:
+
+- on its first start Synapse migrates the database schema (89 to 95) before it opens its listener, then runs background updates while already serving
+- the installer waits for readiness up to `SOVEREIGN_MATRIX_UPGRADE_READY_TIMEOUT_MS` (default 30 minutes) when the homeserver database already exists, and up to `SOVEREIGN_MATRIX_READY_TIMEOUT_MS` (default 10 minutes) on a fresh install; a start that answers sooner continues immediately, and the progress log reports the elapsed wait every 30 seconds
+- how long the migration takes on SD-card storage has not been measured yet; 30 minutes leaves wide headroom over the expected schema migration of a single-household database and can be raised through the environment variable without a release
+- the upgrade is fix-forward only: Synapse 1.125 may still open the migrated database, but upstream does not test that, so do not downgrade the image to roll back; restore a backup taken before the upgrade instead
+
+Behaviour changes in 1.164 that the bundled profile accounts for:
+
+- new rooms use room version 12, in which a room creator's power is implicit and not listed in `power_levels.users`; the alert room is created by the operator account and does not rely on power-level entries for the operator or the bots
+- the legacy push rules that highlighted a message whose body contained the user's display name or user ID are gone (MSC4210); messages in the alert room still notify through the default room message rules, and the test alert mentions the operator explicitly through `m.mentions`
+- the rendered `homeserver.yaml` sets none of the options 1.164 refuses to start with (for example `limit_profile_requests_to_users_who_share_rooms` without `require_auth_for_profile_requests`); room-directory publication is admin-only by default, which matches the private alert room
+- removed unstable client endpoints (MSC2965 `auth_issuer` and `.well-known`, `/sync/e2ee`) are not used by the node, and the reverse proxy forwards `/_matrix/client/*` as a whole rather than per endpoint
+
 ## Account and Room Bootstrap
 
 The bundled install must create a working operator channel, not just a homeserver.
