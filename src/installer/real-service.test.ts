@@ -13727,6 +13727,7 @@ describe("RealInstallerService", () => {
         },
         updateFederationConfig: async (params) => {
           federationUpdateArgs = params as Record<string, unknown>;
+          return undefined;
         },
         bootstrapAccounts: async () => {
           throw new Error("not used");

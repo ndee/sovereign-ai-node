@@ -395,15 +395,24 @@ describe("bundled Matrix edge policy", () => {
     });
 
     it("fails when the reverse proxy cannot be recreated", async () => {
-      const { projectDir } = await provision("auto", false);
+      const { caddyfile, projectDir } = await provision("auto", false);
       const runner = recordingExecRunner(calls, (input) =>
         (input.args ?? []).includes("reverse-proxy") ? 1 : 0,
       );
+      // The rollback recreates the proxy on the restored Caddyfile; when that
+      // fails too the edge state is unknown, so a plain retry is not offered.
       await expect(toggle(projectDir, true, runner)).rejects.toMatchObject({
         code: "MATRIX_EDGE_RELOAD_FAILED",
-        retryable: true,
-        details: { exitCode: 1, stderr: "compose said no" },
+        retryable: false,
+        details: {
+          exitCode: 1,
+          stderr: "compose said no",
+          rollback: { complete: false, failures: [{ step: "recreate reverse-proxy" }] },
+        },
       });
+      expect(await readFile(join(projectDir, "reverse-proxy", "Caddyfile"), "utf8")).toBe(
+        caddyfile,
+      );
     });
   });
 });
