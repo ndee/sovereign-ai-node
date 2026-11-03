@@ -9,6 +9,13 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 From this point forward, GitHub Release notes are auto-generated from commit history
 by the `.github/workflows/release.yml` workflow.
 
+## [2.13.1](https://github.com/ndee/sovereign-ai-node/compare/v2.13.0...v2.13.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* **matrix:** allow the docker helper to recreate one service so the federation toggle works for the service user ([#344](https://github.com/ndee/sovereign-ai-node/issues/344)) ([d4311a9](https://github.com/ndee/sovereign-ai-node/commit/d4311a9972009267b81d8b4a96b033d376285a10))
+
 ## [2.13.0](https://github.com/ndee/sovereign-ai-node/compare/v2.12.3...v2.13.0) (2026-11-02)
 
 

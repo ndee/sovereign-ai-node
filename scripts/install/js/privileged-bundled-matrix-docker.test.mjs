@@ -109,6 +109,8 @@ describe("parseRequest", () => {
     [["up", "-d"], "up"],
     [["up", "-d", "postgres"], "up"],
     [["up", "-d", "--remove-orphans", "--force-recreate", "synapse"], "recreate"],
+    [["up", "-d", "--no-deps", "--force-recreate", "reverse-proxy"], "recreate-one"],
+    [["up", "-d", "--no-deps", "--force-recreate", "synapse", "postgres"], "recreate-one"],
     [["down"], "down"],
     [["down", "--remove-orphans"], "down-orphans"],
     [["ps", "-a"], "ps"],
@@ -166,6 +168,10 @@ describe("parseRequest", () => {
     [["run", "--rm", "synapse"]],
     [["up", "-d", "--build"]],
     [["up", "-d", "../evil"]],
+    [["up", "-d", "--no-deps", "reverse-proxy"]],
+    [["up", "-d", "--no-deps", "--force-recreate", "../evil"]],
+    [["up", "-d", "--force-recreate", "--no-deps", "reverse-proxy"]],
+    [["up", "-d", "--no-deps", "--force-recreate", "--build", "reverse-proxy"]],
     [["logs", "--no-color", "--tail", "all", "synapse"]],
     [["logs", "--no-color", "--tail", "200", "Bad"]],
     [["restart", "synapse", "postgres"]],
@@ -529,6 +535,15 @@ describe("runBundledMatrixDocker", () => {
   it("refuses a service that the project does not define", () => {
     const { run } = setup();
     expect(() => run([PROJECT, "compose", "restart", "caddy"])).toThrow(/no service caddy/);
+  });
+
+  it("recreates a single service without touching its dependencies", () => {
+    const { calls, run } = setup();
+    expect(run([PROJECT, "compose", "up", "-d", "--no-deps", "--force-recreate", "synapse"])).toBe(0);
+    expect(calls[1].args.slice(-5)).toEqual(["up", "-d", "--no-deps", "--force-recreate", "synapse"]);
+    expect(() =>
+      run([PROJECT, "compose", "up", "-d", "--no-deps", "--force-recreate", "caddy"]),
+    ).toThrow(/no service caddy/);
   });
 
   it("refuses to run a project that fails the policy", () => {

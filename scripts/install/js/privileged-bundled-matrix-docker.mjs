@@ -96,6 +96,11 @@ export const COMPOSE_FORMS = [
     accepts: prefixed(["up", "-d", "--remove-orphans", "--force-recreate"], services),
     services: (a) => a.slice(4),
   },
+  {
+    id: "recreate-one",
+    accepts: prefixed(["up", "-d", "--no-deps", "--force-recreate"], services),
+    services: (a) => a.slice(4),
+  },
   { id: "down", accepts: exact(["down"]) },
   { id: "down-orphans", accepts: exact(["down", "--remove-orphans"]) },
   { id: "ps", accepts: exact(["ps", "-a"]) },
