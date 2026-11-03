@@ -61,6 +61,18 @@ MATRIX_PLUGIN_ARGS="${OPENCLAW_MIGRATE_MATRIX_PLUGIN_ARGS-$DEFAULT_MATRIX_PLUGIN
 MATRIX_PLUGIN_CONSENT="${OPENCLAW_MIGRATE_MATRIX_PLUGIN_CONSENT:-auto}"
 # auto: opt in to a private/loopback homeserver only when the configured one is.
 ALLOW_PRIVATE_MATRIX="${OPENCLAW_MIGRATE_ALLOW_PRIVATE_MATRIX:-auto}"
+# OpenClaw treats a web-search provider as configured when one of its
+# credential env vars is set, even with no provider chosen, and the Perplexity
+# entry accepts OPENROUTER_API_KEY, which the gateway always has. From 2026.8
+# the first gateway start after an upgrade installs every such plugin and exits
+# 1 when it cannot (no TTY for capability consent, the newest release needs a
+# newer host), so systemd restarts it forever. The managed agents deny
+# web_search anyway. keep: leave tools.web.search as configured.
+WEB_SEARCH_MODE="${OPENCLAW_MIGRATE_WEB_SEARCH:-disable}"
+# What a failed start/health step records about the gateway unit.
+JOURNALCTL="${OPENCLAW_MIGRATE_JOURNALCTL:-journalctl}"
+GATEWAY_JOURNAL_LINES="${OPENCLAW_MIGRATE_GATEWAY_JOURNAL_LINES:-120}"
+GATEWAY_SHOW_PROPS="NRestarts,Result,ActiveState,SubState,ExecMainCode,ExecMainStatus,ExecMainPID,MainPID,ExecMainStartTimestamp,ExecMainExitTimestamp"
 # The /tools/invoke session the mail review uses; probed for llm-task.
 LLM_TASK_SESSION="${OPENCLAW_MIGRATE_LLM_TASK_SESSION:-agent:mail-sentinel:main}"
 # What a CLI prints when it wanted to ask something. Doctor does not prompt
@@ -112,6 +124,10 @@ SHRINKWRAP_PACKAGES=0
 FAILED_STEP=""
 FINAL_MESSAGE=""
 UNITS_RESTARTED=false
+GATEWAY_SINCE=""
+GATEWAY_DIAG_SINCE=""
+GATEWAY_SHOW_FILE=""
+GATEWAY_JOURNAL_FILE=""
 STEPS_FILE=""
 LOG_FILE=""
 WORK_DIR=""
@@ -540,7 +556,7 @@ const fs = require("node:fs");
 const [stepsFile, out, ok, target, from, backupPath, backupBytes, backupSourceBytes, pkgBackup,
   promptSeen, runsFile, lobVersion, lobOk, lobDetail, swSource, swPackages, message, failedStep,
   unitsRestarted, startedAt, dryRun, alreadyDone, resumed, schema, nodeVersion, nodeOk,
-  nodeUpgraded] = process.argv.slice(1);
+  nodeUpgraded, gatewayUnit, gatewaySince, gatewayShowFile, gatewayJournalFile] = process.argv.slice(1);
 const steps = [];
 try {
   for (const line of fs.readFileSync(stepsFile, "utf8").split("\n")) {
@@ -561,6 +577,19 @@ try {
       interactive_prompt_seen: seen === "true" });
   }
 } catch {}
+const readLines = (file) => {
+  try { return fs.readFileSync(file, "utf8").split("\n").filter((l) => l.trim() !== ""); } catch { return []; }
+};
+let gateway = null;
+if (gatewayShowFile || gatewayJournalFile) {
+  const show = {};
+  for (const line of readLines(gatewayShowFile)) {
+    const i = line.indexOf("=");
+    if (i > 0) show[line.slice(0, i)] = line.slice(i + 1);
+  }
+  gateway = { unit: gatewayUnit, since: gatewaySince ? new Date(Number(gatewaySince) * 1000).toISOString() : null,
+    show, journal: readLines(gatewayJournalFile) };
+}
 const result = {
   ok: ok === "true",
   target,
@@ -577,6 +606,7 @@ const result = {
   failed_step: failedStep || null,
   units_restarted_on_old_version: unitsRestarted === "true",
   message: message || null,
+  gateway,
   started_at: startedAt,
   finished_at: new Date().toISOString(),
   schema: Number(schema),
@@ -602,7 +632,8 @@ write_result() {
     "$UNITS_RESTARTED" "$STARTED_AT" "$DRY_RUN" \
     "$([[ $ALREADY_DONE == 1 ]] && echo true || echo false)" \
     "$([[ $RESUMING == 1 ]] && echo true || echo false)" "$RESULT_SCHEMA" \
-    "$node_version" "$node_ok" "$NODE_UPGRADED"
+    "$node_version" "$node_ok" "$NODE_UPGRADED" \
+    "$GATEWAY_UNIT" "$GATEWAY_DIAG_SINCE" "$GATEWAY_SHOW_FILE" "$GATEWAY_JOURNAL_FILE"
 }
 
 finish() {
@@ -995,11 +1026,58 @@ install_matrix_plugin() {
   STEP_DETAIL="installed $args"
 }
 
+# See WEB_SEARCH_MODE. Runs after the first doctor pass: the newer CLI may
+# refuse to edit a config that still has keys only doctor migrates.
+disable_web_search() {
+  local version="$1" out="$WORK_DIR/web-search-$1.out" rc current
+  if [[ "$WEB_SEARCH_MODE" == keep ]]; then
+    STEP_DETAIL="tools.web.search left as configured"
+    return 0
+  fi
+  current="$(json_field "$CONFIG_PATH" tools.web.search.enabled)"
+  if [[ "$current" == false ]]; then
+    STEP_DETAIL="tools.web.search.enabled already false"
+    return 0
+  fi
+  openclaw_cli "$CMD_TIMEOUT" config set tools.web.search.enabled false --strict-json >"$out" 2>&1
+  rc=$?
+  log_output "$out"
+  if ((rc != 0)); then
+    failed_detail "disabling tools.web.search.enabled" "$rc" "$out"
+    return 1
+  fi
+  STEP_DETAIL="set tools.web.search.enabled=false (was ${current:-unset})"
+}
+
+# Records why the gateway did not come up: the unit's restart/exit state and
+# the redacted tail of its journal since it was started, in migration.log and
+# result.json.
+capture_gateway_diagnostics() {
+  local since="${GATEWAY_SINCE:-$1}" show_raw="$WORK_DIR/gateway-show.raw" journal_raw="$WORK_DIR/gateway-journal.raw"
+  GATEWAY_DIAG_SINCE="$since"
+  GATEWAY_SHOW_FILE="$WORK_DIR/gateway-show.txt"
+  GATEWAY_JOURNAL_FILE="$WORK_DIR/gateway-journal.txt"
+  systemctl show -p "$GATEWAY_SHOW_PROPS" "$GATEWAY_UNIT" >"$show_raw" 2>&1
+  if command -v "$JOURNALCTL" >/dev/null 2>&1; then
+    "$JOURNALCTL" -u "$GATEWAY_UNIT" --since "@$since" --no-pager -n "$GATEWAY_JOURNAL_LINES" -o short-iso >"$journal_raw" 2>&1
+  else
+    printf 'journalctl unavailable (%s)\n' "$JOURNALCTL" >"$journal_raw"
+  fi
+  redact <"$show_raw" >"$GATEWAY_SHOW_FILE"
+  redact <"$journal_raw" | tail -n "$GATEWAY_JOURNAL_LINES" >"$GATEWAY_JOURNAL_FILE"
+  log "gateway diagnostics: systemctl show $GATEWAY_UNIT"
+  log_output "$GATEWAY_SHOW_FILE"
+  log "gateway diagnostics: journal of $GATEWAY_UNIT since @$since (last $GATEWAY_JOURNAL_LINES lines)"
+  log_output "$GATEWAY_JOURNAL_FILE"
+}
+
 # Holds the gateway up once on the stage release: the 2026.6 Matrix plugin
 # finishes moving the flat store and recoverable room keys at startup.
 run_stage_gateway() {
+  GATEWAY_SINCE="$(date +%s)"
   systemctl start "$GATEWAY_UNIT" >>"$LOG_FILE" 2>&1 || {
     STEP_DETAIL="starting $GATEWAY_UNIT on $STAGE_VERSION failed"
+    capture_gateway_diagnostics "$GATEWAY_SINCE"
     return 1
   }
   step_health || {
@@ -1018,6 +1096,7 @@ step_stage() {
   mark_touched stage
   install_version "$STAGE_VERSION" || return 1
   run_doctor "$STAGE_VERSION" config || return 1
+  disable_web_search "$STAGE_VERSION" || return 1
   install_matrix_plugin "$STAGE_VERSION" || return 1
   run_doctor "$STAGE_VERSION" matrix || return 1
   run_stage_gateway || return 1
@@ -1114,6 +1193,10 @@ step_doctor() {
   run_doctor "$TARGET" config
 }
 
+step_web_search() {
+  disable_web_search "$TARGET"
+}
+
 step_matrix_plugin() {
   mark_touched matrix-plugin
   install_matrix_plugin "$TARGET"
@@ -1142,8 +1225,10 @@ step_validate() { run_cli_check config-validate "$VALIDATE_ARGS"; }
 step_matrix_verify() { run_cli_check matrix-verify "$MATRIX_VERIFY_ARGS"; }
 
 step_start() {
+  GATEWAY_SINCE="$(date +%s)"
   if ! start_units; then
     STEP_DETAIL="systemctl start failed"
+    capture_gateway_diagnostics "$GATEWAY_SINCE"
     return 1
   fi
   STEP_DETAIL="started $GATEWAY_UNIT"
@@ -1157,9 +1242,10 @@ gateway_restarts() {
 # gateway answers HTTP on its loopback port (any status code counts: the
 # root path may require auth, but a transport error means it is not up).
 step_health() {
-  local deadline baseline code now
+  local deadline baseline code now started
+  started="$(date +%s)"
   baseline="$(gateway_restarts)"
-  deadline=$(($(date +%s) + HEALTH_TIMEOUT))
+  deadline=$((started + HEALTH_TIMEOUT))
   while :; do
     if systemctl_quiet is-active "$GATEWAY_UNIT"; then
       code="$(curl -s -o /dev/null -m 5 -w '%{http_code}' "$GATEWAY_URL" 2>/dev/null || true)"
@@ -1170,11 +1256,13 @@ step_health() {
     fi
     if [[ "$(gateway_restarts)" != "$baseline" ]]; then
       STEP_DETAIL="$GATEWAY_UNIT restarted while starting"
+      capture_gateway_diagnostics "$started"
       return 1
     fi
     now="$(date +%s)"
     if ((now >= deadline)); then
       STEP_DETAIL="gateway not healthy after ${HEALTH_TIMEOUT}s (last HTTP code '${code:-none}')"
+      capture_gateway_diagnostics "$started"
       return 1
     fi
     sleep "$HEALTH_POLL"
@@ -1290,13 +1378,14 @@ EOF
     plan_line "node: apt-get install --only-upgrade nodejs"
   fi
   if needs_stage; then
-    plan_line "stage: npm install -g openclaw@$STAGE_VERSION; openclaw $DOCTOR_ARGS; openclaw ${MATRIX_PLUGIN_ARGS//%VERSION%/$STAGE_VERSION}; doctor again; start the gateway once (${STAGE_SETTLE}s) and stop it"
+    plan_line "stage: npm install -g openclaw@$STAGE_VERSION; openclaw $DOCTOR_ARGS; web search off; openclaw ${MATRIX_PLUGIN_ARGS//%VERSION%/$STAGE_VERSION}; doctor again; start the gateway once (${STAGE_SETTLE}s) and stop it"
   else
     plan_line "stage: skip (no legacy Matrix store; stage mode $STAGE_MODE)"
   fi
   plan_line "upgrade: npm install -g openclaw@$TARGET (prefix ${NPM_PREFIX:-unknown})"
   plan_line "shrinkwrap: write $OUT_DIR/npm-shrinkwrap.json from the installed tree"
   plan_line "doctor: openclaw $DOCTOR_ARGS (stdin closed, ${DOCTOR_TIMEOUT}s; a prompt fails the run)"
+  plan_line "web-search: openclaw config set tools.web.search.enabled false (mode $WEB_SEARCH_MODE)"
   plan_line "matrix-plugin: openclaw ${MATRIX_PLUGIN_ARGS//%VERSION%/$TARGET} (--accept-capabilities: $MATRIX_PLUGIN_CONSENT); private homeserver opt-in: $ALLOW_PRIVATE_MATRIX"
   plan_line "doctor-matrix: openclaw $DOCTOR_ARGS again for the plugin's own migrations"
   plan_line "config-validate: openclaw $VALIDATE_ARGS"
@@ -1424,7 +1513,7 @@ main() {
     local s
     for s in stop backup node stage upgrade; do skip_step "$s" "already migrated to $TARGET"; done
     run_step shrinkwrap step_shrinkwrap
-    for s in doctor matrix-plugin doctor-matrix config-validate matrix-verify start; do skip_step "$s" "already migrated to $TARGET"; done
+    for s in doctor web-search matrix-plugin doctor-matrix config-validate matrix-verify start; do skip_step "$s" "already migrated to $TARGET"; done
     run_step health step_health
     run_step lobster step_lobster
     FINAL_MESSAGE="already migrated to $TARGET; nothing changed"
@@ -1468,6 +1557,7 @@ main() {
   fi
   run_step shrinkwrap step_shrinkwrap
   run_step doctor step_doctor
+  run_step web-search step_web_search
   run_step matrix-plugin step_matrix_plugin
   run_step doctor-matrix step_doctor_matrix
   run_step config-validate step_validate

@@ -1,6 +1,6 @@
 // Hermetic tests for scripts/openclaw-migrate.sh. Every external program the
-// script drives (systemctl, npm, apt-get, curl, getent, runuser, the OpenClaw
-// CLI and lobster) is a stub whose behaviour is switched by files in the
+// script drives (systemctl, journalctl, npm, apt-get, curl, getent, runuser,
+// the OpenClaw CLI and lobster) is a stub whose behaviour is switched by files in the
 // fixture's state directory: the script runs OpenClaw under `env -i`, so
 // environment variables would not reach the stubs.
 
@@ -157,7 +157,7 @@ case "$1 \${2:-}" in
     [ -e "$S/validate-fail" ] && { echo "config invalid"; exit 1; }
     echo "config ok"; exit 0 ;;
   "config get") [ -e "$S/config-get-redacted" ] && { echo "__OPENCLAW_REDACTED__"; exit 0; }; echo "\\"${SECRETS.gateway}\\""; exit 0 ;;
-  "config set") [ -e "$S/config-set-fail" ] && exit 1; echo "updated $3"; exit 0 ;;
+  "config set") [ -e "$S/config-set-fail-$3" ] && { echo "config set $3 refused"; exit 1; }; echo "updated $3"; exit 0 ;;
   "plugins install")
     # The stage release predates capability consent and rejects the flag;
     # the target refuses an enabled plugin without it when there is no TTY.
@@ -277,6 +277,12 @@ case "$1" in
     touch "$S/active/$unit"; exit 0 ;;
   cat) [ -e ${JSON.stringify(units)}/"$unit" ]; exit ;;
   show)
+    case " $* " in
+      *" --value "*) ;;
+      *)
+        if [ -e "$S/show-props" ]; then cat "$S/show-props"; else printf 'NRestarts=%s\nResult=success\nActiveState=active\nSubState=running\n' "$(cat "$S/nrestarts" 2>/dev/null || echo 0)"; fi
+        exit 0 ;;
+    esac
     n="$(cat "$S/nrestarts" 2>/dev/null || echo 0)"; echo "$n"
     [ -e "$S/health-restart" ] && echo $((n + 1)) >"$S/nrestarts"
     exit 0 ;;
@@ -315,6 +321,13 @@ if [ -e "$S/active/${GATEWAY}" ] && [ ! -e "$S/health-fail" ] && [ ! -e "$S/heal
   if [ ! -e "$S/stage-health-fail" ] || ! grep -q '"version": "${STAGE}"' ${JSON.stringify(join(pkg, "package.json"))}; then printf '401'; exit 0; fi
 fi
 printf '000'; exit 7`,
+  );
+  stub(
+    bin,
+    "journalctl",
+    `printf 'journalctl %s\\n' "$*" >>"$S/calls.log"
+[ -e "$S/journal" ] && cat "$S/journal"
+exit 0`,
   );
   stub(bin, "getent", `printf '%s:x:1000:1000::%s:/bin/bash\\n' "$2" ${JSON.stringify(home)}`);
   stub(bin, "runuser", `printf 'runuser %s\\n' "$*" >>"$S/calls.log"; shift 3; exec "$@"`);
@@ -377,6 +390,7 @@ const ALL_STEPS = [
   "upgrade",
   "shrinkwrap",
   "doctor",
+  "web-search",
   "matrix-plugin",
   "doctor-matrix",
   "config-validate",
@@ -425,7 +439,7 @@ describe("openclaw-migrate.sh happy path", () => {
     const fx = makeFixture({ homeserver: "https://matrix.example.org" });
     const r = await run(fx);
     expect(r.status).toBe(0);
-    expect(r.calls.some((c) => c.includes("config set"))).toBe(false);
+    expect(r.calls.some((c) => c.includes("dangerouslyAllowPrivateNetwork"))).toBe(false);
     expect(r.calls.some((c) => c.includes("plugins install"))).toBe(true);
   });
 
@@ -433,7 +447,7 @@ describe("openclaw-migrate.sh happy path", () => {
     const fx = makeFixture({ homeserver: "https://matrix.example.org" });
     const r = await run(fx, undefined, { OPENCLAW_MIGRATE_MATRIX_PLUGIN_ARGS: "" });
     expect(r.status).toBe(0);
-    expect(r.calls.some((c) => c.includes("plugins install") || c.includes("config set"))).toBe(false);
+    expect(r.calls.some((c) => c.includes("plugins install") || c.includes("dangerouslyAllowPrivateNetwork"))).toBe(false);
     expect(r.result.steps.find((s) => s.name === "matrix-plugin").detail).toBe("matrix plugin install disabled");
   });
 
@@ -467,6 +481,7 @@ describe("openclaw-migrate.sh happy path", () => {
         expect.stringMatching(
           new RegExp(`^openclaw@${TARGET} config set channels\\.matrix\\.network\\.dangerouslyAllowPrivateNetwork true --strict-json`),
         ),
+        expect.stringMatching(new RegExp(`^openclaw@${TARGET} config set tools\\.web\\.search\\.enabled false --strict-json`)),
       ]),
     );
   });
@@ -661,6 +676,12 @@ describe("openclaw-migrate.sh failing steps", () => {
     { step: "shrinkwrap", setup: (fx) => flag(fx, "lockfile-mismatch"), touched: true, detail: /: mismatch node_modules\/dep: lockfile 0\.9\.0, installed 1\.0\.0$/ },
     { step: "doctor", setup: (fx) => flag(fx, `doctor-fail-${TARGET}`), touched: true },
     {
+      step: "web-search",
+      setup: (fx) => flag(fx, "config-set-fail-tools.web.search.enabled"),
+      touched: true,
+      detail: "disabling tools.web.search.enabled exited 1: config set tools.web.search.enabled refused",
+    },
+    {
       step: "matrix-plugin",
       setup: (fx) => flag(fx, "plugin-fail"),
       touched: true,
@@ -669,9 +690,9 @@ describe("openclaw-migrate.sh failing steps", () => {
     {
       step: "matrix-plugin",
       name: "opt-in fails",
-      setup: (fx) => flag(fx, "config-set-fail"),
+      setup: (fx) => flag(fx, "config-set-fail-channels.matrix.network.dangerouslyAllowPrivateNetwork"),
       touched: true,
-      detail: "enabling channels.matrix.network.dangerouslyAllowPrivateNetwork exited 1",
+      detail: "enabling channels.matrix.network.dangerouslyAllowPrivateNetwork exited 1: config set channels.matrix.network.dangerouslyAllowPrivateNetwork refused",
     },
     { step: "doctor-matrix", setup: (fx) => flag(fx, "doctor-matrix-fail"), touched: true },
     { step: "config-validate", setup: (fx) => flag(fx, "validate-fail"), touched: true, detail: "openclaw config validate exited 1: config invalid" },
@@ -854,6 +875,143 @@ describe("openclaw-migrate.sh matrix plugin", () => {
   });
 });
 
+const WEB_SEARCH_SET = "config set tools.web.search.enabled false --strict-json";
+
+describe("openclaw-migrate.sh web search", () => {
+  const callIndex = (r, re) => r.calls.findIndex((c) => re.test(c));
+
+  it("turns web search off after the first doctor pass and before the plugin install", async () => {
+    const fx = makeFixture();
+    const r = await run(fx);
+    expect(r.status).toBe(0);
+    const set = callIndex(r, new RegExp(`^openclaw@${TARGET} ${WEB_SEARCH_SET.replaceAll(".", "\\.")}`));
+    expect(set).toBeGreaterThan(callIndex(r, / doctor --fix/));
+    expect(set).toBeLessThan(callIndex(r, / plugins install npm:/));
+    expect(r.result.steps.find((s) => s.name === "web-search").detail).toBe("set tools.web.search.enabled=false (was unset)");
+  });
+
+  it("leaves a config that already has web search off alone", async () => {
+    const fx = makeFixture();
+    const config = join(fx.home, ".openclaw", "openclaw.json5");
+    writeFileSync(config, JSON.stringify({ ...JSON.parse(readFileSync(config, "utf8")), tools: { web: { search: { enabled: false } } } }));
+    const r = await run(fx);
+    expect(r.status).toBe(0);
+    expect(r.calls.some((c) => c.includes("tools.web.search"))).toBe(false);
+    expect(r.result.steps.find((s) => s.name === "web-search").detail).toBe("tools.web.search.enabled already false");
+  });
+
+  it("can leave web search as configured", async () => {
+    const fx = makeFixture();
+    const r = await run(fx, undefined, { OPENCLAW_MIGRATE_WEB_SEARCH: "keep" });
+    expect(r.status).toBe(0);
+    expect(r.calls.some((c) => c.includes("tools.web.search"))).toBe(false);
+    expect(r.result.steps.find((s) => s.name === "web-search").detail).toBe("tools.web.search left as configured");
+  });
+
+  it("turns web search off on the 6.x stage too, before its gateway start", async () => {
+    const fx = makeFixture({ flatMatrixStore: true });
+    const r = await run(fx);
+    expect(r.status).toBe(0);
+    const set = callIndex(r, new RegExp(`^openclaw@${STAGE} ${WEB_SEARCH_SET.replaceAll(".", "\\.")}`));
+    expect(set).toBeGreaterThan(-1);
+    expect(set).toBeLessThan(callIndex(r, new RegExp(`^systemctl start ${GATEWAY}`)));
+  });
+});
+
+describe("openclaw-migrate.sh gateway diagnostics", () => {
+  const SHOW_PROPS = ["NRestarts=1", "Result=exit-code", "ActiveState=activating", "SubState=auto-restart", "ExecMainCode=1", "ExecMainStatus=1", "MainPID=0", ""].join("\n");
+  const JOURNAL = [
+    "2026-11-03T11:31:44+00:00 node openclaw[64474]: Doctor warnings",
+    `2026-11-03T11:31:45+00:00 node openclaw[64474]: Failed to install missing configured plugin "perplexity": key ${SECRETS.openrouter} token=${SECRETS.gateway}`,
+    "2026-11-03T11:31:45+00:00 node openclaw[64474]: OpenClaw plugin verification failed; refusing to report the gateway ready.",
+    "2026-11-03T11:31:46+00:00 node systemd[1]: sovereign-openclaw-gateway.service: Main process exited, code=exited, status=1/FAILURE",
+    "",
+  ].join("\n");
+
+  const restartLoop = () => {
+    const fx = makeFixture();
+    flag(fx, "health-restart");
+    flag(fx, "show-props", SHOW_PROPS);
+    flag(fx, "journal", JOURNAL);
+    return fx;
+  };
+
+  it("puts the unit's state and journal into migration.log and result.json when health fails", async () => {
+    const fx = restartLoop();
+    const before = Math.floor(Date.now() / 1000);
+    const r = await run(fx);
+    expect(r.status).toBe(1);
+    expect(r.result.failed_step).toBe("health");
+    const journalCall = r.calls.find((c) => c.startsWith("journalctl "));
+    expect(journalCall).toMatch(new RegExp(`^journalctl -u ${GATEWAY} --since @(\\d+) --no-pager -n 120 -o short-iso$`));
+    const since = Number(/@(\d+)/.exec(journalCall)[1]);
+    expect(since).toBeGreaterThanOrEqual(before);
+    expect(r.calls).toContain(
+      `systemctl show -p NRestarts,Result,ActiveState,SubState,ExecMainCode,ExecMainStatus,ExecMainPID,MainPID,ExecMainStartTimestamp,ExecMainExitTimestamp ${GATEWAY}`,
+    );
+    expect(r.result.gateway).toEqual({
+      unit: GATEWAY,
+      since: new Date(since * 1000).toISOString(),
+      show: {
+        NRestarts: "1",
+        Result: "exit-code",
+        ActiveState: "activating",
+        SubState: "auto-restart",
+        ExecMainCode: "1",
+        ExecMainStatus: "1",
+        MainPID: "0",
+      },
+      journal: [
+        "2026-11-03T11:31:44+00:00 node openclaw[64474]: Doctor warnings",
+        '2026-11-03T11:31:45+00:00 node openclaw[64474]: Failed to install missing configured plugin "perplexity": key <redacted> token=<redacted>',
+        "2026-11-03T11:31:45+00:00 node openclaw[64474]: OpenClaw plugin verification failed; refusing to report the gateway ready.",
+        "2026-11-03T11:31:46+00:00 node systemd[1]: sovereign-openclaw-gateway.service: Main process exited, code=exited, status=1/FAILURE",
+      ],
+    });
+    expect(r.log).toContain("    | Result=exit-code");
+    expect(r.log).toContain("    | 2026-11-03T11:31:45+00:00 node openclaw[64474]: OpenClaw plugin verification failed");
+    const resultText = readFileSync(join(fx.out, "result.json"), "utf8");
+    for (const secret of Object.values(SECRETS)) {
+      expect(resultText).not.toContain(secret);
+      expect(r.log).not.toContain(secret);
+    }
+  });
+
+  it("keeps only the last lines of a long journal", async () => {
+    const fx = restartLoop();
+    flag(fx, "journal", Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n") + "\n");
+    const r = await run(fx, undefined, { OPENCLAW_MIGRATE_GATEWAY_JOURNAL_LINES: "5" });
+    expect(r.calls.find((c) => c.startsWith("journalctl "))).toContain(" -n 5 ");
+    expect(r.result.gateway.journal).toEqual(["line 25", "line 26", "line 27", "line 28", "line 29"]);
+  });
+
+  it("captures them when the start itself fails", async () => {
+    const fx = makeFixture();
+    flag(fx, "start-fail");
+    flag(fx, "journal", "start refused\n");
+    const r = await run(fx);
+    expect(r.result.failed_step).toBe("start");
+    expect(r.result.gateway.journal).toEqual(["start refused"]);
+    expect(r.result.gateway.show).toMatchObject({ Result: "success", ActiveState: "active" });
+  });
+
+  it("says so when journalctl is missing instead of failing differently", async () => {
+    const fx = restartLoop();
+    const r = await run(fx, undefined, { OPENCLAW_MIGRATE_JOURNALCTL: join(fx.root, "no-journalctl") });
+    expect(r.result.failed_step).toBe("health");
+    expect(r.result.gateway.journal).toEqual([`journalctl unavailable (${join(fx.root, "no-journalctl")})`]);
+    expect(r.result.gateway.show.Result).toBe("exit-code");
+  });
+
+  it("leaves gateway null when every step succeeded", async () => {
+    const fx = makeFixture();
+    const r = await run(fx);
+    expect(r.status).toBe(0);
+    expect(r.result.gateway).toBeNull();
+    expect(r.calls.some((c) => c.startsWith("journalctl "))).toBe(false);
+  });
+});
+
 describe("openclaw-migrate.sh re-runs", () => {
   it("is a no-op success on an already migrated node", async () => {
     const fx = makeFixture();
@@ -866,7 +1024,7 @@ describe("openclaw-migrate.sh re-runs", () => {
     expect(r.result.node).toEqual({ version: "22.22.3", ok: true, upgraded: false });
     expect(r.result.backup.path).toMatch(/openclaw-state\.tar\.gz$/);
     expect(stepNames(r)).toEqual(ALL_STEPS);
-    for (const name of ["stop", "backup", "node", "stage", "upgrade", "doctor", "config-validate", "matrix-verify", "start"]) {
+    for (const name of ["stop", "backup", "node", "stage", "upgrade", "doctor", "web-search", "config-validate", "matrix-verify", "start"]) {
       expect(r.result.steps.find((s) => s.name === name)).toMatchObject({ ok: true, skipped: true });
     }
     expect(r.calls.filter((c) => /^npm |systemctl (stop|start)| doctor /.test(c))).toEqual([]);
