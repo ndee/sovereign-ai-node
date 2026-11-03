@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
+import { parse as parseYaml } from "yaml";
 
 import type { SovereignPaths } from "../config/paths.js";
 import type { InstallRequest } from "../contracts/index.js";
@@ -95,9 +96,12 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(result.tlsMode).toBe("local-dev");
       expect(result.homeserverDomain).toBe("matrix.local.test");
       expect(result.adminBaseUrl).toBe("http://127.0.0.1:8008");
+      expect(result.existingDatabase).toBe(false);
 
       const composeText = await readFile(result.composeFilePath, "utf8");
-      expect(composeText).toContain("matrixdotorg/synapse:v1.125.0");
+      expect(composeText).toContain(
+        "image: matrixdotorg/synapse:v1.164.1@sha256:fa4aa980f279bcf26d4e7ecc2a2c9a701c73f2ebe8841da9bdcf3b2fdf693d75",
+      );
       expect(composeText).toContain("postgres:16-alpine");
       expect(composeText).toContain('POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"');
       expect(composeText).toContain('"0.0.0.0:8008:8008"');
@@ -137,6 +141,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(homeserverText).toContain("allow_unsafe_locale: true");
       expect(homeserverText).toContain("rc_login:");
       expect(homeserverText).not.toContain("per_second: 1000");
+      expectStartableOnCurrentSynapse(homeserverText);
       const signingKey = await readFile(
         join(result.projectDir, "synapse", "matrix.local.test.signing.key"),
         "utf8",
@@ -219,6 +224,8 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(await modeOf(join(projectDir, ".env"))).toBe(0o600);
       expect(await modeOf(join(synapseDir, "homeserver.yaml"))).toBe(0o640);
       expect(await modeOf(join(synapseDir, "matrix.local.test.signing.key"))).toBe(0o640);
+
+      expect(result.existingDatabase).toBe(true);
 
       // Existing secrets are preserved, not regenerated.
       const envText = await readFile(join(projectDir, ".env"), "utf8");
@@ -849,6 +856,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-matrix-test-"));
     const recordedExecCalls: ExecInput[] = [];
     const recordedFetchUrls: string[] = [];
+    const createRoomBodies: unknown[] = [];
 
     const fakeExecRunner: ExecRunner = {
       run: async (input): Promise<ExecResult> => {
@@ -903,6 +911,7 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       }
 
       if (url.endsWith("/_matrix/client/v3/createRoom")) {
+        createRoomBodies.push(parseBody(init?.body));
         return jsonResponse({
           room_id: "!alerts:matrix.local.test",
         });
@@ -983,6 +992,13 @@ describe("DockerComposeBundledMatrixProvisioner", () => {
       expect(recordedFetchUrls.some((url) => url.endsWith("/_matrix/client/v3/createRoom"))).toBe(
         true,
       );
+      // Room version 12 (the Synapse default since 1.162) makes the creator's
+      // power implicit and rejects listing a creator in power_levels.users. The
+      // alert room must not depend on either: the operator creates it, the bot
+      // only needs the default (zero) power to post, and no room version is pinned.
+      expect(createRoomBodies).toEqual([
+        { name: "Alerts", preset: "private_chat", visibility: "private" },
+      ]);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -1536,6 +1552,21 @@ const buildPaths = (tempRoot: string): SovereignPaths => ({
   provenancePath: join(tempRoot, "install-provenance.json"),
   backupsDir: join(tempRoot, "backups"),
 });
+
+// Config combinations the bundled Synapse release refuses to start with, or
+// options it no longer accepts. Checked against the parsed homeserver.yaml so a
+// future renderer change cannot reintroduce one unnoticed.
+const expectStartableOnCurrentSynapse = (homeserverText: string): void => {
+  const config = parseYaml(homeserverText) as Record<string, unknown>;
+  expect(config).toBeTypeOf("object");
+  if (config.limit_profile_requests_to_users_who_share_rooms === true) {
+    expect(config.require_auth_for_profile_requests).toBe(true);
+  }
+  const experimental = (config.experimental_features ?? {}) as Record<string, unknown>;
+  expect(experimental).not.toHaveProperty("msc3861");
+  expect(experimental).not.toHaveProperty("msc2697");
+  expect(config.database).toMatchObject({ name: "psycopg2" });
+};
 
 const jsonResponse = (payload: unknown, status = 200): Response =>
   new Response(JSON.stringify(payload), {

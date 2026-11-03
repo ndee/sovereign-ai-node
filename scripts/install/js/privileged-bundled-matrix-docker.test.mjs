@@ -60,7 +60,7 @@ const model = () => ({
       ],
     },
     synapse: {
-      image: "matrixdotorg/synapse:v1.125.0",
+      image: "matrixdotorg/synapse:v1.164.1@sha256:fa4aa980f279bcf26d4e7ecc2a2c9a701c73f2ebe8841da9bdcf3b2fdf693d75",
       depends_on: { postgres: { condition: "service_started", required: true } },
       ports: [{ mode: "ingress", host_ip: "127.0.0.1", target: 8008, published: "8008" }],
       healthcheck: { test: ["CMD-SHELL", "true"], interval: "30s" },
@@ -309,7 +309,7 @@ describe("imageRepository", () => {
   it.each([
     ["postgres:16-alpine", "postgres"],
     ["docker.io/library/postgres:16", "postgres"],
-    ["matrixdotorg/synapse:v1.125.0", "matrixdotorg/synapse"],
+    ["matrixdotorg/synapse:v1.164.1@sha256:fa4aa980f279bcf26d4e7ecc2a2c9a701c73f2ebe8841da9bdcf3b2fdf693d75", "matrixdotorg/synapse"],
     ["ghcr.io/ndee/sovereign-caddy-desec:2.10.2@sha256:abc", "ghcr.io/ndee/sovereign-caddy-desec"],
     ["localhost:5000/evil", "localhost:5000/evil"],
     ["caddy", "caddy"],
@@ -320,7 +320,7 @@ describe("imageRepository", () => {
   it("allows the repositories of the images the node renders", () => {
     for (const image of [
       "postgres:16-alpine",
-      "matrixdotorg/synapse:v1.125.0",
+      "matrixdotorg/synapse:v1.164.1@sha256:fa4aa980f279bcf26d4e7ecc2a2c9a701c73f2ebe8841da9bdcf3b2fdf693d75",
       "caddy:2.10.2-alpine",
       "ghcr.io/ndee/sovereign-caddy-desec:2.10.2@sha256:370cd93ff12d1c3c691a5eaf64c06458b2c33100c481e0c6e56c0e91fd622bf6",
       "node:22-alpine",

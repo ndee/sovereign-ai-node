@@ -19,7 +19,7 @@
 # (MATRIX_FOREIGN_SYNAPSE_ON_PORT) — the install must NOT bootstrap against it.
 services:
   synapse:
-    image: matrixdotorg/synapse:v1.125.0
+    image: matrixdotorg/synapse:v1.164.1@sha256:fa4aa980f279bcf26d4e7ecc2a2c9a701c73f2ebe8841da9bdcf3b2fdf693d75
     entrypoint: ["python3", "-c"]
     command:
       - |

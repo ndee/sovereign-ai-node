@@ -342,6 +342,7 @@ import type {
   PendingMigration,
   ReconcileAgentWorkspacesOptions,
   ReconcileAgentWorkspacesResult,
+  ReconcileRuntimeRefreshReport,
   ReconcileTemplateTransitionReport,
   SovereignBotInstantiateResult,
   SovereignBotListResult,
@@ -1255,10 +1256,13 @@ export class RealInstallerService implements InstallerService {
     );
   }
 
-  private async refreshManagedMatrixRouting(runtimeConfig: RuntimeConfig): Promise<void> {
+  private async applyOpenClawRuntimeConfig(
+    runtimeConfig: RuntimeConfig,
+    gatewayOptions?: GatewayRefreshOptions,
+  ): Promise<GatewayReadinessOutcome> {
     await this.writeOpenClawRuntimeArtifacts(runtimeConfig);
     this.setManagedOpenClawEnv(runtimeConfig);
-    await this.refreshGatewayAfterRuntimeConfig(runtimeConfig);
+    return await this.refreshGatewayAfterRuntimeConfig(runtimeConfig, gatewayOptions);
   }
 
   private syncPrimaryDedicatedMatrixBotIdentity(
@@ -1442,6 +1446,7 @@ export class RealInstallerService implements InstallerService {
           body: JSON.stringify({
             msgtype: "m.text",
             body: req.text ?? `Sovereign test alert (${now()})`,
+            "m.mentions": { user_ids: [config.matrix.operator.userId] },
           }),
         });
 
@@ -2876,7 +2881,7 @@ export class RealInstallerService implements InstallerService {
       ttlMinutes: req.ttlMinutes ?? DEFAULT_MATRIX_USER_INVITE_TTL_MINUTES,
     });
     await this.writeMatrixOnboardingState(runtimeConfig, issued.state);
-    await this.refreshManagedMatrixRouting(runtimeConfig);
+    await this.applyOpenClawRuntimeConfig(runtimeConfig);
     return {
       code: issued.code,
       expiresAt: issued.state.expiresAt,
@@ -2908,7 +2913,7 @@ export class RealInstallerService implements InstallerService {
     await rm(join(this.paths.secretsDir, `matrix-user-${normalized.localpart}.password`), {
       force: true,
     });
-    await this.refreshManagedMatrixRouting(runtimeConfig);
+    await this.applyOpenClawRuntimeConfig(runtimeConfig);
     return {
       localpart: normalized.localpart,
       userId: normalized.userId,
@@ -3219,7 +3224,9 @@ export class RealInstallerService implements InstallerService {
    * OpenClaw gateway, reset agent sessions, or touch Matrix. An updater must be
    * able to call this without causing side effects it did not ask for — and
    * refreshGatewayAfterRuntimeConfig throws when the gateway cannot restart,
-   * which would abort an otherwise healthy update.
+   * which would abort an otherwise healthy update. An updater that replaced
+   * the node package asks for the gateway side explicitly with
+   * `refreshRuntime` (see refreshRuntimeAfterReconcile).
    *
    * Honours writePolicy: `always` files are overwritten from the catalog,
    * `ifMissing` files (operator state such as user-policy.json) are left alone.
@@ -3245,6 +3252,7 @@ export class RealInstallerService implements InstallerService {
           templateTransitions: [],
           releaseAuthorization: null,
           systemdUnits: { applied: [] },
+          ...(options?.refreshRuntime === true ? { runtimeRefresh: null } : {}),
         };
       }
       throw error;
@@ -3262,6 +3270,7 @@ export class RealInstallerService implements InstallerService {
     this.reconcileTransitionContext =
       authorization === null ? null : { authorization, transitions: new Map() };
 
+    let result: ReconcileAgentWorkspacesResult;
     try {
       // Compilation resolves every pinned template. With a transition context,
       // a pin mismatch that the authorization exactly binds is STAGED (the
@@ -3310,7 +3319,7 @@ export class RealInstallerService implements InstallerService {
       // update — rather than leaving a bot installed but never scheduled.
       const systemdUnits = await this.applyCompiledSystemdResourcesOrThrow(runtimeConfig);
 
-      return {
+      result = {
         reconciled,
         systemdUnits,
         templateTransitions: transitions.map((transition) =>
@@ -3328,6 +3337,105 @@ export class RealInstallerService implements InstallerService {
     } finally {
       this.reconcileTransitionContext = null;
     }
+
+    if (options?.refreshRuntime !== true) {
+      return result;
+    }
+    return { ...result, runtimeRefresh: await this.refreshRuntimeAfterReconcile() };
+  }
+
+  /**
+   * The runtime phase of `reconcile --refresh-runtime`: an ordered list of
+   * steps, stopped by the first failure. It always restarts the gateway, even
+   * when the rendered bytes are unchanged, because what an update changes is
+   * often outside them: the supplementary groups of the service user, the
+   * OpenClaw or node binary, the gateway env file.
+   *
+   * Planned steps have a fixed place in the order:
+   *   1. bundled Matrix (Synapse) refresh — before the gateway, because the
+   *      gateway unit's ExecStartPre waits for the local homeserver;
+   *   2. OpenClaw version migration — before the render, because the renderer
+   *      writes config for the pinned OpenClaw release;
+   *   3. "openclaw-runtime" — render, managed env, restart, readiness.
+   */
+  private runtimeRefreshSteps(): RuntimeRefreshStep[] {
+    // TODO: bundled Matrix refresh step (1).
+    // TODO: OpenClaw version migration step (2).
+    return [
+      {
+        id: "openclaw-runtime",
+        run: async (state) => {
+          const gateway = await this.applyOpenClawRuntimeConfig(state.runtimeConfig, {
+            preferInstalledSystemUnit: true,
+          });
+          if (!gateway.ready) {
+            throw new RuntimeRefreshStepFailure(describeGatewayNotReady(gateway), {
+              gateway: { ...gateway },
+            });
+          }
+          state.report = {
+            rendered: true,
+            restarted: gateway.unitStarted,
+            ready: true,
+            waitedMs: Math.max(0, Math.round(gateway.waitedMs)),
+            invocationId: await this.readGatewayInvocationId(gateway.unit),
+          };
+        },
+      },
+    ];
+  }
+
+  private async refreshRuntimeAfterReconcile(): Promise<ReconcileRuntimeRefreshReport> {
+    const state: RuntimeRefreshState = {
+      // Re-read: the reconcile may just have committed new template pins, and
+      // the render resolves every agent's template through them.
+      runtimeConfig: await this.readRuntimeConfig(),
+      report: { rendered: false, restarted: false, ready: false, waitedMs: 0, invocationId: null },
+    };
+    for (const step of this.runtimeRefreshSteps()) {
+      try {
+        await step.run(state);
+      } catch (error) {
+        throw {
+          code: "GATEWAY_REFRESH_FAILED",
+          message: `Runtime refresh step ${step.id} failed: ${describeError(error)}`,
+          retryable: true,
+          details: {
+            step: step.id,
+            ...(error instanceof RuntimeRefreshStepFailure
+              ? error.details
+              : {
+                  cause: {
+                    ...(isRecord(error) && typeof error.code === "string"
+                      ? { code: error.code }
+                      : {}),
+                    message: describeError(error),
+                  },
+                }),
+          },
+        };
+      }
+    }
+    return state.report;
+  }
+
+  private async readGatewayInvocationId(unit: string | undefined): Promise<string | null> {
+    if (unit === undefined) {
+      return null;
+    }
+    const shown = await this.safeExec("systemctl", [
+      ...(unit === USER_GATEWAY_SYSTEMD_UNIT ? ["--user"] : []),
+      "show",
+      "-p",
+      "InvocationID",
+      "--value",
+      unit,
+    ]);
+    if (!shown.ok || shown.result.exitCode !== 0) {
+      return null;
+    }
+    const invocationId = shown.result.stdout.trim();
+    return invocationId.length > 0 ? invocationId : null;
   }
 
   /**
@@ -11081,9 +11189,7 @@ export default function (api) {
     const waitsForLocalMatrix = shouldGateSystemGatewayOnLocalMatrix(
       runtimeConfig.matrix.adminBaseUrl,
     );
-    const unitPath =
-      process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH?.trim() ||
-      `/etc/systemd/system/${unitName}`;
+    const unitPath = resolveSystemGatewayUnitPath();
     const unitContents = [
       "[Unit]",
       "Description=Sovereign OpenClaw Gateway",
@@ -12247,11 +12353,21 @@ export default function (api) {
    * listen. Throws OPENCLAW_GATEWAY_RESTART_FAILED only when the unit could not
    * be started; a unit that is still starting at the deadline is returned as
    * not ready, because the configuration itself was applied.
+   *
+   * `preferInstalledSystemUnit` lets an unprivileged caller re-render and
+   * restart an installed system unit through the privileged helpers. Without
+   * it, such a caller runs `openclaw gateway restart`, which on a system-unit
+   * host only signals the running process: it keeps its old unit, environment
+   * and supplementary groups.
    */
   private async refreshGatewayAfterRuntimeConfig(
     runtimeConfig: RuntimeConfig,
+    options?: GatewayRefreshOptions,
   ): Promise<GatewayReadinessOutcome> {
-    if (this.shouldPreferSystemGatewayService(runtimeConfig)) {
+    if (
+      this.shouldPreferSystemGatewayService(runtimeConfig) ||
+      (options?.preferInstalledSystemUnit === true && (await this.isSystemGatewayUnitInstalled()))
+    ) {
       return requireGatewayUnitStarted(
         await this.ensureSystemGatewayServiceFallback(runtimeConfig),
       );
@@ -12294,6 +12410,15 @@ export default function (api) {
       "OpenClaw gateway user service failed after runtime configure; trying system-level fallback",
     );
     return requireGatewayUnitStarted(await this.ensureSystemGatewayServiceFallback(runtimeConfig));
+  }
+
+  private async isSystemGatewayUnitInstalled(): Promise<boolean> {
+    try {
+      await access(resolveSystemGatewayUnitPath());
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private async inspectUserGatewayUnit(): Promise<GatewayUnitSnapshot> {
@@ -14135,6 +14260,32 @@ const renderTemplateTransitionReport = (
   resourcesChanged: [...transition.diff.resourcesChanged],
   committed,
 });
+
+type GatewayRefreshOptions = { preferInstalledSystemUnit?: boolean };
+
+type RuntimeRefreshState = {
+  runtimeConfig: RuntimeConfig;
+  report: ReconcileRuntimeRefreshReport;
+};
+
+type RuntimeRefreshStep = {
+  id: string;
+  run: (state: RuntimeRefreshState) => Promise<void>;
+};
+
+/** A runtime refresh step failure whose details are already structured. */
+class RuntimeRefreshStepFailure extends Error {
+  constructor(
+    message: string,
+    readonly details: Record<string, unknown>,
+  ) {
+    super(message);
+  }
+}
+
+const resolveSystemGatewayUnitPath = (): string =>
+  process.env.SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH?.trim() ||
+  `/etc/systemd/system/${SOVEREIGN_GATEWAY_SYSTEMD_UNIT}`;
 
 const requireGatewayUnitStarted = (outcome: GatewayReadinessOutcome): GatewayReadinessOutcome => {
   if (outcome.unitStarted) {

@@ -9,6 +9,20 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 From this point forward, GitHub Release notes are auto-generated from commit history
 by the `.github/workflows/release.yml` workflow.
 
+## [2.13.0](https://github.com/ndee/sovereign-ai-node/compare/v2.12.3...v2.13.0) (2026-11-02)
+
+
+### Features
+
+* **cli:** optional reconcile --refresh-runtime re-renders the OpenClaw runtime and restarts the gateway ([#340](https://github.com/ndee/sovereign-ai-node/issues/340)) ([7a71a1b](https://github.com/ndee/sovereign-ai-node/commit/7a71a1b5370fd7dccebf90491539aee85449643f))
+
+## [2.12.3](https://github.com/ndee/sovereign-ai-node/compare/v2.12.2...v2.12.3) (2026-11-02)
+
+
+### Bug Fixes
+
+* **matrix:** upgrade bundled Synapse to v1.164.1 ([#336](https://github.com/ndee/sovereign-ai-node/issues/336)) ([c389b6e](https://github.com/ndee/sovereign-ai-node/commit/c389b6e9f41e0a0c36cdd8a65def395c7e0eab8f))
+
 ## [2.12.2](https://github.com/ndee/sovereign-ai-node/compare/v2.12.1...v2.12.2) (2026-10-31)
 
 
