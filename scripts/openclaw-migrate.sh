@@ -53,6 +53,12 @@ MATRIX_VERIFY_ARGS="${OPENCLAW_MIGRATE_MATRIX_VERIFY_ARGS:-matrix verify status}
 # being installed so plugin and host stay in lockstep. Empty disables it.
 DEFAULT_MATRIX_PLUGIN_ARGS="plugins install npm:@openclaw/matrix@%VERSION% --force"
 MATRIX_PLUGIN_ARGS="${OPENCLAW_MIGRATE_MATRIX_PLUGIN_ARGS-$DEFAULT_MATRIX_PLUGIN_ARGS}"
+# Newer releases install a plugin only after consent to its declared
+# capabilities, and without a TTY that consent can only be the
+# --accept-capabilities flag. Older releases (the 6.x stage) reject the flag as
+# unknown, so auto adds it only when `plugins install --help` lists it.
+# always / never skip the probe.
+MATRIX_PLUGIN_CONSENT="${OPENCLAW_MIGRATE_MATRIX_PLUGIN_CONSENT:-auto}"
 # auto: opt in to a private/loopback homeserver only when the configured one is.
 ALLOW_PRIVATE_MATRIX="${OPENCLAW_MIGRATE_ALLOW_PRIVATE_MATRIX:-auto}"
 # The /tools/invoke session the mail review uses; probed for llm-task.
@@ -194,11 +200,21 @@ redact() {
 }
 
 # The last lines a failed command printed, redacted and joined into one line
-# for result.json. The frames of the CLI's notes carry nothing and go.
+# for result.json. The frames of the CLI's notes and its generic Debug/Try/Help
+# footer carry nothing and go, so the tail is the actual reason.
 failure_tail() {
   redact <"$1" |
     sed -E 's/(│|┌|└|◇|◆|├|╮|╯|─)+//g; s/[[:space:]]+/ /g; s/^ //; s/ $//' |
-    grep -v '^$' | tail -n "${2:-2}" | awk 'NR > 1 { printf "; " } { printf "%s", $0 }' | cut -c1-600
+    grep -vE '^$|^\[openclaw\] (Debug|Try|Help):' |
+    tail -n "${2:-2}" | awk 'NR > 1 { printf "; " } { printf "%s", $0 }' | cut -c1-600
+}
+
+# STEP_DETAIL for a command that failed: what ran, its exit code and the tail
+# of what it printed, so result.json alone says why.
+failed_detail() {
+  local what="$1" rc="$2" out="$3" last=""
+  [[ -s "$out" ]] && last="$(failure_tail "$out")"
+  STEP_DETAIL="$what exited $rc${last:+: $last}"
 }
 
 # Appends a command's captured output to the log, redacted and indented.
@@ -845,6 +861,7 @@ step_node() {
   [[ -n "$NODE_VERSION" && "$NODE_VERSION" != "$before" ]] && NODE_UPGRADED=true
   if ((rc != 0)); then
     STEP_DETAIL="apt-get upgrade of nodejs failed (exit $rc)"
+    [[ -s "$out" ]] && STEP_DETAIL+=": $(failure_tail "$out")"
     return 1
   fi
   if ! node_in_range "$NODE_VERSION"; then
@@ -880,9 +897,7 @@ run_doctor() {
     return 1
   fi
   if ((rc != 0)); then
-    local last
-    last="$(failure_tail "$out")"
-    STEP_DETAIL="doctor ($version, $phase) exited $rc${last:+: $last}"
+    failed_detail "doctor ($version, $phase)" "$rc" "$out"
     return 1
   fi
   STEP_DETAIL="doctor ($version, $phase) ok"
@@ -894,7 +909,7 @@ install_version() {
   local rc=$?
   log_output "$out"
   if ((rc != 0)); then
-    STEP_DETAIL="npm install -g openclaw@$version exited $rc"
+    failed_detail "npm install -g openclaw@$version" "$rc" "$out"
     return 1
   fi
   got="$(installed_openclaw_version)"
@@ -927,6 +942,18 @@ matrix_homeserver_is_private() {
   [[ "$host" != *.* ]]
 }
 
+# Does the installed CLI need (and accept) --accept-capabilities on
+# `plugins install`? See MATRIX_PLUGIN_CONSENT.
+plugin_install_takes_consent() {
+  local help="$WORK_DIR/plugins-install-help.out"
+  case "$MATRIX_PLUGIN_CONSENT" in
+    always) return 0 ;;
+    never) return 1 ;;
+  esac
+  openclaw_cli "$CMD_TIMEOUT" plugins install --help >"$help" 2>&1
+  grep -q -e '--accept-capabilities' "$help"
+}
+
 # Installs the Matrix channel plugin matching <version> and, for a private
 # homeserver, opts in to it. Both are config/state changes made through the
 # CLI, so the plugin's own config contract decides what is valid.
@@ -937,12 +964,17 @@ install_matrix_plugin() {
     return 0
   fi
   args="${MATRIX_PLUGIN_ARGS//%VERSION%/$version}"
+  # The plugin is the first-party channel at the host's own version, and the
+  # node already ran Matrix enabled before the migration.
+  if [[ " $args " != *" --accept-capabilities "* ]] && plugin_install_takes_consent; then
+    args+=" --accept-capabilities"
+  fi
   # shellcheck disable=SC2086
   openclaw_cli "$NPM_TIMEOUT" $args >"$out" 2>&1
   rc=$?
   log_output "$out"
   if ((rc != 0)); then
-    STEP_DETAIL="openclaw $args exited $rc"
+    failed_detail "openclaw $args" "$rc" "$out"
     return 1
   fi
   allow="$ALLOW_PRIVATE_MATRIX"
@@ -954,7 +986,7 @@ install_matrix_plugin() {
     rc=$?
     log_output "$out"
     if ((rc != 0)); then
-      STEP_DETAIL="enabling channels.matrix.network.dangerouslyAllowPrivateNetwork exited $rc"
+      failed_detail "enabling channels.matrix.network.dangerouslyAllowPrivateNetwork" "$rc" "$out"
       return 1
     fi
     STEP_DETAIL="installed $args; private homeserver opt-in set"
@@ -1069,6 +1101,7 @@ step_shrinkwrap() {
   if ! summary="$("$NODE_BIN" -e "$SHRINKWRAP_JS" "$PKG_DIR" "$OUT_DIR/npm-shrinkwrap.json" 2>"$WORK_DIR/shrinkwrap.err")"; then
     log_output "$WORK_DIR/shrinkwrap.err"
     STEP_DETAIL="could not build npm-shrinkwrap.json from $PKG_DIR"
+    [[ -s "$WORK_DIR/shrinkwrap.err" ]] && STEP_DETAIL+=": $(failure_tail "$WORK_DIR/shrinkwrap.err")"
     return 1
   fi
   SHRINKWRAP_SOURCE="${summary%%$'\t'*}"
@@ -1099,7 +1132,7 @@ run_cli_check() {
   rc=$?
   log_output "$out"
   if ((rc != 0)); then
-    STEP_DETAIL="openclaw $args exited $rc"
+    failed_detail "openclaw $args" "$rc" "$out"
     return 1
   fi
   STEP_DETAIL="openclaw $args ok"
@@ -1191,6 +1224,7 @@ step_lobster() {
   if ((rc != 0)) || ! grep -q 'clawd.invoke' "$out" || ! grep -q 'llm_task.invoke' "$out"; then
     log_output "$out"
     LOBSTER_DETAIL="lobster commands.list failed or lacks clawd.invoke/llm_task.invoke (exit $rc)"
+    [[ -s "$out" ]] && LOBSTER_DETAIL+=": $(failure_tail "$out")"
     STEP_DETAIL="$LOBSTER_DETAIL"
     return 1
   fi
@@ -1263,7 +1297,7 @@ EOF
   plan_line "upgrade: npm install -g openclaw@$TARGET (prefix ${NPM_PREFIX:-unknown})"
   plan_line "shrinkwrap: write $OUT_DIR/npm-shrinkwrap.json from the installed tree"
   plan_line "doctor: openclaw $DOCTOR_ARGS (stdin closed, ${DOCTOR_TIMEOUT}s; a prompt fails the run)"
-  plan_line "matrix-plugin: openclaw ${MATRIX_PLUGIN_ARGS//%VERSION%/$TARGET}; private homeserver opt-in: $ALLOW_PRIVATE_MATRIX"
+  plan_line "matrix-plugin: openclaw ${MATRIX_PLUGIN_ARGS//%VERSION%/$TARGET} (--accept-capabilities: $MATRIX_PLUGIN_CONSENT); private homeserver opt-in: $ALLOW_PRIVATE_MATRIX"
   plan_line "doctor-matrix: openclaw $DOCTOR_ARGS again for the plugin's own migrations"
   plan_line "config-validate: openclaw $VALIDATE_ARGS"
   plan_line "matrix-verify: openclaw $MATRIX_VERIFY_ARGS"

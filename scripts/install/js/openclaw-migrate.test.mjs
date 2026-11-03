@@ -158,7 +158,29 @@ case "$1 \${2:-}" in
     echo "config ok"; exit 0 ;;
   "config get") [ -e "$S/config-get-redacted" ] && { echo "__OPENCLAW_REDACTED__"; exit 0; }; echo "\\"${SECRETS.gateway}\\""; exit 0 ;;
   "config set") [ -e "$S/config-set-fail" ] && exit 1; echo "updated $3"; exit 0 ;;
-  "plugins install") [ -e "$S/plugin-fail" ] && { echo "npm ERR! 404"; exit 1; }; touch "$S/plugin-installed"; echo "installed $3"; exit 0 ;;
+  "plugins install")
+    # The stage release predates capability consent and rejects the flag;
+    # the target refuses an enabled plugin without it when there is no TTY.
+    consent=yes; [ "$v" = "${STAGE}" ] && consent=no
+    case " $* " in *" --accept-capabilities "*) accepted=yes ;; *) accepted=no ;; esac
+    if [ "$3" = "--help" ]; then
+      echo "Usage: openclaw plugins install [options] <path-or-spec-or-plugin>"
+      echo "  --force                  Confirm non-ClawHub sources and overwrite an existing plugin"
+      [ "$consent" = yes ] && echo "  --accept-capabilities    Accept the plugin's declared capabilities"
+      exit 0
+    fi
+    [ "$consent$accepted" = noyes ] && { echo "error: unknown option '--accept-capabilities'"; exit 1; }
+    [ -e "$S/plugin-fail" ] && { echo "npm ERR! 404 Not Found - GET https://registry.npmjs.org/@openclaw%2fmatrix (auth $MATRIX_ACCESS_TOKEN)"; echo "[openclaw] Debug: set OPENCLAW_DEBUG=1 to include the stack trace."; exit 1; }
+    echo "Installing $3 into $HOME/.openclaw/npm/projects/openclaw-matrix"
+    if [ "$consent$accepted" = yesno ]; then
+      echo "[openclaw] Could not start the CLI."
+      echo "[openclaw] Reason: Plugin \\"matrix\\" requires capability consent. Use openclaw plugins install or openclaw plugins enable with --accept-capabilities, then retry."
+      echo "[openclaw] Debug: set OPENCLAW_DEBUG=1 to include the stack trace."
+      echo "[openclaw] Try: openclaw doctor"
+      echo "[openclaw] Help: openclaw --help"
+      exit 1
+    fi
+    touch "$S/plugin-installed"; echo "installed $3"; exit 0 ;;
   "matrix verify") [ -e "$S/matrix-fail" ] && { echo "matrix: server device unknown"; exit 1; }; echo "matrix: verified"; exit 0 ;;
 esac
 echo "unexpected openclaw call: $*" >&2
@@ -439,7 +461,9 @@ describe("openclaw-migrate.sh happy path", () => {
         expect.stringMatching(new RegExp(`^openclaw@${TARGET} doctor --fix`)),
         expect.stringMatching(new RegExp(`^openclaw@${TARGET} config validate`)),
         expect.stringMatching(new RegExp(`^openclaw@${TARGET} matrix verify status`)),
-        expect.stringMatching(new RegExp(`^openclaw@${TARGET} plugins install npm:@openclaw/matrix@${TARGET} --force`)),
+        expect.stringMatching(
+          new RegExp(`^openclaw@${TARGET} plugins install npm:@openclaw/matrix@${TARGET} --force --accept-capabilities home=`),
+        ),
         expect.stringMatching(
           new RegExp(`^openclaw@${TARGET} config set channels\\.matrix\\.network\\.dangerouslyAllowPrivateNetwork true --strict-json`),
         ),
@@ -621,23 +645,46 @@ describe("openclaw-migrate.sh failing steps", () => {
       touched: false,
       stopped: true,
     },
-    { step: "stage", fixture: { flatMatrixStore: true }, setup: (fx) => flag(fx, `npm-fail-${STAGE}`), touched: true },
+    { step: "stage", fixture: { flatMatrixStore: true }, setup: (fx) => flag(fx, `npm-fail-${STAGE}`), touched: true, detail: `npm install -g openclaw@${STAGE} exited 1: npm ERR! network` },
     { step: "stage", name: "6.x doctor fails", fixture: { flatMatrixStore: true }, setup: (fx) => flag(fx, `doctor-fail-${STAGE}`), touched: true },
-    { step: "stage", name: "6.x matrix plugin fails", fixture: { flatMatrixStore: true }, setup: (fx) => flag(fx, "plugin-fail"), touched: true },
+    {
+      step: "stage",
+      name: "6.x matrix plugin fails",
+      fixture: { flatMatrixStore: true },
+      setup: (fx) => flag(fx, "plugin-fail"),
+      touched: true,
+      detail: `openclaw plugins install npm:@openclaw/matrix@${STAGE} --force exited 1: npm ERR! 404 Not Found - GET https://registry.npmjs.org/@openclaw%2fmatrix (auth <redacted>)`,
+    },
     { step: "stage", name: "6.x matrix doctor fails", fixture: { flatMatrixStore: true }, setup: (fx) => flag(fx, "doctor-matrix-fail"), touched: true },
     { step: "stage", name: "6.x gateway never healthy", fixture: { flatMatrixStore: true }, setup: (fx) => flag(fx, "stage-health-fail"), touched: true },
-    { step: "upgrade", setup: (fx) => flag(fx, `npm-fail-${TARGET}`), touched: true },
-    { step: "shrinkwrap", setup: (fx) => flag(fx, "lockfile-mismatch"), touched: true },
+    { step: "upgrade", setup: (fx) => flag(fx, `npm-fail-${TARGET}`), touched: true, detail: `npm install -g openclaw@${TARGET} exited 1: npm ERR! network` },
+    { step: "shrinkwrap", setup: (fx) => flag(fx, "lockfile-mismatch"), touched: true, detail: /: mismatch node_modules\/dep: lockfile 0\.9\.0, installed 1\.0\.0$/ },
     { step: "doctor", setup: (fx) => flag(fx, `doctor-fail-${TARGET}`), touched: true },
-    { step: "matrix-plugin", setup: (fx) => flag(fx, "plugin-fail"), touched: true },
-    { step: "matrix-plugin", name: "opt-in fails", setup: (fx) => flag(fx, "config-set-fail"), touched: true },
+    {
+      step: "matrix-plugin",
+      setup: (fx) => flag(fx, "plugin-fail"),
+      touched: true,
+      detail: `openclaw plugins install npm:@openclaw/matrix@${TARGET} --force --accept-capabilities exited 1: npm ERR! 404 Not Found - GET https://registry.npmjs.org/@openclaw%2fmatrix (auth <redacted>)`,
+    },
+    {
+      step: "matrix-plugin",
+      name: "opt-in fails",
+      setup: (fx) => flag(fx, "config-set-fail"),
+      touched: true,
+      detail: "enabling channels.matrix.network.dangerouslyAllowPrivateNetwork exited 1",
+    },
     { step: "doctor-matrix", setup: (fx) => flag(fx, "doctor-matrix-fail"), touched: true },
-    { step: "config-validate", setup: (fx) => flag(fx, "validate-fail"), touched: true },
-    { step: "matrix-verify", setup: (fx) => flag(fx, "matrix-fail"), touched: true },
+    { step: "config-validate", setup: (fx) => flag(fx, "validate-fail"), touched: true, detail: "openclaw config validate exited 1: config invalid" },
+    { step: "matrix-verify", setup: (fx) => flag(fx, "matrix-fail"), touched: true, detail: "openclaw matrix verify status exited 1: matrix: server device unknown" },
     { step: "start", setup: (fx) => flag(fx, "start-fail"), touched: true },
     { step: "health", setup: (fx) => flag(fx, "health-fail"), touched: true },
     { step: "health", name: "restart loop", setup: (fx) => flag(fx, "health-restart"), touched: true },
-    { step: "lobster", setup: (fx) => flag(fx, "lobster-broken"), touched: true },
+    {
+      step: "lobster",
+      setup: (fx) => flag(fx, "lobster-broken"),
+      touched: true,
+      detail: "lobster commands.list failed or lacks clawd.invoke/llm_task.invoke (exit 1): SyntaxError",
+    },
     { step: "lobster", name: "token refused", setup: (fx) => flag(fx, "lobster-status", "401"), touched: true },
     { step: "lobster", name: "gateway unreachable", setup: (fx) => flag(fx, "lobster-status", ""), touched: true },
     { step: "lobster", name: "unexpected status", setup: (fx) => flag(fx, "lobster-status", "500"), touched: true },
@@ -654,6 +701,15 @@ describe("openclaw-migrate.sh failing steps", () => {
       expect(r.result.failed_step).toBe(c.step);
       expect(r.result.steps.at(-1)).toMatchObject({ name: c.step, ok: false });
       expect(r.result.message).toBeTruthy();
+      if (c.detail !== undefined) {
+        const { detail } = r.result.steps.at(-1);
+        if (typeof c.detail === "string") {
+          expect(detail).toBe(c.detail);
+        } else {
+          expect(detail).toMatch(c.detail);
+        }
+        expect(r.result.message).toContain(`Failure: ${detail}`);
+      }
       expect(r.result.node).toEqual(c.node ?? { version: c.fixture?.nodeVersion ?? "22.22.3", ok: true, upgraded: false });
       if (!c.touched) {
         expect(installedVersion(fx)).toBe(FROM);
@@ -730,6 +786,71 @@ describe("openclaw-migrate.sh doctor", () => {
     expect(doctorLog).toContain(warning);
     const secondPass = r.log.slice(r.log.indexOf("step doctor-matrix: start"), r.log.indexOf("step doctor-matrix: ok"));
     expect(secondPass).not.toContain(warning);
+  });
+});
+
+describe("openclaw-migrate.sh matrix plugin", () => {
+  const CONSENT_REASON =
+    '[openclaw] Reason: Plugin "matrix" requires capability consent. Use openclaw plugins install or openclaw plugins enable with --accept-capabilities, then retry.';
+  const installs = (r) => r.calls.filter((c) => / plugins install npm:/.test(c)).map((c) => c.replace(/ home=.*/, ""));
+
+  it("accepts the declared capabilities only on a release whose CLI offers the flag", async () => {
+    const fx = makeFixture({ flatMatrixStore: true });
+    const r = await run(fx);
+    expect(r.status).toBe(0);
+    expect(installs(r)).toEqual([
+      `openclaw@${STAGE} plugins install npm:@openclaw/matrix@${STAGE} --force`,
+      `openclaw@${TARGET} plugins install npm:@openclaw/matrix@${TARGET} --force --accept-capabilities`,
+    ]);
+    expect(r.result.steps.find((s) => s.name === "matrix-plugin").detail).toBe(
+      `installed plugins install npm:@openclaw/matrix@${TARGET} --force --accept-capabilities; private homeserver opt-in set`,
+    );
+  });
+
+  it("can force the consent flag without probing, or leave it out", async () => {
+    const fx = makeFixture();
+    const forced = await run(fx, undefined, { OPENCLAW_MIGRATE_MATRIX_PLUGIN_CONSENT: "always" });
+    expect(forced.status).toBe(0);
+    expect(forced.calls.some((c) => c.includes("plugins install --help"))).toBe(false);
+    expect(installs(forced)).toEqual([`openclaw@${TARGET} plugins install npm:@openclaw/matrix@${TARGET} --force --accept-capabilities`]);
+
+    const custom = makeFixture();
+    const given = await run(custom, undefined, {
+      OPENCLAW_MIGRATE_MATRIX_PLUGIN_ARGS: "plugins install npm:@openclaw/matrix@%VERSION% --accept-capabilities --force",
+    });
+    expect(given.status).toBe(0);
+    expect(installs(given)).toEqual([`openclaw@${TARGET} plugins install npm:@openclaw/matrix@${TARGET} --accept-capabilities --force`]);
+  });
+
+  it("reports a refused capability consent in migration.log and result.json", async () => {
+    const fx = makeFixture();
+    const r = await run(fx, undefined, { OPENCLAW_MIGRATE_MATRIX_PLUGIN_CONSENT: "never" });
+    expect(r.status).toBe(1);
+    expect(r.result).toMatchObject({ ok: false, failed_step: "matrix-plugin", units_restarted_on_old_version: false });
+    const step = r.result.steps.at(-1);
+    expect(step).toMatchObject({ name: "matrix-plugin", ok: false });
+    expect(step.detail).toBe(
+      `openclaw plugins install npm:@openclaw/matrix@${TARGET} --force exited 1: [openclaw] Could not start the CLI.; ${CONSENT_REASON}`,
+    );
+    expect(r.result.message).toContain(CONSENT_REASON);
+    expect(r.log).toContain(`    | ${CONSENT_REASON}`);
+    expect(isActive(fx, GATEWAY)).toBe(false);
+  });
+
+  it("puts a failed install's output into migration.log and result.json with secrets redacted", async () => {
+    const fx = makeFixture();
+    flag(fx, "plugin-fail");
+    const r = await run(fx);
+    expect(r.status).toBe(1);
+    const error = "npm ERR! 404 Not Found - GET https://registry.npmjs.org/@openclaw%2fmatrix (auth <redacted>)";
+    expect(r.result.steps.at(-1).detail).toContain(error);
+    expect(r.result.message).toContain(error);
+    expect(r.log).toContain(`    | ${error}`);
+    const resultText = readFileSync(join(fx.out, "result.json"), "utf8");
+    for (const secret of Object.values(SECRETS)) {
+      expect(resultText).not.toContain(secret);
+      expect(r.log).not.toContain(secret);
+    }
   });
 });
 
