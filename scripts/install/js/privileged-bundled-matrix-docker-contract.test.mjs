@@ -217,11 +217,11 @@ describe("compose commands the node sends to the bundled-matrix-docker helper", 
     const used = new Set(
       requests.map(({ argv }) => {
         const request = parseRequest(argv);
-        return request.kind === "compose" ? request.form.id : request.kind;
+        return request.kind === "compose" ? `compose ${request.form.id}` : `docker ${request.kind}`;
       }),
     );
     expect([...used].sort()).toEqual(
-      [...COMPOSE_FORMS.map((form) => form.id), "inspect", "ps"].sort(),
+      [...COMPOSE_FORMS.map((form) => `compose ${form.id}`), "docker inspect", "docker ps"].sort(),
     );
   });
 });
