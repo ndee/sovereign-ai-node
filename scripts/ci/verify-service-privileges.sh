@@ -109,6 +109,18 @@ else
   else
     pass "the stdin password is not in the journal"
   fi
+
+  # A federation change recreates the reverse proxy this way. This install has
+  # no reverse proxy, so the form is checked against synapse, which later
+  # steps need again.
+  expect_status "recreating one service without its dependencies through the helper" 0 \
+    "$docker_helper" "$project_dir" compose up -d --no-deps --force-recreate synapse
+  if curl -fsS --retry 30 --retry-delay 2 --retry-all-errors \
+    http://127.0.0.1:8008/_matrix/client/versions >/dev/null; then
+    pass "synapse answers again after the recreate"
+  else
+    fail "synapse does not answer after the recreate"
+  fi
 fi
 
 unit_helper="$HELPERS/install-systemd-unit"
