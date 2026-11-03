@@ -129,6 +129,18 @@ v="$(sed -n 's/.*"version": "\\(.*\\)".*/\\1/p' "$(dirname "$(readlink -f "$0")"
 printf 'openclaw@%s %s home=%s tty=%s key=%s\\n' "$v" "$*" "$HOME" "$([ -t 0 ] && echo yes || echo no)" "$([ -n "\${OPENROUTER_API_KEY:-}" ] && echo set || echo unset)" >>"$S/calls.log"
 case "$1 \${2:-}" in
   "doctor --fix")
+    echo "$PWD" >>"$S/doctor-cwd"
+    # OpenClaw (through execa) starts every child with an explicit cwd of
+    # process.cwd(); in a directory this user cannot traverse that chdir fails.
+    if [ -e "$S/doctor-eacces" ] || ! node -e 'require("node:child_process").execFileSync("true", { cwd: process.cwd(), stdio: "ignore" })' 2>/dev/null; then
+      echo "│  - Moved plugins.entries.llm-task.config.allowedModels to llm.allowedCompletionModels.  │"
+      echo "├──────────────────────────────────────────────╯"
+      echo "Doctor could not complete maintenance. Check the reported service state, resolve the failure, and rerun doctor --fix."
+      echo "Command failed during launch or output capture (EACCES)"
+      exit 1
+    fi
+    [ -e "$S/plugin-installed" ] || echo "Config warnings: plugins.entries.matrix: plugin not installed: matrix — install the official external plugin with: openclaw plugins install clawhub:@openclaw/matrix"
+    [ -e "$S/doctor-secret-fail" ] && { echo "Error: provider rejected key $OPENROUTER_API_KEY"; exit 2; }
     if [ -e "$S/doctor-prompt" ]; then
       printf '◆  Migrate heartbeat to automations?\\n'
       if read -r answer; then echo "answered $answer"; fi
@@ -252,7 +264,8 @@ exit 0`,
   stub(
     bin,
     "npm",
-    `printf 'npm %s backups=%s\\n' "$*" "$(find ${JSON.stringify(join(root, "backup"))} -name 'openclaw-state.tar.gz' 2>/dev/null | wc -l)" >>"$S/calls.log"
+    `echo "$PWD" >>"$S/npm-cwd"
+printf 'npm %s backups=%s\\n' "$*" "$(find ${JSON.stringify(join(root, "backup"))} -name 'openclaw-state.tar.gz' 2>/dev/null | wc -l)" >>"$S/calls.log"
 [ "$1 $2" = "install -g" ] || exit 64
 spec="$3"; version="\${spec#openclaw@}"
 [ -e "$S/npm-fail-$version" ] && { echo "npm ERR! network"; exit 1; }
@@ -295,9 +308,13 @@ exec ${JSON.stringify(process.execPath)} "$@"`,
 
 const flag = (fx, name, content = "") => writeFileSync(join(fx.state, name), content);
 
-const run = async (fx, args = ["--target", TARGET, "--out", fx.out], extraEnv = {}) => {
+// `cwd` starts the script from that directory after making it untraversable,
+// the way a root caller's 0700 staging directory is for the service user.
+const run = async (fx, args = ["--target", TARGET, "--out", fx.out], extraEnv = {}, { cwd } = {}) => {
   writeFileSync(join(fx.state, "calls.log"), "");
-  const result = await exec("bash", [SCRIPT, ...args], {
+  const argv =
+    cwd === undefined ? [SCRIPT, ...args] : ["-c", 'cd "$1" && chmod 000 . && shift && exec bash "$@"', "_", cwd, SCRIPT, ...args];
+  const result = await exec("bash", argv, {
     env: {
       PATH: `${fx.bin}:${process.env.PATH}`,
       HOME: fx.root,
@@ -314,6 +331,7 @@ const run = async (fx, args = ["--target", TARGET, "--out", fx.out], extraEnv = 
       ...extraEnv,
     },
   });
+  if (cwd !== undefined) chmodSync(cwd, 0o700);
   const resultPath = join(fx.out, "result.json");
   return {
     status: result.status,
@@ -650,6 +668,69 @@ describe("openclaw-migrate.sh failing steps", () => {
       }
     });
   }
+});
+
+describe("openclaw-migrate.sh doctor", () => {
+  const EACCES_LINE = "Command failed during launch or output capture (EACCES)";
+
+  it("runs OpenClaw and npm from a directory their user can traverse, not the caller's", async () => {
+    const fx = makeFixture();
+    const locked = join(fx.root, "staging");
+    mkdirSync(locked, { mode: 0o700 });
+    const r = await run(fx, undefined, {}, { cwd: locked });
+    expect(r.log).not.toContain(EACCES_LINE);
+    expect(r.status).toBe(0);
+    expect(r.result.steps.find((s) => s.name === "doctor")).toMatchObject({ ok: true, detail: `doctor (${TARGET}, config) ok` });
+    const cwds = (name) => readFileSync(join(fx.state, name), "utf8").split("\n").filter(Boolean);
+    expect(cwds("doctor-cwd")).toEqual([fx.home, fx.home]);
+    expect(cwds("npm-cwd")).toEqual([fx.home]);
+  });
+
+  it("fails closed on a doctor that cannot spawn and records why in result.json", async () => {
+    const fx = makeFixture();
+    flag(fx, "doctor-eacces");
+    const r = await run(fx);
+    expect(r.status).toBe(1);
+    expect(r.result).toMatchObject({ ok: false, failed_step: "doctor", units_restarted_on_old_version: false });
+    const step = r.result.steps.at(-1);
+    expect(step).toMatchObject({ name: "doctor", ok: false });
+    expect(step.detail).toBe(
+      `doctor (${TARGET}, config) exited 1: Doctor could not complete maintenance. Check the reported service state, resolve the failure, and rerun doctor --fix.; ${EACCES_LINE}`,
+    );
+    expect(r.result.message).toContain(EACCES_LINE);
+    expect(r.result.message).toContain("NOT restarted");
+    expect(r.result.doctor.runs).toEqual([
+      { version: TARGET, phase: "config", exit: 1, timed_out: false, interactive_prompt_seen: false },
+    ]);
+    // The full output stays in the log, frames included.
+    expect(r.log).toContain("    | ├──");
+    expect(r.log).toContain(`    | ${EACCES_LINE}`);
+    expect(isActive(fx, GATEWAY)).toBe(false);
+    expect(r.calls.some((c) => c.includes("plugins install"))).toBe(false);
+  });
+
+  it("keeps secrets out of a failed doctor's detail", async () => {
+    const fx = makeFixture();
+    flag(fx, "doctor-secret-fail");
+    const r = await run(fx);
+    expect(r.status).toBe(1);
+    const detail = r.result.steps.at(-1).detail;
+    expect(detail).toBe(`doctor (${TARGET}, config) exited 2: Config warnings: plugins.entries.matrix: plugin not installed: matrix — install the official external plugin with: openclaw plugins install clawhub:@openclaw/matrix; Error: provider rejected key <redacted>`);
+    const resultText = readFileSync(join(fx.out, "result.json"), "utf8");
+    expect(resultText).not.toContain(SECRETS.openrouter);
+    expect(r.log).not.toContain(SECRETS.openrouter);
+  });
+
+  it("accepts the first pass's missing-Matrix-plugin warning, which the next step resolves", async () => {
+    const fx = makeFixture();
+    const r = await run(fx);
+    expect(r.status).toBe(0);
+    const warning = "plugin not installed: matrix";
+    const doctorLog = r.log.slice(r.log.indexOf("step doctor: start"), r.log.indexOf("step doctor: ok"));
+    expect(doctorLog).toContain(warning);
+    const secondPass = r.log.slice(r.log.indexOf("step doctor-matrix: start"), r.log.indexOf("step doctor-matrix: ok"));
+    expect(secondPass).not.toContain(warning);
+  });
 });
 
 describe("openclaw-migrate.sh re-runs", () => {

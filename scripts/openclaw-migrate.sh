@@ -193,6 +193,14 @@ redact() {
   fi
 }
 
+# The last lines a failed command printed, redacted and joined into one line
+# for result.json. The frames of the CLI's notes carry nothing and go.
+failure_tail() {
+  redact <"$1" |
+    sed -E 's/(│|┌|└|◇|◆|├|╮|╯|─)+//g; s/[[:space:]]+/ /g; s/^ //; s/ $//' |
+    grep -v '^$' | tail -n "${2:-2}" | awk 'NR > 1 { printf "; " } { printf "%s", $0 }' | cut -c1-600
+}
+
 # Appends a command's captured output to the log, redacted and indented.
 log_output() {
   local file="$1"
@@ -285,15 +293,23 @@ device_of() {
   stat -c %d "$dir"
 }
 
-# Runs a command as <user>, keeping the caller's environment out of it.
+# Runs a command as <user> from <dir>, keeping the caller's environment out of
+# it. runuser keeps the caller's cwd, and a root caller's (a 0700 staging
+# directory, /root) is one <user> cannot traverse. OpenClaw starts every child
+# with an explicit cwd of process.cwd(), so each of its spawns then fails with
+# EACCES: doctor --fix aborts halfway through its repairs.
 as_user() {
-  local user="$1"
-  shift
-  if [[ "$(id -un)" == "$user" ]]; then
-    "$@"
-  else
-    runuser -u "$user" -- "$@"
-  fi
+  local user="$1" dir="$2"
+  shift 2
+  [[ -d "$dir" ]] || dir=/
+  (
+    cd -- "$dir" || exit 1
+    if [[ "$(id -un)" == "$user" ]]; then
+      exec "$@"
+    else
+      exec runuser -u "$user" -- "$@"
+    fi
+  )
 }
 
 # The service user loads the gateway env file itself, so its secrets never
@@ -307,7 +323,7 @@ ENV_LOADER='f="$1"; shift; if [ -r "$f" ]; then while IFS= read -r l || [ -n "$l
 openclaw_cli() {
   local timeout_s="$1"
   shift
-  as_user "$SERVICE_USER" env -i \
+  as_user "$SERVICE_USER" "$SERVICE_HOME" env -i \
     HOME="$SERVICE_HOME" \
     PATH="$UNIT_PATH" \
     OPENCLAW_HOME="$SERVICE_HOME" \
@@ -324,7 +340,7 @@ npm_install_openclaw() {
   local version="$1" out="$2" home
   home="$(getent passwd "$NPM_OWNER" | cut -d: -f6)"
   [[ -n "$home" ]] || home="$SERVICE_HOME"
-  as_user "$NPM_OWNER" env -i \
+  as_user "$NPM_OWNER" "$home" env -i \
     HOME="$home" \
     PATH="$UNIT_PATH" \
     CI=1 \
@@ -474,7 +490,7 @@ start_units() {
 # Failure handling.
 # ---------------------------------------------------------------------------
 fail_closed() {
-  local backup_hint=""
+  local backup_hint="" failure="$STEP_DETAIL"
   if [[ -n "$BACKUP_PATH" ]]; then
     backup_hint=" State backup: $BACKUP_PATH."
     [[ -n "$PKG_BACKUP_PATH" ]] && backup_hint+=" Package backup: $PKG_BACKUP_PATH."
@@ -497,6 +513,7 @@ fail_closed() {
     fi
     FINAL_MESSAGE="Step '$FAILED_STEP' failed after '$TOUCHED_BY' had already changed the OpenClaw tree or state, so the units were NOT restarted on the old version (it is no longer intact).${backup_hint}${rollback}"
   fi
+  [[ -n "$failure" ]] && FINAL_MESSAGE+=" Failure: $failure"
   log "$FINAL_MESSAGE"
   finish 1
 }
@@ -863,7 +880,9 @@ run_doctor() {
     return 1
   fi
   if ((rc != 0)); then
-    STEP_DETAIL="doctor ($version, $phase) exited $rc"
+    local last
+    last="$(failure_tail "$out")"
+    STEP_DETAIL="doctor ($version, $phase) exited $rc${last:+: $last}"
     return 1
   fi
   STEP_DETAIL="doctor ($version, $phase) ok"
@@ -1137,7 +1156,7 @@ lobster_invoke_status() {
   # The token arrives on stdin and is exported inside the service user's
   # shell, so it is never part of an argument list visible in /proc.
   # shellcheck disable=SC2016
-  as_user "$SERVICE_USER" env -i HOME="$SERVICE_HOME" PATH="$UNIT_PATH" CLAWD_URL="${GATEWAY_URL%/}" \
+  as_user "$SERVICE_USER" "$SERVICE_HOME" env -i HOME="$SERVICE_HOME" PATH="$UNIT_PATH" CLAWD_URL="${GATEWAY_URL%/}" \
     timeout -k 5 "$CMD_TIMEOUT" bash -c 'IFS= read -r CLAWD_TOKEN; export CLAWD_TOKEN; exec "$@" </dev/null' _ \
     "$LOBSTER_BIN" "clawd.invoke --tool $tool --action json --args-json {}${session:+ --session-key $session}" \
     <<<"$token" >"$out" 2>&1
@@ -1166,7 +1185,7 @@ step_lobster() {
   fi
   pkg="$(dirname "$(dirname "$(readlink -f "$LOBSTER_BIN")")")"
   LOBSTER_VERSION="$(json_field "$pkg/package.json" version)"
-  as_user "$SERVICE_USER" env -i HOME="$SERVICE_HOME" PATH="$UNIT_PATH" \
+  as_user "$SERVICE_USER" "$SERVICE_HOME" env -i HOME="$SERVICE_HOME" PATH="$UNIT_PATH" \
     timeout -k 5 "$CMD_TIMEOUT" "$LOBSTER_BIN" 'commands.list | json' </dev/null >"$out" 2>&1
   rc=$?
   if ((rc != 0)) || ! grep -q 'clawd.invoke' "$out" || ! grep -q 'llm_task.invoke' "$out"; then
