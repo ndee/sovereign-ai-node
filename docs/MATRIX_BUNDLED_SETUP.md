@@ -188,6 +188,8 @@ The bundled Caddy site renders the same path policy in every access and TLS mode
 
 `sovereign-node reconfigure matrix --federation/--no-federation` rewrites the policy region and recreates the reverse-proxy container along with restarting Synapse.
 
+The switch applies completely or not at all. It writes the runtime config, the saved install request and the OpenClaw runtime only after Synapse and the reverse proxy have restarted on the new setting. When any step fails, the command restores `homeserver.yaml`, `.env`, the well-known server file and the `Caddyfile`. If it had already restarted Synapse or the reverse proxy, it restarts them again on the restored files, together with the OpenClaw gateway. It then puts the runtime config and the install request back, and reports the error with a `rollback` outcome. The error is `retryable` only when the step that failed is transient and every rollback step succeeded. After an incomplete rollback, repair the steps listed in `rollback.failures` before you run the command again.
+
 ## Synapse Configuration Defaults (Bundled Profile)
 
 The bundled profile should set conservative defaults:

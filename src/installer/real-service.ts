@@ -157,6 +157,7 @@ import {
   reclaimOwnershipInvocation,
   systemdUnitInstallInvocation,
 } from "../system/privileged-helpers.js";
+import { type RollbackStep, runRollback, withRollbackOutcome } from "../system/rollback.js";
 import { resolveServiceNode, SYSTEM_PROGRAM_SEARCH_PATH } from "../system/service-node.js";
 import {
   DEV_STATE_FALLBACK_ENV,
@@ -2216,58 +2217,18 @@ export class RealInstallerService implements InstallerService {
     const changed: string[] = [];
     let gatewayReadiness: GatewayReadinessOutcome | undefined;
 
+    let requestUpdate: { changed: string[]; validation: CheckResult[] };
     if (federationChanged) {
       changed.push("matrix.federationEnabled");
-
-      const raw = await readFile(this.paths.configPath, "utf8");
-      const parsed = parseJsonDocument(raw);
-      if (!isRecord(parsed)) {
-        throw {
-          code: "CONFIG_INVALID",
-          message: "Sovereign runtime config does not match expected shape",
-          retryable: false,
-          details: { configPath: this.paths.configPath },
-        };
-      }
-
-      const matrixConfig = isRecord(parsed.matrix) ? parsed.matrix : {};
-      matrixConfig.federationEnabled = requestedFederation;
-      parsed.matrix = matrixConfig;
-      parsed.generatedAt = now();
-      await this.writeInstallerJsonFile(this.paths.configPath, parsed, 0o644);
-
-      const nextRuntimeConfig: RuntimeConfig = {
-        ...runtimeConfig,
-        matrix: {
-          ...runtimeConfig.matrix,
-          federationEnabled: requestedFederation,
-        },
-      };
-
-      if (
-        runtimeConfig.matrix.projectDir !== undefined &&
-        this.matrixProvisioner.updateFederationConfig !== undefined
-      ) {
-        const projectDir = runtimeConfig.matrix.projectDir;
-        await this.matrixProvisioner.updateFederationConfig({
-          federationEnabled: requestedFederation,
-          projectDir,
-          composeFilePath: join(projectDir, "compose.yaml"),
-          accessMode: runtimeConfig.matrix.accessMode,
-          homeserverDomain: runtimeConfig.matrix.homeserverDomain,
-          publicBaseUrl: runtimeConfig.matrix.publicBaseUrl,
-        });
-      }
-
-      await this.writeOpenClawRuntimeArtifacts(nextRuntimeConfig);
-      this.setManagedOpenClawEnv(nextRuntimeConfig);
-      gatewayReadiness = await this.refreshGatewayAfterRuntimeConfig(nextRuntimeConfig);
+      const applied = await this.applyFederationSwitch(runtimeConfig, requestedFederation);
+      requestUpdate = applied.requestUpdate;
+      gatewayReadiness = await this.refreshGatewayAfterRuntimeConfig(applied.nextRuntimeConfig);
+    } else {
+      requestUpdate = await this.updateInstallRequestFederation({
+        federationEnabled: requestedFederation,
+        changed: false,
+      });
     }
-
-    const requestUpdate = await this.updateInstallRequestFederation({
-      federationEnabled: requestedFederation,
-      changed: federationChanged,
-    });
     changed.push(...requestUpdate.changed);
 
     return {
@@ -2300,6 +2261,122 @@ export class RealInstallerService implements InstallerService {
         ? {}
         : { gateway: summarizeGatewayReadiness(gatewayReadiness) }),
     };
+  }
+
+  /**
+   * Applies a federation switch to Synapse, the edge, the runtime config, the
+   * saved install request and the OpenClaw runtime as one unit: when any step
+   * fails, every earlier one is undone, so the node never runs with these
+   * sources disagreeing. The gateway restart follows only once all of them
+   * agree.
+   */
+  private async applyFederationSwitch(
+    runtimeConfig: RuntimeConfig,
+    federationEnabled: boolean,
+  ): Promise<{
+    nextRuntimeConfig: RuntimeConfig;
+    requestUpdate: { changed: string[]; validation: CheckResult[] };
+  }> {
+    const configRaw = await readFile(this.paths.configPath, "utf8");
+    const parsed = parseJsonDocument(configRaw);
+    if (!isRecord(parsed)) {
+      throw {
+        code: "CONFIG_INVALID",
+        message: "Sovereign runtime config does not match expected shape",
+        retryable: false,
+        details: { configPath: this.paths.configPath },
+      };
+    }
+    const requestPath = this.getInstallRequestPath();
+    const requestRaw = await readFile(requestPath, "utf8").catch(() => null);
+    const nextRuntimeConfig: RuntimeConfig = {
+      ...runtimeConfig,
+      matrix: { ...runtimeConfig.matrix, federationEnabled },
+    };
+
+    const matrixConfig = isRecord(parsed.matrix) ? parsed.matrix : {};
+    matrixConfig.federationEnabled = federationEnabled;
+    parsed.matrix = matrixConfig;
+    parsed.generatedAt = now();
+
+    // Undo steps run newest first and are recorded before the step they undo.
+    const undo: RollbackStep[] = [];
+    let synapseRestarted = false;
+    try {
+      const projectDir = runtimeConfig.matrix.projectDir;
+      if (projectDir !== undefined && this.matrixProvisioner.updateFederationConfig !== undefined) {
+        // On its own failure the provisioner has already restored its files.
+        const change = await this.matrixProvisioner.updateFederationConfig({
+          federationEnabled,
+          projectDir,
+          composeFilePath: join(projectDir, "compose.yaml"),
+          accessMode: runtimeConfig.matrix.accessMode,
+          homeserverDomain: runtimeConfig.matrix.homeserverDomain,
+          publicBaseUrl: runtimeConfig.matrix.publicBaseUrl,
+        });
+        if (change !== undefined) {
+          synapseRestarted = true;
+          undo.unshift({
+            step: "bundled Matrix federation settings",
+            run: () => change.rollback(),
+          });
+        }
+      }
+
+      undo.unshift({
+        step: "runtime config",
+        run: () => this.writeInstallerTextFile(this.paths.configPath, configRaw, 0o644),
+      });
+      await this.writeInstallerJsonFile(this.paths.configPath, parsed, 0o644);
+
+      if (requestRaw !== null) {
+        undo.unshift({
+          step: "saved install request",
+          run: () => this.writeInstallerTextFile(requestPath, requestRaw, 0o640),
+        });
+      }
+      const requestUpdate = await this.updateInstallRequestFederation({
+        federationEnabled,
+        changed: true,
+      });
+
+      undo.unshift({
+        step: "OpenClaw runtime artifacts",
+        run: async () => {
+          await this.writeOpenClawRuntimeArtifacts(runtimeConfig);
+          this.setManagedOpenClawEnv(runtimeConfig);
+        },
+      });
+      await this.writeOpenClawRuntimeArtifacts(nextRuntimeConfig);
+      this.setManagedOpenClawEnv(nextRuntimeConfig);
+
+      return { nextRuntimeConfig, requestUpdate };
+    } catch (error) {
+      // A Synapse restart orphans the gateway's sync connection, so the
+      // gateway is restarted on the restored runtime whenever Synapse was.
+      if (
+        synapseRestarted ||
+        (isRecord(error) && isRecord(error.details) && error.details.synapseRestarted === true)
+      ) {
+        undo.push({
+          step: "OpenClaw gateway restart",
+          run: async () => {
+            await this.refreshGatewayAfterRuntimeConfig(runtimeConfig);
+          },
+        });
+      }
+      const outcome = await runRollback(undo);
+      if (!outcome.complete) {
+        this.logger.error(
+          { failures: outcome.failures },
+          "Matrix federation switch could not be fully rolled back",
+        );
+      }
+      throw withRollbackOutcome(error, outcome, {
+        code: "MATRIX_RECONFIGURE_FAILED",
+        message: "Matrix federation change could not be applied",
+      });
+    }
   }
 
   async reconfigureOpenrouter(req: ReconfigureOpenrouterRequest): Promise<ReconfigureResult> {
@@ -12104,9 +12181,13 @@ export default function (api) {
   }
 
   private async writeInstallerJsonFile(path: string, value: unknown, mode: number): Promise<void> {
+    await this.writeInstallerTextFile(path, `${JSON.stringify(value, null, 2)}\n`, mode);
+  }
+
+  private async writeInstallerTextFile(path: string, content: string, mode: number): Promise<void> {
     const tempPath = `${path}.${randomUUID()}.tmp`;
     await mkdir(dirname(path), { recursive: true });
-    await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    await writeFile(tempPath, content, "utf8");
     await chmod(tempPath, mode);
     await rename(tempPath, path);
     await this.applyRuntimeOwnership(path);

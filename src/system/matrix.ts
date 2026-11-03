@@ -32,6 +32,12 @@ import {
   resolveDockerAccess,
 } from "./privileged-helpers.js";
 import {
+  type RollbackOutcome,
+  type RollbackStep,
+  runRollback,
+  withRollbackOutcome,
+} from "./rollback.js";
+import {
   DEV_STATE_FALLBACK_ENV,
   devStateFallbackDir,
   stateDirUnwritableError,
@@ -228,8 +234,17 @@ export interface BundledMatrixProvisioner {
     accessMode: BundledMatrixAccessMode;
     homeserverDomain: string;
     publicBaseUrl: string;
-  }): Promise<void>;
+  }): Promise<BundledMatrixFederationChange | undefined>;
 }
+
+/**
+ * An applied federation change. `rollback` restores the files it rewrote and
+ * restarts the services it restarted, so a caller whose own follow-up step
+ * fails can undo the whole switch.
+ */
+export type BundledMatrixFederationChange = {
+  rollback(): Promise<void>;
+};
 
 export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvisioner {
   private resolvedBaseDir: string | null = null;
@@ -2160,7 +2175,7 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
     accessMode: BundledMatrixAccessMode;
     homeserverDomain: string;
     publicBaseUrl: string;
-  }): Promise<void> {
+  }): Promise<BundledMatrixFederationChange> {
     const synapseDir = join(params.projectDir, "synapse");
     const homeserverPath = join(synapseDir, "homeserver.yaml");
     const envFilePath = join(params.projectDir, ".env");
@@ -2171,87 +2186,175 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
       "matrix",
       "server",
     );
+    const caddyfilePath = join(params.projectDir, "reverse-proxy", "Caddyfile");
 
-    const homeserverYaml = await readFile(homeserverPath, "utf8");
-    const whitelistLine = "federation_domain_whitelist: []";
-    const hasWhitelist = homeserverYaml.includes(whitelistLine);
-
-    let updatedYaml: string;
-    if (params.federationEnabled && hasWhitelist) {
-      updatedYaml = homeserverYaml
-        .split("\n")
-        .filter((line) => line.trim() !== whitelistLine)
-        .join("\n");
-    } else if (!params.federationEnabled && !hasWhitelist) {
-      updatedYaml = `${homeserverYaml.trimEnd()}\n${whitelistLine}\n`;
-    } else {
-      updatedYaml = homeserverYaml;
-    }
-    if (updatedYaml !== homeserverYaml) {
-      await writeFile(homeserverPath, updatedYaml, "utf8");
-    }
-
-    const envContent = await readFile(envFilePath, "utf8");
-    const updatedEnv = envContent.replace(
-      /^MATRIX_FEDERATION_ENABLED=.*/m,
-      `MATRIX_FEDERATION_ENABLED=${params.federationEnabled ? "true" : "false"}`,
-    );
-    if (updatedEnv !== envContent) {
-      await writeFile(envFilePath, updatedEnv, "utf8");
-    }
-
-    const hasWellKnownServer = await access(wellKnownServerPath, fsConstants.F_OK)
-      .then(() => true)
-      .catch(() => false);
-    if (hasWellKnownServer) {
-      const wellKnown = renderWellKnownFiles({
-        accessMode: params.accessMode,
-        homeserverDomain: params.homeserverDomain,
-        publicBaseUrl: params.publicBaseUrl,
-      });
-      await writeFile(wellKnownServerPath, `${wellKnown.server}\n`, "utf8");
-    }
-
-    const edgeChanged = await this.updateEdgeFederationPolicy(
-      join(params.projectDir, "reverse-proxy", "Caddyfile"),
-      params.federationEnabled,
-    );
-
-    await this.runComposeCommand(params.projectDir, params.composeFilePath, ["restart", "synapse"]);
-    if (edgeChanged) {
-      const recreate = await this.runComposeCommand(params.projectDir, params.composeFilePath, [
-        "up",
-        "-d",
-        "--no-deps",
-        "--force-recreate",
-        "reverse-proxy",
-      ]);
-      if (recreate.exitCode !== 0) {
-        throw {
-          code: "MATRIX_EDGE_RELOAD_FAILED",
-          message:
-            "Bundled Matrix reverse proxy could not be recreated after the federation change",
-          retryable: true,
-          details: {
-            command: recreate.command,
-            exitCode: recreate.exitCode,
-            stderr: truncateText(recreate.stderr, 4000),
-          },
-        };
+    // Undo steps are recorded before the action they undo, so a write that
+    // fails half-way is restored too.
+    const restores: RollbackStep[] = [];
+    let synapseRestarted = false;
+    let edgeRecreated = false;
+    const rewrite = async (path: string, original: string, updated: string): Promise<void> => {
+      if (updated === original) {
+        return;
       }
+      restores.unshift({
+        step: `restore ${path}`,
+        run: () => writeFile(path, original, "utf8"),
+      });
+      await writeFile(path, updated, "utf8");
+    };
+    const rollback = async (): Promise<RollbackOutcome> => {
+      const steps: RollbackStep[] = [...restores];
+      if (synapseRestarted) {
+        steps.push({
+          step: "restart synapse",
+          run: () => this.restartSynapse(params.projectDir, params.composeFilePath),
+        });
+      }
+      if (edgeRecreated) {
+        steps.push({
+          step: "recreate reverse-proxy",
+          run: () => this.recreateReverseProxy(params.projectDir, params.composeFilePath),
+        });
+      }
+      const outcome = await runRollback(steps);
+      if (!outcome.complete) {
+        this.logger.error(
+          { projectDir: params.projectDir, failures: outcome.failures },
+          "Bundled Matrix federation change could not be fully rolled back",
+        );
+      }
+      return outcome;
+    };
+
+    try {
+      const homeserverYaml = await readFile(homeserverPath, "utf8");
+      const whitelistLine = "federation_domain_whitelist: []";
+      const hasWhitelist = homeserverYaml.includes(whitelistLine);
+
+      let updatedYaml: string;
+      if (params.federationEnabled && hasWhitelist) {
+        updatedYaml = homeserverYaml
+          .split("\n")
+          .filter((line) => line.trim() !== whitelistLine)
+          .join("\n");
+      } else if (!params.federationEnabled && !hasWhitelist) {
+        updatedYaml = `${homeserverYaml.trimEnd()}\n${whitelistLine}\n`;
+      } else {
+        updatedYaml = homeserverYaml;
+      }
+      await rewrite(homeserverPath, homeserverYaml, updatedYaml);
+
+      const envContent = await readFile(envFilePath, "utf8");
+      await rewrite(
+        envFilePath,
+        envContent,
+        envContent.replace(
+          /^MATRIX_FEDERATION_ENABLED=.*/m,
+          `MATRIX_FEDERATION_ENABLED=${params.federationEnabled ? "true" : "false"}`,
+        ),
+      );
+
+      const wellKnownServer = await readFile(wellKnownServerPath, "utf8").catch(() => null);
+      if (wellKnownServer !== null) {
+        const wellKnown = renderWellKnownFiles({
+          accessMode: params.accessMode,
+          homeserverDomain: params.homeserverDomain,
+          publicBaseUrl: params.publicBaseUrl,
+        });
+        await rewrite(wellKnownServerPath, wellKnownServer, `${wellKnown.server}\n`);
+      }
+
+      const caddyfile = await readFile(caddyfilePath, "utf8").catch(() => null);
+      const updatedCaddyfile =
+        caddyfile === null
+          ? null
+          : this.renderEdgeFederationPolicy(caddyfilePath, caddyfile, params.federationEnabled);
+      const edgeChanged =
+        caddyfile !== null && updatedCaddyfile !== null && updatedCaddyfile !== caddyfile;
+      if (edgeChanged) {
+        await rewrite(caddyfilePath, caddyfile, updatedCaddyfile);
+      }
+
+      synapseRestarted = true;
+      await this.restartSynapse(params.projectDir, params.composeFilePath);
+      if (edgeChanged) {
+        edgeRecreated = true;
+        await this.recreateReverseProxy(params.projectDir, params.composeFilePath);
+      }
+    } catch (error) {
+      const failed = withRollbackOutcome(error, await rollback(), {
+        code: "MATRIX_FEDERATION_UPDATE_FAILED",
+        message: "Bundled Matrix federation settings could not be applied",
+      });
+      // Callers restart whatever holds a connection to Synapse when it was
+      // restarted, even though the change itself was undone.
+      throw { ...failed, details: { ...failed.details, synapseRestarted } };
+    }
+
+    return {
+      rollback: async () => {
+        const outcome = await rollback();
+        if (!outcome.complete) {
+          throw {
+            code: "MATRIX_FEDERATION_ROLLBACK_FAILED",
+            message: `Bundled Matrix federation change could not be rolled back: ${outcome.failures
+              .map((failure) => failure.step)
+              .join(", ")}`,
+            retryable: false,
+            details: { projectDir: params.projectDir, rollback: outcome },
+          };
+        }
+      },
+    };
+  }
+
+  private async restartSynapse(projectDir: string, composeFilePath: string): Promise<void> {
+    const restart = await this.runComposeCommand(projectDir, composeFilePath, [
+      "restart",
+      "synapse",
+    ]);
+    if (restart.exitCode !== 0) {
+      throw {
+        code: "MATRIX_SYNAPSE_RESTART_FAILED",
+        message: `Bundled Matrix Synapse could not be restarted (exit ${String(restart.exitCode)})`,
+        retryable: true,
+        details: {
+          command: restart.command,
+          exitCode: restart.exitCode,
+          stderr: truncateText(restart.stderr, 4000),
+        },
+      };
     }
   }
 
-  private async updateEdgeFederationPolicy(
-    caddyfilePath: string,
-    federationEnabled: boolean,
-  ): Promise<boolean> {
-    let caddyfile: string;
-    try {
-      caddyfile = await readFile(caddyfilePath, "utf8");
-    } catch {
-      return false;
+  private async recreateReverseProxy(projectDir: string, composeFilePath: string): Promise<void> {
+    const recreate = await this.runComposeCommand(projectDir, composeFilePath, [
+      "up",
+      "-d",
+      "--no-deps",
+      "--force-recreate",
+      "reverse-proxy",
+    ]);
+    if (recreate.exitCode !== 0) {
+      throw {
+        code: "MATRIX_EDGE_RELOAD_FAILED",
+        message: `Bundled Matrix reverse proxy could not be recreated after the federation change (exit ${String(recreate.exitCode)})`,
+        retryable: true,
+        details: {
+          command: recreate.command,
+          exitCode: recreate.exitCode,
+          stderr: truncateText(recreate.stderr, 4000),
+        },
+      };
     }
+  }
+
+  private renderEdgeFederationPolicy(
+    caddyfilePath: string,
+    caddyfile: string,
+    federationEnabled: boolean,
+  ): string | null {
     const lines = caddyfile.split("\n");
     const begin = lines.indexOf(MATRIX_EDGE_POLICY_BEGIN);
     const end = lines.indexOf(MATRIX_EDGE_POLICY_END);
@@ -2260,18 +2363,13 @@ export class DockerComposeBundledMatrixProvisioner implements BundledMatrixProvi
         { caddyfilePath },
         "Caddyfile has no edge policy region; it is re-rendered on the next provision run",
       );
-      return false;
+      return null;
     }
-    const updated = [
+    return [
       ...lines.slice(0, begin),
       ...renderMatrixEdgePolicy(federationEnabled),
       ...lines.slice(end + 1),
     ].join("\n");
-    if (updated === caddyfile) {
-      return false;
-    }
-    await writeFile(caddyfilePath, updated, "utf8");
-    return true;
   }
 
   private async runComposeCommand(
