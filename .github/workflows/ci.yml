@@ -53,7 +53,7 @@ jobs:
             setup-ui
           requireScope: false
 
-  # Path awareness keeps the installer e2e jobs (~16 job-minutes, plus the upgrade) off
+  # Path awareness keeps the installer e2e jobs (~20 job-minutes, plus the upgrade) off
   # draft or install-irrelevant pull requests. Every main push runs all of them:
   # a successful CI workflow is the release publication gate, so none of its
   # installer coverage may be skipped on a release-capable commit.
@@ -619,6 +619,143 @@ jobs:
           echo "=== request file ==="
           cat /tmp/ci-install-request.json 2>/dev/null | jq . || true
 
+  # The setup web UI path: install.sh only bootstraps the host, and the install
+  # job runs in-process inside sovereign-node-api.service as the unprivileged
+  # service user. That is a system service with no login session, so there is
+  # no systemd user bus. The root CLI installs above never take this path.
+  e2e_web_install:
+    name: E2E Install (non-root web install)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    needs: [test, changes]
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      (needs.changes.outputs.install_relevant == 'true' &&
+       github.event.pull_request.draft == false)
+    env:
+      WEB_E2E: scripts/e2e/web-install-e2e.sh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Clone bot catalog repo
+        run: |
+          BOT_REF="${GITHUB_HEAD_REF:-main}"
+          if git ls-remote --exit-code --heads https://github.com/ndee/sovereign-ai-bots "$BOT_REF" >/dev/null 2>&1; then
+            git clone --depth 1 --branch "$BOT_REF" https://github.com/ndee/sovereign-ai-bots /tmp/sovereign-ai-bots
+          else
+            git clone --depth 1 https://github.com/ndee/sovereign-ai-bots /tmp/sovereign-ai-bots
+          fi
+
+      - name: Pre-pull Docker images
+        run: |
+          synapse_image="$(bash scripts/e2e/synapse-upgrade-e2e.sh expected-image src/system/matrix.ts)"
+          docker pull postgres:16-alpine &
+          docker pull "$synapse_image" &
+          wait
+
+      - name: Bootstrap the host only (install.sh --skip-install-run)
+        run: |
+          cp test/fixtures/ci-install-request.json /tmp/ci-install-request.json
+          sudo env "PATH=$PATH" bash scripts/install.sh \
+            --source-dir "$GITHUB_WORKSPACE" \
+            --bots-source-dir /tmp/sovereign-ai-bots \
+            --request-file /tmp/ci-install-request.json \
+            --install \
+            --non-interactive \
+            --skip-install-run
+        timeout-minutes: 10
+
+      - name: Verify the API runs unprivileged with no systemd user bus
+        run: sudo bash "$WEB_E2E" assert-no-user-bus
+
+      - name: Run the install through the setup API
+        run: sudo env "PATH=$PATH" bash "$WEB_E2E" run /tmp/ci-install-request.json /tmp/web-install-job.json
+        timeout-minutes: 16
+
+      - name: Verify Matrix is reachable
+        run: |
+          curl -f --retry 3 --retry-delay 2 http://127.0.0.1:8008/_matrix/client/versions | jq .
+
+      - name: Verify reported gateway readiness matches the gateway port
+        run: |
+          jq -e '
+            .result.job.state == "succeeded"
+            and .result.gateway.ready == true
+            and ([.result.job.steps[] | select(.id == "gateway_ready" and .state == "succeeded")] | length) == 1
+          ' /tmp/web-install-job.json > /dev/null
+          curl -s -o /dev/null --max-time 5 http://127.0.0.1:18789/
+          sudo env "PATH=$PATH" sovereign-node status --json > /tmp/status.json
+          jq -e '.result.services[] | select(.kind == "openclaw") | .readiness == "ready"' /tmp/status.json
+          systemctl is-active sovereign-openclaw-gateway.service
+          test "$(systemctl show -p User --value sovereign-openclaw-gateway.service)" = sovereign-node
+
+      - name: Verify the OpenClaw state belongs to the service user
+        run: sudo env "PATH=$PATH" bash scripts/ci/verify-openclaw-state-ownership.sh
+
+      - name: Verify no install credential is in a log or job record
+        run: sudo env "PATH=$PATH" bash scripts/ci/verify-no-credential-residue.sh
+
+      - name: Verify the service user's privileges and helpers
+        run: sudo env "PATH=$PATH" bash scripts/ci/verify-service-privileges.sh
+
+      - name: Verify bot state is owned by the service user and the Mail Sentinel scan runs
+        run: |
+          state_dir=/var/lib/sovereign-node/mail-sentinel
+          sudo test -d "$state_dir/workspace/data"
+          not_owned="$(sudo find "$state_dir" ! -user sovereign-node)"
+          if [ -n "$not_owned" ]; then
+            echo "::error::Not owned by sovereign-node after the API install:"
+            echo "$not_owned"
+            exit 1
+          fi
+
+          since="$(date '+%Y-%m-%d %H:%M:%S')"
+          scan_rc=0
+          sudo systemctl start sovereign-mail-sentinel-scan.service || scan_rc=$?
+          journal="$(sudo journalctl -u sovereign-mail-sentinel-scan.service --since "$since" --no-pager)"
+          echo "$journal"
+          if grep -q 'EACCES' <<<"$journal"; then
+            echo "::error::Mail Sentinel scan hit EACCES"
+            exit 1
+          fi
+          if [ "$scan_rc" -ne 0 ]; then
+            echo "::error::sovereign-mail-sentinel-scan.service failed (exit $scan_rc)"
+            exit 1
+          fi
+
+      - name: Verify the gateway and scan units run inside their systemd sandbox
+        run: sudo env "PATH=$PATH" bash scripts/ci/verify-systemd-sandbox.sh
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== final install job ==="
+          jq . /tmp/web-install-job.json 2>/dev/null || true
+          echo "=== API service ==="
+          sudo systemctl status --no-pager sovereign-node-api.service 2>&1 || true
+          sudo journalctl -u sovereign-node-api.service -n 400 --no-pager 2>&1 || true
+          echo "=== sovereign-node status ==="
+          sudo env "PATH=$PATH" sovereign-node status --json 2>&1 || true
+          echo "=== gateway and scan units ==="
+          sudo cat /etc/systemd/system/sovereign-openclaw-gateway.service 2>/dev/null || true
+          sudo systemctl status --no-pager sovereign-openclaw-gateway.service 2>&1 || true
+          sudo journalctl -u sovereign-openclaw-gateway.service -n 300 --no-pager 2>&1 || true
+          sudo journalctl -u sovereign-mail-sentinel-scan.service -n 100 --no-pager 2>&1 || true
+          echo "=== OpenClaw home ownership ==="
+          sudo find /var/lib/sovereign-node/openclaw-home -maxdepth 3 -printf '%u:%g %m %TY-%Tm-%TdT%TH:%TM:%TS %p\n' 2>&1 | sort -k3 || true
+          echo "=== docker compose logs ==="
+          COMPOSE_DIR=$(find /etc/sovereign-node -name compose.yaml -exec dirname {} \; 2>/dev/null | head -1)
+          if [ -n "$COMPOSE_DIR" ]; then
+            cd "$COMPOSE_DIR" && docker compose logs --tail=100 2>&1 || true
+          fi
+
   # Upgrade in place from the previous published release to this change, the
   # path an installed node takes with `sovereign-node update`. Proves that the
   # bundled Synapse migrates its existing database, keeps rooms and history,
@@ -827,6 +964,7 @@ jobs:
       - e2e_noninteractive
       - e2e_interactive
       - e2e_rerun_after_partial_failure
+      - e2e_web_install
       - e2e_upgrade
     env:
       REQUIRED_RESULTS: ${{ toJSON(needs) }}
@@ -834,7 +972,7 @@ jobs:
       - name: Require every main validation job to pass
         run: |
           jq -e '
-            length == 11 and
+            length == 12 and
             all(.[]; .result == "success")
           ' <<<"$REQUIRED_RESULTS" >/dev/null || {
             echo "::error::A required main CI job failed, was cancelled, or was skipped."
