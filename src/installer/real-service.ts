@@ -11282,12 +11282,6 @@ export default function (api) {
   }
 
   /**
-   * OpenClaw 2026.8 needs its external Matrix plugin, a config repair and a
-   * valid config before the gateway may start: a start without them restart-
-   * loops. Runs all three as the service user with the gateway stopped and
-   * returns the options for that first start. Nothing changes for 2026.3.
-   */
-  /**
    * Starts the freshly installed user-level gateway service. A 2026.8 gateway
    * starts only after its Matrix plugin, repair and config check in the
    * configure step: started here it would run without any config.
@@ -11310,6 +11304,12 @@ export default function (api) {
     await this.ensureMatrixCryptoRuntimeWritable(runtimeConfig);
   }
 
+  /**
+   * OpenClaw 2026.8 needs its external Matrix plugin, a config repair and a
+   * valid config before the gateway may start: a start without them restart-
+   * loops. Runs all three as the service user with the gateway stopped and
+   * returns the options for that first start. Nothing changes for 2026.3.
+   */
   private async prepareOpenClawGatewayStart(
     runtimeConfig: RuntimeConfig,
   ): Promise<{ shape: OpenClawRuntimeConfigShape; startOptions: GatewayStartOptions }> {
