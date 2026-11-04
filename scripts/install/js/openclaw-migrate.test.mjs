@@ -116,7 +116,7 @@ const args = process.argv.slice(2);
 const scriptGroup = () => Number(fs.readFileSync(path.join(S, "script-pgid"), "utf8"));
 const fail = (command, code, message) => {
   process.stderr.write('{"level":30,"msg":"working"}\\n');
-  process.stderr.write(JSON.stringify({ ok: false, command, error: { code, message, retryable: false } }) + "\\n");
+  process.stderr.write(JSON.stringify({ contractVersion: "2.0.0", ok: false, error: { code, message, retryable: false, details: { nested: { x: 1 } } }, command }, null, 2) + "\\n");
   process.exit(1);
 };
 const succeed = (command, result) => {
@@ -137,7 +137,7 @@ if (args[0] === "openclaw-migration" && args[1] === "install-runtime") {
   const target = args[args.indexOf("--target") + 1];
   const gateway = fs.existsSync(path.join(S, "active", ${JSON.stringify(GATEWAY)})) ? "active" : "inactive";
   const lock = cp.spawnSync("flock", ["-n", "-s", ${JSON.stringify(lock)}, "true"]).status === 0 ? "free" : "held";
-  log(\`sovereign-node install-runtime target=\${target} gateway=\${gateway} lock=\${lock} backups=\${countBackups(${JSON.stringify(backup)})} prefer_offline=\${process.env.npm_config_prefer_offline ?? "unset"} npm_prefix=\${process.env.npm_config_prefix ?? "unset"} user_home=\${process.env.HOME}\`);
+  log(\`sovereign-node install-runtime target=\${target} gateway=\${gateway} lock=\${lock} backups=\${countBackups(${JSON.stringify(backup)})} prefer_offline=\${process.env.npm_config_prefer_offline ?? "unset"} npm_prefix=\${process.env.npm_config_prefix ?? "unset"} prefix_bin_first=\${(process.env.PATH ?? "").split(":")[0] === path.join(process.env.npm_config_prefix ?? "", "bin")} user_home=\${process.env.HOME}\`);
   // A power loss: the script and this command die together.
   if (has("install-kill")) {
     process.kill(-scriptGroup(), "SIGKILL");
@@ -634,7 +634,7 @@ describe("openclaw-migrate.sh happy path", () => {
     const r = await run(fx);
     expect(r.status).toBe(0);
     expect(installCalls(r)).toEqual([
-      `sovereign-node install-runtime target=${TARGET} gateway=inactive lock=held backups=1 prefer_offline=true npm_prefix=${fx.prefix} user_home=${fx.home}`,
+      `sovereign-node install-runtime target=${TARGET} gateway=inactive lock=held backups=1 prefer_offline=true npm_prefix=${fx.prefix} prefix_bin_first=true user_home=${fx.home}`,
     ]);
     const install = callIndex(r, /^sovereign-node install-runtime/);
     expect(callIndex(r, new RegExp(`^systemctl stop ${GATEWAY}`))).toBeLessThan(install);
@@ -1157,7 +1157,7 @@ describe("openclaw-migrate.sh interrupted runs", () => {
     expect(again.result).toMatchObject({ outcome: "migrated", recovery: "restore", resumed: true, from: FROM });
     expect(step(again, "backup").detail).toMatch(/^restored OpenClaw 2026\.3\.13, its state and its unit from /);
     expect(installCalls(again)).toEqual([
-      `sovereign-node install-runtime target=${TARGET} gateway=inactive lock=held backups=1 prefer_offline=true npm_prefix=${fx.prefix} user_home=${fx.home}`,
+      `sovereign-node install-runtime target=${TARGET} gateway=inactive lock=held backups=1 prefer_offline=true npm_prefix=${fx.prefix} prefix_bin_first=true user_home=${fx.home}`,
     ]);
     expect(installedVersion(fx)).toBe(TARGET);
     expect(isActive(fx, GATEWAY)).toBe(true);

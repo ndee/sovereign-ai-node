@@ -293,14 +293,24 @@ failed_detail() {
 }
 
 # STEP_DETAIL for a failed node CLI call: its JSON error envelope (the last
-# line of stderr; the lines before it are its log) when there is one.
+# JSON object on stderr; the lines before it are its log) when there is one.
+# shellcheck disable=SC2016
+CLI_ERROR_JS='
+const text = require("node:fs").readFileSync(process.argv[1], "utf8");
+const starts = [];
+for (let i = text.indexOf("{"); i !== -1; i = text.indexOf("{", i + 1)) {
+  if (i === 0 || text[i - 1] === "\n") starts.push(i);
+}
+for (const start of starts.reverse()) {
+  try {
+    const e = JSON.parse(text.slice(start)).error;
+    if (e && e.code) { process.stdout.write(`${e.code}: ${e.message}`); break; }
+  } catch {}
+}
+'
 failed_cli_detail() {
   local what="$1" rc="$2" err="$3" envelope=""
-  # shellcheck disable=SC2016
-  [[ -s "$err" ]] && envelope="$(grep -E '^\{.*"ok":false' "$err" | tail -n 1 | "$NODE_BIN" -e '
-    let s = ""; process.stdin.on("data", (c) => { s += c; }).on("end", () => {
-      try { const e = JSON.parse(s).error; process.stdout.write(`${e.code}: ${e.message}`); } catch {}
-    });' 2>/dev/null)"
+  [[ -s "$err" ]] && envelope="$("$NODE_BIN" -e "$CLI_ERROR_JS" "$err" 2>/dev/null)"
   if [[ -n "$envelope" ]]; then
     STEP_DETAIL="$what exited $rc: $(printf '%s' "$envelope" | redact | cut -c1-600)"
   else
@@ -1640,9 +1650,11 @@ step_upgrade() {
   mark_touched upgrade
   set_phase upgrade
   home="$(owner_home)"
+  # The CLI checks the install by running `openclaw` from PATH; the unit's
+  # PATH need not hold the prefix's bin (its ExecStart is absolute).
   as_user "$NPM_OWNER" "$home" env -i \
     HOME="$home" \
-    PATH="$UNIT_PATH" \
+    PATH="$NPM_PREFIX/bin:$UNIT_PATH" \
     CI=1 NO_COLOR=1 \
     NPM_CONFIG_CACHE="$home/.npm" \
     npm_config_prefer_offline=true \
