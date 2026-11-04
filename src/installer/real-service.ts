@@ -12640,9 +12640,12 @@ export default function (api) {
     runtimeConfig: RuntimeConfig,
     options?: GatewayRefreshOptions,
   ): Promise<GatewayReadinessOutcome> {
+    // With no user bus there is no user service to restart, whatever the
+    // caller asked for, so an installed system unit is the gateway.
     if (
       this.shouldPreferSystemGatewayService(runtimeConfig) ||
-      (options?.preferInstalledSystemUnit === true && (await this.isSystemGatewayUnitInstalled()))
+      ((options?.preferInstalledSystemUnit === true || !(await this.hasGatewayUserServiceBus())) &&
+        (await this.isSystemGatewayUnitInstalled()))
     ) {
       return requireGatewayUnitStarted(
         await this.ensureSystemGatewayServiceFallback(runtimeConfig, options),

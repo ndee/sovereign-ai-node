@@ -18513,7 +18513,8 @@ describe("gateway user-service install and the systemd user bus", () => {
 
     expect(finished.job.steps.filter((step) => step.state === "failed")).toEqual([]);
     expect(finished.job.state).toBe("succeeded");
-    expect(scenario.probeCalls()).toBe(1);
+    // Asked once before the user-service install and again before its restart.
+    expect(scenario.probeCalls()).toBe(2);
     expect(scenario.installCalls()).toBe(1);
   });
 

@@ -287,7 +287,7 @@ EOF
   # stopped, and a repeat install finds the system unit already running.
   unit=sovereign-openclaw-gateway
   cat <<EOF
-${user} ALL=(root) NOPASSWD: /bin/systemctl stop ${unit}, /bin/systemctl stop ${unit}.service
+${user} ALL=(root) NOPASSWD: /bin/systemctl stop ${unit}.service
 EOF
   unit=sovereign-mail-sentinel-scan
   cat <<EOF
