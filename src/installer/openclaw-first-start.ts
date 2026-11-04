@@ -14,8 +14,9 @@ import type { ExecResult } from "../system/exec.js";
 
 export const OPENCLAW_MATRIX_PLUGIN_PACKAGE = "@openclaw/matrix";
 export const OPENCLAW_PLUGIN_INSTALL_TIMEOUT_MS = 600_000;
-export const OPENCLAW_PLUGIN_INSTALL_ATTEMPTS = 3;
+// Three attempts: the first, then one after each delay.
 export const OPENCLAW_PLUGIN_INSTALL_RETRY_DELAYS_MS = [10_000, 30_000] as const;
+export const OPENCLAW_PLUGIN_INSTALL_ATTEMPTS = OPENCLAW_PLUGIN_INSTALL_RETRY_DELAYS_MS.length + 1;
 export const OPENCLAW_DOCTOR_TIMEOUT_MS = 600_000;
 export const OPENCLAW_CLI_CHECK_TIMEOUT_MS = 120_000;
 
@@ -111,30 +112,23 @@ export const installOpenClawMatrixPlugin = async (
     version,
     await pluginInstallTakesCapabilityConsent(deps.run),
   );
-  let last: { ok: true; result: ExecResult } | { ok: false; error: string } | undefined;
-  for (let attempt = 1; attempt <= OPENCLAW_PLUGIN_INSTALL_ATTEMPTS; attempt += 1) {
-    last = await deps.run(args, { timeoutMs: OPENCLAW_PLUGIN_INSTALL_TIMEOUT_MS });
-    if (last.ok && last.result.exitCode === 0) {
-      return args;
-    }
-    const retry =
-      last.ok &&
-      isTransientOpenClawFailure(last.result) &&
-      attempt < OPENCLAW_PLUGIN_INSTALL_ATTEMPTS;
-    if (!retry) {
+  let last = await deps.run(args, { timeoutMs: OPENCLAW_PLUGIN_INSTALL_TIMEOUT_MS });
+  for (const delayMs of OPENCLAW_PLUGIN_INSTALL_RETRY_DELAYS_MS) {
+    if (!last.ok || last.result.exitCode === 0 || !isTransientOpenClawFailure(last.result)) {
       break;
     }
-    await deps.sleep(OPENCLAW_PLUGIN_INSTALL_RETRY_DELAYS_MS[attempt - 1] ?? 0);
+    await deps.sleep(delayMs);
+    last = await deps.run(args, { timeoutMs: OPENCLAW_PLUGIN_INSTALL_TIMEOUT_MS });
+  }
+  if (last.ok && last.result.exitCode === 0) {
+    return args;
   }
   const failure: InstallerFailure = {
     code: "OPENCLAW_MATRIX_PLUGIN_INSTALL_FAILED",
     message: `OpenClaw could not install the Matrix channel plugin ${OPENCLAW_MATRIX_PLUGIN_PACKAGE}@${version}`,
     // The same install succeeds on a rerun once the registry answers again.
     retryable: true,
-    details:
-      last === undefined || !last.ok
-        ? { args, error: last?.error ?? "not run" }
-        : { args, ...describeResult(last.result) },
+    details: last.ok ? { args, ...describeResult(last.result) } : { args, error: last.error },
   };
   throw failure;
 };

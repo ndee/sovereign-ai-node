@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   describeGatewayNotReady,
   describeSkippedGatewaySmokeCheck,
+  GATEWAY_FIRST_START_READY_DEADLINE_MS,
   GATEWAY_READY_DEADLINE_MAX_MS,
   GATEWAY_READY_DEADLINE_MIN_MS,
   GATEWAY_READY_DEADLINE_MS,
@@ -157,6 +158,16 @@ describe("resolveGatewayReadyDeadlineMs", () => {
     expect(resolveGatewayReadyDeadlineMs({})).toBe(300_000);
     expect(resolveGatewayReadyDeadlineMs({ [GATEWAY_READY_TIMEOUT_ENV]: "  " })).toBe(300_000);
     expect(resolveGatewayReadyDeadlineMs({ [GATEWAY_READY_TIMEOUT_ENV]: "soon" })).toBe(300_000);
+  });
+
+  it("lets the caller choose the default, which the environment still overrides", () => {
+    expect(resolveGatewayReadyDeadlineMs({}, GATEWAY_FIRST_START_READY_DEADLINE_MS)).toBe(600_000);
+    expect(resolveGatewayReadyDeadlineMs({ [GATEWAY_READY_TIMEOUT_ENV]: "x" }, 600_000)).toBe(
+      600_000,
+    );
+    expect(resolveGatewayReadyDeadlineMs({ [GATEWAY_READY_TIMEOUT_ENV]: "120000" }, 600_000)).toBe(
+      120_000,
+    );
   });
 
   it("accepts an override inside the bounds", () => {

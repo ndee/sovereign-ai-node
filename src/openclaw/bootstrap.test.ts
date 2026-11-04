@@ -832,11 +832,15 @@ describe("ShellOpenClawBootstrapper never breaks the runtime in place on a faile
     });
   });
 
-  it("hardens world-writable bundled extension directories", async () => {
+  it.each([
+    "extensions",
+    "dist/extensions",
+  ])("hardens world-writable bundled extension directories in %s/", async (relative) => {
+    const segments = relative.split("/");
     await withUid(1001, async () => {
       const { bootstrapper, runtimeDir } = await unprivilegedInstall({
         ciHook: async (stagingDir) => {
-          const extensions = join(stagingDir, "node_modules", "openclaw", "extensions");
+          const extensions = join(stagingDir, "node_modules", "openclaw", ...segments);
           await mkdir(join(extensions, "memory-core"), { recursive: true });
           await writeFile(join(extensions, "memory-core", "index.ts"), "export {};\n", "utf8");
           await chmod(join(extensions, "memory-core", "index.ts"), 0o666);
@@ -847,7 +851,7 @@ describe("ShellOpenClawBootstrapper never breaks the runtime in place on a faile
 
       await bootstrapper.ensureInstalled(INSTALL);
 
-      const extensions = join(resolveOpenClawRuntimePackageRoot(runtimeDir), "extensions");
+      const extensions = join(resolveOpenClawRuntimePackageRoot(runtimeDir), ...segments);
       expect((await stat(extensions)).mode & 0o022).toBe(0);
       expect((await stat(join(extensions, "memory-core"))).mode & 0o022).toBe(0);
       expect((await stat(join(extensions, "memory-core", "index.ts"))).mode & 0o022).toBe(0);

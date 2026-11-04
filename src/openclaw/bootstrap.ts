@@ -1053,9 +1053,12 @@ const ensureOpenClawPackageReadable = async (
   }
 };
 
+// 2026.3 bundles plugins in `extensions/`, 2026.8 in `dist/extensions/`. A
+// world-writable bundled plugin is one OpenClaw refuses to load.
+const BUNDLED_EXTENSION_ROOTS = [["extensions"], ["dist", "extensions"]] as const;
+
 const hardenBundledExtensionDirectories = async (packageRoot: string): Promise<void> => {
-  const extensionsRoot = join(packageRoot, "extensions");
-  const queue = [extensionsRoot];
+  const queue: string[] = BUNDLED_EXTENSION_ROOTS.map((segments) => join(packageRoot, ...segments));
 
   while (queue.length > 0) {
     const currentPath = queue.shift();

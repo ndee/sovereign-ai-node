@@ -17579,6 +17579,10 @@ describe("typed tools, scan agents and exec pinning", () => {
         },
       });
 
+      const ownershipApplied = vi.spyOn(
+        service as unknown as { applyConfiguredRuntimeOwnership: (path: string) => Promise<void> },
+        "applyConfiguredRuntimeOwnership",
+      );
       const instantiated = await service.instantiateSovereignBot({ id: "typed-sentinel" });
       expect(instantiated.agent.toolInstanceIds).toEqual([
         "typed-sentinel-imap",
@@ -17689,6 +17693,12 @@ describe("typed tools, scan agents and exec pinning", () => {
       expect((await stat(join(openclawHome, "state", "sovereign-typed-tools"))).mode & 0o777).toBe(
         0o700,
       );
+      // OpenClaw 2026.8 keeps its own SQLite state in the parent: it is the
+      // service user's, not left to a root mkdir -p.
+      expect((await stat(join(openclawHome, "state"))).mode & 0o777).toBe(0o700);
+      const owned = ownershipApplied.mock.calls.map(([path]) => path);
+      expect(owned).toContain(join(openclawHome, "state"));
+      expect(owned).toContain(join(openclawHome, "state", "sovereign-typed-tools"));
 
       const runtimeConfig = JSON.parse(await readFile(paths.configPath, "utf8")) as {
         sovereignTools: { instances: Array<{ id: string; config: Record<string, string> }> };

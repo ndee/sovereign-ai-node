@@ -401,6 +401,14 @@ jobs:
           sudo journalctl -u sovereign-mail-sentinel-scan.service -n 100 --no-pager 2>&1 || true
           echo "=== OpenClaw home ownership ==="
           sudo find /var/lib/sovereign-node/openclaw-home -maxdepth 3 -printf '%u:%g %m %TY-%Tm-%TdT%TH:%TM:%TS %p\n' 2>&1 | sort -k3 || true
+          echo "=== gateway start with OPENCLAW_DEBUG (stack traces) ==="
+          dropin=/run/systemd/system/sovereign-openclaw-gateway.service.d
+          sudo mkdir -p "$dropin"
+          printf '[Service]\nEnvironment=OPENCLAW_DEBUG=1\n' | sudo tee "$dropin/ci-debug.conf" > /dev/null
+          sudo systemctl daemon-reload
+          sudo systemctl restart sovereign-openclaw-gateway.service || true
+          sleep 20
+          sudo journalctl -u sovereign-openclaw-gateway.service --since "-25s" --no-pager 2>&1 | grep -v "blocked plugin candidate" | tail -n 200 || true
           echo "=== docker compose logs ==="
           COMPOSE_DIR=$(find /etc/sovereign-node -name compose.yaml -exec dirname {} \; 2>/dev/null | head -1)
           if [ -n "$COMPOSE_DIR" ]; then
@@ -500,6 +508,14 @@ jobs:
           sudo journalctl -u sovereign-mail-sentinel-scan.service -n 100 --no-pager 2>&1 || true
           echo "=== OpenClaw home ownership ==="
           sudo find /var/lib/sovereign-node/openclaw-home -maxdepth 3 -printf '%u:%g %m %TY-%Tm-%TdT%TH:%TM:%TS %p\n' 2>&1 | sort -k3 || true
+          echo "=== gateway start with OPENCLAW_DEBUG (stack traces) ==="
+          dropin=/run/systemd/system/sovereign-openclaw-gateway.service.d
+          sudo mkdir -p "$dropin"
+          printf '[Service]\nEnvironment=OPENCLAW_DEBUG=1\n' | sudo tee "$dropin/ci-debug.conf" > /dev/null
+          sudo systemctl daemon-reload
+          sudo systemctl restart sovereign-openclaw-gateway.service || true
+          sleep 20
+          sudo journalctl -u sovereign-openclaw-gateway.service --since "-25s" --no-pager 2>&1 | grep -v "blocked plugin candidate" | tail -n 200 || true
           echo "=== docker compose logs ==="
           COMPOSE_DIR=$(find /etc/sovereign-node -name compose.yaml -exec dirname {} \; 2>/dev/null | head -1)
           if [ -n "$COMPOSE_DIR" ]; then

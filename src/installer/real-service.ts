@@ -9579,19 +9579,10 @@ export default function (api) {
             await this.openclawGatewayServiceManager.install({
               force: req.openclaw?.forceReinstall ?? false,
             });
-            // 2026.8 starts only after its Matrix plugin, repair and config
-            // check in the configure step; a start here would have no config.
-            const shape = resolveOpenClawRuntimeConfigShape([
-              (await this.safeDetectOpenClaw())?.version,
-              resolveRequestedOpenClawVersion(req.openclaw?.version),
-            ]);
-            if (shape === "list") {
-              await this.openclawGatewayServiceManager.start();
-              // The matrix extension downloads its E2EE crypto runtime into its
-              // own (root-owned) package dir on first gateway startup; hand that
-              // dir to the service user so the download can succeed (issue #207).
-              await this.ensureMatrixCryptoRuntimeWritable(stepState.runtimeConfig);
-            }
+            await this.startInstalledUserGatewayService(
+              req.openclaw?.version,
+              stepState.runtimeConfig,
+            );
           } catch (error) {
             if (!isGatewayUserSystemdUnavailableError(error)) {
               throw error;
@@ -11296,6 +11287,29 @@ export default function (api) {
    * loops. Runs all three as the service user with the gateway stopped and
    * returns the options for that first start. Nothing changes for 2026.3.
    */
+  /**
+   * Starts the freshly installed user-level gateway service. A 2026.8 gateway
+   * starts only after its Matrix plugin, repair and config check in the
+   * configure step: started here it would run without any config.
+   */
+  private async startInstalledUserGatewayService(
+    requestedVersion: string | undefined,
+    runtimeConfig: RuntimeConfig | undefined,
+  ): Promise<void> {
+    const shape = resolveOpenClawRuntimeConfigShape([
+      (await this.safeDetectOpenClaw())?.version,
+      resolveRequestedOpenClawVersion(requestedVersion),
+    ]);
+    if (shape === "keyed") {
+      return;
+    }
+    await this.openclawGatewayServiceManager.start();
+    // The matrix extension downloads its E2EE crypto runtime into its own
+    // (root-owned) package dir on first gateway startup; hand that dir to the
+    // service user so the download can succeed (issue #207).
+    await this.ensureMatrixCryptoRuntimeWritable(runtimeConfig);
+  }
+
   private async prepareOpenClawGatewayStart(
     runtimeConfig: RuntimeConfig,
   ): Promise<{ shape: OpenClawRuntimeConfigShape; startOptions: GatewayStartOptions }> {
