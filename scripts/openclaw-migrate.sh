@@ -5,7 +5,7 @@
 # codes, result.json) is documented in docs/OPENCLAW_MIGRATION.md.
 #
 #   bash openclaw-migrate.sh --target <version|pinned> --out <dir>
-#        [--node-package <dir>] [--budget <seconds>] [--dry-run]
+#        [--node-package <dir>] [--bots-dir <dir>] [--budget <seconds>] [--dry-run]
 #
 # Writes <out>/migration.log (secrets redacted), <out>/result.json and
 # <out>/npm-shrinkwrap.json.
@@ -112,6 +112,7 @@ OUT_DIR=""
 DRY_RUN=0
 NODE_PACKAGE=""
 NODE_CLI=""
+BOTS_DIR=""
 BUDGET=""
 DEADLINE=0
 OUTCOME=""
@@ -185,7 +186,7 @@ STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 usage() {
   cat <<'EOF'
 Usage: bash openclaw-migrate.sh --target <version|pinned> --out <dir>
-                                [--node-package <dir>] [--budget <seconds>] [--dry-run]
+                                [--node-package <dir>] [--bots-dir <dir>] [--budget <seconds>] [--dry-run]
 
 Unattended staged migration of the node's OpenClaw runtime. Run as root.
 
@@ -194,6 +195,8 @@ Unattended staged migration of the node's OpenClaw runtime. Run as root.
   --out <dir>            Directory for migration.log, result.json, npm-shrinkwrap.json
   --node-package <dir>   Installed node package whose CLI installs the runtime
                          (default: the package this script ships in)
+  --bots-dir <dir>       Installed bot catalog the node CLI reconciles against
+                         (default: sovereign-ai-bots next to the node package)
   --budget <seconds>     Wall-clock budget for the run (default 1500)
   --dry-run              Print the plan and exit; changes nothing, writes nothing
   -h, --help             Show this help
@@ -463,6 +466,8 @@ npm_install_openclaw() {
     CI=1 \
     NPM_CONFIG_CACHE="$home/.npm" \
     npm_config_prefix="$NPM_PREFIX" \
+    SOVEREIGN_NODE_APP_DIR="$NODE_PACKAGE" \
+    SOVEREIGN_BOTS_REPO_DIR="$BOTS_DIR" \
     timeout -k 30 "$(clamp "$NPM_TIMEOUT")" npm install -g "openclaw@${version}" </dev/null >"$out" 2>&1
 }
 
@@ -1135,6 +1140,8 @@ resolve_node_package() {
     NODE_PACKAGE="$(dirname "$(dirname "$self")")"
   fi
   NODE_CLI="$NODE_PACKAGE/dist/sovereign-node.js"
+  # The installer puts the catalog beside the app (<root>/app, <root>/sovereign-ai-bots).
+  BOTS_DIR="${BOTS_DIR:-$(dirname "$NODE_PACKAGE")/sovereign-ai-bots}"
 }
 
 runtime_template() { printf '%s/deploy/openclaw-runtime' "$NODE_PACKAGE"; }
@@ -1253,6 +1260,10 @@ step_preflight() {
   fi
   if [[ ! -f "$NODE_CLI" || ! -f "$(runtime_template)/package-lock.json" ]]; then
     STEP_DETAIL="$NODE_PACKAGE is not a built node package (need dist/sovereign-node.js and deploy/openclaw-runtime/)"
+    return 1
+  fi
+  if [[ ! -d "$BOTS_DIR/bots" ]]; then
+    STEP_DETAIL="no bot catalog at $BOTS_DIR (pass --bots-dir); the node CLI reconciles the bots against it"
     return 1
   fi
   if [[ "$TARGET" != "$LOCKED_VERSION" ]]; then
@@ -1796,6 +1807,8 @@ run_cli_check() {
 step_validate() { run_cli_check config-validate "$VALIDATE_ARGS"; }
 step_matrix_verify() { run_cli_check matrix-verify "$MATRIX_VERIFY_ARGS"; }
 
+# The node CLI gets the app and bot catalog dirs the installed wrapper would
+# export; without them it clones a catalog of its own.
 # The node renders the config and the gateway unit for the version now
 # installed and starts the gateway (the unit's sandbox lets it execute only
 # the package it was rendered for, so a bare restart would not do). This is
@@ -1813,6 +1826,8 @@ step_start() {
     PATH="$UNIT_PATH" \
     CI=1 NO_COLOR=1 \
     SOVEREIGN_NODE_GATEWAY_READY_TIMEOUT_MS="$((wait_s * 1000))" \
+    SOVEREIGN_NODE_APP_DIR="$NODE_PACKAGE" \
+    SOVEREIGN_BOTS_REPO_DIR="$BOTS_DIR" \
     timeout -k 30 "$(clamp $((wait_s + 300)))" "$NODE_BIN" "$NODE_CLI" reconcile --refresh-runtime --json \
     </dev/null >"$out" 2>"$err"
   rc=$?
@@ -1949,6 +1964,7 @@ print_plan() {
   cat <<EOF
 OpenClaw migration plan (dry run; nothing is changed)
   target:            ${TARGET:-unknown} (node package ${NODE_PACKAGE:-unknown} locks ${LOCKED_VERSION:-unknown})
+  bot catalog:       ${BOTS_DIR:-unknown}
   installed:         ${FROM_VERSION:-unknown} at ${PKG_DIR:-unknown}
   npm prefix:        ${NPM_PREFIX:-unknown} (owner ${NPM_OWNER:-unknown})
   service user/home: ${SERVICE_USER:-unknown} ${SERVICE_HOME:-unknown}
@@ -2002,12 +2018,12 @@ EOF
 parse_args() {
   while (($# > 0)); do
     case "$1" in
-      --target | --out | --node-package | --budget)
+      --target | --out | --node-package | --bots-dir | --budget)
         [[ $# -ge 2 ]] || die_usage "$1 needs a value"
         set_arg "${1#--}" "$2"
         shift 2
         ;;
-      --target=* | --out=* | --node-package=* | --budget=*)
+      --target=* | --out=* | --node-package=* | --bots-dir=* | --budget=*)
         local key="${1%%=*}"
         set_arg "${key#--}" "${1#*=}"
         shift
@@ -2041,6 +2057,7 @@ set_arg() {
     target) TARGET_ARG="$2" ;;
     out) OUT_DIR="$2" ;;
     node-package) NODE_PACKAGE="$2" ;;
+    bots-dir) BOTS_DIR="$2" ;;
     budget) BUDGET="$2" ;;
   esac
 }

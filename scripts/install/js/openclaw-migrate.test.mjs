@@ -172,7 +172,7 @@ if (args[0] === "openclaw-migration" && args[1] === "install-runtime") {
 }
 if (args[0] === "reconcile") {
   const command = "reconcile";
-  log(\`sovereign-node reconcile \${args.slice(1).join(" ")} ready_ms=\${process.env.SOVEREIGN_NODE_GATEWAY_READY_TIMEOUT_MS} user_home=\${process.env.HOME}\`);
+  log(\`sovereign-node reconcile \${args.slice(1).join(" ")} ready_ms=\${process.env.SOVEREIGN_NODE_GATEWAY_READY_TIMEOUT_MS} app=\${process.env.SOVEREIGN_NODE_APP_DIR} bots=\${process.env.SOVEREIGN_BOTS_REPO_DIR} user_home=\${process.env.HOME}\`);
   fs.appendFileSync(path.join(${JSON.stringify(units)}, ${JSON.stringify(GATEWAY)}), "# rendered by the node for the installed OpenClaw\\n");
   if (has("refresh-fail")) fail(command, "GATEWAY_REFRESH_FAILED", "Runtime refresh step openclaw-runtime failed: template pin mismatch");
   cp.spawnSync("systemctl", ["start", ${JSON.stringify(GATEWAY)}], { stdio: "ignore" });
@@ -203,6 +203,7 @@ const makeFixture = ({
   const backup = join(root, "backup");
   const lock = join(root, "migrate.lock");
   const nodePackage = join(root, "nodepkg");
+  mkdirSync(join(root, "sovereign-ai-bots", "bots", "mail-sentinel"), { recursive: true });
   const user = userInfo().username;
   mkdirSync(join(state, "active"), { recursive: true });
   writeFileSync(join(state, "node-version"), nodeVersion);
@@ -668,7 +669,7 @@ describe("openclaw-migrate.sh happy path", () => {
     const fx = makeFixture();
     const r = await run(fx);
     expect(r.status).toBe(0);
-    expect(r.calls.filter((c) => c.startsWith("sovereign-node reconcile"))).toEqual([`sovereign-node reconcile --refresh-runtime --json ready_ms=600000 user_home=${fx.home}`]);
+    expect(r.calls.filter((c) => c.startsWith("sovereign-node reconcile"))).toEqual([`sovereign-node reconcile --refresh-runtime --json ready_ms=600000 app=${fx.nodePackage} bots=${join(fx.root, "sovereign-ai-bots")} user_home=${fx.home}`]);
     const refresh = callIndex(r, /^sovereign-node reconcile/);
     expect(refresh).toBeGreaterThan(callIndex(r, / matrix verify status /));
     expect(readFileSync(join(fx.units, GATEWAY), "utf8")).toContain("# rendered by the node");
@@ -923,6 +924,13 @@ describe("openclaw-migrate.sh failure handling", () => {
       name: "not a built node package",
       setup: (fx) => rmSync(join(fx.nodePackage, "dist"), { recursive: true }),
       detail: (fx) => `${fx.nodePackage} is not a built node package (need dist/sovereign-node.js and deploy/openclaw-runtime/)`,
+      stopped: false,
+    },
+    {
+      step: "preflight",
+      name: "no bot catalog",
+      setup: (fx) => rmSync(join(fx.root, "sovereign-ai-bots"), { recursive: true }),
+      detail: (fx) => `no bot catalog at ${join(fx.root, "sovereign-ai-bots")} (pass --bots-dir); the node CLI reconciles the bots against it`,
       stopped: false,
     },
     {
@@ -1628,9 +1636,10 @@ describe("openclaw-migrate.sh arguments", () => {
     const help = (await run(fx, ["--help"])).stdout;
     expect(help).toContain("--target <version>");
     expect(help).toContain("4  another migration holds the lock");
-    const r = await run(fx, [`--target=${TARGET}`, `--out=${fx.out}`, `--node-package=${fx.nodePackage}`, "--budget=900", "--dry-run"]);
+    const r = await run(fx, [`--target=${TARGET}`, `--out=${fx.out}`, `--node-package=${fx.nodePackage}`, "--budget=900", "--bots-dir=/srv/bots", "--dry-run"]);
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("budget:            900s");
+    expect(r.stdout).toContain("bot catalog:       /srv/bots");
   });
 
   it("refuses to run as a non-root user unless told it is a test", async () => {

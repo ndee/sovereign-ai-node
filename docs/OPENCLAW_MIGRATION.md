@@ -14,6 +14,7 @@ env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     --target pinned \
     --out <root-owned result dir> \
     --node-package <installed node package dir> \
+    --bots-dir <installed bot catalog dir> \
     --budget <seconds left of the caller's own timeout>
 ```
 
@@ -22,6 +23,7 @@ env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
 | `--target <version\|pinned>` | Target OpenClaw version. `pinned` reads it from `<node-package>/deploy/openclaw-runtime/package.json`. An explicit version must equal that one: the node CLI installs nothing else. |
 | `--out <dir>` | Receives `migration.log` (secrets redacted), `result.json` and `npm-shrinkwrap.json`. |
 | `--node-package <dir>` | The installed node package whose CLI installs the runtime and refreshes the gateway. Default: the package the script ships in (`<dir>/scripts/openclaw-migrate.sh`). |
+| `--bots-dir <dir>` | The installed bot catalog, which the node CLI reconciles against. The CLI gets it as `SOVEREIGN_BOTS_REPO_DIR`, as the installed `sovereign-node` wrapper would export it. Default: `sovereign-ai-bots` next to the node package (`<install root>/app` → `<install root>/sovereign-ai-bots`). Preflight fails without it. |
 | `--budget <seconds>` | Wall-clock budget for the whole run, default 1500. Every step's timeout is clamped to what is left minus a 240 s recovery reserve, so a failure still has time to roll back and restart. With less than 600 s left after the reserve, the run stops nothing and exits 1. |
 | `--dry-run` | Prints the plan. Changes and writes nothing. |
 
