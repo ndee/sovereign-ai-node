@@ -2867,6 +2867,12 @@ describe("RealInstallerService", () => {
           requireMention: false,
         }),
       );
+      // A room `allow` key is invalid for the 2026.8 Matrix plugin, and 2026.3
+      // treats a missing one as allowed.
+      expect(
+        JSON.stringify(openclawConfig.channels?.matrix?.accounts?.["mail-sentinel"]?.groups),
+      ).not.toContain('"allow"');
+      expect(Object.hasOwn(openclawConfig, "update")).toBe(false);
       expect(
         openclawConfig.agents?.list?.every((entry) => Object.hasOwn(entry, "matrix") === false),
       ).toBe(true);
@@ -2895,6 +2901,7 @@ describe("RealInstallerService", () => {
         deny: ["process", "browser", "web_fetch", "web_search"],
         elevated: { enabled: false },
         fs: { workspaceOnly: true },
+        web: { search: { enabled: false } },
       });
       expect(openclawConfig.browser).toEqual({ enabled: false });
       expect(openclawConfig.discovery).toEqual({ mdns: { mode: "off" } });
@@ -2977,6 +2984,252 @@ describe("RealInstallerService", () => {
       ) as InstallRequest;
       expect(canonicalRequest.imap?.protocol).toBe("pop3");
       expect((await service.getPendingMigrations()).pending).toEqual([]);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("renders the OpenClaw 2026.8 config shape when 2026.8 is installed", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+
+    let matrixTestCalls = 0;
+    const matrixProbeUrls: string[] = [];
+    const observedMatrixUrls: string[] = [];
+    let sentMessageBody = "";
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "2026.8.35",
+        }),
+        ensureInstalled: async (opts) => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: opts.version,
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert --id mail-sentinel",
+          cronCommand: "openclaw cron add --name mail-sentinel-poll --every 5m",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+          capabilities: ["IMAP4rev1"],
+        }),
+      },
+      matrixProvisioner: {
+        provision: async (req) => ({
+          projectDir: join(tempRoot, "matrix"),
+          composeFilePath: join(tempRoot, "matrix", "compose.yaml"),
+          accessMode: "direct",
+          homeserverDomain: req.matrix.homeserverDomain,
+          publicBaseUrl: "http://matrix.example.org",
+          adminBaseUrl: "http://127.0.0.1:8008",
+          federationEnabled: req.matrix.federationEnabled ?? false,
+          tlsMode: "local-dev",
+          passthrough: false,
+        }),
+        bootstrapAccounts: async () => ({
+          operator: {
+            localpart: "operator",
+            userId: "@operator:matrix.example.org",
+            passwordSecretRef: "file:/tmp/operator.password",
+            accessToken: "operator-token",
+          },
+          bot: {
+            localpart: "mail-sentinel",
+            userId: "@mail-sentinel:matrix.example.org",
+            passwordSecretRef: "file:/tmp/mail-sentinel.password",
+            accessToken: "bot-token",
+          },
+        }),
+        bootstrapRoom: async () => ({
+          roomId: "!alerts:matrix.example.org",
+          roomName: "Sovereign Alerts",
+        }),
+        test: async (req) => {
+          matrixTestCalls += 1;
+          matrixProbeUrls.push(req.publicBaseUrl);
+          return {
+            ok: true,
+            homeserverUrl: req.publicBaseUrl,
+            checks: [],
+          };
+        },
+      },
+      fetchImpl: async (url, init) => {
+        const provisionResponse = buildManagedAgentMatrixProvisionResponse(url, init);
+        if (provisionResponse !== null) {
+          return provisionResponse;
+        }
+        if (!url.includes("/_matrix/client/v3/rooms/")) {
+          return new Response("not found", { status: 404 });
+        }
+        observedMatrixUrls.push(url);
+        sentMessageBody = typeof init?.body === "string" ? init.body : "";
+        return new Response(JSON.stringify({ event_id: "$evt1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+
+    try {
+      const started = await service.startInstall(buildInstallRequest());
+      const finished = await waitForJob(service, started.job.jobId);
+
+      expect(finished.job.state).toBe("succeeded");
+      expect(matrixTestCalls).toBe(1);
+
+      const stepStates = Object.fromEntries(
+        finished.job.steps.map((step) => [step.id, step.state]),
+      );
+      expect(stepStates.preflight).toBe("succeeded");
+      expect(stepStates.openclaw_bootstrap_cli).toBe("succeeded");
+      expect(stepStates.imap_validate).toBe("succeeded");
+      expect(stepStates.matrix_provision).toBe("succeeded");
+      expect(stepStates.matrix_bootstrap_accounts).toBe("succeeded");
+      expect(stepStates.matrix_bootstrap_room).toBe("succeeded");
+      expect(stepStates.openclaw_gateway_service_install).toBe("succeeded");
+      expect(stepStates.openclaw_configure).toBe("succeeded");
+      expect(stepStates.bots_configure).toBe("succeeded");
+      expect(stepStates.smoke_checks).toBe("succeeded");
+      expect(stepStates.test_alert).toBe("succeeded");
+      expect(matrixProbeUrls).toEqual(["http://127.0.0.1:8008"]);
+      expect(observedMatrixUrls).toHaveLength(2);
+      expect(observedMatrixUrls.every((url) => url.startsWith("http://127.0.0.1:8008/"))).toBe(
+        true,
+      );
+      expect(sentMessageBody).toContain("Hello from Mail Sentinel");
+
+      const stored = await service.getInstallJob(started.job.jobId);
+      expect(stored.job.state).toBe("succeeded");
+      expect(stored.error).toBeUndefined();
+
+      const registrationRaw = await readFile(
+        join(paths.stateDir, "mail-sentinel", "registration.json"),
+        "utf8",
+      );
+      const registration = JSON.parse(registrationRaw) as { agentId?: string };
+      expect(registration.agentId).toBe("mail-sentinel");
+
+      const runtimeConfigStat = await stat(paths.configPath);
+      expect(runtimeConfigStat.mode & 0o777).toBe(0o644);
+
+      const openclawConfigRaw = await readFile(
+        join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
+        "utf8",
+      );
+      const openclawConfig = JSON.parse(openclawConfigRaw) as {
+        meta?: unknown;
+        agents?: {
+          list?: unknown;
+          ownership?: string;
+          defaults?: Record<string, unknown>;
+          entries?: Record<string, { default?: unknown; skills?: unknown; tools?: unknown }>;
+        };
+        bindings?: unknown[];
+        plugins?: { allow?: string[]; entries?: Record<string, unknown> };
+        channels?: {
+          matrix?: { accounts?: Record<string, { network?: unknown; groups?: unknown }> };
+        };
+        tools?: { deny?: string[]; web?: unknown };
+        skills?: unknown;
+        memory?: unknown;
+        update?: unknown;
+      };
+      expect(finished.job.state).toBe("succeeded");
+      expect(openclawConfig.meta).toEqual({ migrations: { modelPolicyAllowlist: true } });
+      expect(openclawConfig.agents?.list).toBeUndefined();
+      expect(openclawConfig.agents?.ownership).toBe("explicit");
+      const entries = openclawConfig.agents?.entries ?? {};
+      expect(Object.keys(entries)).toEqual(["mail-sentinel"]);
+      expect(Object.values(entries).every((entry) => entry.default === undefined)).toBe(true);
+      expect(entries["mail-sentinel"]?.tools).toEqual({
+        allow: ["exec", "llm-task", "lobster", "session_status"],
+        deny: ["process", "browser", "web_fetch", "web_search"],
+        exec: { host: "gateway", mode: "allowlist" },
+      });
+      expect(openclawConfig.agents?.defaults).toEqual(
+        expect.objectContaining({
+          modelPolicy: {
+            allow: [
+              "openrouter/qwen/qwen-2.5-7b-instruct",
+              "openrouter/qwen/qwen-2.5-32b-instruct",
+            ],
+          },
+          heartbeat: { every: "0m" },
+          systemAgent: { agentId: "mail-sentinel" },
+        }),
+      );
+      expect(openclawConfig.bindings).toEqual(
+        expect.arrayContaining([
+          { agentId: "mail-sentinel", match: { channel: "matrix", accountId: "*" } },
+        ]),
+      );
+      expect(openclawConfig.plugins?.allow).toEqual(expect.arrayContaining(["openrouter"]));
+      expect(openclawConfig.plugins?.entries?.openrouter).toEqual({ enabled: true });
+      expect(openclawConfig.plugins?.entries?.["llm-task"]).toEqual({
+        enabled: true,
+        config: {
+          defaultProvider: "openrouter",
+          defaultModel: "qwen/qwen-2.5-7b-instruct",
+          timeoutMs: 30_000,
+        },
+        llm: {
+          allowModelOverride: true,
+          allowAuthProfileOverride: false,
+          allowedCompletionModels: ["openrouter/qwen/qwen-2.5-7b-instruct"],
+        },
+      });
+      const account = openclawConfig.channels?.matrix?.accounts?.["mail-sentinel"];
+      expect(account?.network).toEqual({ dangerouslyAllowPrivateNetwork: true });
+      expect(JSON.stringify(account?.groups)).not.toContain('"allow"');
+      expect(openclawConfig.tools?.web).toEqual({ search: { enabled: false } });
+      expect(openclawConfig.tools?.deny).toEqual(
+        expect.arrayContaining(["web_search", "code_execution", "terminal", "x_search"]),
+      );
+      expect(openclawConfig.skills).toEqual({ workshop: { autonomous: { mode: "off" } } });
+      expect(openclawConfig.memory).toEqual({ search: { enabled: false } });
+      expect(openclawConfig.update).toEqual({ checkOnStart: false });
+
+      // Status reads the keyed roster: the managed agent is still found.
+      const status = await service.getStatus();
+      expect(status.openclaw.agentPresent).toBe(true);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
