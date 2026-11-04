@@ -235,6 +235,26 @@ describe("buildGatewaySandboxPaths", () => {
       "extensions/matrix/node_modules/@matrix-org/matrix-sdk-crypto-nodejs",
     );
   });
+
+  it("lets the gateway execute native addons of plugins OpenClaw installed into its state dir", () => {
+    const paths = buildGatewaySandboxPaths({
+      stateDir: "/var/lib/sovereign-node",
+      openclawServiceHome: "/var/lib/sovereign-node/openclaw-home",
+      tempDir: "/var/lib/sovereign-node/openclaw-home/tmp",
+      agentWorkspaces: [],
+      serviceNpmPrefix: "/var/lib/sovereign-node/.npm-global",
+      openclawPackageRoots: [],
+      openclawPluginInstallRoots: ["/var/lib/sovereign-node/openclaw-home/.openclaw/npm"],
+      programs: ["/usr/bin/node"],
+    });
+    expect(paths.execPaths).toEqual([
+      "/usr/bin/node",
+      "/var/lib/sovereign-node/.npm-global/bin",
+      "/var/lib/sovereign-node/.npm-global/lib",
+      "/var/lib/sovereign-node/openclaw-home/.openclaw/npm",
+    ]);
+    expect(paths.readWritePaths).toContain("/var/lib/sovereign-node");
+  });
 });
 
 describe("buildBotServiceSandboxPaths", () => {

@@ -34,6 +34,13 @@ describe("isOpenClawCoreToolId", () => {
     expect(isOpenClawCoreToolId(" Exec ")).toBe(true);
     expect(isOpenClawCoreToolId("llm-task")).toBe(false);
   });
+
+  // A plugin tool named like a 2026.8 core tool would be shadowed there.
+  it("knows the core tools 2026.8 adds", () => {
+    for (const toolId of ["skill_workshop", "ask_user", "code_execution", "terminal", "x_search"]) {
+      expect(isOpenClawCoreToolId(toolId)).toBe(true);
+    }
+  });
 });
 
 describe("resolveOpenClawScanAgentId", () => {
