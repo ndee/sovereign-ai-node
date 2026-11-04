@@ -9,6 +9,14 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 From this point forward, GitHub Release notes are auto-generated from commit history
 by the `.github/workflows/release.yml` workflow.
 
+## [2.14.0](https://github.com/ndee/sovereign-ai-node/compare/v2.13.2...v2.14.0) (2026-11-04)
+
+
+### Features
+
+* **openclaw:** install OpenClaw from a locked runtime project and require Node.js &gt;=22.22.3 &lt;23 ([#348](https://github.com/ndee/sovereign-ai-node/issues/348)) ([bc08843](https://github.com/ndee/sovereign-ai-node/commit/bc08843c1e54ee27a9a2b0f0f9aa857764072ed8))
+* **openclaw:** render the OpenClaw 2026.8 config shape when 2026.8 is installed ([#349](https://github.com/ndee/sovereign-ai-node/issues/349)) ([4daa6ee](https://github.com/ndee/sovereign-ai-node/commit/4daa6eeb9477821518fd5734e6fbc854b8a81800))
+
 ## [2.13.2](https://github.com/ndee/sovereign-ai-node/compare/v2.13.1...v2.13.2) (2026-11-03)
 
 
