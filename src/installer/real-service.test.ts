@@ -2600,7 +2600,7 @@ describe("RealInstallerService", () => {
       openclawBootstrapper: {
         detectInstalled: async () => ({
           binaryPath: "/usr/local/bin/openclaw",
-          version: "0.2.0",
+          version: "2026.3.13",
         }),
         ensureInstalled: async (opts) => ({
           binaryPath: "/usr/local/bin/openclaw",
@@ -3252,7 +3252,7 @@ describe("RealInstallerService", () => {
       openclawBootstrapper: {
         detectInstalled: async () => ({
           binaryPath: "/usr/local/bin/openclaw",
-          version: "0.2.0",
+          version: "2026.3.13",
         }),
         ensureInstalled: async (opts) => ({
           binaryPath: "/usr/local/bin/openclaw",
@@ -12904,7 +12904,7 @@ describe("RealInstallerService", () => {
       openclawBootstrapper: {
         detectInstalled: async () => ({
           binaryPath: "/usr/local/bin/openclaw",
-          version: "0.2.0",
+          version: "2026.3.13",
         }),
         ensureInstalled: async (opts) => ({
           binaryPath: "/usr/local/bin/openclaw",
