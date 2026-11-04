@@ -90,16 +90,41 @@
   loop_control:
     label: "{{ item.name }}"
 
+# OpenClaw keeps its state (a SQLite database since 2026.8) under the service
+# user's home. A root-run CLI would create that state as root, which the
+# gateway can then no longer open, or read the wrong (root's) state when no
+# OpenClaw environment is set. Every OpenClaw call below therefore runs as the
+# service user, with the gateway's environment and from its home directory.
+- name: Require the OpenClaw CLI identity for OpenClaw cron jobs
+  ansible.builtin.assert:
+    that:
+      - sovereign_host_resources_plan.openclawCli is defined
+    fail_msg: The host resources plan declares OpenClaw cron jobs but not the identity to run the OpenClaw CLI as
+  when: sovereign_host_resource_crons | length > 0
+
+- name: Resolve how OpenClaw CLI calls run
+  ansible.builtin.set_fact:
+    sovereign_host_resources_openclaw_argv: >-
+      {{
+        ['runuser', '-u', sovereign_host_resources_plan.openclawCli.user, '--', 'env',
+         'HOME=' ~ sovereign_host_resources_plan.openclawCli.home,
+         'OPENCLAW_HOME=' ~ sovereign_host_resources_plan.openclawCli.home,
+         'OPENCLAW_CONFIG=' ~ sovereign_host_resources_plan.openclawCli.configPath,
+         'OPENCLAW_CONFIG_PATH=' ~ sovereign_host_resources_plan.openclawCli.configPath,
+         'CI=1']
+        + sovereign_host_resources_plan.openclawCli.command
+      }}
+    sovereign_host_resources_openclaw_cwd: "{{ sovereign_host_resources_plan.openclawCli.home }}"
+  when: sovereign_host_resource_crons | length > 0
+
 - name: List OpenClaw cron jobs
   ansible.builtin.command:
-    argv:
-      - openclaw
-      - cron
-      - list
-      - --json
+    argv: "{{ sovereign_host_resources_openclaw_argv + ['cron', 'list', '--json'] }}"
+    chdir: "{{ sovereign_host_resources_openclaw_cwd }}"
   register: sovereign_host_resources_openclaw_cron_list
   changed_when: false
   failed_when: false
+  when: sovereign_host_resource_crons | length > 0
 
 - name: Normalize OpenClaw cron list
   ansible.builtin.command:
@@ -116,7 +141,7 @@
         else:
             jobs = raw.get("jobs") or raw.get("crons") or []
         json.dump(jobs, sys.stdout)
-    stdin: "{{ sovereign_host_resources_openclaw_cron_list.stdout if sovereign_host_resources_openclaw_cron_list.rc == 0 else '[]' }}"
+    stdin: "{{ sovereign_host_resources_openclaw_cron_list.stdout if (sovereign_host_resources_openclaw_cron_list.rc | default(1)) == 0 else '[]' }}"
   register: sovereign_host_resources_openclaw_cron_jobs
   changed_when: false
 
@@ -126,11 +151,8 @@
 
 - name: Remove superseded or absent OpenClaw cron jobs
   ansible.builtin.command:
-    argv:
-      - openclaw
-      - cron
-      - rm
-      - "{{ item.id }}"
+    argv: "{{ sovereign_host_resources_openclaw_argv + ['cron', 'rm', item.id] }}"
+    chdir: "{{ sovereign_host_resources_openclaw_cwd }}"
   loop: >-
     {{
       sovereign_host_resources_openclaw_jobs
@@ -152,9 +174,11 @@
 
 - name: Ensure declared OpenClaw cron jobs exist
   ansible.builtin.command:
+    chdir: "{{ sovereign_host_resources_openclaw_cwd }}"
     argv: >-
       {{
-        ['openclaw', 'cron', 'add', '--name', item.spec.id, '--agent', item.spec.agentId, '--every', item.spec.every, '--session', item.spec.session, '--message', item.spec.message]
+        sovereign_host_resources_openclaw_argv
+        + ['cron', 'add', '--name', item.spec.id, '--agent', item.spec.agentId, '--every', item.spec.every, '--session', item.spec.session, '--message', item.spec.message]
         + ([] if item.spec.announceRoomId is not defined else ['--announce', '--channel', 'matrix', '--to', item.spec.announceRoomId])
         + ['--replace']
       }}

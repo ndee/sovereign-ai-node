@@ -289,6 +289,11 @@ jobs:
         run: |
           curl -f --retry 3 --retry-delay 2 http://127.0.0.1:8008/_matrix/client/v3/login | jq .
 
+      # OpenClaw 2026.8 keeps its state in SQLite under the service home; a
+      # root-created entry there stops the gateway.
+      - name: Verify the OpenClaw state belongs to the service user
+        run: sudo env "PATH=$PATH" bash scripts/ci/verify-openclaw-state-ownership.sh
+
       # Secrets must not travel in the process arguments of privileged calls:
       # sudo records those, so they would surface in the journal.
       - name: Verify no install credential is in a log or job record
@@ -472,6 +477,11 @@ jobs:
       - name: Verify operator account exists
         run: |
           curl -f --retry 3 --retry-delay 2 http://127.0.0.1:8008/_matrix/client/v3/login | jq .
+
+      # OpenClaw 2026.8 keeps its state in SQLite under the service home; a
+      # root-created entry there stops the gateway.
+      - name: Verify the OpenClaw state belongs to the service user
+        run: sudo env "PATH=$PATH" bash scripts/ci/verify-openclaw-state-ownership.sh
 
       - name: Collect logs on failure
         if: failure()
@@ -733,6 +743,11 @@ jobs:
       - name: Verify a test alert reaches the operator as a mention
         run: sudo env "PATH=$PATH" bash "$UPGRADE_HELPER" verify-alert "$UPGRADE_DIR/state.json"
 
+      # OpenClaw 2026.8 keeps its state in SQLite under the service home; a
+      # root-created entry there stops the gateway.
+      - name: Verify the OpenClaw state belongs to the service user
+        run: sudo env "PATH=$PATH" bash scripts/ci/verify-openclaw-state-ownership.sh
+
       - name: Restart Synapse twice and require a clean start each time
         run: |
           bash "$UPGRADE_HELPER" restarts 2
@@ -752,6 +767,11 @@ jobs:
           if [ -n "$job" ]; then
             sudo jq '.response.job | {state, steps: [.steps[] | {id, state}]}' "$job" || true
           fi
+          echo "=== gateway unit ==="
+          sudo systemctl status --no-pager sovereign-openclaw-gateway.service 2>&1 || true
+          sudo journalctl -u sovereign-openclaw-gateway.service -n 300 --no-pager 2>&1 || true
+          echo "=== OpenClaw home ownership ==="
+          sudo find /var/lib/sovereign-node/openclaw-home -maxdepth 3 -printf '%u:%g %m %TY-%Tm-%TdT%TH:%TM:%TS %p\n' 2>&1 | sort -k3 || true
           echo "=== docker ps -a ==="
           docker ps -a || true
           echo "=== synapse logs ==="

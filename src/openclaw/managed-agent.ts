@@ -23,6 +23,11 @@ const MANAGED_OPENCLAW_ENV_KEYS = [
 export type ManagedAgentRegistrationInput = {
   agentId: string;
   workspaceDir: string;
+  /**
+   * The agent is already in the rendered OpenClaw config (2026.8
+   * `agents.entries`), whose CLI has no verb that registers it again.
+   */
+  agentRenderedInConfig?: boolean;
   removeCronMatchers?: Array<{
     id?: string;
     name?: string;
@@ -87,18 +92,23 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
   }
 
   async register(input: ManagedAgentRegistrationInput): Promise<ManagedAgentRegistrationResult> {
-    const agentCommandResult = await this.runCommandAlternatives({
-      label: `${input.agentId}-agent`,
-      commands: [
-        ["agents", "add", input.agentId, "--workspace", input.workspaceDir],
-        ["agents", "create", input.agentId, "--workspace", input.workspaceDir],
-        ["agents", "upsert", input.agentId, "--workspace", input.workspaceDir],
-        ["agents", "upsert", "--id", input.agentId, "--workspace", input.workspaceDir],
-        ["agents", "add", "--id", input.agentId, "--workspace", input.workspaceDir],
-        ["agents", "create", "--id", input.agentId, "--workspace", input.workspaceDir],
-      ],
-      allowAlreadyExists: true,
-    });
+    const agentCommand =
+      input.agentRenderedInConfig === true
+        ? RENDERED_AGENT_COMMAND
+        : (
+            await this.runCommandAlternatives({
+              label: `${input.agentId}-agent`,
+              commands: [
+                ["agents", "add", input.agentId, "--workspace", input.workspaceDir],
+                ["agents", "create", input.agentId, "--workspace", input.workspaceDir],
+                ["agents", "upsert", input.agentId, "--workspace", input.workspaceDir],
+                ["agents", "upsert", "--id", input.agentId, "--workspace", input.workspaceDir],
+                ["agents", "add", "--id", input.agentId, "--workspace", input.workspaceDir],
+                ["agents", "create", "--id", input.agentId, "--workspace", input.workspaceDir],
+              ],
+              allowAlreadyExists: true,
+            })
+          ).command;
 
     let cronCommandResult: ExecResult | undefined;
     if (Array.isArray(input.removeCronMatchers) && input.removeCronMatchers.length > 0) {
@@ -125,7 +135,7 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
     return {
       agentId: input.agentId,
       workspaceDir: input.workspaceDir,
-      agentCommand: agentCommandResult.command,
+      agentCommand,
       ...(input.cron === undefined
         ? {}
         : {
@@ -169,18 +179,9 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
       (job, index, all) => all.findIndex((entry) => entry.id === job.id) === index,
     );
     for (const job of uniqueStaleJobs) {
-      const cronRmLookupPath = this.resolveLookupPath();
-      const result = await this.execRunner.run({
-        command: "openclaw",
-        args: ["cron", "rm", job.id],
-        options: {
-          timeout: OPENCLAW_MANAGED_AGENT_COMMAND_TIMEOUT_MS,
-          env: {
-            CI: "1",
-            ...(cronRmLookupPath === undefined ? {} : { PATH: cronRmLookupPath }),
-          },
-        },
-      });
+      // Same identity as the listing: a root-run CLI would create OpenClaw's
+      // state as root and lock the gateway out of it.
+      const result = await this.runOpenClawCommandWithGatewayRetry(["cron", "rm", job.id]);
       if (result.exitCode !== 0 && !isNotFoundResult(result)) {
         throw {
           code: "MANAGED_AGENT_REGISTER_FAILED",
@@ -407,6 +408,9 @@ export class ShellOpenClawManagedAgentRegistrar implements OpenClawManagedAgentR
     });
   }
 }
+
+/** Recorded as the agent command when the rendered config registered the agent. */
+export const RENDERED_AGENT_COMMAND = "openclaw config: agents.entries";
 
 const buildCronCommands = (input: ManagedAgentRegistrationInput): string[][] => {
   if (input.cron === undefined) {
