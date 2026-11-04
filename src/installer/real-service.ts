@@ -13353,10 +13353,10 @@ export default function (api) {
         user: this.getConfiguredServiceIdentity(runtimeConfig).user,
         home: dirname(runtimeConfig.openclaw.openclawHome),
         configPath: runtimeConfig.openclaw.runtimeConfigPath,
-        command:
-          serviceNode.ok && isAbsolute(openclawCommand)
-            ? [serviceNode.path, openclawCommand]
-            : [openclawCommand],
+        command: [
+          ...(serviceNode.ok && isAbsolute(openclawCommand) ? [serviceNode.path] : []),
+          openclawCommand,
+        ],
       },
     };
   }

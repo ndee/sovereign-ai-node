@@ -127,6 +127,29 @@ A pin change is exactly one edit plus a regenerated lock:
 
 After writing Sovereign-managed OpenClaw config and environment, the installer installs or repairs the gateway service via `openclaw gateway install` (using `--force` when a rewrite is required).
 
+### First gateway start on OpenClaw 2026.8
+
+2026.8 no longer bundles the Matrix channel and refuses to start on a config it considers invalid. After rendering the config, and before the gateway starts, the installer therefore:
+
+1. stops the system gateway unit if one is installed (`doctor --fix` does not repair state while a gateway it does not supervise can still run);
+2. installs `npm:@openclaw/matrix@<installed OpenClaw version>` with `--force`, plus `--accept-capabilities` when `openclaw plugins install --help` lists it. A transient failure (network, registry, timeout) is retried twice, after 10 s and 30 s; any other failure stops the install before the gateway starts;
+3. runs `openclaw doctor --fix --non-interactive` with stdin closed and a 600 s timeout. A run that times out, is killed, or prints a prompt fails the step instead of relying on a default answer;
+4. runs `openclaw config validate` as the hard gate;
+5. starts the gateway and waits up to 600 s for its first start (`SOVEREIGN_NODE_GATEWAY_READY_TIMEOUT_MS` still overrides it).
+
+On 2026.8 the rendered config already registers every managed agent (`agents.entries`) and binding, so the installer runs no `openclaw agents` registration command and only checks that `openclaw agents list` shows each agent. 2026.3 keeps its existing CLI registration and start order.
+
+### Run-as identity for OpenClaw calls
+
+OpenClaw 2026.8 keeps its state in a SQLite database under `<serviceHome>/.openclaw/state`. Anything there created by root locks the gateway out of its own state, so:
+
+- every `openclaw` call the installer makes as root runs as the service user, with the gateway's `HOME`, `OPENCLAW_HOME` and config path and from a directory that user can enter; this includes the `cron` calls of the post-install host reconciliation (`deploy/ansible/roles/sovereign_host_resources_apply`), which take the identity from the `openclawCli` block of `host-resources.json`;
+- directories the installer itself creates under `.openclaw/state` are created owned by the service user;
+- `npm` run as root keeps root's own `HOME`, so no root-owned `~/.npm` is left in the service home for the service user's plugin installs to trip over;
+- group- and world-write bits are removed from the bundled plugins (`extensions/` on 2026.3, `dist/extensions/` on 2026.8), which OpenClaw refuses to load otherwise.
+
+CI checks after every E2E install and upgrade that everything in the service home outside the trusted extension tree belongs to the service user (`scripts/ci/verify-openclaw-state-ownership.sh`).
+
 ## Filesystem Layout and Secrets Strategy
 
 ## Directory Layout (Default)

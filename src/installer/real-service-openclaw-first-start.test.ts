@@ -49,6 +49,7 @@ type Internals = {
   safeExec(
     command: string,
     args: string[],
+    options?: { timeoutMs?: number },
   ): Promise<{ ok: true; result: ExecResult } | { ok: false; error: string }>;
   ensureMatrixCryptoRuntimeWritable(config?: RuntimeConfig): Promise<void>;
   reconcileManagedExecApprovals(config: RuntimeConfig): Promise<void>;
@@ -224,6 +225,21 @@ describe("OpenClaw 2026.8 first start", () => {
       replies["sudo -n systemctl stop"] = { exitCode: 1, stderr: "denied" };
 
       await makeService("2026.8.35").prepareOpenClawGatewayStart(runtimeConfig());
+
+      expect(openclawCommands()).toContain("openclaw doctor --fix --non-interactive");
+    });
+
+    it("still repairs when systemctl cannot be run at all", async () => {
+      await writeFile(join(tempRoot, "gateway.service"), "[Unit]\n", "utf8");
+      const service = makeService("2026.8.35");
+      const safeExec = service.safeExec.bind(service);
+      vi.spyOn(service, "safeExec").mockImplementation(async (command, args, ...rest) =>
+        command === "systemctl" || command === "sudo"
+          ? { ok: false, error: "spawn systemctl ENOENT" }
+          : await safeExec(command, args, ...rest),
+      );
+
+      await service.prepareOpenClawGatewayStart(runtimeConfig());
 
       expect(openclawCommands()).toContain("openclaw doctor --fix --non-interactive");
     });
