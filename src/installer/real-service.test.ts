@@ -2867,12 +2867,7 @@ describe("RealInstallerService", () => {
           requireMention: false,
         }),
       );
-      // A room `allow` key is invalid for the 2026.8 Matrix plugin, and 2026.3
-      // treats a missing one as allowed.
-      expect(
-        JSON.stringify(openclawConfig.channels?.matrix?.accounts?.["mail-sentinel"]?.groups),
-      ).not.toContain('"allow"');
-      expect(Object.hasOwn(openclawConfig, "update")).toBe(false);
+
       expect(
         openclawConfig.agents?.list?.every((entry) => Object.hasOwn(entry, "matrix") === false),
       ).toBe(true);
@@ -2901,7 +2896,6 @@ describe("RealInstallerService", () => {
         deny: ["process", "browser", "web_fetch", "web_search"],
         elevated: { enabled: false },
         fs: { workspaceOnly: true },
-        web: { search: { enabled: false } },
       });
       expect(openclawConfig.browser).toEqual({ enabled: false });
       expect(openclawConfig.discovery).toEqual({ mdns: { mode: "off" } });

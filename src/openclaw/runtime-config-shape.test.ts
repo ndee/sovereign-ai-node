@@ -172,6 +172,10 @@ const listShapeConfig = (): ListShapeRuntimeConfig => ({
         "mail-sentinel": {
           homeserver: "http://127.0.0.1:8008",
           userId: "@mail-sentinel:example.org",
+          groups: {
+            "*": { enabled: true, allow: true, users: [] },
+            "!muted:example.org": { enabled: true, allow: false, users: [] },
+          },
         },
         public: { homeserver: "https://matrix.example.org", userId: "@bot:example.org" },
       },
@@ -214,7 +218,6 @@ const listShapeConfig = (): ListShapeRuntimeConfig => ({
     deny: ["lobster"],
     elevated: { enabled: false },
     fs: { workspaceOnly: true },
-    web: { search: { enabled: false } },
   },
   browser: { enabled: false },
   discovery: { mdns: { mode: "off" } },
@@ -264,6 +267,10 @@ describe("toKeyedOpenClawRuntimeConfig", () => {
             "mail-sentinel": {
               homeserver: "http://127.0.0.1:8008",
               userId: "@mail-sentinel:example.org",
+              groups: {
+                "*": { enabled: true, users: [] },
+                "!muted:example.org": { enabled: false, users: [] },
+              },
               network: { dangerouslyAllowPrivateNetwork: true },
             },
             public: { homeserver: "https://matrix.example.org", userId: "@bot:example.org" },
@@ -373,6 +380,23 @@ describe("toKeyedOpenClawRuntimeConfig", () => {
     expect(keyed.channels.matrix).toEqual({ enabled: true, threadReplies: "always" });
     expect(keyed.agents.entries).toEqual({});
     expect(keyed.agents.defaults.systemAgent).toBeUndefined();
+  });
+
+  it("leaves room maps and entries it cannot read as they are", () => {
+    const config = listShapeConfig();
+    config.channels.matrix.accounts = {
+      a: { homeserver: "https://matrix.example.org", groups: "bogus" },
+      b: { homeserver: "https://matrix.example.org", groups: { "*": true } },
+    };
+
+    const keyed = toKeyedOpenClawRuntimeConfig(config, { scanAgentIds: new Set() }) as {
+      channels: { matrix: { accounts: unknown } };
+    };
+
+    expect(keyed.channels.matrix.accounts).toEqual({
+      a: { homeserver: "https://matrix.example.org", groups: "bogus" },
+      b: { homeserver: "https://matrix.example.org", groups: { "*": true } },
+    });
   });
 
   it("drops a non-list allowedModels and keeps a config-less llm-task entry", () => {

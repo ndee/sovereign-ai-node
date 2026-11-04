@@ -13249,6 +13249,7 @@ export default function (api) {
           string,
           {
             enabled: boolean;
+            allow: boolean;
             autoReply?: boolean;
             requireMention?: boolean;
             users: string[];
@@ -13265,6 +13266,7 @@ export default function (api) {
       string,
       {
         enabled: boolean;
+        allow: boolean;
         autoReply?: boolean;
         requireMention?: boolean;
         users: string[];
@@ -13272,12 +13274,14 @@ export default function (api) {
     > => ({
       "*": {
         enabled: true,
+        allow: true,
         autoReply: input.autoReply,
         requireMention: input.requireMention,
         users: input.users,
       },
       [input.roomId]: {
         enabled: true,
+        allow: true,
         autoReply: input.autoReply,
         requireMention: input.requireMention,
         users: input.users,
@@ -13529,16 +13533,6 @@ export default function (api) {
         },
         fs: {
           workspaceOnly: true,
-        },
-        // With no provider chosen, 2026.8 counts every web-search plugin whose
-        // credential is in the gateway environment as configured, installs it
-        // on the first start and exits when that install needs consent; the
-        // Perplexity plugin accepts OPENROUTER_API_KEY. No node agent may use
-        // web_search, so turning search off removes nothing.
-        web: {
-          search: {
-            enabled: false,
-          },
         },
       },
       browser: {

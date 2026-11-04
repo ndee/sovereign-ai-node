@@ -228,6 +228,30 @@ const keyedLlmTaskEntry = (entry: unknown): unknown => {
 
 const OPENROUTER_PLUGIN_ID = "openrouter";
 
+// 2026.8's Matrix plugin rejects a room `allow` key; `enabled` carries it.
+const keyedMatrixRooms = (rooms: unknown): unknown =>
+  !isRecord(rooms)
+    ? rooms
+    : Object.fromEntries(
+        Object.entries(rooms).map(([roomId, room]) => {
+          if (!isRecord(room)) {
+            return [roomId, room];
+          }
+          const { allow, ...rest } = room;
+          return [roomId, allow === false ? { ...rest, enabled: false } : rest];
+        }),
+      );
+
+const keyedMatrixAccount = (
+  account: { homeserver: string } & Record<string, unknown>,
+): Record<string, unknown> => ({
+  ...account,
+  ...(account.groups === undefined ? {} : { groups: keyedMatrixRooms(account.groups) }),
+  ...(matrixHomeserverNeedsPrivateNetworkOptIn(account.homeserver)
+    ? { network: { dangerouslyAllowPrivateNetwork: true } }
+    : {}),
+});
+
 /**
  * Turn the 2026.3-shaped runtime config into the shape 2026.8 accepts as is,
  * so the first `openclaw doctor` on a fresh install has nothing to migrate.
@@ -269,9 +293,7 @@ export const toKeyedOpenClawRuntimeConfig = (
       : Object.fromEntries(
           Object.entries(payload.channels.matrix.accounts).map(([accountId, account]) => [
             accountId,
-            matrixHomeserverNeedsPrivateNetworkOptIn(account.homeserver)
-              ? { ...account, network: { dangerouslyAllowPrivateNetwork: true } }
-              : account,
+            keyedMatrixAccount(account),
           ]),
         );
 
@@ -321,6 +343,12 @@ export const toKeyedOpenClawRuntimeConfig = (
       deny: Array.from(
         new Set([...payload.tools.deny, ...OPENCLAW_KEYED_SHAPE_EXTRA_DENIED_TOOL_IDS]),
       ),
+      // With no provider chosen, 2026.8 counts every web-search plugin whose
+      // credential is in the gateway environment as configured, installs it on
+      // the first start and exits when that install needs consent; the
+      // Perplexity plugin accepts OPENROUTER_API_KEY, which the gateway always
+      // has. No node agent may use web_search, so this removes nothing.
+      web: { search: { enabled: false } },
     },
     skills: {
       workshop: { autonomous: { mode: "off" } },

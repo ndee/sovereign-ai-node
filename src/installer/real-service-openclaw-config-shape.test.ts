@@ -220,7 +220,9 @@ describe("OpenClaw config shape follows the installed OpenClaw", () => {
     const rendered = await readRendered(config);
     expect(rendered.agents?.list).toEqual([expect.objectContaining({ id: "node-operator" })]);
     expect(rendered.agents?.entries).toBeUndefined();
-    expect(rendered.tools?.web).toEqual({ search: { enabled: false } });
+    // The 2026.3 render is unchanged: no 2026.8-only settings leak into it.
+    expect(rendered.tools?.web).toBeUndefined();
+    expect(rendered.agents?.ownership).toBeUndefined();
   });
 
   it("renders the 2026.8 shape when 2026.8 is installed", async () => {
