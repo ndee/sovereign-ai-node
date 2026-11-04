@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createLogger } from "../logging/logger.js";
 import type { ExecInput, ExecResult, ExecRunner } from "../system/exec.js";
@@ -39,11 +39,8 @@ import {
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const TEMPLATE_DIR = join(REPO_ROOT, "deploy", "openclaw-runtime");
-// The project the pin moves to next, kept so its lock stays verified until then.
-const NEXT_RUNTIME_DIR = join(REPO_ROOT, "test", "fixtures", "openclaw-runtime-2026.8.35");
 const LOCKED_RUNTIMES = [
   { label: "the shipped project", dir: TEMPLATE_DIR, version: SOVEREIGN_PINNED_OPENCLAW_VERSION },
-  { label: "the 2026.8.35 project", dir: NEXT_RUNTIME_DIR, version: "2026.8.35" },
 ];
 
 type LockEntry = {
@@ -152,6 +149,23 @@ const writeFakeOpenClawPackage = async (
   }
 };
 
+const EARLIER = "2026.3.13";
+const globalRootOf = (prefix: string): string => join(prefix, "lib", "node_modules", "openclaw");
+
+/** A host installed before the locked runtime: OpenClaw installed globally into the prefix. */
+const installGlobally = async (
+  prefix: string,
+  options: FakePackageOptions & { link?: boolean } = {},
+): Promise<string> => {
+  const globalRoot = globalRootOf(prefix);
+  await writeFakeOpenClawPackage(globalRoot, { version: EARLIER, ...options });
+  await mkdir(join(prefix, "bin"), { recursive: true });
+  if (options.link !== false) {
+    await symlink(join(globalRoot, "openclaw.mjs"), join(prefix, "bin", "openclaw"));
+  }
+  return globalRoot;
+};
+
 const writeInstalledPackage = async (extensionDir: string, name: string): Promise<void> => {
   const packageDir = join(extensionDir, "node_modules", ...name.split("/"));
   await mkdir(packageDir, { recursive: true });
@@ -254,8 +268,10 @@ const unprivilegedInstall = async (
   const prefix = join(serviceHome, ".npm-global");
   await setup?.(serviceHome);
   const world = createWorld(() => join(prefix, "bin"), options);
-  const bootstrapper = new ShellOpenClawBootstrapper(world.runner, createLogger(), serviceHome);
+  const logger = createLogger();
+  const bootstrapper = new ShellOpenClawBootstrapper(world.runner, logger, serviceHome);
   return {
+    logger,
     serviceHome,
     prefix,
     runtimeDir: resolveOpenClawRuntimeDir(prefix),
@@ -288,20 +304,10 @@ describe("the locked OpenClaw runtime project", () => {
     }
   });
 
-  it("differs from the 2026.8.35 project only in the openclaw version, so a pin change is one edit plus a new lock", async () => {
-    const shipped = JSON.parse(await readFile(join(TEMPLATE_DIR, "package.json"), "utf8"));
-    const next = JSON.parse(await readFile(join(NEXT_RUNTIME_DIR, "package.json"), "utf8"));
-    expect({ ...next, dependencies: { openclaw: PIN } }).toEqual(shipped);
-  });
-
-  // Recorded so a markdown-it override is a visible decision: on 2026.3.13
-  // markdown-it is a runtime dependency below 15, on 2026.8.35 it is compiled
-  // into openclaw's dist and no longer a package.
-  it("has markdown-it 14 at runtime on 2026.3.13 and none on 2026.8.35", async () => {
-    expect(
-      lockedPackages(await readLock(TEMPLATE_DIR), "markdown-it").map(([, entry]) => entry.version),
-    ).toEqual(["14.3.3"]);
-    expect(lockedPackages(await readLock(NEXT_RUNTIME_DIR), "markdown-it")).toEqual([]);
+  // Recorded so a markdown-it override is a visible decision: on 2026.8.35
+  // markdown-it is compiled into openclaw's dist and is no longer a package.
+  it("has no markdown-it package at runtime", async () => {
+    expect(lockedPackages(await readLock(TEMPLATE_DIR), "markdown-it")).toEqual([]);
   });
 
   it.each(
@@ -565,29 +571,6 @@ describe("ShellOpenClawBootstrapper installs from the locked runtime project", (
     });
   });
 
-  it("installs the 2026.8.35 project the pin moves to next", async () => {
-    await withUid(1001, async () => {
-      const serviceHome = await mkdtemp(join(tmpdir(), "openclaw-service-home-"));
-      const prefix = join(serviceHome, ".npm-global");
-      const world = createWorld(() => join(prefix, "bin"), { ciPackage: { version: "2026.8.35" } });
-      const bootstrapper = new ShellOpenClawBootstrapper(
-        world.runner,
-        createLogger(),
-        serviceHome,
-        NEXT_RUNTIME_DIR,
-      );
-
-      const info = await bootstrapper.ensureInstalled({ ...INSTALL, version: "2026.8.35" });
-      const rerun = await bootstrapper.ensureInstalled({ ...INSTALL, version: "2026.8.35" });
-
-      expect(info).toMatchObject({ version: "2026.8.35", reinstalled: true });
-      expect(rerun.reinstalled).toBe(false);
-      expect(
-        await readFile(join(resolveOpenClawRuntimeDir(prefix), "package-lock.json"), "utf8"),
-      ).toBe(await readFile(join(NEXT_RUNTIME_DIR, "package-lock.json"), "utf8"));
-    });
-  });
-
   it("resolves the pinned-by-sovereign alias and an empty version to the pin", () => {
     expect(resolveRequestedOpenClawVersion(SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS)).toBe(PIN);
     expect(resolveRequestedOpenClawVersion("  ")).toBe(PIN);
@@ -661,18 +644,250 @@ describe("ShellOpenClawBootstrapper keeps reruns idempotent", () => {
     });
   });
 
-  it("upgrades an earlier OpenClaw whose version differs from the pin", async () => {
+  it("keeps an earlier OpenClaw whose version differs from the pin", async () => {
     await withUid(1001, async () => {
-      const { bootstrapper, calls } = await unprivilegedInstall({
-        detect: async (_input, linkPath) =>
-          existsSync(join(dirname(linkPath), "..", "lib", "sovereign-openclaw-runtime"))
-            ? ok("openclaw --version", `OpenClaw ${PIN}`)
-            : ok("openclaw --version", "OpenClaw 2026.2.1 (abc)"),
+      const { bootstrapper, calls, logger, linkPath, runtimeDir, prefix } =
+        await unprivilegedInstall({}, async (serviceHome) => {
+          await installGlobally(join(serviceHome, ".npm-global"));
+        });
+      const info$ = vi.spyOn(logger, "info");
+
+      const info = await bootstrapper.ensureInstalled(INSTALL);
+
+      expect(info).toEqual({
+        binaryPath: "openclaw",
+        version: EARLIER,
+        installMethod: "npm_fallback",
+        reinstalled: false,
+        held: true,
       });
+      expect(callsTo(calls, "npm", "ci")).toHaveLength(0);
+      expect(await readlink(linkPath())).toBe(join(globalRootOf(prefix), "openclaw.mjs"));
+      expect(existsSync(runtimeDir)).toBe(false);
+      expect(info$).toHaveBeenCalledWith(
+        expect.objectContaining({ installedVersion: EARLIER, lockedVersion: PIN }),
+        `Keeping the installed OpenClaw ${EARLIER}; moving to ${PIN} runs only through the staged OpenClaw migration`,
+      );
+    });
+  });
+
+  it("repairs the bundled extensions of the kept OpenClaw, not of a locked runtime it lacks", async () => {
+    await withUid(1001, async () => {
+      const { bootstrapper, calls, prefix } = await unprivilegedInstall({}, async (serviceHome) => {
+        await installGlobally(join(serviceHome, ".npm-global"), { matrixExtension: true });
+      });
+
+      await bootstrapper.ensureInstalled(INSTALL);
+
+      const [repair] = callsTo(calls, "npm", "install");
+      expect(repair?.options?.cwd).toBe(join(globalRootOf(prefix), "extensions", "matrix"));
+    });
+  });
+
+  it("keeps an earlier OpenClaw in the locked runtime and leaves that runtime in place", async () => {
+    await withUid(1001, async () => {
+      const { bootstrapper, calls, runtimeDir, linkPath } = await unprivilegedInstall(
+        {},
+        async (serviceHome) => {
+          const prefix = join(serviceHome, ".npm-global");
+          // A stale global copy stays behind when a host moves to the locked runtime.
+          await installGlobally(prefix, { link: false });
+          const lockedRoot = resolveOpenClawRuntimePackageRoot(resolveOpenClawRuntimeDir(prefix));
+          await writeFakeOpenClawPackage(lockedRoot, { version: EARLIER, matrixExtension: true });
+          await symlink(join(lockedRoot, "openclaw.mjs"), join(prefix, "bin", "openclaw"));
+        },
+      );
+      const lockedRoot = resolveOpenClawRuntimePackageRoot(runtimeDir);
+
+      const info = await bootstrapper.ensureInstalled(INSTALL);
+
+      expect(info).toMatchObject({
+        version: EARLIER,
+        installMethod: "locked_project",
+        held: true,
+      });
+      expect(callsTo(calls, "npm", "ci")).toHaveLength(0);
+      expect(await readlink(linkPath())).toBe(join(lockedRoot, "openclaw.mjs"));
+      expect(existsSync(join(lockedRoot, "package.json"))).toBe(true);
+      expect(callsTo(calls, "npm", "install")[0]?.options?.cwd).toBe(
+        join(lockedRoot, "extensions", "matrix"),
+      );
+    });
+  });
+
+  it("keeps an earlier OpenClaw whose CLI lies outside both layouts, without a repair", async () => {
+    await withUid(1001, async () => {
+      const { bootstrapper, calls, logger } = await unprivilegedInstall({
+        detect: async () => ok("openclaw --version", `OpenClaw ${EARLIER}`),
+      });
+      const warn$ = vi.spyOn(logger, "warn");
+
+      const info = await bootstrapper.ensureInstalled(INSTALL);
+
+      expect(info).toMatchObject({ version: EARLIER, installMethod: "npm_fallback", held: true });
+      expect(calls.filter((call) => call.command === "npm")).toHaveLength(0);
+      expect(warn$).toHaveBeenCalledWith(
+        expect.objectContaining({ installedVersion: EARLIER }),
+        "The kept OpenClaw package was not found in the prefix; skipping the bundled extension dependency repair",
+      );
+    });
+  });
+
+  it.each([
+    ["forceReinstall", { forceReinstall: true }],
+    ["skipIfCompatibleInstalled: false", { skipIfCompatibleInstalled: false }],
+  ])("keeps an earlier OpenClaw even with %s", async (_label, override) => {
+    await withUid(1001, async () => {
+      const { bootstrapper, calls } = await unprivilegedInstall({}, async (serviceHome) => {
+        await installGlobally(join(serviceHome, ".npm-global"));
+      });
+
+      const info = await bootstrapper.ensureInstalled({ ...INSTALL, ...override });
+
+      expect(info).toMatchObject({ version: EARLIER, reinstalled: false, held: true });
+      expect(callsTo(calls, "npm", "ci")).toHaveLength(0);
+    });
+  });
+
+  it("keeps an earlier OpenClaw when the request still names that version", async () => {
+    await withUid(1001, async () => {
+      const { bootstrapper, logger } = await unprivilegedInstall({}, async (serviceHome) => {
+        await installGlobally(join(serviceHome, ".npm-global"));
+      });
+      const warn$ = vi.spyOn(logger, "warn");
+
+      const info = await bootstrapper.ensureInstalled({ ...INSTALL, version: EARLIER });
+
+      expect(info).toMatchObject({ version: EARLIER, held: true });
+      expect(warn$).not.toHaveBeenCalled();
+    });
+  });
+
+  it("refuses to install over an earlier OpenClaw whose CLI does not answer", async () => {
+    await withUid(1001, async () => {
+      const { bootstrapper, calls, prefix } = await unprivilegedInstall({}, async (serviceHome) => {
+        await installGlobally(join(serviceHome, ".npm-global"), { link: false });
+      });
+
+      await expect(bootstrapper.ensureInstalled(INSTALL)).rejects.toMatchObject({
+        code: "OPENCLAW_MIGRATION_REQUIRED",
+        retryable: false,
+        details: {
+          installedVersion: EARLIER,
+          lockedVersion: PIN,
+          packageRoot: globalRootOf(prefix),
+        },
+      });
+      expect(callsTo(calls, "npm", "ci")).toHaveLength(0);
+    });
+  });
+
+  it("refuses even with forceReinstall when the CLI does not answer", async () => {
+    await withUid(1001, async () => {
+      const { bootstrapper, calls } = await unprivilegedInstall({}, async (serviceHome) => {
+        await installGlobally(join(serviceHome, ".npm-global"), { link: false });
+      });
+
+      await expect(
+        bootstrapper.ensureInstalled({ ...INSTALL, forceReinstall: true }),
+      ).rejects.toMatchObject({ code: "OPENCLAW_MIGRATION_REQUIRED" });
+      expect(callsTo(calls, "npm", "ci")).toHaveLength(0);
+    });
+  });
+
+  it("repairs a pinned locked runtime whose CLI does not answer, despite an older global copy", async () => {
+    await withUid(1001, async () => {
+      let detections = 0;
+      const { bootstrapper, calls } = await unprivilegedInstall(
+        {
+          detect: async (_input, linkPath) => {
+            detections += 1;
+            if (detections === 1) {
+              return { command: "openclaw --version", exitCode: 1, stdout: "", stderr: "crash" };
+            }
+            const { version } = JSON.parse(
+              await readFile(join(dirname(await realpath(linkPath)), "package.json"), "utf8"),
+            );
+            return ok("openclaw --version", `OpenClaw ${version}`);
+          },
+        },
+        async (serviceHome) => {
+          const prefix = join(serviceHome, ".npm-global");
+          await installGlobally(prefix, { link: false });
+          const lockedRoot = resolveOpenClawRuntimePackageRoot(resolveOpenClawRuntimeDir(prefix));
+          await writeFakeOpenClawPackage(lockedRoot);
+          await symlink(join(lockedRoot, "openclaw.mjs"), join(prefix, "bin", "openclaw"));
+        },
+      );
 
       const info = await bootstrapper.ensureInstalled(INSTALL);
 
       expect(info).toMatchObject({ version: PIN, reinstalled: true });
+      expect(info.held).toBeUndefined();
+      expect(callsTo(calls, "npm", "ci")).toHaveLength(1);
+    });
+  });
+
+  it("moves an earlier OpenClaw to the pin only when the caller allows a version change", async () => {
+    await withUid(1001, async () => {
+      const { bootstrapper, calls, runtimeDir, linkPath } = await unprivilegedInstall(
+        {},
+        async (serviceHome) => {
+          await installGlobally(join(serviceHome, ".npm-global"));
+        },
+      );
+
+      const info = await bootstrapper.ensureInstalled({ ...INSTALL, allowVersionChange: true });
+
+      expect(info).toEqual({
+        binaryPath: "openclaw",
+        version: PIN,
+        installMethod: "locked_project",
+        reinstalled: true,
+      });
+      expect(callsTo(calls, "npm", "ci")).toHaveLength(1);
+      expect(await readlink(linkPath())).toBe(
+        join(resolveOpenClawRuntimePackageRoot(runtimeDir), "openclaw.mjs"),
+      );
+    });
+  });
+
+  it("installs the pin on a host with no OpenClaw at all", async () => {
+    await withUid(1001, async () => {
+      const { bootstrapper, calls } = await unprivilegedInstall();
+
+      const info = await bootstrapper.ensureInstalled(INSTALL);
+
+      expect(info).toMatchObject({ version: PIN, reinstalled: true });
+      expect(info.held).toBeUndefined();
+      expect(callsTo(calls, "npm", "ci")).toHaveLength(1);
+    });
+  });
+
+  it("treats a package that reports no version as no OpenClaw and installs the pin", async () => {
+    await withUid(1001, async () => {
+      const { bootstrapper, calls } = await unprivilegedInstall(
+        {
+          detect: async () => ({
+            command: "openclaw --version",
+            exitCode: 1,
+            stdout: "",
+            stderr: "",
+          }),
+        },
+        async (serviceHome) => {
+          const globalRoot = await installGlobally(join(serviceHome, ".npm-global"));
+          await writeFile(
+            join(globalRoot, "package.json"),
+            JSON.stringify({ name: "openclaw", bin: "openclaw.mjs" }),
+            "utf8",
+          );
+        },
+      );
+
+      await expect(bootstrapper.ensureInstalled(INSTALL)).rejects.toMatchObject({
+        code: "OPENCLAW_INSTALL_FAILED",
+      });
       expect(callsTo(calls, "npm", "ci")).toHaveLength(1);
     });
   });
@@ -868,11 +1083,15 @@ describe("ShellOpenClawBootstrapper never breaks the runtime in place on a faile
     });
   });
 
-  it("hardens world-writable bundled extension directories", async () => {
+  it.each([
+    "extensions",
+    "dist/extensions",
+  ])("hardens world-writable bundled extension directories in %s/", async (relative) => {
+    const segments = relative.split("/");
     await withUid(1001, async () => {
       const { bootstrapper, runtimeDir } = await unprivilegedInstall({
         ciHook: async (stagingDir) => {
-          const extensions = join(stagingDir, "node_modules", "openclaw", "extensions");
+          const extensions = join(stagingDir, "node_modules", "openclaw", ...segments);
           await mkdir(join(extensions, "memory-core"), { recursive: true });
           await writeFile(join(extensions, "memory-core", "index.ts"), "export {};\n", "utf8");
           await chmod(join(extensions, "memory-core", "index.ts"), 0o666);
@@ -883,7 +1102,7 @@ describe("ShellOpenClawBootstrapper never breaks the runtime in place on a faile
 
       await bootstrapper.ensureInstalled(INSTALL);
 
-      const extensions = join(resolveOpenClawRuntimePackageRoot(runtimeDir), "extensions");
+      const extensions = join(resolveOpenClawRuntimePackageRoot(runtimeDir), ...segments);
       expect((await stat(extensions)).mode & 0o022).toBe(0);
       expect((await stat(join(extensions, "memory-core"))).mode & 0o022).toBe(0);
       expect((await stat(join(extensions, "memory-core", "index.ts"))).mode & 0o022).toBe(0);

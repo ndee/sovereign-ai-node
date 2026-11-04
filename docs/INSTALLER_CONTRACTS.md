@@ -101,12 +101,33 @@ In the default install path, `sovereign-node install` is responsible for install
 
 Default behavior:
 
-- install the current Sovereign-pinned OpenClaw version `2026.3.13` from the locked runtime project shipped in `deploy/openclaw-runtime/` (a `package.json` with a `zod` `4.6.6` override and its committed `package-lock.json`); never from the upstream `openclaw.ai/install.sh` and never with a bare `npm install -g`
+- install the current Sovereign-pinned OpenClaw version `2026.8.35` from the locked runtime project shipped in `deploy/openclaw-runtime/` (a `package.json` with a `zod` `4.6.6` override and its committed `package-lock.json`); never from the upstream `openclaw.ai/install.sh` and never with a bare `npm install -g`
 - install it with `npm ci --omit=dev` into `<prefix>/lib/sovereign-openclaw-runtime`, where `<prefix>` is `<serviceHome>/.npm-global` for an unprivileged install and npm's global prefix (`npm prefix -g`) for a root install, then link `<prefix>/bin/openclaw` to the locked CLI
 - stage the install next to the runtime in place and swap it in only after `npm ci` succeeds, so a failed install leaves the previous runtime working; a rerun skips the install when the runtime in place was installed from the same lock and `<prefix>/bin/openclaw` points into it
+- keep an installed OpenClaw whose version differs from the pin (see below); a host without OpenClaw gets the pin
 - require Node.js `>=22.22.3 <23` for both the process running `sovereign-node` and the system Node the gateway runs on (preflight checks `node-version` and `gateway-node-version`); `install.sh` upgrades or installs Node.js 22 from NodeSource when needed
 - skip OpenClaw onboarding because Sovereign owns the domain-specific configuration flow
 - run non-interactively in the installer backend
+
+### Keeping the installed OpenClaw version
+
+Moving a host to another OpenClaw version migrates OpenClaw's state in a way the earlier version cannot read. That needs the gateway stopped and a backup first. Every install job runs while the gateway is up, so no install job changes the OpenClaw version. This covers `sovereign-node install`, `sovereign-node update`, an `install.sh` rerun, `POST /api/install/run`, the IMAP reconfigure and mail-sentinel instance changes. Only the staged OpenClaw migration changes it.
+
+The bootstrap step works out the installed version:
+
+1. the version the `openclaw` CLI reports;
+2. when the CLI does not answer, the `package.json` version of the package `<prefix>/bin/openclaw` points into, then of `<prefix>/lib/node_modules/openclaw` (the global layout of earlier releases), then of `<prefix>/lib/sovereign-openclaw-runtime/node_modules/openclaw`.
+
+When that version differs from the pin, the step:
+
+- keeps it. It logs `Keeping the installed OpenClaw <installed>; moving to <pin> runs only through the staged OpenClaw migration` and runs no `npm ci`, no relink and no cache clear;
+- repairs the bundled extension dependencies of the kept package;
+- records the kept version as `openclaw.requestedVersion` in `sovereign-node.json5`, so the config shape and the `openclaw-version-pin` doctor check follow the installed CLI;
+- fails with `OPENCLAW_MIGRATION_REQUIRED` (not retryable) when the version came from a package on disk because the CLI did not answer, instead of installing over it.
+
+`forceReinstall` and `skipIfCompatibleInstalled: false` repair the installed version only and do not lift the hold. The only way past it is `allowVersionChange` on the bootstrapper's install options. Only the staged migration sets it, in code, after it has stopped the gateway and taken its backup. It is not part of `InstallRequest`, and it is never read from the environment, the API, the saved request or any other file, because the service user can write all of those. When the installed version equals the pin, the regular path applies, including the move of a global install into the locked runtime project.
+
+The E2E upgrade job checks that `sovereign-node update` from the previous release keeps that release's OpenClaw version.
 
 ### Changing the OpenClaw pin
 
@@ -125,9 +146,32 @@ A pin change is exactly one edit plus a regenerated lock:
 
 `--install-strategy=shallow` nests every dependency under `node_modules/openclaw`, so the package root the gateway sandbox derives from the CLI holds the runtime. npm still places openclaw's peer dependencies beside it in `node_modules`, which the sandbox therefore also allows.
 
-The next target, `2026.8.35`, is kept as a verified project in `test/fixtures/openclaw-runtime-2026.8.35/`. For that pin, step 2 can be replaced by copying its `package-lock.json` into `deploy/openclaw-runtime/`, and the fixture is then dropped.
-
 After writing Sovereign-managed OpenClaw config and environment, the installer installs or repairs the gateway service via `openclaw gateway install` (using `--force` when a rewrite is required).
+
+### First gateway start on OpenClaw 2026.8
+
+2026.8 no longer bundles the Matrix channel and refuses to start on a config it considers invalid. After rendering the config, and before the gateway starts, the installer therefore:
+
+1. stops the system gateway unit if one is installed (`doctor --fix` does not repair state while a gateway it does not supervise can still run);
+2. installs `npm:@openclaw/matrix@<installed OpenClaw version>` with `--force`, plus `--accept-capabilities` when `openclaw plugins install --help` lists it. A transient failure (network, registry, timeout) is retried twice, after 10 s and 30 s; any other failure stops the install before the gateway starts;
+3. runs `openclaw doctor --fix --non-interactive` with stdin closed and a 600 s timeout. A run that times out, is killed, or prints a prompt fails the step instead of relying on a default answer;
+4. runs `openclaw config validate` as the hard gate;
+5. starts the gateway and waits up to 600 s for its first start (`SOVEREIGN_NODE_GATEWAY_READY_TIMEOUT_MS` still overrides it).
+
+On 2026.8 the rendered config already registers every managed agent (`agents.entries`) and binding, so the installer runs no `openclaw agents` registration command and only checks that `openclaw agents list` shows each agent. 2026.3 keeps its existing CLI registration and start order.
+
+Known residual: the `@openclaw/matrix` plugin bundles two dependencies that npm overrides cannot reach. They carry GHSA-gfr2-rv44-r23c and GHSA-mrhx-c7xc-m3w5, with an availability-only impact (no confidentiality or integrity impact). The residual closes with the next `@openclaw/matrix` release, which the installer picks up through the normal pin update.
+
+### Run-as identity for OpenClaw calls
+
+OpenClaw 2026.8 keeps its state in a SQLite database under `<serviceHome>/.openclaw/state`. Anything there created by root locks the gateway out of its own state, so:
+
+- every `openclaw` call the installer makes as root runs as the service user, with the gateway's `HOME`, `OPENCLAW_HOME` and config path and from a directory that user can enter; this includes the `cron` calls of the post-install host reconciliation (`deploy/ansible/roles/sovereign_host_resources_apply`), which take the identity from the `openclawCli` block of `host-resources.json`;
+- directories the installer itself creates under `.openclaw/state` are created owned by the service user;
+- `npm` run as root keeps root's own `HOME`, so no root-owned `~/.npm` is left in the service home for the service user's plugin installs to trip over;
+- group- and world-write bits are removed from the bundled plugins (`extensions/` on 2026.3, `dist/extensions/` on 2026.8), which OpenClaw refuses to load otherwise.
+
+CI checks after every E2E install and upgrade that everything in the service home outside the trusted extension tree belongs to the service user (`scripts/ci/verify-openclaw-state-ownership.sh`).
 
 ## Filesystem Layout and Secrets Strategy
 
@@ -626,7 +670,7 @@ type InstallRequest = {
     installMethod?: "install_sh"; // phase-B default and only supported value
     version?: string; // normally provided by Sovereign pin/profile
     skipIfCompatibleInstalled?: boolean; // default true
-    forceReinstall?: boolean; // default false
+    forceReinstall?: boolean; // default false; repairs the installed version, never replaces it with another
     runOnboard?: false; // default false; Sovereign flow skips onboarding
   };
   openrouter: {

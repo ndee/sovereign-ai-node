@@ -16,6 +16,7 @@ import {
 } from "node:fs/promises";
 import { request as httpsRequest } from "node:https";
 import { isIPv4 } from "node:net";
+import { userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { connect as tlsConnect } from "node:tls";
 import type {
@@ -186,6 +187,7 @@ import {
 import {
   describeGatewayNotReady,
   describeSkippedGatewaySmokeCheck,
+  GATEWAY_FIRST_START_READY_DEADLINE_MS,
   type GatewayReadinessOutcome,
   type GatewayUnitSnapshot,
   parseSystemctlShow,
@@ -200,6 +202,7 @@ import {
   JobRunner,
   type JobRunnerSnapshot,
 } from "./job-runner.js";
+import { prepareOpenClawGatewayFirstStart } from "./openclaw-first-start.js";
 import {
   clearOpenClawTempDirCaches,
   removeForeignOwnedTempEntries,
@@ -3846,7 +3849,14 @@ export class RealInstallerService implements InstallerService {
       "create",
     );
     try {
-      await this.ensureManagedAgentOpenClawBindings(await this.readRuntimeConfig());
+      const boundRuntimeConfig = await this.readRuntimeConfig();
+      await this.ensureManagedAgentOpenClawBindings(
+        boundRuntimeConfig,
+        await this.resolveInstalledOpenClawConfigShape(
+          boundRuntimeConfig,
+          await this.readManagedOpenClawRuntimeJson(boundRuntimeConfig),
+        ),
+      );
     } catch (error) {
       if (!isCoreAgentBindingBestEffortSkippable(error)) {
         throw error;
@@ -6627,14 +6637,16 @@ export default function (api) {
       return;
     }
 
-    const stateDir = join(
-      runtimeConfig.openclaw.openclawHome,
-      "state",
-      TYPED_TOOL_OPENCLAW_PLUGIN_ID,
-    );
-    await mkdir(stateDir, { recursive: true, mode: 0o700 });
-    await chmod(stateDir, 0o700);
-    await this.applyConfiguredRuntimeOwnership(stateDir, runtimeConfig);
+    // The parent is OpenClaw's own state dir (its SQLite database since
+    // 2026.8). Left to `mkdir -p` it would be created root-owned and 0700 by a
+    // root install, and the gateway could no longer open its own state.
+    const openclawStateDir = join(runtimeConfig.openclaw.openclawHome, "state");
+    const stateDir = join(openclawStateDir, TYPED_TOOL_OPENCLAW_PLUGIN_ID);
+    for (const dir of [openclawStateDir, stateDir]) {
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      await chmod(dir, 0o700);
+      await this.applyConfiguredRuntimeOwnership(dir, runtimeConfig);
+    }
 
     for (const dir of [extensionDir, join(extensionDir, "bin")]) {
       await mkdir(dir, { recursive: true });
@@ -9088,6 +9100,13 @@ export default function (api) {
     const serviceNode = shouldRunOpenClawAsServiceUser
       ? await resolveServiceNode(this.serviceProgramSearchPath)
       : null;
+    // setManagedOpenClawEnv points this process's HOME at the OpenClaw service
+    // home. npm run as root from there leaves a root-owned ~/.npm behind, which
+    // the service user's own npm (OpenClaw plugin installs) cannot write.
+    const rootNpmHome =
+      command === "npm" && typeof process.getuid === "function" && process.getuid() === 0
+        ? userInfo().homedir
+        : undefined;
     const effectiveCommand = shouldRunOpenClawAsServiceUser ? "sudo" : command;
     const effectiveArgs = shouldRunOpenClawAsServiceUser
       ? [
@@ -9126,6 +9145,7 @@ export default function (api) {
                 },
               }
             : {}),
+          ...(rootNpmHome === undefined ? {} : { env: { HOME: rootNpmHome } }),
         },
       });
       return {
@@ -9277,6 +9297,7 @@ export default function (api) {
       gatewayServiceSkipped?: boolean;
       gatewayReadiness?: GatewayReadinessOutcome;
       relayTunnelServiceInstalled?: boolean;
+      heldOpenClawVersion?: string;
     } = {};
 
     return [
@@ -9326,6 +9347,9 @@ export default function (api) {
           });
           if (installed.reinstalled === true) {
             await this.clearOpenClawRuntimeCaches();
+          }
+          if (installed.held === true) {
+            stepState.heldOpenClawVersion = installed.version;
           }
         },
       },
@@ -9559,11 +9583,10 @@ export default function (api) {
             await this.openclawGatewayServiceManager.install({
               force: req.openclaw?.forceReinstall ?? false,
             });
-            await this.openclawGatewayServiceManager.start();
-            // The matrix extension downloads its E2EE crypto runtime into its
-            // own (root-owned) package dir on first gateway startup; hand that
-            // dir to the service user so the download can succeed (issue #207).
-            await this.ensureMatrixCryptoRuntimeWritable(stepState.runtimeConfig);
+            await this.startInstalledUserGatewayService(
+              req.openclaw?.version,
+              stepState.runtimeConfig,
+            );
           } catch (error) {
             if (!isGatewayUserSystemdUnavailableError(error)) {
               throw error;
@@ -9607,6 +9630,9 @@ export default function (api) {
           const appliedRequest = stepState.effectiveRequest ?? req;
           let runtimeConfig = await this.writeSovereignConfig({
             req: appliedRequest,
+            ...(stepState.heldOpenClawVersion === undefined
+              ? {}
+              : { openclawVersion: stepState.heldOpenClawVersion }),
             matrixProvision: stepState.matrixProvision,
             matrixAccounts: stepState.matrixAccounts,
             matrixRoom: stepState.matrixRoom,
@@ -9694,14 +9720,19 @@ export default function (api) {
               await this.installRelayTunnelServiceOrThrow(runtimeConfig);
           }
 
+          const gatewayStart = await this.prepareOpenClawGatewayStart(runtimeConfig);
+
           // A gateway that is not listening yet does not fail this step: the
           // configuration is applied, and `gateway_ready` reports the wait.
           // Until it listens, bot registration is deferred as for a skipped
           // gateway.
           if (stepState.gatewayServiceSkipped === true) {
-            const outcome = await this.ensureSystemGatewayServiceFallback(runtimeConfig);
+            const outcome = await this.ensureSystemGatewayServiceFallback(
+              runtimeConfig,
+              gatewayStart.startOptions,
+            );
             stepState.gatewayReadiness = outcome;
-            if (outcome.unitStarted) {
+            if (outcome.unitStarted && gatewayStart.shape === "list") {
               // System-level gateway flow starts the gateway here rather than in
               // the user-service step, so fix the crypto runtime dir now (#207).
               await this.ensureMatrixCryptoRuntimeWritable(runtimeConfig);
@@ -9711,7 +9742,10 @@ export default function (api) {
           }
 
           try {
-            stepState.gatewayReadiness = await this.refreshGatewayAfterRuntimeConfig(runtimeConfig);
+            stepState.gatewayReadiness = await this.refreshGatewayAfterRuntimeConfig(
+              runtimeConfig,
+              gatewayStart.startOptions,
+            );
           } catch (error) {
             if (isGatewayUserSystemdUnavailableError(error)) {
               stepState.gatewayServiceSkipped = true;
@@ -9726,7 +9760,9 @@ export default function (api) {
             throw error;
           }
           stepState.gatewayServiceSkipped = !stepState.gatewayReadiness.ready;
-          await this.ensureMatrixCryptoRuntimeWritable(runtimeConfig);
+          if (gatewayStart.shape === "list") {
+            await this.ensureMatrixCryptoRuntimeWritable(runtimeConfig);
+          }
         },
       },
       {
@@ -10772,6 +10808,12 @@ export default function (api) {
   ): Promise<ManagedAgentRegistrationResult[]> {
     const registrations: ManagedAgentRegistrationResult[] = [];
     let deferred = false;
+    // 2026.8 has no CLI verb that registers an existing agent: the rendered
+    // config already holds every agent (agents.entries) and binding.
+    const configShape = await this.resolveInstalledOpenClawConfigShape(
+      runtimeConfig,
+      await this.readManagedOpenClawRuntimeJson(runtimeConfig),
+    );
 
     for (const botPackage of botPackages) {
       const agent = runtimeConfig.openclawProfile.agents.find(
@@ -10805,6 +10847,7 @@ export default function (api) {
             await this.managedAgentRegistrar.register({
               agentId: agent.id,
               workspaceDir: agent.workspace,
+              ...(configShape === "keyed" ? { agentRenderedInConfig: true } : {}),
               ...(staleCronMatchers.length === 0 ? {} : { removeCronMatchers: staleCronMatchers }),
               ...(cronEntry === undefined ||
               compiledCron?.kind !== "openclawCron" ||
@@ -10859,7 +10902,7 @@ export default function (api) {
 
     if (!deferred) {
       try {
-        await this.ensureManagedAgentOpenClawBindings(runtimeConfig);
+        await this.ensureManagedAgentOpenClawBindings(runtimeConfig, configShape);
       } catch (error) {
         if (!isCoreAgentBindingBestEffortSkippable(error)) {
           throw error;
@@ -10894,7 +10937,10 @@ export default function (api) {
     }
   }
 
-  private async ensureManagedAgentOpenClawBindings(runtimeConfig: RuntimeConfig): Promise<void> {
+  private async ensureManagedAgentOpenClawBindings(
+    runtimeConfig: RuntimeConfig,
+    configShape: OpenClawRuntimeConfigShape,
+  ): Promise<void> {
     if (this.execRunner === null) {
       this.logger.warn(
         "Exec runner unavailable; skipping explicit OpenClaw per-agent matrix account/binding setup",
@@ -10936,6 +10982,10 @@ export default function (api) {
         );
         continue;
       }
+      if (configShape === "keyed") {
+        await this.requireOpenClawAgentPresent(agent.id);
+        continue;
+      }
       const botPackage = await this.findBotPackageByTemplateRef(agent.templateRef);
       const usesSharedServiceIdentity =
         agent.matrix.userId === runtimeConfig.matrix.bot.userId &&
@@ -10973,6 +11023,22 @@ export default function (api) {
       }
     }
     await this.reconcileManagedExecApprovals(runtimeConfig);
+  }
+
+  /**
+   * The rendered 2026.8 config registers the agent; the gateway's own listing
+   * proves it took. An unreadable listing is left to the smoke checks.
+   */
+  private async requireOpenClawAgentPresent(agentId: string): Promise<void> {
+    const probe = await this.waitForOpenClawListContains(["agents", "list"], agentId);
+    if (probe.verified && !probe.present) {
+      throw {
+        code: "MANAGED_AGENT_REGISTER_FAILED",
+        message: `OpenClaw does not list the managed agent ${agentId} from the rendered config`,
+        retryable: true,
+        details: { agentId },
+      };
+    }
   }
 
   /**
@@ -11222,10 +11288,90 @@ export default function (api) {
     }
   }
 
+  /**
+   * Starts the freshly installed user-level gateway service. A 2026.8 gateway
+   * starts only after its Matrix plugin, repair and config check in the
+   * configure step: started here it would run without any config.
+   */
+  private async startInstalledUserGatewayService(
+    requestedVersion: string | undefined,
+    runtimeConfig: RuntimeConfig | undefined,
+  ): Promise<void> {
+    const shape = resolveOpenClawRuntimeConfigShape([
+      (await this.safeDetectOpenClaw())?.version,
+      resolveRequestedOpenClawVersion(requestedVersion),
+    ]);
+    if (shape === "keyed") {
+      return;
+    }
+    await this.openclawGatewayServiceManager.start();
+    // The matrix extension downloads its E2EE crypto runtime into its own
+    // (root-owned) package dir on first gateway startup; hand that dir to the
+    // service user so the download can succeed (issue #207).
+    await this.ensureMatrixCryptoRuntimeWritable(runtimeConfig);
+  }
+
+  /**
+   * OpenClaw 2026.8 needs its external Matrix plugin, a config repair and a
+   * valid config before the gateway may start: a start without them restart-
+   * loops. Runs all three as the service user with the gateway stopped and
+   * returns the options for that first start. Nothing changes for 2026.3.
+   */
+  private async prepareOpenClawGatewayStart(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<{ shape: OpenClawRuntimeConfigShape; startOptions: GatewayStartOptions }> {
+    const shape = await this.resolveInstalledOpenClawConfigShape(
+      runtimeConfig,
+      await this.readManagedOpenClawRuntimeJson(runtimeConfig),
+    );
+    if (shape !== "keyed") {
+      return { shape, startOptions: {} };
+    }
+    if (this.execRunner === null) {
+      this.logger.warn(
+        "Exec runner unavailable; skipping the OpenClaw Matrix plugin install, doctor and config validation",
+      );
+      return { shape, startOptions: {} };
+    }
+    const version =
+      (await this.safeDetectOpenClaw())?.version ??
+      resolveRequestedOpenClawVersion(runtimeConfig.openclaw.requestedVersion);
+    // `doctor --fix` refuses to repair state while a gateway it does not
+    // supervise itself (this system unit) can still run.
+    if (await this.isSystemGatewayUnitInstalled()) {
+      const stopped = await this.runSystemctlElevated(["stop", SOVEREIGN_GATEWAY_SYSTEMD_UNIT]);
+      if (!stopped.ok || stopped.result.exitCode !== 0) {
+        this.logger.warn(
+          stopped.ok
+            ? {
+                exitCode: stopped.result.exitCode,
+                stderr: truncateText(stopped.result.stderr, 400),
+              }
+            : { error: stopped.error },
+          "Could not stop the OpenClaw gateway before its config repair",
+        );
+      }
+    }
+    await prepareOpenClawGatewayFirstStart(
+      {
+        run: async (args, options) =>
+          await this.safeExec("openclaw", args, { timeoutMs: options.timeoutMs }),
+        sleep: this.gatewayReadinessClock.sleep,
+      },
+      version,
+    );
+    this.logger.info(
+      { version },
+      "OpenClaw Matrix plugin installed, config repaired and validated before the gateway start",
+    );
+    return { shape, startOptions: { readyDeadlineMs: GATEWAY_FIRST_START_READY_DEADLINE_MS } };
+  }
+
   private async ensureSystemGatewayServiceFallback(
     runtimeConfig: RuntimeConfig,
+    options?: GatewayStartOptions,
   ): Promise<GatewayReadinessOutcome> {
-    const deadlineMs = resolveGatewayReadyDeadlineMs();
+    const deadlineMs = resolveGatewayReadyDeadlineMs(process.env, options?.readyDeadlineMs);
     const unitNotStarted = (reason: string): GatewayReadinessOutcome => ({
       unitStarted: false,
       ready: false,
@@ -12488,7 +12634,7 @@ export default function (api) {
       (options?.preferInstalledSystemUnit === true && (await this.isSystemGatewayUnitInstalled()))
     ) {
       return requireGatewayUnitStarted(
-        await this.ensureSystemGatewayServiceFallback(runtimeConfig),
+        await this.ensureSystemGatewayServiceFallback(runtimeConfig, options),
       );
     }
 
@@ -12507,7 +12653,7 @@ export default function (api) {
       await this.openclawGatewayServiceManager.start();
     }
 
-    const deadlineMs = resolveGatewayReadyDeadlineMs();
+    const deadlineMs = resolveGatewayReadyDeadlineMs(process.env, options?.readyDeadlineMs);
     if (this.execRunner === null) {
       return { unitStarted: true, ready: true, waitedMs: 0, deadlineMs };
     }
@@ -12528,7 +12674,9 @@ export default function (api) {
       { ...outcome },
       "OpenClaw gateway user service failed after runtime configure; trying system-level fallback",
     );
-    return requireGatewayUnitStarted(await this.ensureSystemGatewayServiceFallback(runtimeConfig));
+    return requireGatewayUnitStarted(
+      await this.ensureSystemGatewayServiceFallback(runtimeConfig, options),
+    );
   }
 
   private async isSystemGatewayUnitInstalled(): Promise<boolean> {
@@ -12602,6 +12750,12 @@ export default function (api) {
 
   private async writeSovereignConfig(input: {
     req: InstallRequest;
+    /**
+     * The OpenClaw the bootstrap step kept instead of the pin. Recorded as the
+     * requested version so the config shape and the version-pin check follow
+     * the installed CLI even when it cannot be run.
+     */
+    openclawVersion?: string;
     relayEnrollment?: RelayEnrollmentResult;
     matrixProvision: BundledMatrixProvisionResult;
     matrixAccounts: BundledMatrixAccountsResult;
@@ -12721,7 +12875,8 @@ export default function (api) {
       openclaw: {
         managedInstallation: input.req.openclaw?.manageInstallation ?? true,
         installMethod: input.req.openclaw?.installMethod ?? "install_sh",
-        requestedVersion: resolveRequestedOpenClawVersion(input.req.openclaw?.version),
+        requestedVersion:
+          input.openclawVersion ?? resolveRequestedOpenClawVersion(input.req.openclaw?.version),
         openclawHome: openclawPaths.openclawHome,
         runtimeConfigPath: openclawPaths.runtimeConfigPath,
         runtimeProfilePath: openclawPaths.runtimeProfilePath,
@@ -13161,7 +13316,10 @@ export default function (api) {
       if (runtimeConfig.hostResources !== undefined) {
         await this.writeInstallerJsonFile(
           runtimeConfig.hostResources.planPath,
-          runtimeConfig.hostResources,
+          {
+            ...runtimeConfig.hostResources,
+            ...(await this.resolveHostPlanOpenClawCli(runtimeConfig)),
+          },
           0o644,
         );
         await this.applyRuntimeOwnership(runtimeConfig.hostResources.planPath);
@@ -13179,6 +13337,42 @@ export default function (api) {
     }
 
     return runtimeConfig;
+  }
+
+  /**
+   * Who the post-install host reconciliation runs the OpenClaw CLI as. It runs
+   * as root, and a root-run CLI would create OpenClaw's state as root (or read
+   * root's own), so the plan names the gateway's identity, environment and
+   * CLI. Only a plan that declares OpenClaw cron jobs needs it.
+   */
+  private async resolveHostPlanOpenClawCli(
+    runtimeConfig: RuntimeConfig,
+  ): Promise<{ openclawCli?: HostPlanOpenClawCli }> {
+    if (
+      !(runtimeConfig.hostResources?.resources ?? []).some(
+        (resource) => resource.kind === "openclawCron",
+      )
+    ) {
+      return {};
+    }
+    const serviceNpmBinDir = await this.resolveServiceNpmBinDir(runtimeConfig);
+    const searchPath = [serviceNpmBinDir, ...this.serviceProgramSearchPath.split(":")].join(":");
+    const openclawCommand =
+      (await resolveExecutablePath("openclaw", searchPath)) ??
+      (await resolveExecutablePath("openclaw")) ??
+      "openclaw";
+    const serviceNode = await resolveServiceNode(this.serviceProgramSearchPath);
+    return {
+      openclawCli: {
+        user: this.getConfiguredServiceIdentity(runtimeConfig).user,
+        home: dirname(runtimeConfig.openclaw.openclawHome),
+        configPath: runtimeConfig.openclaw.runtimeConfigPath,
+        command: [
+          ...(serviceNode.ok && isAbsolute(openclawCommand) ? [serviceNode.path] : []),
+          openclawCommand,
+        ],
+      },
+    };
   }
 
   private async writeOpenClawRuntimeArtifacts(runtimeConfig: RuntimeConfig): Promise<void> {
@@ -14388,7 +14582,16 @@ const renderTemplateTransitionReport = (
   committed,
 });
 
-type GatewayRefreshOptions = { preferInstalledSystemUnit?: boolean };
+type GatewayStartOptions = { readyDeadlineMs?: number };
+
+type HostPlanOpenClawCli = {
+  user: string;
+  home: string;
+  configPath: string;
+  command: string[];
+};
+
+type GatewayRefreshOptions = GatewayStartOptions & { preferInstalledSystemUnit?: boolean };
 
 type RuntimeRefreshState = {
   runtimeConfig: RuntimeConfig;

@@ -1,10 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createLogger } from "../logging/logger.js";
 import type { ExecInput, ExecResult, ExecRunner } from "../system/exec.js";
 import { resolveServiceNodeCommand } from "../system/service-node.js";
 import { resolveOpenClawSpawnLookupPath } from "./bootstrap.js";
-import { ShellOpenClawManagedAgentRegistrar } from "./managed-agent.js";
+import { RENDERED_AGENT_COMMAND, ShellOpenClawManagedAgentRegistrar } from "./managed-agent.js";
 
 // The service user runs the system node, never the node that started the installer.
 const serviceNode = await resolveServiceNodeCommand();
@@ -679,5 +679,68 @@ describe("ShellOpenClawManagedAgentRegistrar", () => {
         process.env.SOVEREIGN_NODE_CONFIG = priorSovereignNodeConfig;
       }
     }
+  });
+
+  describe("as root with a configured service user", () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.restoreAllMocks();
+    });
+
+    const asServiceUser = (calls: string[]): ExecRunner => ({
+      run: async (input): Promise<ExecResult> => {
+        const serialized = [input.command, ...(input.args ?? [])].join(" ");
+        calls.push(serialized);
+        const listing = serialized.endsWith(" cron list --json");
+        return {
+          command: serialized,
+          exitCode: serialized.startsWith("sudo -u sovereign-node -- ") ? 0 : 1,
+          stdout: listing
+            ? '{"jobs":[{"id":"11111111-1111-1111-1111-111111111111","name":"mail-sentinel-poll","agentId":"mail-sentinel"}]}'
+            : "",
+          stderr: "",
+        };
+      },
+    });
+
+    it("removes a stale cron job as the service user, never as root", async () => {
+      vi.stubEnv("SOVEREIGN_NODE_SERVICE_USER", "sovereign-node");
+      vi.stubEnv("SUDO_USER", "");
+      vi.spyOn(process as { getuid: () => number }, "getuid").mockReturnValue(0);
+      const calls: string[] = [];
+
+      await new ShellOpenClawManagedAgentRegistrar(asServiceUser(calls), createLogger()).register({
+        agentId: "mail-sentinel",
+        workspaceDir: "/tmp/ws",
+        agentRenderedInConfig: true,
+        removeCronMatchers: [{ name: "mail-sentinel-poll", agentId: "mail-sentinel" }],
+      });
+
+      const removal = calls.filter((call) =>
+        call.endsWith(" cron rm 11111111-1111-1111-1111-111111111111"),
+      );
+      expect(removal).toHaveLength(1);
+      expect(removal[0]).toMatch(/^sudo -u sovereign-node -- /);
+      expect(calls.filter((call) => call.startsWith("openclaw "))).toEqual([]);
+    });
+
+    it("does not run an agent registration command for an agent the config already holds", async () => {
+      vi.stubEnv("SOVEREIGN_NODE_SERVICE_USER", "sovereign-node");
+      vi.stubEnv("SUDO_USER", "");
+      vi.spyOn(process as { getuid: () => number }, "getuid").mockReturnValue(0);
+      const calls: string[] = [];
+
+      const result = await new ShellOpenClawManagedAgentRegistrar(
+        asServiceUser(calls),
+        createLogger(),
+      ).register({
+        agentId: "mail-sentinel",
+        workspaceDir: "/tmp/ws",
+        agentRenderedInConfig: true,
+      });
+
+      expect(result.agentCommand).toBe(RENDERED_AGENT_COMMAND);
+      expect(calls.filter((call) => / agents /.test(call))).toEqual([]);
+    });
   });
 });

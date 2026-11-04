@@ -289,6 +289,11 @@ jobs:
         run: |
           curl -f --retry 3 --retry-delay 2 http://127.0.0.1:8008/_matrix/client/v3/login | jq .
 
+      # OpenClaw 2026.8 keeps its state in SQLite under the service home; a
+      # root-created entry there stops the gateway.
+      - name: Verify the OpenClaw state belongs to the service user
+        run: sudo env "PATH=$PATH" bash scripts/ci/verify-openclaw-state-ownership.sh
+
       # Secrets must not travel in the process arguments of privileged calls:
       # sudo records those, so they would surface in the journal.
       - name: Verify no install credential is in a log or job record
@@ -394,6 +399,8 @@ jobs:
           sudo systemctl status --no-pager sovereign-openclaw-gateway.service 2>&1 || true
           sudo journalctl -u sovereign-openclaw-gateway.service -n 300 --no-pager 2>&1 || true
           sudo journalctl -u sovereign-mail-sentinel-scan.service -n 100 --no-pager 2>&1 || true
+          echo "=== OpenClaw home ownership ==="
+          sudo find /var/lib/sovereign-node/openclaw-home -maxdepth 3 -printf '%u:%g %m %TY-%Tm-%TdT%TH:%TM:%TS %p\n' 2>&1 | sort -k3 || true
           echo "=== docker compose logs ==="
           COMPOSE_DIR=$(find /etc/sovereign-node -name compose.yaml -exec dirname {} \; 2>/dev/null | head -1)
           if [ -n "$COMPOSE_DIR" ]; then
@@ -471,6 +478,11 @@ jobs:
         run: |
           curl -f --retry 3 --retry-delay 2 http://127.0.0.1:8008/_matrix/client/v3/login | jq .
 
+      # OpenClaw 2026.8 keeps its state in SQLite under the service home; a
+      # root-created entry there stops the gateway.
+      - name: Verify the OpenClaw state belongs to the service user
+        run: sudo env "PATH=$PATH" bash scripts/ci/verify-openclaw-state-ownership.sh
+
       - name: Collect logs on failure
         if: failure()
         run: |
@@ -486,6 +498,8 @@ jobs:
           sudo systemctl status --no-pager sovereign-openclaw-gateway.service 2>&1 || true
           sudo journalctl -u sovereign-openclaw-gateway.service -n 300 --no-pager 2>&1 || true
           sudo journalctl -u sovereign-mail-sentinel-scan.service -n 100 --no-pager 2>&1 || true
+          echo "=== OpenClaw home ownership ==="
+          sudo find /var/lib/sovereign-node/openclaw-home -maxdepth 3 -printf '%u:%g %m %TY-%Tm-%TdT%TH:%TM:%TS %p\n' 2>&1 | sort -k3 || true
           echo "=== docker compose logs ==="
           COMPOSE_DIR=$(find /etc/sovereign-node -name compose.yaml -exec dirname {} \; 2>/dev/null | head -1)
           if [ -n "$COMPOSE_DIR" ]; then
@@ -609,6 +623,8 @@ jobs:
   # path an installed node takes with `sovereign-node update`. Proves that the
   # bundled Synapse migrates its existing database, keeps rooms and history,
   # and still delivers alerts before a release built from this change ships.
+  # The update keeps the OpenClaw the previous release installed: only the
+  # staged OpenClaw migration moves a node to another OpenClaw version.
   e2e_upgrade:
     name: E2E Upgrade (previous release to this change)
     runs-on: ubuntu-24.04
@@ -692,6 +708,18 @@ jobs:
           sudo test -s /etc/sovereign-node/install-request.json
         timeout-minutes: 15
 
+      - name: Record the OpenClaw the previous release installed
+        run: |
+          previous_pin="$(sed -n 's/^export const SOVEREIGN_PINNED_OPENCLAW_VERSION = "\(.*\)";$/\1/p' \
+            "$PREVIOUS_DIR/src/openclaw/bootstrap.ts")"
+          sudo env "PATH=$PATH" sovereign-node doctor --json > "$UPGRADE_DIR/doctor-pre.json"
+          installed="$(jq -r '.result.checks[] | select(.id == "openclaw-version-pin") | .details.detectedVersion // empty' \
+            "$UPGRADE_DIR/doctor-pre.json")"
+          echo "previous release pin: $previous_pin, installed OpenClaw: $installed"
+          test -n "$previous_pin"
+          test "$installed" = "$previous_pin"
+          echo "PREVIOUS_OPENCLAW_VERSION=$installed" >> "$GITHUB_ENV"
+
       - name: Verify the previous release runs its Synapse
         run: |
           bash "$UPGRADE_HELPER" snapshot "$UPGRADE_DIR/pre.json"
@@ -723,11 +751,32 @@ jobs:
           bash "$UPGRADE_HELPER" verify-image "$EXPECTED_SYNAPSE_IMAGE" \
             "$UPGRADE_DIR/pre.json" "$UPGRADE_DIR/post.json"
 
+      # Every install job runs while the gateway is up, so an update must not
+      # swap the OpenClaw version under it.
+      - name: Verify the update kept the previous release's OpenClaw
+        run: |
+          sudo env "PATH=$PATH" sovereign-node doctor --json > "$UPGRADE_DIR/doctor-post.json"
+          jq '.result.checks[] | select(.id == "openclaw-version-pin")' "$UPGRADE_DIR/doctor-post.json"
+          installed="$(jq -r '.result.checks[] | select(.id == "openclaw-version-pin") | .details.detectedVersion // empty' \
+            "$UPGRADE_DIR/doctor-post.json")"
+          test "$installed" = "$PREVIOUS_OPENCLAW_VERSION"
+          # The kept version is recorded as the configured one.
+          jq -e '.result.checks[] | select(.id == "openclaw-version-pin") | .status == "pass"' \
+            "$UPGRADE_DIR/doctor-post.json" > /dev/null
+          echo "OPENCLAW_VERSION_AFTER_UPDATE=$installed" >> "$GITHUB_ENV"
+
       - name: Verify the pre-upgrade rooms and history are readable
         run: sudo env "PATH=$PATH" bash "$UPGRADE_HELPER" verify-history "$UPGRADE_DIR/state.json"
 
       - name: Verify a test alert reaches the operator as a mention
         run: sudo env "PATH=$PATH" bash "$UPGRADE_HELPER" verify-alert "$UPGRADE_DIR/state.json"
+
+      # OpenClaw 2026.8 keeps its state in SQLite under the service home; a
+      # root-created entry there stops the gateway. An earlier OpenClaw kept by
+      # the update may never create that state dir.
+      - name: Verify the OpenClaw state belongs to the service user
+        if: startsWith(env.OPENCLAW_VERSION_AFTER_UPDATE, '2026.8.')
+        run: sudo env "PATH=$PATH" bash scripts/ci/verify-openclaw-state-ownership.sh
 
       - name: Restart Synapse twice and require a clean start each time
         run: |
@@ -748,6 +797,11 @@ jobs:
           if [ -n "$job" ]; then
             sudo jq '.response.job | {state, steps: [.steps[] | {id, state}]}' "$job" || true
           fi
+          echo "=== gateway unit ==="
+          sudo systemctl status --no-pager sovereign-openclaw-gateway.service 2>&1 || true
+          sudo journalctl -u sovereign-openclaw-gateway.service -n 300 --no-pager 2>&1 || true
+          echo "=== OpenClaw home ownership ==="
+          sudo find /var/lib/sovereign-node/openclaw-home -maxdepth 3 -printf '%u:%g %m %TY-%Tm-%TdT%TH:%TM:%TS %p\n' 2>&1 | sort -k3 || true
           echo "=== docker ps -a ==="
           docker ps -a || true
           echo "=== synapse logs ==="

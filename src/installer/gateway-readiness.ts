@@ -12,6 +12,9 @@ export const OPENCLAW_GATEWAY_URL = "http://127.0.0.1:18789/";
 export const GATEWAY_READY_POLL_MS = 2_000;
 export const GATEWAY_READY_PROBE_TIMEOUT_MS = 2_000;
 export const GATEWAY_READY_DEADLINE_MS = 300_000;
+// An OpenClaw 2026.8 gateway's first start loads freshly installed plugins and
+// finishes migrations, which takes longer than a restart on a Raspberry Pi.
+export const GATEWAY_FIRST_START_READY_DEADLINE_MS = 600_000;
 export const GATEWAY_READY_DEADLINE_MIN_MS = 30_000;
 export const GATEWAY_READY_DEADLINE_MAX_MS = 900_000;
 export const GATEWAY_READY_TIMEOUT_ENV = "SOVEREIGN_NODE_GATEWAY_READY_TIMEOUT_MS";
@@ -45,14 +48,17 @@ export type GatewayReadinessWaitDeps = {
   pollMs?: number;
 };
 
-export const resolveGatewayReadyDeadlineMs = (env: NodeJS.ProcessEnv = process.env): number => {
+export const resolveGatewayReadyDeadlineMs = (
+  env: NodeJS.ProcessEnv = process.env,
+  defaultMs: number = GATEWAY_READY_DEADLINE_MS,
+): number => {
   const raw = env[GATEWAY_READY_TIMEOUT_ENV]?.trim();
   if (raw === undefined || raw.length === 0) {
-    return GATEWAY_READY_DEADLINE_MS;
+    return defaultMs;
   }
   const parsed = Number(raw);
   if (!Number.isFinite(parsed)) {
-    return GATEWAY_READY_DEADLINE_MS;
+    return defaultMs;
   }
   return Math.min(
     GATEWAY_READY_DEADLINE_MAX_MS,
