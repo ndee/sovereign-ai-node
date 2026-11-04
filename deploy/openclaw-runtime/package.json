@@ -1,0 +1,12 @@
+{
+  "name": "sovereign-openclaw-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Locked OpenClaw runtime installed by sovereign-node. Regenerate the lockfile with: npm install --package-lock-only --ignore-scripts --install-strategy=shallow",
+  "dependencies": {
+    "openclaw": "2026.3.13"
+  },
+  "overrides": {
+    "zod": "4.6.6"
+  }
+}

@@ -104,6 +104,8 @@ jq -e '((.bundledDependencies // .bundleDependencies // []) | length) == 0' \
 for required in \
   package.json \
   deploy/runtime/pnpm-lock.yaml \
+  deploy/openclaw-runtime/package.json \
+  deploy/openclaw-runtime/package-lock.json \
   README.md \
   CHANGELOG.md \
   dist/sovereign-node.js \

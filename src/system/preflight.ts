@@ -5,8 +5,13 @@ import type { CheckResult } from "../contracts/common.js";
 import type { PreflightResult } from "../contracts/index.js";
 import type { Logger } from "../logging/logger.js";
 import type { ExecResult, ExecRunner } from "./exec.js";
+import {
+  isSupportedNodeVersion,
+  parseNodeVersion,
+  SUPPORTED_NODE_RANGE,
+} from "./node-runtime-floor.js";
+import { resolveServiceNode, type ServiceNodeResolution } from "./service-node.js";
 
-const MIN_NODE_MAJOR = 22;
 const MIN_DISK_FREE_BYTES = 10 * 1024 * 1024 * 1024;
 
 type PreflightCheckStatus = CheckResult["status"];
@@ -19,18 +24,21 @@ export class ShellHostPreflightChecker implements HostPreflightChecker {
   constructor(
     private readonly execRunner: ExecRunner,
     private readonly logger: Logger,
+    private readonly resolveGatewayNode: () => Promise<ServiceNodeResolution> = () =>
+      resolveServiceNode(),
   ) {}
 
   async run(input?: PreflightRequest): Promise<PreflightResult> {
     const checks = await Promise.all([
       this.checkPlatform(),
       this.checkNodeVersion(),
+      this.checkGatewayNodeVersion(),
       this.checkPrivilegeAccess(),
       this.checkDiskSpace(),
       this.checkDockerCli(),
       this.checkDockerCompose(),
       this.checkPorts80And443(),
-      this.checkDnsLookup("openclaw.ai", "openclaw-dns", "OpenClaw install domain DNS"),
+      this.checkDnsLookup("registry.npmjs.org", "openclaw-dns", "OpenClaw package registry DNS"),
       this.checkMatrixDomainDns(input),
       this.checkClockSync(),
     ]);
@@ -59,22 +67,65 @@ export class ShellHostPreflightChecker implements HostPreflightChecker {
   }
 
   private async checkNodeVersion(): Promise<CheckResult> {
-    const [majorText] = process.versions.node.split(".");
-    const major = Number(majorText);
-    if (Number.isFinite(major) && major >= MIN_NODE_MAJOR) {
-      return check("node-version", `Node ${process.versions.node} detected`, "pass", {
-        nodeVersion: process.versions.node,
-      });
+    const nodeVersion = process.versions.node;
+    if (isSupportedNodeVersion(nodeVersion)) {
+      return check("node-version", `Node ${nodeVersion} detected`, "pass", { nodeVersion });
     }
 
     return check(
       "node-version",
-      `Node ${process.versions.node} is below the required major version ${MIN_NODE_MAJOR}`,
+      `Node ${nodeVersion} running sovereign-node is outside the supported range ${SUPPORTED_NODE_RANGE}`,
       "fail",
-      {
-        nodeVersion: process.versions.node,
-        requiredMajor: MIN_NODE_MAJOR,
-      },
+      { nodeVersion, requiredRange: SUPPORTED_NODE_RANGE },
+    );
+  }
+
+  /**
+   * The gateway runs on the system Node the service user can execute, which
+   * need not be the Node running this process (a version manager or a CI tool
+   * cache, say), so its version is checked on its own.
+   */
+  private async checkGatewayNodeVersion(): Promise<CheckResult> {
+    const resolution = await this.resolveGatewayNode();
+    if (!resolution.ok) {
+      return check(
+        "gateway-node-version",
+        `No system Node.js usable by the gateway service user was found on ${resolution.searchPath}`,
+        "warn",
+        { searchPath: resolution.searchPath, problems: resolution.problems },
+      );
+    }
+
+    const probe = await this.safeExec(resolution.path, ["--version"]);
+    const output = probe.ok && probe.result.exitCode === 0 ? probe.result.stdout.trim() : "";
+    if (parseNodeVersion(output) === null) {
+      return check(
+        "gateway-node-version",
+        `Could not read the version of the gateway's Node.js at ${resolution.path}`,
+        "warn",
+        {
+          nodePath: resolution.path,
+          ...(probe.ok
+            ? { exitCode: probe.result.exitCode, output: summarizeText(output) }
+            : { error: probe.error }),
+        },
+      );
+    }
+
+    const nodeVersion = output.replace(/^v/, "");
+    if (isSupportedNodeVersion(nodeVersion)) {
+      return check(
+        "gateway-node-version",
+        `Gateway Node ${nodeVersion} at ${resolution.path} detected`,
+        "pass",
+        { nodePath: resolution.path, nodeVersion },
+      );
+    }
+    return check(
+      "gateway-node-version",
+      `Gateway Node ${nodeVersion} at ${resolution.path} is outside the supported range ${SUPPORTED_NODE_RANGE}`,
+      "fail",
+      { nodePath: resolution.path, nodeVersion, requiredRange: SUPPORTED_NODE_RANGE },
     );
   }
 
@@ -373,7 +424,10 @@ const buildRecommendedActions = (checks: CheckResult[]): string[] => {
         add("Use a Linux VM (Ubuntu LTS recommended) for the bundled_matrix install path.");
         break;
       case "node-version":
-        add("Install Node.js 22+ on the host before running sovereign-node.");
+      case "gateway-node-version":
+        add(
+          `${item.message}. Upgrade the host's Node.js to ${SUPPORTED_NODE_RANGE}. This step cannot install packages; as root, rerun install.sh (it upgrades the NodeSource nodejs package) or run 'apt-get update && apt-get install --only-upgrade nodejs', then retry.`,
+        );
         break;
       case "sudo-access":
         add("Run the installer as root or with sudo privileges on the target VM.");
@@ -393,7 +447,7 @@ const buildRecommendedActions = (checks: CheckResult[]): string[] => {
         );
         break;
       case "openclaw-dns":
-        add("Confirm outbound DNS/network access to openclaw.ai from the host.");
+        add("Confirm outbound DNS/network access to registry.npmjs.org from the host.");
         break;
       case "matrix-domain-dns":
         add("Point your Matrix domain/subdomain DNS to the VM before running the bundled install.");

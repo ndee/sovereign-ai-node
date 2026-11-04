@@ -226,7 +226,9 @@ jobs:
 
   e2e_noninteractive:
     name: E2E Install (non-interactive)
-    runs-on: ubuntu-latest
+    # The gateway runs on the host's system Node, which must be inside the
+    # supported >=22.22.3 <23 range; ubuntu-latest (26.04) ships Node 24 there.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     needs: [test, changes]
     if: >-
@@ -400,7 +402,9 @@ jobs:
 
   e2e_interactive:
     name: E2E Install (interactive)
-    runs-on: ubuntu-latest
+    # The gateway runs on the host's system Node, which must be inside the
+    # supported >=22.22.3 <23 range; ubuntu-latest (26.04) ships Node 24 there.
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     needs: [test, changes]
     if: >-
@@ -490,7 +494,9 @@ jobs:
 
   e2e_rerun_after_partial_failure:
     name: E2E Install (rerun after partial failure)
-    runs-on: ubuntu-latest
+    # The gateway runs on the host's system Node, which must be inside the
+    # supported >=22.22.3 <23 range; ubuntu-latest (26.04) ships Node 24 there.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     needs: [test, changes]
     if: >-

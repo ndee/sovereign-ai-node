@@ -123,6 +123,8 @@ sync_prebuilt_node_artifact() (
 
   for required in \
     deploy/runtime/pnpm-lock.yaml \
+    deploy/openclaw-runtime/package.json \
+    deploy/openclaw-runtime/package-lock.json \
     dist/sovereign-node.js \
     dist/sovereign-node-api.js \
     dist/sovereign-node-onboarding-api.js \
