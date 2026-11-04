@@ -9,6 +9,13 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 From this point forward, GitHub Release notes are auto-generated from commit history
 by the `.github/workflows/release.yml` workflow.
 
+## [2.15.1](https://github.com/ndee/sovereign-ai-node/compare/v2.15.0...v2.15.1) (2026-11-04)
+
+
+### Bug Fixes
+
+* **installer:** skip the gateway user-service install when there is no systemd user bus ([#354](https://github.com/ndee/sovereign-ai-node/issues/354)) ([5c0c90b](https://github.com/ndee/sovereign-ai-node/commit/5c0c90b0308049a0a145bc73e5ec769f308243f9))
+
 ## [2.15.0](https://github.com/ndee/sovereign-ai-node/compare/v2.14.0...v2.15.0) (2026-11-04)
 
 
