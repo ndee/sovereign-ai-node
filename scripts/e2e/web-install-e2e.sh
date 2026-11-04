@@ -8,6 +8,7 @@
 # Usage (run as root, on a host bootstrapped with install.sh --skip-install-run):
 #   web-install-e2e.sh assert-no-user-bus
 #   web-install-e2e.sh run <request.json> <final-job.json>
+#   web-install-e2e.sh reconfigure-openrouter <model> <result.json>
 #
 # Exit codes: 0 pass, 1 check failed, 64 usage error.
 set -euo pipefail
@@ -117,6 +118,23 @@ run_install() {
   printf 'PASS install job %s succeeded\n' "$job_id"
 }
 
+# A settings change from the setup UI restarts the gateway from the same
+# unprivileged process that installed it.
+reconfigure_openrouter() {
+  local model=$1 out_file=$2 work csrf
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' RETURN
+
+  wait_for_api
+  csrf="$(login "$work/cookies")"
+  curl -sS --max-time 600 -b "$work/cookies" -H 'Content-Type: application/json' -H "X-CSRF-Token: $csrf" \
+    --data "$(jq -cn --arg model "$model" '{openrouter: {model: $model}}')" \
+    "$API_URL/api/reconfigure/openrouter" >"$out_file"
+  jq '{ok, error, gateway: .result.gateway, validation: .result.validation}' "$out_file"
+  jq -e '.ok == true' "$out_file" >/dev/null || die "POST /api/reconfigure/openrouter failed"
+  printf 'PASS OpenRouter model reconfigured to %s\n' "$model"
+}
+
 case "${1:-}" in
   assert-no-user-bus)
     assert_no_user_bus
@@ -128,8 +146,15 @@ case "${1:-}" in
     }
     run_install "$2" "$3"
     ;;
+  reconfigure-openrouter)
+    [[ $# -eq 3 ]] || {
+      printf 'usage: %s reconfigure-openrouter <model> <result.json>\n' "$0" >&2
+      exit 64
+    }
+    reconfigure_openrouter "$2" "$3"
+    ;;
   *)
-    printf 'usage: %s assert-no-user-bus | run <request.json> <final-job.json>\n' "$0" >&2
+    printf 'usage: %s assert-no-user-bus | run <request.json> <final-job.json> | reconfigure-openrouter <model> <result.json>\n' "$0" >&2
     exit 64
     ;;
 esac

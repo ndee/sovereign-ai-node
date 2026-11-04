@@ -733,9 +733,9 @@ jobs:
       - name: Verify the gateway and scan units run inside their systemd sandbox
         run: sudo env "PATH=$PATH" bash scripts/ci/verify-systemd-sandbox.sh
 
-      # A second run finds the system gateway unit installed. OpenClaw's doctor
-      # repairs its state only while that gateway is stopped, so the service
-      # user must be able to stop it.
+      # A second run in the same API process finds the system gateway unit
+      # installed. OpenClaw's doctor repairs its state only while that gateway
+      # is stopped, so the service user must be able to stop it.
       - name: Re-run the install through the setup API on the installed node
         run: |
           since="$(date '+%Y-%m-%d %H:%M:%S')"
@@ -744,15 +744,37 @@ jobs:
             echo "::error::the install could not stop the gateway before the OpenClaw config repair"
             exit 1
           fi
+          # The first install points the API's HOME at the OpenClaw home; the
+          # second must keep using the OpenClaw the first one installed.
+          if sudo test -e /var/lib/sovereign-node/openclaw-home/.npm-global; then
+            echo "::error::the second install put another OpenClaw under the OpenClaw home"
+            sudo ls -la /var/lib/sovereign-node/openclaw-home/.npm-global
+            exit 1
+          fi
           jq -e '.result.gateway.ready == true' /tmp/web-install-job.json > /dev/null
           curl -s -o /dev/null --max-time 5 --retry 10 --retry-connrefused --retry-delay 3 http://127.0.0.1:18789/
         timeout-minutes: 16
+
+      - name: Reconfigure OpenRouter through the setup API and require a restarted, ready gateway
+        run: |
+          before="$(systemctl show -p ActiveEnterTimestampMonotonic --value sovereign-openclaw-gateway.service)"
+          sudo env "PATH=$PATH" bash "$WEB_E2E" reconfigure-openrouter openrouter/ci-web-reconfigure-probe /tmp/web-reconfigure.json
+          jq -e '
+            .result.gateway.ready == true
+            and ([.result.validation[] | select(.id == "openclaw-gateway-restart" and .status == "pass")] | length) == 1
+          ' /tmp/web-reconfigure.json > /dev/null
+          after="$(systemctl show -p ActiveEnterTimestampMonotonic --value sovereign-openclaw-gateway.service)"
+          echo "gateway unit entered active at ${before} before and ${after} after the reconfigure"
+          test "$after" -gt "$before"
+          curl -s -o /dev/null --max-time 5 --retry 10 --retry-connrefused --retry-delay 3 http://127.0.0.1:18789/
+        timeout-minutes: 12
 
       - name: Collect logs on failure
         if: failure()
         run: |
           echo "=== final install job ==="
           jq . /tmp/web-install-job.json 2>/dev/null || true
+          jq . /tmp/web-reconfigure.json 2>/dev/null || true
           echo "=== API service ==="
           sudo systemctl status --no-pager sovereign-node-api.service 2>&1 || true
           sudo journalctl -u sovereign-node-api.service -n 400 --no-pager 2>&1 || true

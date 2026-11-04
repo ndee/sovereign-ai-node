@@ -30,6 +30,7 @@ const GOLDEN_RULES = [
     `sovereign-node ALL=(root) NOPASSWD: /bin/systemctl is-active ${unit}, /bin/systemctl is-active ${unit}.service`,
     `sovereign-node ALL=(root) NOPASSWD: /bin/systemctl status ${unit}, /bin/systemctl status ${unit}.service`,
   ]),
+  "sovereign-node ALL=(root) NOPASSWD: /bin/systemctl stop sovereign-openclaw-gateway, /bin/systemctl stop sovereign-openclaw-gateway.service",
   ...["enable", "restart", "is-active", "is-enabled"].map(
     (verb) =>
       `sovereign-node ALL=(root) NOPASSWD: /bin/systemctl ${verb} sovereign-mail-sentinel-scan.service, /bin/systemctl ${verb} sovereign-mail-sentinel-scan.timer`,

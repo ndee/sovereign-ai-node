@@ -17,7 +17,10 @@ export const createApp = () => {
   const logger = createLogger();
   const execRunner = new ExecaExecRunner();
 
-  const openclawBootstrapper = new ShellOpenClawBootstrapper(execRunner, logger);
+  // Read once at startup: an install job later points this process's HOME at
+  // the OpenClaw home, and the next install in the same process must still use
+  // the npm prefix the first one installed OpenClaw into.
+  const openclawBootstrapper = new ShellOpenClawBootstrapper(execRunner, logger, process.env.HOME);
   const imapTester = new SocketImapTester(logger);
   const openrouterKeyValidator = new HttpOpenrouterKeyValidator();
   const matrixProvisioner = new DockerComposeBundledMatrixProvisioner(
