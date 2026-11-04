@@ -477,12 +477,6 @@ owner_home() {
   printf '%s' "${home:-$SERVICE_HOME}"
 }
 
-service_user_home() {
-  local home
-  home="$(getent passwd "$SERVICE_USER" | cut -d: -f6)"
-  printf '%s' "${home:-$SERVICE_HOME}"
-}
-
 pkg_version_of() {
   [[ -f "$1/package.json" ]] || return 0
   json_field "$1/package.json" version
@@ -1808,7 +1802,10 @@ step_validate() { run_cli_check config-validate "$VALIDATE_ARGS"; }
 step_matrix_verify() { run_cli_check matrix-verify "$MATRIX_VERIFY_ARGS"; }
 
 # The node CLI gets the app and bot catalog dirs the installed wrapper would
-# export; without them it clones a catalog of its own.
+# export; without them it clones a catalog of its own. It runs as the
+# identity the node was installed with, the owner of the OpenClaw prefix:
+# root on a root install, whose trusted extension tree only root may write,
+# and the service user on an unprivileged one.
 # The node renders the config and the gateway unit for the version now
 # installed and starts the gateway (the unit's sandbox lets it execute only
 # the package it was rendered for, so a bare restart would not do). This is
@@ -1817,11 +1814,11 @@ step_matrix_verify() { run_cli_check matrix-verify "$MATRIX_VERIFY_ARGS"; }
 step_start() {
   local out="$WORK_DIR/refresh.out" err="$WORK_DIR/refresh.err" home before rc wait_s
   release_guard
-  home="$(service_user_home)"
+  home="$(owner_home)"
   before="$(gateway_start_mark)"
   GATEWAY_SINCE="$(date +%s)"
   wait_s="$(clamp "$REFRESH_READY_TIMEOUT")"
-  as_user "$SERVICE_USER" "$home" env -i \
+  as_user "$NPM_OWNER" "$home" env -i \
     HOME="$home" \
     PATH="$UNIT_PATH" \
     CI=1 NO_COLOR=1 \

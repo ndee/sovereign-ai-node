@@ -676,6 +676,16 @@ describe("openclaw-migrate.sh happy path", () => {
     expect(step(r, "start").detail).toBe(`the node rendered the runtime for ${TARGET} and started ${GATEWAY}`);
   });
 
+  it("runs the node CLI as the prefix owner and OpenClaw as the service user", async () => {
+    const fx = makeFixture();
+    const r = await run(fx, undefined, { OPENCLAW_MIGRATE_SERVICE_USER: "sovereign-svc" });
+    expect(r.status).toBe(0);
+    const runuser = r.calls.filter((c) => c.startsWith("runuser "));
+    expect(runuser.some((c) => c.startsWith("runuser -u sovereign-svc -- env -i") && c.includes(" doctor --fix"))).toBe(true);
+    expect(runuser.some((c) => c.includes("reconcile") || c.includes("install-runtime"))).toBe(false);
+    expect(r.calls.some((c) => c.startsWith("sovereign-node reconcile"))).toBe(true);
+  });
+
   it("blocks every gateway start while the tree is half migrated", async () => {
     const fx = makeFixture();
     flag(fx, "doctor-try-start");

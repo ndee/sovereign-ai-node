@@ -92,7 +92,7 @@ The scan timers are stopped, not disabled, so a reboot starts them again. Every 
 | upgrade | down | `sovereign-node openclaw-migration install-runtime --target <v> --json` as the prefix owner, with `npm_config_prefer_offline=true` |
 | shrinkwrap | down | `npm-shrinkwrap.json` of the installed tree, as evidence |
 | doctor, web-search, matrix-plugin, doctor-matrix, config-validate, matrix-verify | down | As the service user from its home, stdin closed |
-| start | up | `sovereign-node reconcile --refresh-runtime --json` as the service user: the node renders config and unit for the installed version and starts the gateway. This is the point of no return. |
+| start | up | `sovereign-node reconcile --refresh-runtime --json` as the identity the node was installed with (the prefix owner: root on a root install, the service user on an unprivileged one): the node renders config and unit for the installed version and starts the gateway. This is the point of no return. |
 | health | up | The unit is active, has not restarted, and answers HTTP on loopback |
 | lobster | up | `commands.list`, a `/tools/invoke` probe with the gateway token, and `llm-task` on `agent:mail-sentinel-scan:main` with a trivial prompt. The `llm-task` answer is recorded in `llm_task`, not gated on. |
 
