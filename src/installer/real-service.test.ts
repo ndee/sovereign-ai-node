@@ -2983,6 +2983,151 @@ describe("RealInstallerService", () => {
     }
   });
 
+  it("keeps a held earlier OpenClaw on its own config shape after its CLI stops answering", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+
+    const execCalls: string[] = [];
+    const service = new RealInstallerService(createLogger(), paths, {
+      openclawBootstrapper: {
+        // The kept CLI answered the bootstrap step, then stopped answering, so
+        // the config shape falls back to the version the step recorded.
+        detectInstalled: async () => null,
+        ensureInstalled: async () => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: "2026.3.13",
+          installMethod: "npm_fallback",
+          reinstalled: false,
+          held: true,
+        }),
+      },
+      execRunner: {
+        run: async (input: ExecInput): Promise<ExecResult> => {
+          const command = [input.command, ...(input.args ?? [])].join(" ");
+          execCalls.push(command);
+          return (
+            maybeHandleInstalledLobsterExec(input) ??
+            handleExecApprovalsExec(command) ?? { command, exitCode: 0, stdout: "", stderr: "" }
+          );
+        },
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {},
+        start: async () => {},
+        restart: async () => {},
+      },
+      managedAgentRegistrar: {
+        register: async () => ({
+          agentId: "mail-sentinel",
+          cronJobId: "mail-sentinel-poll",
+          workspaceDir: join(paths.stateDir, "mail-sentinel", "workspace"),
+          agentCommand: "openclaw agents upsert --id mail-sentinel",
+          cronCommand: "openclaw cron add --name mail-sentinel-poll --every 5m",
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+          capabilities: ["IMAP4rev1"],
+        }),
+      },
+      matrixProvisioner: {
+        provision: async (req) => ({
+          projectDir: join(tempRoot, "matrix"),
+          composeFilePath: join(tempRoot, "matrix", "compose.yaml"),
+          accessMode: "direct",
+          homeserverDomain: req.matrix.homeserverDomain,
+          publicBaseUrl: "http://matrix.example.org",
+          adminBaseUrl: "http://127.0.0.1:8008",
+          federationEnabled: req.matrix.federationEnabled ?? false,
+          tlsMode: "local-dev",
+          passthrough: false,
+        }),
+        bootstrapAccounts: async () => ({
+          operator: {
+            localpart: "operator",
+            userId: "@operator:matrix.example.org",
+            passwordSecretRef: "file:/tmp/operator.password",
+            accessToken: "operator-token",
+          },
+          bot: {
+            localpart: "mail-sentinel",
+            userId: "@mail-sentinel:matrix.example.org",
+            passwordSecretRef: "file:/tmp/mail-sentinel.password",
+            accessToken: "bot-token",
+          },
+        }),
+        bootstrapRoom: async () => ({
+          roomId: "!alerts:matrix.example.org",
+          roomName: "Sovereign Alerts",
+        }),
+        test: async (req) => ({ ok: true, homeserverUrl: req.publicBaseUrl, checks: [] }),
+      },
+      fetchImpl: async (url, init) => {
+        const provisionResponse = buildManagedAgentMatrixProvisionResponse(url, init);
+        if (provisionResponse !== null) {
+          return provisionResponse;
+        }
+        if (!url.includes("/_matrix/client/v3/rooms/")) {
+          return new Response("not found", { status: 404 });
+        }
+        return new Response(JSON.stringify({ event_id: "$evt1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+
+    try {
+      const started = await service.startInstall(buildInstallRequest());
+      const finished = await waitForJob(service, started.job.jobId);
+
+      const stepStates = Object.fromEntries(
+        finished.job.steps.map((step) => [step.id, step.state]),
+      );
+      expect(stepStates.openclaw_bootstrap_cli).toBe("succeeded");
+      expect(stepStates.openclaw_configure).toBe("succeeded");
+
+      const writtenConfig = JSON.parse(await readFile(paths.configPath, "utf8")) as {
+        openclaw?: { requestedVersion?: string };
+      };
+      expect(writtenConfig.openclaw?.requestedVersion).toBe("2026.3.13");
+
+      const openclawConfig = JSON.parse(
+        await readFile(join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"), "utf8"),
+      ) as { agents?: { list?: unknown; entries?: unknown } };
+      expect(Array.isArray(openclawConfig.agents?.list)).toBe(true);
+      expect(openclawConfig.agents?.entries).toBeUndefined();
+
+      expect(execCalls.filter((command) => /\bplugins install\b/.test(command))).toEqual([]);
+      expect(execCalls.filter((command) => /\bdoctor\b/.test(command))).toEqual([]);
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("renders the OpenClaw 2026.8 config shape when 2026.8 is installed", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {
