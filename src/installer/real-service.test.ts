@@ -18297,3 +18297,301 @@ describe("RealInstallerService.testAlert", () => {
     }
   });
 });
+
+describe("gateway user-service install and the systemd user bus", () => {
+  const SERVICE_DEFINITION_UNKNOWN = {
+    code: "OPENCLAW_GATEWAY_INSTALL_FAILED",
+    message: "OpenClaw gateway command exited with non-zero status",
+    retryable: true,
+    details: {
+      command: "openclaw gateway install",
+      exitCode: 1,
+      stderr: "SERVICE_DEFINITION_UNKNOWN: Service definition cannot be safely inspected.",
+      stdout: "",
+    },
+  };
+
+  type Scenario = {
+    service: RealInstallerService;
+    paths: SovereignPaths;
+    installCalls: () => number;
+    probeCalls: () => number;
+    warnings: string[];
+  };
+
+  let tempRoot = "";
+  let priorServiceUser: string | undefined;
+  let getuidMock: ReturnType<typeof vi.spyOn> | null = null;
+
+  beforeEach(async () => {
+    tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-gateway-user-bus-"));
+    priorServiceUser = process.env.SOVEREIGN_NODE_SERVICE_USER;
+  });
+
+  afterEach(async () => {
+    getuidMock?.mockRestore();
+    getuidMock = null;
+    if (priorServiceUser === undefined) {
+      delete process.env.SOVEREIGN_NODE_SERVICE_USER;
+    } else {
+      process.env.SOVEREIGN_NODE_SERVICE_USER = priorServiceUser;
+    }
+    await rm(tempRoot, { recursive: true, force: true });
+  });
+
+  const runAs = (uid: number) => {
+    getuidMock =
+      typeof process.getuid === "function"
+        ? vi
+            .spyOn(process as typeof process & { getuid: () => number }, "getuid")
+            .mockImplementation(() => uid)
+        : null;
+  };
+
+  const createScenario = (options: {
+    userBus: boolean;
+    install: () => Promise<void>;
+  }): Scenario => {
+    const paths: SovereignPaths = {
+      configPath: join(tempRoot, "etc", "sovereign-node.json5"),
+      secretsDir: join(tempRoot, "etc", "secrets"),
+      stateDir: join(tempRoot, "var", "lib"),
+      logsDir: join(tempRoot, "var", "log"),
+      installJobsDir: join(tempRoot, "install-jobs"),
+      openclawServiceHome: join(tempRoot, "openclaw-home"),
+      provenancePath: join(tempRoot, "install-provenance.json"),
+      backupsDir: join(tempRoot, "backups"),
+    };
+    let installCalls = 0;
+    let probeCalls = 0;
+    const warnings: string[] = [];
+    const logger = createLogger();
+    const warn = logger.warn.bind(logger);
+    vi.spyOn(logger, "warn").mockImplementation(((...args: unknown[]) => {
+      const message = args.find((arg): arg is string => typeof arg === "string");
+      if (message !== undefined) warnings.push(message);
+      return (warn as (...rest: unknown[]) => void)(...args);
+    }) as typeof logger.warn);
+
+    const service = new RealInstallerService(logger, paths, {
+      openclawBootstrapper: {
+        detectInstalled: async () => ({ binaryPath: "/usr/local/bin/openclaw", version: "0.2.0" }),
+        ensureInstalled: async (opts) => ({
+          binaryPath: "/usr/local/bin/openclaw",
+          version: opts.version,
+          installMethod: "install_sh",
+        }),
+      },
+      openclawGatewayServiceManager: {
+        install: async () => {
+          installCalls += 1;
+          await options.install();
+        },
+        start: async () => {},
+        restart: async () => {},
+        hasUserServiceBus: async () => {
+          probeCalls += 1;
+          return options.userBus;
+        },
+      },
+      managedAgentRegistrar: {
+        register: async (input: { agentId: string }) => ({
+          agentId: input.agentId,
+          workspaceDir: join(tempRoot, "workspace", input.agentId),
+          agentCommand: `openclaw agents add ${input.agentId}`,
+        }),
+      },
+      preflightChecker: {
+        run: async () => ({
+          mode: "bundled_matrix",
+          overall: "pass",
+          checks: [],
+          recommendedActions: [],
+        }),
+      },
+      imapTester: {
+        test: async (req) => ({
+          ok: true,
+          host: req.imap.host,
+          port: req.imap.port,
+          tls: req.imap.tls,
+          auth: "ok",
+          mailbox: req.imap.mailbox ?? "INBOX",
+          capabilities: ["IMAP4rev1"],
+        }),
+      },
+      matrixProvisioner: {
+        provision: async (req) => ({
+          projectDir: join(tempRoot, "matrix"),
+          composeFilePath: join(tempRoot, "matrix", "compose.yaml"),
+          accessMode: "direct",
+          homeserverDomain: req.matrix.homeserverDomain,
+          publicBaseUrl: req.matrix.publicBaseUrl,
+          adminBaseUrl: "http://127.0.0.1:8008",
+          federationEnabled: req.matrix.federationEnabled ?? false,
+          tlsMode: "local-dev",
+          passthrough: false,
+        }),
+        bootstrapAccounts: async () => ({
+          operator: {
+            localpart: "operator",
+            userId: "@operator:matrix.example.org",
+            passwordSecretRef: "file:/tmp/operator.password",
+            accessToken: "operator-token",
+          },
+          bot: {
+            localpart: "mail-sentinel",
+            userId: "@mail-sentinel:matrix.example.org",
+            passwordSecretRef: "file:/tmp/mail-sentinel.password",
+            accessToken: "bot-token",
+          },
+        }),
+        bootstrapRoom: async () => ({
+          roomId: "!alerts:matrix.example.org",
+          roomName: "Sovereign Alerts",
+        }),
+        test: async (req) => ({ ok: true, homeserverUrl: req.publicBaseUrl, checks: [] }),
+      },
+      fetchImpl: async (url, init) => {
+        const provisionResponse = buildManagedAgentMatrixProvisionResponse(url, init);
+        if (provisionResponse !== null) {
+          return provisionResponse;
+        }
+        if (url.includes("/joined_members")) {
+          return new Response(JSON.stringify({ joined: {} }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({ event_id: "$evt1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+    return {
+      service,
+      paths,
+      installCalls: () => installCalls,
+      probeCalls: () => probeCalls,
+      warnings,
+    };
+  };
+
+  const stepOf = (finished: InstallJobStatusResponse, id: string) =>
+    finished.job.steps.find((step) => step.id === id);
+
+  it("skips the user-service install when the unprivileged installer has no user bus", async () => {
+    runAs(998);
+    const scenario = createScenario({
+      userBus: false,
+      install: async () => {
+        throw SERVICE_DEFINITION_UNKNOWN;
+      },
+    });
+
+    const started = await scenario.service.startInstall(buildInstallRequest());
+    const finished = await waitForJob(scenario.service, started.job.jobId);
+
+    expect(stepOf(finished, "openclaw_gateway_service_install")).toMatchObject({
+      state: "succeeded",
+    });
+    expect(finished.job.state).toBe("succeeded");
+    expect(scenario.installCalls()).toBe(0);
+    expect(scenario.probeCalls()).toBe(1);
+    expect(scenario.warnings).toContain(
+      "Skipping OpenClaw user-service gateway install: this process has no systemd user bus; using system-level service flow",
+    );
+  });
+
+  it("installs the user service as before when the unprivileged installer has a user bus", async () => {
+    runAs(998);
+    const scenario = createScenario({ userBus: true, install: async () => {} });
+
+    const started = await scenario.service.startInstall(buildInstallRequest());
+    const finished = await waitForJob(scenario.service, started.job.jobId);
+
+    expect(finished.job.steps.filter((step) => step.state === "failed")).toEqual([]);
+    expect(finished.job.state).toBe("succeeded");
+    expect(scenario.probeCalls()).toBe(1);
+    expect(scenario.installCalls()).toBe(1);
+  });
+
+  it("still fails on an inspection refusal when a user bus exists", async () => {
+    runAs(998);
+    const scenario = createScenario({
+      userBus: true,
+      install: async () => {
+        throw SERVICE_DEFINITION_UNKNOWN;
+      },
+    });
+
+    const started = await scenario.service.startInstall(buildInstallRequest());
+    const finished = await waitForJob(scenario.service, started.job.jobId);
+
+    expect(finished.job.state).toBe("failed");
+    expect(stepOf(finished, "openclaw_gateway_service_install")).toMatchObject({
+      state: "failed",
+      error: { code: "OPENCLAW_GATEWAY_INSTALL_FAILED" },
+    });
+    expect(scenario.installCalls()).toBe(1);
+  });
+
+  // Runs the install steps in order up to the gateway service install and
+  // changes the process identity only for that step, so the earlier steps stay
+  // on the unprivileged paths these fakes support.
+  const runGatewayStepAs = async (scenario: Scenario, becomeIdentity: () => void) => {
+    const steps = (
+      scenario.service as unknown as {
+        buildInstallSteps(req: InstallRequest): Array<{ id: string; run: () => Promise<unknown> }>;
+      }
+    ).buildInstallSteps(buildInstallRequest());
+    for (const step of steps) {
+      if (step.id === "openclaw_gateway_service_install") {
+        becomeIdentity();
+        await step.run();
+        return;
+      }
+      await step.run();
+    }
+    throw new Error("openclaw_gateway_service_install step not found");
+  };
+  const runGatewayStepAsRoot = async (scenario: Scenario) =>
+    await runGatewayStepAs(scenario, () => runAs(0));
+
+  it("keeps the root install on the system-level flow without probing the user bus", async () => {
+    process.env.SOVEREIGN_NODE_SERVICE_USER = "sovereign-node";
+    const scenario = createScenario({ userBus: false, install: async () => {} });
+
+    await runGatewayStepAsRoot(scenario);
+
+    expect(scenario.probeCalls()).toBe(0);
+    expect(scenario.installCalls()).toBe(0);
+  });
+
+  it("runs the user-service install for a root-run install whose service user is root", async () => {
+    process.env.SOVEREIGN_NODE_SERVICE_USER = "root";
+    const scenario = createScenario({ userBus: false, install: async () => {} });
+
+    await runGatewayStepAsRoot(scenario);
+
+    expect(scenario.probeCalls()).toBe(0);
+    expect(scenario.installCalls()).toBe(1);
+  });
+
+  it("asks the gateway manager about the bus on a platform without process.getuid", async () => {
+    const proc = process as unknown as { getuid?: unknown };
+    const priorGetuid = proc.getuid;
+    const scenario = createScenario({ userBus: false, install: async () => {} });
+    try {
+      await runGatewayStepAs(scenario, () => {
+        proc.getuid = undefined;
+      });
+    } finally {
+      proc.getuid = priorGetuid;
+    }
+
+    expect(scenario.probeCalls()).toBe(1);
+    expect(scenario.installCalls()).toBe(0);
+  });
+});
