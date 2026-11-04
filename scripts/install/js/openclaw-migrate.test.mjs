@@ -1418,7 +1418,19 @@ describe("openclaw-migrate.sh gateway diagnostics", () => {
     expect(r.result.gateway).toEqual({
       unit: GATEWAY,
       since: new Date(since * 1000).toISOString(),
-      show: { NRestarts: "1", Result: "exit-code", ActiveState: "activating", SubState: "auto-restart", ExecMainCode: "1", ExecMainStatus: "1", MainPID: "0" },
+      show: {
+        NRestarts: "1",
+        Result: "exit-code",
+        ActiveState: "activating",
+        SubState: "auto-restart",
+        ExecMainCode: "1",
+        ExecMainStatus: "1",
+        MainPID: "0",
+        // What ExecStart names on disk, for a 203/EXEC.
+        ExecStartBinary: join(fx.prefix, "bin", "openclaw"),
+        ExecStartResolved: join(fx.prefix, RUNTIME, "openclaw.mjs"),
+        ExecStartListing: expect.stringMatching(new RegExp(`^lrwxrwxrwx .* '${join(fx.prefix, "bin", "openclaw")}' -> '`)),
+      },
       journal: [
         "2026-11-03T11:31:44+00:00 node openclaw[64474]: Doctor warnings",
         '2026-11-03T11:31:45+00:00 node openclaw[64474]: Failed to install missing configured plugin "perplexity": key <redacted> token=<redacted>',

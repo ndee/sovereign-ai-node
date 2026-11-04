@@ -828,6 +828,12 @@ jobs:
         run: |
           echo "=== staged OpenClaw migration ==="
           sudo cat "$UPGRADE_DIR/migrate/migration.log" "$UPGRADE_DIR/migrate/result.json" 2>/dev/null || true
+          echo "=== gateway unit file and the openclaw binaries it may resolve ==="
+          sudo cat /etc/systemd/system/sovereign-openclaw-gateway.service 2>&1 || true
+          sudo ls -la /var/lib/sovereign-node/.npm-global/bin 2>&1 || true
+          for b in /var/lib/sovereign-node/.npm-global/bin/openclaw "$(dirname "$(command -v node)")/openclaw" /usr/local/bin/openclaw; do
+            sudo sh -c "ls -l '$b' && readlink -f '$b' && head -c 200 '$b'; echo" 2>&1 || true
+          done
           echo "=== upgrade watcher ==="
           cat "$UPGRADE_DIR/watch.json" 2>/dev/null || true
           echo "=== snapshots ==="

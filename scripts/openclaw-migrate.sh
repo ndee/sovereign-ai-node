@@ -1592,6 +1592,15 @@ capture_gateway_diagnostics() {
   else
     printf 'journalctl unavailable (%s)\n' "$JOURNALCTL" >"$journal_raw"
   fi
+  # 203/EXEC means the unit cannot execute what ExecStart names; record what
+  # that is on disk.
+  local exec_bin
+  exec_bin="$(unit_value "$UNIT_DIR/$GATEWAY_UNIT" ExecStart)"
+  exec_bin="${exec_bin%% *}"
+  if [[ -n "$exec_bin" ]]; then
+    printf 'ExecStartBinary=%s\nExecStartResolved=%s\nExecStartListing=%s\n' "$exec_bin" \
+      "$(readlink -f "$exec_bin" 2>/dev/null || echo missing)" "$(stat -c '%A %U:%G %s %N' "$exec_bin" 2>&1)" >>"$show_raw"
+  fi
   redact <"$show_raw" >"$GATEWAY_SHOW_FILE"
   redact <"$journal_raw" | tail -n "$GATEWAY_JOURNAL_LINES" >"$GATEWAY_JOURNAL_FILE"
   log "gateway diagnostics: systemctl show $GATEWAY_UNIT"
