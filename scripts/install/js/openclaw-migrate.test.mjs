@@ -137,7 +137,7 @@ if (args[0] === "openclaw-migration" && args[1] === "install-runtime") {
   const target = args[args.indexOf("--target") + 1];
   const gateway = fs.existsSync(path.join(S, "active", ${JSON.stringify(GATEWAY)})) ? "active" : "inactive";
   const lock = cp.spawnSync("flock", ["-n", "-s", ${JSON.stringify(lock)}, "true"]).status === 0 ? "free" : "held";
-  log(\`sovereign-node install-runtime target=\${target} gateway=\${gateway} lock=\${lock} backups=\${countBackups(${JSON.stringify(backup)})} prefer_offline=\${process.env.npm_config_prefer_offline ?? "unset"} user_home=\${process.env.HOME}\`);
+  log(\`sovereign-node install-runtime target=\${target} gateway=\${gateway} lock=\${lock} backups=\${countBackups(${JSON.stringify(backup)})} prefer_offline=\${process.env.npm_config_prefer_offline ?? "unset"} npm_prefix=\${process.env.npm_config_prefix ?? "unset"} user_home=\${process.env.HOME}\`);
   // A power loss: the script and this command die together.
   if (has("install-kill")) {
     process.kill(-scriptGroup(), "SIGKILL");
@@ -634,7 +634,7 @@ describe("openclaw-migrate.sh happy path", () => {
     const r = await run(fx);
     expect(r.status).toBe(0);
     expect(installCalls(r)).toEqual([
-      `sovereign-node install-runtime target=${TARGET} gateway=inactive lock=held backups=1 prefer_offline=true user_home=${fx.home}`,
+      `sovereign-node install-runtime target=${TARGET} gateway=inactive lock=held backups=1 prefer_offline=true npm_prefix=${fx.prefix} user_home=${fx.home}`,
     ]);
     const install = callIndex(r, /^sovereign-node install-runtime/);
     expect(callIndex(r, new RegExp(`^systemctl stop ${GATEWAY}`))).toBeLessThan(install);
@@ -1157,7 +1157,7 @@ describe("openclaw-migrate.sh interrupted runs", () => {
     expect(again.result).toMatchObject({ outcome: "migrated", recovery: "restore", resumed: true, from: FROM });
     expect(step(again, "backup").detail).toMatch(/^restored OpenClaw 2026\.3\.13, its state and its unit from /);
     expect(installCalls(again)).toEqual([
-      `sovereign-node install-runtime target=${TARGET} gateway=inactive lock=held backups=1 prefer_offline=true user_home=${fx.home}`,
+      `sovereign-node install-runtime target=${TARGET} gateway=inactive lock=held backups=1 prefer_offline=true npm_prefix=${fx.prefix} user_home=${fx.home}`,
     ]);
     expect(installedVersion(fx)).toBe(TARGET);
     expect(isActive(fx, GATEWAY)).toBe(true);

@@ -1627,7 +1627,11 @@ step_stage() {
   STEP_DETAIL="ran $STAGE_VERSION (doctor, matrix plugin, one gateway start) to migrate the legacy Matrix store (${LEGACY_MATRIX_STORE:-forced})"
 }
 
-# The node CLI installs the runtime its package locks. Its install step keeps
+# The node CLI installs the runtime its package locks. As root it installs
+# into `npm prefix -g`, which for another PATH's npm is another prefix than
+# the gateway's; npm_config_prefix pins it to the one discovered here (an
+# unprivileged owner always uses ~/.npm-global, checked in preflight).
+# Its install step keeps
 # an installed OpenClaw of another version on every other path; this command
 # lifts that hold only while this script holds LOCK_FILE and the gateway is
 # stopped, which is the state this step runs in.
@@ -1642,6 +1646,7 @@ step_upgrade() {
     CI=1 NO_COLOR=1 \
     NPM_CONFIG_CACHE="$home/.npm" \
     npm_config_prefer_offline=true \
+    npm_config_prefix="$NPM_PREFIX" \
     timeout -k 30 "$(clamp "$NPM_TIMEOUT")" "$NODE_BIN" "$NODE_CLI" openclaw-migration install-runtime --target "$TARGET" --json \
     </dev/null >"$out" 2>"$err"
   rc=$?
