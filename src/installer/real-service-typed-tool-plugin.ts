@@ -44,10 +44,19 @@ export type TypedToolPluginConfig = {
 export const TYPED_TOOL_CONFIRM_TTL_MS = 15 * 60 * 1000;
 export const TYPED_TOOL_COMMAND_TIMEOUT_MS = 120_000;
 
-export const renderTypedToolPluginManifest = (): string =>
+// OpenClaw 2026.8 loads a plugin's tool runtime only for tools its manifest
+// names in contracts.tools, and startup-loads it (registering the confirm
+// command) only on activation.onStartup. 2026.3 ignores both keys.
+export const renderTypedToolPluginManifest = (toolNames: readonly string[]): string =>
   JSON.stringify(
     {
       id: TYPED_TOOL_OPENCLAW_PLUGIN_ID,
+      activation: {
+        onStartup: true,
+      },
+      contracts: {
+        tools: Array.from(new Set(toolNames)).sort(),
+      },
       configSchema: {
         type: "object",
         additionalProperties: false,

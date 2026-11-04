@@ -130,6 +130,13 @@ import {
   sameOpenRouterPrivacy,
 } from "../openclaw/openrouter-routing.js";
 import {
+  listOpenClawConfigAgentIds,
+  type OpenClawRuntimeConfigShape,
+  readOpenClawConfigLastTouchedVersion,
+  resolveOpenClawRuntimeConfigShape,
+  toKeyedOpenClawRuntimeConfig,
+} from "../openclaw/runtime-config-shape.js";
+import {
   TYPED_TOOL_CONFIRM_COMMAND,
   TYPED_TOOL_OPENCLAW_PLUGIN_ID,
 } from "../openclaw/typed-tool-runtime.js";
@@ -6635,7 +6642,10 @@ export default function (api) {
       await this.applyTrustedOpenClawExtensionOwnership(script.target);
     }
     const files = [
-      { name: "openclaw.plugin.json", content: renderTypedToolPluginManifest() },
+      {
+        name: "openclaw.plugin.json",
+        content: renderTypedToolPluginManifest(Array.from(tools.keys())),
+      },
       {
         name: "plugin-config.json",
         content: renderTypedToolPluginConfig({
@@ -8577,11 +8587,24 @@ export default function (api) {
     runtimeJson: Record<string, unknown> | null,
     agentId: string,
   ): boolean {
-    const agents = runtimeJson?.agents;
-    if (!isRecord(agents) || !Array.isArray(agents.list)) {
-      return false;
-    }
-    return agents.list.some((entry) => isRecord(entry) && entry.id === agentId);
+    return listOpenClawConfigAgentIds(runtimeJson).includes(agentId);
+  }
+
+  /**
+   * The config shape the installed OpenClaw accepts. The CLI's own version is
+   * the best evidence; the version that last wrote the config and then the
+   * requested (pinned) version cover a CLI that cannot be run right now.
+   */
+  private async resolveInstalledOpenClawConfigShape(
+    runtimeConfig: RuntimeConfig,
+    existingRuntimePayload: Record<string, unknown> | null,
+  ): Promise<OpenClawRuntimeConfigShape> {
+    const detected = await this.safeDetectOpenClaw();
+    return resolveOpenClawRuntimeConfigShape([
+      detected?.version,
+      readOpenClawConfigLastTouchedVersion(existingRuntimePayload),
+      resolveRequestedOpenClawVersion(runtimeConfig.openclaw.requestedVersion),
+    ]);
   }
 
   private managedOpenClawRuntimeHasCron(
@@ -11257,6 +11280,15 @@ export default function (api) {
         openclawCommand,
         serviceNpmBinDir,
       ),
+      // 2026.8 installs external plugins such as Matrix, with its native
+      // crypto addon, into its own state dir instead of the package tree.
+      openclawPluginInstallRoots:
+        (await this.resolveInstalledOpenClawConfigShape(
+          runtimeConfig,
+          await this.readManagedOpenClawRuntimeJson(runtimeConfig),
+        )) === "keyed"
+          ? [join(this.paths.openclawServiceHome, ".openclaw", "npm")]
+          : [],
       programs: await withProgramRealPaths([
         ...basePrograms,
         ...(await this.listGatewaySandboxAgentPrograms(runtimeConfig, unitPathEnv, nodeCommand)),
@@ -13217,7 +13249,6 @@ export default function (api) {
           string,
           {
             enabled: boolean;
-            allow: boolean;
             autoReply?: boolean;
             requireMention?: boolean;
             users: string[];
@@ -13234,7 +13265,6 @@ export default function (api) {
       string,
       {
         enabled: boolean;
-        allow: boolean;
         autoReply?: boolean;
         requireMention?: boolean;
         users: string[];
@@ -13242,14 +13272,12 @@ export default function (api) {
     > => ({
       "*": {
         enabled: true,
-        allow: true,
         autoReply: input.autoReply,
         requireMention: input.requireMention,
         users: input.users,
       },
       [input.roomId]: {
         enabled: true,
-        allow: true,
         autoReply: input.autoReply,
         requireMention: input.requireMention,
         users: input.users,
@@ -13502,6 +13530,16 @@ export default function (api) {
         fs: {
           workspaceOnly: true,
         },
+        // With no provider chosen, 2026.8 counts every web-search plugin whose
+        // credential is in the gateway environment as configured, installs it
+        // on the first start and exits when that install needs consent; the
+        // Perplexity plugin accepts OPENROUTER_API_KEY. No node agent may use
+        // web_search, so turning search off removes nothing.
+        web: {
+          search: {
+            enabled: false,
+          },
+        },
       },
       browser: {
         enabled: false,
@@ -13535,6 +13573,10 @@ export default function (api) {
       openrouter: runtimeConfig.openrouter,
     };
     const managedTempDir = this.getManagedOpenClawTempDir(runtimeConfig);
+    const configShape = await this.resolveInstalledOpenClawConfigShape(
+      runtimeConfig,
+      existingRuntimePayload,
+    );
 
     try {
       await mkdir(this.paths.openclawServiceHome, { recursive: true });
@@ -13557,7 +13599,11 @@ export default function (api) {
       await this.applyConfiguredRuntimeOwnership(managedTempDir, runtimeConfig);
       await this.writeProtectedJsonFile(
         runtimeConfig.openclaw.runtimeConfigPath,
-        runtimePayload,
+        configShape === "keyed"
+          ? toKeyedOpenClawRuntimeConfig(runtimePayload, {
+              scanAgentIds: new Set(scanAgentEntries.map((scan) => scan.id)),
+            })
+          : runtimePayload,
         runtimeConfig,
       );
       await this.writeProtectedJsonFile(

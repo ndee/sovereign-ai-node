@@ -12,10 +12,18 @@ import {
   resolveGuardedJsonStateWorkspaceDir,
 } from "../openclaw/guarded-json-state-context.js";
 
+// See renderTypedToolPluginManifest: without contracts.tools and
+// activation.onStartup, OpenClaw 2026.8 never loads the tool.
 export const renderGuardedJsonStateWorkspacePluginManifest = (): string =>
   JSON.stringify(
     {
       id: GUARDED_JSON_STATE_OPENCLAW_PLUGIN_ID,
+      activation: {
+        onStartup: true,
+      },
+      contracts: {
+        tools: [GUARDED_JSON_STATE_OPENCLAW_TOOL_NAME],
+      },
       configSchema: {
         type: "object",
         additionalProperties: false,
