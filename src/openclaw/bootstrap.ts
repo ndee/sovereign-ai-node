@@ -16,7 +16,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { Logger } from "../logging/logger.js";
@@ -39,7 +39,9 @@ const BUNDLED_OPENCLAW_EXTENSION_REPAIR_TARGETS = [
 // Sovereign pins one OpenClaw release and installs it only from the locked
 // runtime project in deploy/openclaw-runtime, whose package.json and
 // package-lock.json must name this exact version (a unit test enforces it).
-export const SOVEREIGN_PINNED_OPENCLAW_VERSION = "2026.8.35";
+// Changing the pin is this edit plus regenerating that lock; see
+// docs/INSTALLER_CONTRACTS.md.
+export const SOVEREIGN_PINNED_OPENCLAW_VERSION = "2026.3.13";
 export const SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS = "pinned-by-sovereign";
 
 export type OpenClawInstallOptions = {
@@ -803,6 +805,20 @@ export const resolveOpenClawRuntimeDir = (npmPrefix: string): string =>
 
 export const resolveOpenClawRuntimePackageRoot = (runtimeDir: string): string =>
   join(runtimeDir, "node_modules", OPENCLAW_RUNTIME_PACKAGE);
+
+/**
+ * The locked runtime's `node_modules` when `packageRoot` is its openclaw
+ * package, else null. npm places a peer dependency of openclaw beside it
+ * there rather than inside it, so the package root alone does not hold every
+ * native module the gateway may load.
+ */
+export const resolveOpenClawRuntimeModulesDir = (packageRoot: string): string | null => {
+  const modulesDir = dirname(packageRoot);
+  return basename(modulesDir) === "node_modules" &&
+    basename(dirname(modulesDir)) === OPENCLAW_RUNTIME_DIRNAME
+    ? modulesDir
+    : null;
+};
 
 export const readOpenClawRuntimeTemplate = async (
   templateDir: string,

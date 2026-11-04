@@ -288,6 +288,26 @@ describe("sovereign-openclaw-gateway unit sandbox", () => {
     expect(unit).toContain(`\nExecStartPre=${join(toolBin, "node")} -e "`);
   });
 
+  it("lets the gateway execute the locked runtime's peer dependencies beside its package", async () => {
+    await installTools();
+    // The locked runtime project nests openclaw's dependencies inside its
+    // package, but npm puts a peer dependency beside it in node_modules.
+    const runtimeModules = join(globalRoot, "sovereign-openclaw-runtime", "node_modules");
+    const runtimePackage = join(runtimeModules, "openclaw");
+    await mkdir(runtimePackage, { recursive: true });
+    await writeFile(join(runtimePackage, "openclaw.mjs"), "#!/usr/bin/env node\n", { mode: 0o755 });
+    await rm(join(npmPrefix, "bin", "openclaw"));
+    await symlink(join(runtimePackage, "openclaw.mjs"), join(npmPrefix, "bin", "openclaw"));
+
+    const unit = await render(makeService(), runtimeConfig("http://127.0.0.1:8008"));
+
+    const execPaths = unit.match(/^ExecPaths=(.*)$/m)?.[1]?.split(" ") ?? [];
+    expect(execPaths).toEqual(expect.arrayContaining([`-${runtimePackage}`, `-${runtimeModules}`]));
+    expect(execPaths.indexOf(`-${runtimeModules}`)).toBe(
+      execPaths.indexOf(`-${runtimePackage}`) + 1,
+    );
+  });
+
   it("keeps the installer's own PATH and node out of the unit", async () => {
     await installTools();
     // A version-manager or CI tool-cache node sits first on the caller's PATH,

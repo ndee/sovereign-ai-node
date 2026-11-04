@@ -91,6 +91,7 @@ import {
 } from "../openclaw/agent-tool-policy.js";
 import {
   type OpenClawBootstrapper,
+  resolveOpenClawRuntimeModulesDir,
   resolveOpenClawSpawnLookupPath,
   resolveRequestedOpenClawVersion,
 } from "../openclaw/bootstrap.js";
@@ -5285,7 +5286,12 @@ export class RealInstallerService implements InstallerService {
     const roots: string[] = [];
     try {
       // The bin entry is a symlink to openclaw.mjs at the package root.
-      roots.push(dirname(await realpath(openclawCommand)));
+      const packageRoot = dirname(await realpath(openclawCommand));
+      roots.push(packageRoot);
+      const runtimeModules = resolveOpenClawRuntimeModulesDir(packageRoot);
+      if (runtimeModules !== null) {
+        roots.push(runtimeModules);
+      }
     } catch {}
     roots.push(
       join(await this.resolveOpenClawGlobalRoot(), "openclaw"),

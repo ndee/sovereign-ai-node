@@ -1,10 +1,11 @@
 /**
  * The Node.js range sovereign-node and the OpenClaw gateway support.
  *
- * The lower bound is the pinned OpenClaw's own runtime floor: below it the
- * gateway exits at start-up and systemd's restart policy turns that into a
- * crash loop, so this is a correctness bound, not hygiene. The upper bound
- * keeps every host on the single Node major the runtime is validated on.
+ * The lower bound is the runtime floor of OpenClaw 2026.8.x, which the node
+ * is moving to: below it that gateway exits at start-up and systemd's restart
+ * policy turns that into a crash loop, so hosts are raised to it before the
+ * pin moves. The upper bound keeps every host on the single Node major the
+ * runtime is validated on.
  * Keep in sync with `engines.node` in package.json and `NODE_RUNTIME_MIN_*`
  * in scripts/install/lib-runtime-deps.sh.
  */

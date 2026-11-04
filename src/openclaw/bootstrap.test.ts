@@ -26,6 +26,7 @@ import {
   resolveOpenClawLookupPath,
   resolveOpenClawNpmPrefix,
   resolveOpenClawRuntimeDir,
+  resolveOpenClawRuntimeModulesDir,
   resolveOpenClawRuntimePackageRoot,
   resolveOpenClawRuntimeTemplateDir,
   resolveOpenClawSpawnCwd,
@@ -38,6 +39,27 @@ import {
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const TEMPLATE_DIR = join(REPO_ROOT, "deploy", "openclaw-runtime");
+// The project the pin moves to next, kept so its lock stays verified until then.
+const NEXT_RUNTIME_DIR = join(REPO_ROOT, "test", "fixtures", "openclaw-runtime-2026.8.35");
+const LOCKED_RUNTIMES = [
+  { label: "the shipped project", dir: TEMPLATE_DIR, version: SOVEREIGN_PINNED_OPENCLAW_VERSION },
+  { label: "the 2026.8.35 project", dir: NEXT_RUNTIME_DIR, version: "2026.8.35" },
+];
+
+type LockEntry = {
+  version?: string;
+  dependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
+};
+const readLock = async (
+  dir: string,
+): Promise<{ lockfileVersion: number; packages: Record<string, LockEntry> }> =>
+  JSON.parse(await readFile(join(dir, "package-lock.json"), "utf8"));
+const lockedPackages = (
+  lock: { packages: Record<string, LockEntry> },
+  name: string,
+): Array<[string, LockEntry]> =>
+  Object.entries(lock.packages).filter(([path]) => path.endsWith(`node_modules/${name}`));
 const PIN = SOVEREIGN_PINNED_OPENCLAW_VERSION;
 const INSTALL = {
   version: SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS,
@@ -243,42 +265,68 @@ const unprivilegedInstall = async (
 };
 
 describe("the locked OpenClaw runtime project", () => {
-  it("locks exactly the pinned OpenClaw version", async () => {
-    const template = await readOpenClawRuntimeTemplate(TEMPLATE_DIR);
-    expect(template.version).toBe(PIN);
-    const lock = JSON.parse(template.lockfileText) as {
-      lockfileVersion: number;
-      packages: Record<string, { version?: string; dependencies?: Record<string, string> }>;
-    };
+  it.each(LOCKED_RUNTIMES)("$label locks exactly OpenClaw $version", async ({ dir, version }) => {
+    const template = await readOpenClawRuntimeTemplate(dir);
+    expect(template.version).toBe(version);
+    const lock = await readLock(dir);
     expect(lock.lockfileVersion).toBe(3);
-    expect(lock.packages[""]?.dependencies).toEqual({ openclaw: PIN });
-    expect(lock.packages["node_modules/openclaw"]?.version).toBe(PIN);
+    expect(lock.packages[""]?.dependencies).toEqual({ openclaw: version });
+    expect(lock.packages["node_modules/openclaw"]?.version).toBe(version);
   });
 
-  it("forces every zod in the tree to at least 4.6.6 through the override", async () => {
-    const manifest = JSON.parse(await readFile(join(TEMPLATE_DIR, "package.json"), "utf8"));
+  it("locks the pinned version in the shipped project", async () => {
+    expect((await readOpenClawRuntimeTemplate(TEMPLATE_DIR)).version).toBe(PIN);
+  });
+
+  it.each(LOCKED_RUNTIMES)("$label forces every zod in the tree to 4.6.6", async ({ dir }) => {
+    const manifest = JSON.parse(await readFile(join(dir, "package.json"), "utf8"));
     expect(manifest.overrides).toEqual({ zod: "4.6.6" });
-    const lock = JSON.parse(await readFile(join(TEMPLATE_DIR, "package-lock.json"), "utf8")) as {
-      packages: Record<string, { version?: string }>;
-    };
-    const zods = Object.entries(lock.packages).filter(([path]) => /(^|\/)zod$/.test(path));
+    const zods = lockedPackages(await readLock(dir), "zod");
     expect(zods.length).toBeGreaterThan(0);
     for (const [path, entry] of zods) {
       expect(entry.version, path).toBe("4.6.6");
     }
   });
 
-  it("nests every dependency under the openclaw package so its package root holds the whole runtime", async () => {
-    const lock = JSON.parse(await readFile(join(TEMPLATE_DIR, "package-lock.json"), "utf8")) as {
-      packages: Record<string, unknown>;
-    };
+  it("differs from the 2026.8.35 project only in the openclaw version, so a pin change is one edit plus a new lock", async () => {
+    const shipped = JSON.parse(await readFile(join(TEMPLATE_DIR, "package.json"), "utf8"));
+    const next = JSON.parse(await readFile(join(NEXT_RUNTIME_DIR, "package.json"), "utf8"));
+    expect({ ...next, dependencies: { openclaw: PIN } }).toEqual(shipped);
+  });
+
+  // Recorded so a markdown-it override is a visible decision: on 2026.3.13
+  // markdown-it is a runtime dependency below 15, on 2026.8.35 it is compiled
+  // into openclaw's dist and no longer a package.
+  it("has markdown-it 14 at runtime on 2026.3.13 and none on 2026.8.35", async () => {
+    expect(
+      lockedPackages(await readLock(TEMPLATE_DIR), "markdown-it").map(([, entry]) => entry.version),
+    ).toEqual(["14.3.3"]);
+    expect(lockedPackages(await readLock(NEXT_RUNTIME_DIR), "markdown-it")).toEqual([]);
+  });
+
+  it.each(
+    LOCKED_RUNTIMES,
+  )("$label keeps everything but openclaw's peers inside the openclaw package", async ({ dir }) => {
+    const lock = await readLock(dir);
+    const peers = Object.keys(lock.packages["node_modules/openclaw"]?.peerDependencies ?? {});
     const outside = Object.keys(lock.packages).filter(
       (path) =>
         path !== "" &&
         path !== "node_modules/openclaw" &&
-        !path.startsWith("node_modules/openclaw/"),
+        !path.startsWith("node_modules/openclaw/") &&
+        !peers.some(
+          (peer) => path === `node_modules/${peer}` || path.startsWith(`node_modules/${peer}/`),
+        ),
     );
     expect(outside).toEqual([]);
+  });
+
+  it("names the runtime's node_modules only for the locked runtime's own package", () => {
+    expect(
+      resolveOpenClawRuntimeModulesDir("/usr/lib/sovereign-openclaw-runtime/node_modules/openclaw"),
+    ).toBe("/usr/lib/sovereign-openclaw-runtime/node_modules");
+    expect(resolveOpenClawRuntimeModulesDir("/usr/lib/node_modules/openclaw")).toBeNull();
+    expect(resolveOpenClawRuntimeModulesDir("/opt/sovereign-openclaw-runtime/openclaw")).toBeNull();
   });
 
   it("ships the runtime project in the published package", async () => {
@@ -510,10 +558,33 @@ describe("ShellOpenClawBootstrapper installs from the locked runtime project", (
     await withUid(1001, async () => {
       const { bootstrapper, calls } = await unprivilegedInstall();
 
-      const info = await bootstrapper.ensureInstalled({ ...INSTALL, version: "2026.3.13" });
+      const info = await bootstrapper.ensureInstalled({ ...INSTALL, version: "2026.1.1" });
 
       expect(info.version).toBe(PIN);
       expect(callsTo(calls, "npm", "ci")).toHaveLength(1);
+    });
+  });
+
+  it("installs the 2026.8.35 project the pin moves to next", async () => {
+    await withUid(1001, async () => {
+      const serviceHome = await mkdtemp(join(tmpdir(), "openclaw-service-home-"));
+      const prefix = join(serviceHome, ".npm-global");
+      const world = createWorld(() => join(prefix, "bin"), { ciPackage: { version: "2026.8.35" } });
+      const bootstrapper = new ShellOpenClawBootstrapper(
+        world.runner,
+        createLogger(),
+        serviceHome,
+        NEXT_RUNTIME_DIR,
+      );
+
+      const info = await bootstrapper.ensureInstalled({ ...INSTALL, version: "2026.8.35" });
+      const rerun = await bootstrapper.ensureInstalled({ ...INSTALL, version: "2026.8.35" });
+
+      expect(info).toMatchObject({ version: "2026.8.35", reinstalled: true });
+      expect(rerun.reinstalled).toBe(false);
+      expect(
+        await readFile(join(resolveOpenClawRuntimeDir(prefix), "package-lock.json"), "utf8"),
+      ).toBe(await readFile(join(NEXT_RUNTIME_DIR, "package-lock.json"), "utf8"));
     });
   });
 
@@ -596,7 +667,7 @@ describe("ShellOpenClawBootstrapper keeps reruns idempotent", () => {
         detect: async (_input, linkPath) =>
           existsSync(join(dirname(linkPath), "..", "lib", "sovereign-openclaw-runtime"))
             ? ok("openclaw --version", `OpenClaw ${PIN}`)
-            : ok("openclaw --version", "OpenClaw 2026.3.13 (abc)"),
+            : ok("openclaw --version", "OpenClaw 2026.2.1 (abc)"),
       });
 
       const info = await bootstrapper.ensureInstalled(INSTALL);

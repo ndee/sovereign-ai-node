@@ -101,21 +101,31 @@ In the default install path, `sovereign-node install` is responsible for install
 
 Default behavior:
 
-- install the current Sovereign-pinned OpenClaw version `2026.8.35` from the locked runtime project shipped in `deploy/openclaw-runtime/` (a `package.json` with a `zod` `4.6.6` override and its committed `package-lock.json`); never from the upstream `openclaw.ai/install.sh` and never with a bare `npm install -g`
+- install the current Sovereign-pinned OpenClaw version `2026.3.13` from the locked runtime project shipped in `deploy/openclaw-runtime/` (a `package.json` with a `zod` `4.6.6` override and its committed `package-lock.json`); never from the upstream `openclaw.ai/install.sh` and never with a bare `npm install -g`
 - install it with `npm ci --omit=dev` into `<prefix>/lib/sovereign-openclaw-runtime`, where `<prefix>` is `<serviceHome>/.npm-global` for an unprivileged install and npm's global prefix (`npm prefix -g`) for a root install, then link `<prefix>/bin/openclaw` to the locked CLI
 - stage the install next to the runtime in place and swap it in only after `npm ci` succeeds, so a failed install leaves the previous runtime working; a rerun skips the install when the runtime in place was installed from the same lock and `<prefix>/bin/openclaw` points into it
 - require Node.js `>=22.22.3 <23` for both the process running `sovereign-node` and the system Node the gateway runs on (preflight checks `node-version` and `gateway-node-version`); `install.sh` upgrades or installs Node.js 22 from NodeSource when needed
 - skip OpenClaw onboarding because Sovereign owns the domain-specific configuration flow
 - run non-interactively in the installer backend
 
-To regenerate the lockfile after a pin change:
+### Changing the OpenClaw pin
 
-```bash
-cd deploy/openclaw-runtime
-npm install --package-lock-only --ignore-scripts --install-strategy=shallow
-```
+A pin change is exactly one edit plus a regenerated lock:
 
-`--install-strategy=shallow` nests every dependency under `node_modules/openclaw`, so the package root holds the whole runtime.
+1. Set `SOVEREIGN_PINNED_OPENCLAW_VERSION` in `src/openclaw/bootstrap.ts` and `dependencies.openclaw` in `deploy/openclaw-runtime/package.json` to the new version.
+2. Regenerate the lock:
+
+   ```bash
+   cd deploy/openclaw-runtime
+   rm package-lock.json
+   npm install --package-lock-only --ignore-scripts --install-strategy=shallow
+   ```
+
+3. Run `pnpm test:coverage:unit`. The `src/openclaw/bootstrap.test.ts` lock tests fail when the pin, the manifest and the lock disagree, when any `zod` in the lock is not the override, or when a package other than one of openclaw's peers sits outside `node_modules/openclaw`.
+
+`--install-strategy=shallow` nests every dependency under `node_modules/openclaw`, so the package root the gateway sandbox derives from the CLI holds the runtime. npm still places openclaw's peer dependencies beside it in `node_modules`, which the sandbox therefore also allows.
+
+The next target, `2026.8.35`, is kept as a verified project in `test/fixtures/openclaw-runtime-2026.8.35/`. For that pin, step 2 can be replaced by copying its `package-lock.json` into `deploy/openclaw-runtime/`, and the fixture is then dropped.
 
 After writing Sovereign-managed OpenClaw config and environment, the installer installs or repairs the gateway service via `openclaw gateway install` (using `--force` when a rewrite is required).
 
