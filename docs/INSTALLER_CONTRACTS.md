@@ -160,6 +160,8 @@ After writing Sovereign-managed OpenClaw config and environment, the installer i
 
 On 2026.8 the rendered config already registers every managed agent (`agents.entries`) and binding, so the installer runs no `openclaw agents` registration command and only checks that `openclaw agents list` shows each agent. 2026.3 keeps its existing CLI registration and start order.
 
+Known residual: the `@openclaw/matrix` plugin bundles two dependencies that npm overrides cannot reach. They carry GHSA-gfr2-rv44-r23c and GHSA-mrhx-c7xc-m3w5, with an availability-only impact (no confidentiality or integrity impact). The residual closes with the next `@openclaw/matrix` release, which the installer picks up through the normal pin update.
+
 ### Run-as identity for OpenClaw calls
 
 OpenClaw 2026.8 keeps its state in a SQLite database under `<serviceHome>/.openclaw/state`. Anything there created by root locks the gateway out of its own state, so:
