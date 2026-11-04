@@ -540,7 +540,7 @@ describe("ShellHostPreflightChecker.run", () => {
     });
     expect(result.overall).toBe("fail");
     expect(result.recommendedActions).toEqual([
-      "Upgrade the host's Node.js to >=22.22.3 <23. This step cannot install packages; as root, rerun install.sh (it upgrades the NodeSource nodejs package) or run 'apt-get update && apt-get install --only-upgrade nodejs', then retry.",
+      `Node ${node} running sovereign-node is outside the supported range >=22.22.3 <23. Upgrade the host's Node.js to >=22.22.3 <23. This step cannot install packages; as root, rerun install.sh (it upgrades the NodeSource nodejs package) or run 'apt-get update && apt-get install --only-upgrade nodejs', then retry.`,
     ]);
   });
 
@@ -572,7 +572,9 @@ describe("ShellHostPreflightChecker.run", () => {
     });
     expect(result.overall).toBe("fail");
     expect(result.recommendedActions).toHaveLength(1);
-    expect(result.recommendedActions[0]).toContain("cannot install packages");
+    expect(result.recommendedActions[0]).toMatch(
+      /^Gateway Node 22\.22\.2 at \/usr\/bin\/node is outside .*cannot install packages/,
+    );
   });
 
   it("warns when no system Node usable by the service user exists", async () => {

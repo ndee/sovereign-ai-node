@@ -426,7 +426,7 @@ const buildRecommendedActions = (checks: CheckResult[]): string[] => {
       case "node-version":
       case "gateway-node-version":
         add(
-          `Upgrade the host's Node.js to ${SUPPORTED_NODE_RANGE}. This step cannot install packages; as root, rerun install.sh (it upgrades the NodeSource nodejs package) or run 'apt-get update && apt-get install --only-upgrade nodejs', then retry.`,
+          `${item.message}. Upgrade the host's Node.js to ${SUPPORTED_NODE_RANGE}. This step cannot install packages; as root, rerun install.sh (it upgrades the NodeSource nodejs package) or run 'apt-get update && apt-get install --only-upgrade nodejs', then retry.`,
         );
         break;
       case "sudo-access":
