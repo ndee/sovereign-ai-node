@@ -9579,6 +9579,17 @@ export default function (api) {
             return;
           }
 
+          if (!(await this.hasGatewayUserServiceBus())) {
+            stepState.gatewayServiceSkipped = true;
+            this.logger.warn(
+              {
+                serviceUser: this.getConfiguredServiceIdentity().user,
+              },
+              "Skipping OpenClaw user-service gateway install: this process has no systemd user bus; using system-level service flow",
+            );
+            return;
+          }
+
           try {
             await this.openclawGatewayServiceManager.install({
               force: req.openclaw?.forceReinstall ?? false,
@@ -14298,6 +14309,13 @@ export default function (api) {
       user,
       group,
     };
+  }
+
+  private async hasGatewayUserServiceBus(): Promise<boolean> {
+    if (process.getuid?.() === 0) {
+      return true;
+    }
+    return (await this.openclawGatewayServiceManager.hasUserServiceBus?.()) ?? true;
   }
 
   private shouldPreferSystemGatewayService(runtimeConfig?: RuntimeConfig): boolean {

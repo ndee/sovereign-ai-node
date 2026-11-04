@@ -1,5 +1,5 @@
 import { constants as fsConstants } from "node:fs";
-import { access } from "node:fs/promises";
+import { access, stat } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 
 import type { Logger } from "../logging/logger.js";
@@ -23,6 +23,11 @@ export interface OpenClawGatewayServiceManager {
   install(options?: GatewayInstallOptions): Promise<void>;
   start(): Promise<void>;
   restart(): Promise<void>;
+  /**
+   * Whether this process can reach a systemd user bus. A manager that cannot
+   * tell leaves it out, and the install then attempts the user service.
+   */
+  hasUserServiceBus?(): Promise<boolean>;
 }
 
 export class ShellOpenClawGatewayServiceManager implements OpenClawGatewayServiceManager {
@@ -46,6 +51,10 @@ export class ShellOpenClawGatewayServiceManager implements OpenClawGatewayServic
    */
   private resolveLookupPath(): string | undefined {
     return resolveOpenClawSpawnLookupPath(this.serviceHome);
+  }
+
+  async hasUserServiceBus(): Promise<boolean> {
+    return await hasSystemdUserBus();
   }
 
   async install(options?: GatewayInstallOptions): Promise<void> {
@@ -189,6 +198,42 @@ export const isSystemdBusUnavailableMessage = (message: string): boolean =>
   /systemctl --user unavailable|failed to connect to (?:bus|system scope bus)|no medium found|transport endpoint is not connected/i.test(
     message,
   );
+
+export type SystemdUserBusProbe = {
+  env?: NodeJS.ProcessEnv;
+  uid?: number | null;
+  isSocket?: (path: string) => Promise<boolean>;
+};
+
+const isUnixSocket = async (path: string): Promise<boolean> => {
+  try {
+    return (await stat(path)).isSocket();
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Finds the user bus the way OpenClaw's `busctl --user` calls do. An explicit
+ * DBUS_SESSION_BUS_ADDRESS is used as given; otherwise the socket is
+ * `<XDG_RUNTIME_DIR or /run/user/<uid>>/bus`. A system service has neither
+ * variable, and with no login session or lingering no user manager creates that
+ * socket. OpenClaw 2026.8 then refuses `gateway install` with a sanitized
+ * SERVICE_DEFINITION_UNKNOWN and drops the bus error, so the absence has to be
+ * detected before the call instead of read from its output.
+ */
+export const hasSystemdUserBus = async (probe: SystemdUserBusProbe = {}): Promise<boolean> => {
+  const env = probe.env ?? process.env;
+  if ((env.DBUS_SESSION_BUS_ADDRESS?.trim() ?? "").length > 0) {
+    return true;
+  }
+  const uid = probe.uid !== undefined ? probe.uid : (process.getuid?.() ?? null);
+  const runtimeDir = env.XDG_RUNTIME_DIR?.trim() || (uid === null ? null : `/run/user/${uid}`);
+  if (runtimeDir === null) {
+    return true;
+  }
+  return await (probe.isSocket ?? isUnixSocket)(join(runtimeDir, "bus"));
+};
 
 const resolveExecutablePath = async (
   command: string,

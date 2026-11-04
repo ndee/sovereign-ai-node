@@ -14,6 +14,8 @@ set -euo pipefail
 
 API_SERVICE="${API_SERVICE:-sovereign-node-api.service}"
 API_URL="${API_URL:-http://127.0.0.1:8787}"
+APP_DIR="${APP_DIR:-/opt/sovereign-ai-node/app}"
+CONFIG_PATH="${CONFIG_PATH:-/etc/sovereign-node/sovereign-node.json5}"
 INSTALL_TIMEOUT_SECONDS="${INSTALL_TIMEOUT_SECONDS:-900}"
 POLL_SECONDS="${POLL_SECONDS:-5}"
 
@@ -57,17 +59,39 @@ wait_for_api() {
   die "$API_URL/healthz did not answer"
 }
 
+operator_password() {
+  local ref
+  ref="$(node -e '
+    const JSON5 = require(process.argv[1]);
+    const config = JSON5.parse(require("node:fs").readFileSync(process.argv[2], "utf8"));
+    process.stdout.write(config.matrix?.operator?.passwordSecretRef ?? "");
+  ' "$APP_DIR/node_modules/json5" "$CONFIG_PATH")"
+  [[ "$ref" == file:* ]] || die "operator password secret ref is not a file ref: ${ref:-<none>}"
+  cat "${ref#file:}"
+}
+
+# A fresh node signs in with a one-time bootstrap token; once an install has
+# configured the operator, the setup UI asks for the operator's password.
+login() {
+  local cookies=$1 stage body
+  stage="$(curl -fsS "$API_URL/api/auth/state" | jq -er '.result.stage')"
+  if [[ "$stage" == "needs-bootstrap" ]]; then
+    body="$(jq -cn --arg token "$(sovereign-node setup-ui issue-bootstrap-token --ttl-minutes 30 --json | jq -er '.result.token')" '{token: $token}')"
+  else
+    body="$(jq -cn --arg password "$(operator_password)" '{password: $password}')"
+  fi
+  curl -fsS -c "$cookies" -H 'Content-Type: application/json' --data "$body" \
+    "$API_URL/api/auth/login" | jq -er '.result.csrf'
+}
+
 run_install() {
-  local request_file=$1 out_file=$2 work token csrf job_id deadline state
+  local request_file=$1 out_file=$2 work csrf job_id deadline state
   [[ -f "$request_file" ]] || die "request file not found: $request_file"
   work="$(mktemp -d)"
   trap 'rm -rf "$work"' RETURN
 
   wait_for_api
-  token="$(sovereign-node setup-ui issue-bootstrap-token --ttl-minutes 30 --json | jq -er '.result.token')"
-  csrf="$(curl -fsS -c "$work/cookies" -H 'Content-Type: application/json' \
-    --data "$(jq -cn --arg token "$token" '{token: $token}')" \
-    "$API_URL/api/auth/login" | jq -er '.result.csrf')"
+  csrf="$(login "$work/cookies")"
 
   curl -fsS -b "$work/cookies" -H 'Content-Type: application/json' -H "X-CSRF-Token: $csrf" \
     --data @"$request_file" "$API_URL/api/install/run" >"$work/start.json" || {
