@@ -104,9 +104,30 @@ Default behavior:
 - install the current Sovereign-pinned OpenClaw version `2026.8.35` from the locked runtime project shipped in `deploy/openclaw-runtime/` (a `package.json` with a `zod` `4.6.6` override and its committed `package-lock.json`); never from the upstream `openclaw.ai/install.sh` and never with a bare `npm install -g`
 - install it with `npm ci --omit=dev` into `<prefix>/lib/sovereign-openclaw-runtime`, where `<prefix>` is `<serviceHome>/.npm-global` for an unprivileged install and npm's global prefix (`npm prefix -g`) for a root install, then link `<prefix>/bin/openclaw` to the locked CLI
 - stage the install next to the runtime in place and swap it in only after `npm ci` succeeds, so a failed install leaves the previous runtime working; a rerun skips the install when the runtime in place was installed from the same lock and `<prefix>/bin/openclaw` points into it
+- keep an installed OpenClaw whose version differs from the pin (see below); a host without OpenClaw gets the pin
 - require Node.js `>=22.22.3 <23` for both the process running `sovereign-node` and the system Node the gateway runs on (preflight checks `node-version` and `gateway-node-version`); `install.sh` upgrades or installs Node.js 22 from NodeSource when needed
 - skip OpenClaw onboarding because Sovereign owns the domain-specific configuration flow
 - run non-interactively in the installer backend
+
+### Keeping the installed OpenClaw version
+
+Moving a host to another OpenClaw version migrates OpenClaw's state in a way the earlier version cannot read. That needs the gateway stopped and a backup first. Every install job runs while the gateway is up, so no install job changes the OpenClaw version. This covers `sovereign-node install`, `sovereign-node update`, an `install.sh` rerun, `POST /api/install/run`, the IMAP reconfigure and mail-sentinel instance changes. Only the staged OpenClaw migration changes it.
+
+The bootstrap step works out the installed version:
+
+1. the version the `openclaw` CLI reports;
+2. when the CLI does not answer, the `package.json` version of the package `<prefix>/bin/openclaw` points into, then of `<prefix>/lib/node_modules/openclaw` (the global layout of earlier releases), then of `<prefix>/lib/sovereign-openclaw-runtime/node_modules/openclaw`.
+
+When that version differs from the pin, the step:
+
+- keeps it. It logs `Keeping the installed OpenClaw <installed>; moving to <pin> runs only through the staged OpenClaw migration` and runs no `npm ci`, no relink and no cache clear;
+- repairs the bundled extension dependencies of the kept package;
+- records the kept version as `openclaw.requestedVersion` in `sovereign-node.json5`, so the config shape and the `openclaw-version-pin` doctor check follow the installed CLI;
+- fails with `OPENCLAW_MIGRATION_REQUIRED` (not retryable) when the version came from a package on disk because the CLI did not answer, instead of installing over it.
+
+`forceReinstall` and `skipIfCompatibleInstalled: false` repair the installed version only and do not lift the hold. The only way past it is `allowVersionChange` on the bootstrapper's install options. Only the staged migration sets it, in code, after it has stopped the gateway and taken its backup. It is not part of `InstallRequest`, and it is never read from the environment, the API, the saved request or any other file, because the service user can write all of those. When the installed version equals the pin, the regular path applies, including the move of a global install into the locked runtime project.
+
+The E2E upgrade job checks that `sovereign-node update` from the previous release keeps that release's OpenClaw version.
 
 ### Changing the OpenClaw pin
 
@@ -647,7 +668,7 @@ type InstallRequest = {
     installMethod?: "install_sh"; // phase-B default and only supported value
     version?: string; // normally provided by Sovereign pin/profile
     skipIfCompatibleInstalled?: boolean; // default true
-    forceReinstall?: boolean; // default false
+    forceReinstall?: boolean; // default false; repairs the installed version, never replaces it with another
     runOnboard?: false; // default false; Sovereign flow skips onboarding
   };
   openrouter: {

@@ -16,7 +16,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { Logger } from "../logging/logger.js";
@@ -50,6 +50,14 @@ export type OpenClawInstallOptions = {
   noOnboard?: boolean;
   forceReinstall?: boolean;
   skipIfCompatibleInstalled?: boolean;
+  /**
+   * Lets an installed OpenClaw of another version be replaced by the locked
+   * one. Only the staged OpenClaw migration may pass it, after stopping the
+   * gateway and taking its backup. Set it in code only: never from the install
+   * request, the API, the environment or any file, all of which the service
+   * user can write.
+   */
+  allowVersionChange?: boolean;
 };
 
 export type DetectedOpenClaw = {
@@ -65,6 +73,11 @@ export type OpenClawInstallInfo = {
   installMethod: "locked_project" | "install_sh" | "npm_fallback";
   /** True when this call (re)installed the CLI rather than keeping the one found. */
   reinstalled?: boolean;
+  /**
+   * True when an installed OpenClaw of another version than the lock was kept:
+   * only the staged migration moves a host to the locked version.
+   */
+  held?: boolean;
 };
 
 export interface OpenClawBootstrapper {
@@ -426,6 +439,17 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
   async ensureInstalled(opts: OpenClawInstallOptions): Promise<OpenClawInstallInfo> {
     const requestedVersion = resolveRequestedOpenClawVersion(opts.version);
     const template = await this.readRuntimeTemplate();
+    const detected = await this.detectInstalled();
+    const npmPrefix = await this.resolveInstallPrefix();
+    const runtimeDir = resolveOpenClawRuntimeDir(npmPrefix);
+    // Before forceReinstall and the skip check: a forced reinstall may repair
+    // the installed version, never replace it with another one.
+    if (opts.allowVersionChange !== true) {
+      const held = await this.holdInstalledVersion(detected, npmPrefix, runtimeDir, template);
+      if (held !== null) {
+        return held;
+      }
+    }
     if (!versionsMatch(requestedVersion, template.version)) {
       // The locked project is the only install source, so another version
       // cannot be honoured; installing the lock keeps old request files that
@@ -435,9 +459,6 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
         "Requested OpenClaw version differs from the locked runtime; installing the locked version",
       );
     }
-    const detected = await this.detectInstalled();
-    const npmPrefix = await this.resolveInstallPrefix();
-    const runtimeDir = resolveOpenClawRuntimeDir(npmPrefix);
     if (
       detected !== null &&
       !opts.forceReinstall &&
@@ -445,7 +466,9 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
       versionsMatch(detected.version, template.version) &&
       (await isLockedRuntimeCurrent(runtimeDir, npmPrefix, template))
     ) {
-      await this.repairBundledExtensionRuntimeDependencies(runtimeDir);
+      await this.repairBundledExtensionRuntimeDependencies(
+        resolveOpenClawRuntimePackageRoot(runtimeDir),
+      );
       this.logger.info(
         {
           openclawVersion: detected.version,
@@ -499,13 +522,72 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
       );
     }
 
-    await this.repairBundledExtensionRuntimeDependencies(runtimeDir);
+    await this.repairBundledExtensionRuntimeDependencies(
+      resolveOpenClawRuntimePackageRoot(runtimeDir),
+    );
 
     return {
       binaryPath: installed.binaryPath,
       version: installed.version,
       installMethod: "locked_project",
       reinstalled: true,
+    };
+  }
+
+  /**
+   * Keep an installed OpenClaw whose version differs from the lock.
+   *
+   * Moving a host to another OpenClaw migrates its state in a way the old
+   * version cannot read, so it must stop the gateway and take a backup first.
+   * Every install job (update, installer rerun, reconfigure, bot instance
+   * changes) runs while the gateway is up, so none of them may swap versions.
+   * Returns null when nothing is installed or the installed version is the
+   * locked one; the regular install path handles both.
+   */
+  private async holdInstalledVersion(
+    detected: DetectedOpenClaw | null,
+    npmPrefix: string,
+    runtimeDir: string,
+    template: OpenClawRuntimeTemplate,
+  ): Promise<OpenClawInstallInfo | null> {
+    const onDisk = await findInstalledOpenClawPackages(npmPrefix, runtimeDir);
+    const installedVersion = detected?.version ?? onDisk[0]?.version;
+    if (installedVersion === undefined || versionsMatch(installedVersion, template.version)) {
+      return null;
+    }
+    const lockedVersion = template.version;
+    if (detected === null) {
+      throw {
+        code: "OPENCLAW_MIGRATION_REQUIRED",
+        message: `OpenClaw ${installedVersion} is installed but its CLI does not answer; moving to ${lockedVersion} runs only through the staged OpenClaw migration`,
+        retryable: false,
+        details: { installedVersion, lockedVersion, packageRoot: onDisk[0]?.packageRoot },
+      };
+    }
+    this.logger.info(
+      { installedVersion, lockedVersion, binaryPath: detected.binaryPath },
+      `Keeping the installed OpenClaw ${installedVersion}; moving to ${lockedVersion} runs only through the staged OpenClaw migration`,
+    );
+    const heldPackage = onDisk.find((candidate) =>
+      versionsMatch(candidate.version, installedVersion),
+    );
+    if (heldPackage === undefined) {
+      this.logger.warn(
+        { installedVersion, npmPrefix },
+        "The kept OpenClaw package was not found in the prefix; skipping the bundled extension dependency repair",
+      );
+    } else {
+      await this.repairBundledExtensionRuntimeDependencies(heldPackage.packageRoot);
+    }
+    return {
+      binaryPath: detected.binaryPath,
+      version: installedVersion,
+      installMethod:
+        heldPackage?.packageRoot === resolveOpenClawRuntimePackageRoot(runtimeDir)
+          ? "locked_project"
+          : "npm_fallback",
+      reinstalled: false,
+      held: true,
     };
   }
 
@@ -648,8 +730,7 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
     return installResult;
   }
 
-  private async repairBundledExtensionRuntimeDependencies(runtimeDir: string): Promise<void> {
-    const packageRoot = resolveOpenClawRuntimePackageRoot(runtimeDir);
+  private async repairBundledExtensionRuntimeDependencies(packageRoot: string): Promise<void> {
     await ensureOpenClawPackageReadable(packageRoot, this.logger);
     await hardenBundledExtensionDirectories(packageRoot);
 
@@ -793,6 +874,58 @@ export const resolveOpenClawRuntimeTemplateDir = (
     current = dirname(current);
   }
   return null;
+};
+
+type InstalledOpenClawPackage = {
+  packageRoot: string;
+  version: string;
+};
+
+const readOpenClawPackageVersion = async (packageRoot: string): Promise<string | null> => {
+  try {
+    const manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8")) as {
+      version?: unknown;
+    };
+    return typeof manifest.version === "string" && manifest.version.trim().length > 0
+      ? manifest.version.trim()
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+const isPathWithin = async (path: string, root: string): Promise<boolean> => {
+  try {
+    return (await realpath(path)).startsWith(`${await realpath(root)}${sep}`);
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * The OpenClaw packages installed under the prefix: the one `<prefix>/bin/openclaw`
+ * runs first, then the legacy global layout every host installed before the
+ * locked runtime has, then the locked runtime. A host moved to the locked
+ * runtime keeps its old global copy, so the linked one is the one in use.
+ */
+const findInstalledOpenClawPackages = async (
+  npmPrefix: string,
+  runtimeDir: string,
+): Promise<InstalledOpenClawPackage[]> => {
+  const binPath = join(npmPrefix, "bin", OPENCLAW_RUNTIME_PACKAGE);
+  const found: Array<InstalledOpenClawPackage & { linked: boolean }> = [];
+  for (const packageRoot of [
+    join(npmPrefix, "lib", "node_modules", OPENCLAW_RUNTIME_PACKAGE),
+    resolveOpenClawRuntimePackageRoot(runtimeDir),
+  ]) {
+    const version = await readOpenClawPackageVersion(packageRoot);
+    if (version !== null) {
+      found.push({ packageRoot, version, linked: await isPathWithin(binPath, packageRoot) });
+    }
+  }
+  return [...found.filter((entry) => entry.linked), ...found.filter((entry) => !entry.linked)].map(
+    ({ packageRoot, version }) => ({ packageRoot, version }),
+  );
 };
 
 /**

@@ -9297,6 +9297,7 @@ export default function (api) {
       gatewayServiceSkipped?: boolean;
       gatewayReadiness?: GatewayReadinessOutcome;
       relayTunnelServiceInstalled?: boolean;
+      heldOpenClawVersion?: string;
     } = {};
 
     return [
@@ -9346,6 +9347,9 @@ export default function (api) {
           });
           if (installed.reinstalled === true) {
             await this.clearOpenClawRuntimeCaches();
+          }
+          if (installed.held === true) {
+            stepState.heldOpenClawVersion = installed.version;
           }
         },
       },
@@ -9626,6 +9630,9 @@ export default function (api) {
           const appliedRequest = stepState.effectiveRequest ?? req;
           let runtimeConfig = await this.writeSovereignConfig({
             req: appliedRequest,
+            ...(stepState.heldOpenClawVersion === undefined
+              ? {}
+              : { openclawVersion: stepState.heldOpenClawVersion }),
             matrixProvision: stepState.matrixProvision,
             matrixAccounts: stepState.matrixAccounts,
             matrixRoom: stepState.matrixRoom,
@@ -12743,6 +12750,12 @@ export default function (api) {
 
   private async writeSovereignConfig(input: {
     req: InstallRequest;
+    /**
+     * The OpenClaw the bootstrap step kept instead of the pin. Recorded as the
+     * requested version so the config shape and the version-pin check follow
+     * the installed CLI even when it cannot be run.
+     */
+    openclawVersion?: string;
     relayEnrollment?: RelayEnrollmentResult;
     matrixProvision: BundledMatrixProvisionResult;
     matrixAccounts: BundledMatrixAccountsResult;
@@ -12862,7 +12875,8 @@ export default function (api) {
       openclaw: {
         managedInstallation: input.req.openclaw?.manageInstallation ?? true,
         installMethod: input.req.openclaw?.installMethod ?? "install_sh",
-        requestedVersion: resolveRequestedOpenClawVersion(input.req.openclaw?.version),
+        requestedVersion:
+          input.openclawVersion ?? resolveRequestedOpenClawVersion(input.req.openclaw?.version),
         openclawHome: openclawPaths.openclawHome,
         runtimeConfigPath: openclawPaths.runtimeConfigPath,
         runtimeProfilePath: openclawPaths.runtimeProfilePath,
