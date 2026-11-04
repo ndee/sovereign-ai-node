@@ -3377,6 +3377,8 @@ export class RealInstallerService implements InstallerService {
         await this.clearTemplateTransitionJournal();
       }
 
+      await this.rederiveNodeOwnedBindings(runtimeConfig);
+
       const reconciled: string[] = [];
       for (const agent of runtimeConfig.openclawProfile.agents) {
         await this.ensureManagedAgentWorkspace({
@@ -3401,8 +3403,8 @@ export class RealInstallerService implements InstallerService {
       // workspace loop above only writes workspace-local files; without this,
       // a device whose units were never created (issue #224: the wizard's
       // unprivileged configure step silently skipped them) stays unscheduled
-      // through every update while reporting healthy. Reconcile runs as root
-      // on the update path, so this is also the fleet-wide repair. A unit
+      // through every update while reporting healthy. Reconcile runs on every
+      // update path, so this is also the fleet-wide repair. A unit
       // that cannot be converged fails the reconcile — and thereby the
       // update — rather than leaving a bot installed but never scheduled.
       const systemdUnits = await this.applyCompiledSystemdResourcesOrThrow(runtimeConfig);
@@ -4641,6 +4643,99 @@ export class RealInstallerService implements InstallerService {
       botStatus,
       ...(unmatchedSystemdBots.length === 0 ? {} : { unmatchedSystemdBots }),
     };
+  }
+
+  /**
+   * The bindings the node derives itself (the scan agent a bot tool reviews
+   * through, the plugin allow list) are written only by the install job. A
+   * node installed by an older release keeps that release's values through
+   * every update and every re-render, so a binding added later never reaches
+   * it: a bot tool without `scanAgentId` sends its reviews to the chat agent,
+   * whose closed tool list has no llm-task. Reconcile therefore re-derives
+   * both with the install job's rules and persists only what differs.
+   */
+  private async rederiveNodeOwnedBindings(runtimeConfig: RuntimeConfig): Promise<void> {
+    const botPackages = await this.listBotPackages();
+    const packageOf = (agent: RuntimeAgentEntry): LoadedBotPackage | undefined =>
+      botPackages.find(
+        (botPackage) =>
+          agent.botId === botPackage.manifest.id || agent.templateRef === botPackage.templateRef,
+      );
+
+    const scanAgentIds = new Map<string, string>();
+    for (const agent of runtimeConfig.openclawProfile.agents) {
+      const botPackage = packageOf(agent);
+      if (botPackage === undefined) {
+        continue;
+      }
+      for (const tool of this.resolveBoundToolInstances(
+        runtimeConfig,
+        agent.toolInstanceIds ?? [],
+      )) {
+        const reviewsThroughScanAgent = botPackage.toolTemplates.some(
+          (toolTemplate) =>
+            toolTemplate.templateRef === tool.templateRef &&
+            toolTemplate.manifest.openclawScanAgent !== undefined,
+        );
+        const expected = resolveOpenClawScanAgentId(agent.id);
+        if (reviewsThroughScanAgent && tool.config.scanAgentId !== expected) {
+          scanAgentIds.set(tool.id, expected);
+        }
+      }
+    }
+
+    // A bot agent whose package is missing from the catalog cannot be
+    // re-derived; recomputing without it would drop the plugins it needs.
+    const everyBotAgentResolved = runtimeConfig.openclawProfile.agents.every(
+      (agent) => agent.botId === undefined || packageOf(agent) !== undefined,
+    );
+    const currentAllow = runtimeConfig.openclawProfile.plugins.allow;
+    const requiredAllow = this.listRequiredOpenClawPluginIds(
+      botPackages.filter((botPackage) =>
+        runtimeConfig.openclawProfile.agents.some((agent) => packageOf(agent) === botPackage),
+      ),
+    );
+    const allowChanged =
+      everyBotAgentResolved &&
+      (requiredAllow.length !== new Set(currentAllow).size ||
+        requiredAllow.some((pluginId) => !currentAllow.includes(pluginId)));
+
+    if (scanAgentIds.size === 0 && !allowChanged) {
+      return;
+    }
+
+    // readRuntimeConfig accepted this document moments ago, so its shape holds;
+    // only the two derived fields are rewritten, everything else stays as is.
+    const parsed = parseJsonDocument(await readFile(this.paths.configPath, "utf8")) as {
+      // Present whenever the allow list can differ: the parser defaults a
+      // missing profile to exactly what the rules require for no bots.
+      openclawProfile: { plugins?: Record<string, unknown> };
+      sovereignTools?: { instances?: Array<{ id?: unknown; config?: Record<string, unknown> }> };
+    };
+    if (allowChanged) {
+      parsed.openclawProfile.plugins = { ...parsed.openclawProfile.plugins, allow: requiredAllow };
+      runtimeConfig.openclawProfile.plugins.allow = requiredAllow;
+    }
+    for (const entry of parsed.sovereignTools?.instances ?? []) {
+      const scanAgentId = scanAgentIds.get(String(entry.id));
+      if (scanAgentId !== undefined) {
+        entry.config = { ...entry.config, scanAgentId };
+      }
+    }
+    for (const tool of runtimeConfig.sovereignTools.instances) {
+      const scanAgentId = scanAgentIds.get(tool.id);
+      if (scanAgentId !== undefined) {
+        tool.config = { ...tool.config, scanAgentId };
+      }
+    }
+    await this.writeInstallerJsonFile(this.paths.configPath, parsed, 0o644);
+    this.logger.info(
+      {
+        scanAgentIds: Object.fromEntries(scanAgentIds),
+        ...(allowChanged ? { pluginsAllow: { before: currentAllow, after: requiredAllow } } : {}),
+      },
+      "Re-derived node-owned bindings written by an older release",
+    );
   }
 
   private async refreshRuntimeHostResources(runtimeConfig: RuntimeConfig): Promise<void> {

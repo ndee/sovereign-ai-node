@@ -34,6 +34,8 @@ export const createApp = () => {
   return {
     logger,
     paths: DEFAULT_PATHS,
+    openclawBootstrapper,
+    execRunner,
     installerService: new RealInstallerService(logger, DEFAULT_PATHS, {
       openclawBootstrapper,
       openclawGatewayServiceManager,

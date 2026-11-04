@@ -765,6 +765,46 @@ jobs:
             "$UPGRADE_DIR/doctor-post.json" > /dev/null
           echo "OPENCLAW_VERSION_AFTER_UPDATE=$installed" >> "$GITHUB_ENV"
 
+      # The staged migration is the only path that moves an installed node to
+      # the pinned OpenClaw. Run it the way a root update stage does: a
+      # root-owned copy, a clean environment, the installed node package.
+      - name: Migrate the kept OpenClaw with the staged migration
+        run: |
+          libexec=/usr/local/libexec/sovereign-node-e2e
+          sudo install -d -m 0700 "$libexec"
+          sudo install -m 0700 scripts/openclaw-migrate.sh "$libexec/openclaw-migrate.sh"
+          set +e
+          sudo env -i "PATH=$PATH" bash "$libexec/openclaw-migrate.sh" --target pinned \
+            --out "$UPGRADE_DIR/migrate" --node-package /opt/sovereign-ai-node/app --budget 1500
+          rc=$?
+          set -e
+          sudo jq '{ok, outcome, exit_code, from, target, failed_step, message, node, llm_task, rollback,
+            steps: [.steps[] | {name, ok, skipped, seconds, detail}]}' "$UPGRADE_DIR/migrate/result.json"
+          test "$rc" = 0
+          sudo jq -e --arg from "$OPENCLAW_VERSION_AFTER_UPDATE" \
+            '.outcome == "migrated" and .from == $from and .node.ok and .lobster.ok' \
+            "$UPGRADE_DIR/migrate/result.json" > /dev/null
+          pinned="$(jq -r '.dependencies.openclaw' deploy/openclaw-runtime/package.json)"
+          sudo env "PATH=$PATH" sovereign-node doctor --json > "$UPGRADE_DIR/doctor-migrated.json"
+          installed="$(jq -r '.result.checks[] | select(.id == "openclaw-version-pin") | .details.detectedVersion // empty' \
+            "$UPGRADE_DIR/doctor-migrated.json")"
+          echo "after the migration: OpenClaw $installed (pinned $pinned)"
+          test "$installed" = "$pinned"
+          echo "OPENCLAW_VERSION_AFTER_UPDATE=$installed" >> "$GITHUB_ENV"
+        timeout-minutes: 30
+
+      - name: Rerun the staged migration on the migrated node (no-op)
+        run: |
+          set +e
+          sudo env -i "PATH=$PATH" bash /usr/local/libexec/sovereign-node-e2e/openclaw-migrate.sh --target pinned \
+            --out "$UPGRADE_DIR/migrate-again" --node-package /opt/sovereign-ai-node/app
+          rc=$?
+          set -e
+          sudo jq '{ok, outcome, exit_code, failed_step, message}' "$UPGRADE_DIR/migrate-again/result.json"
+          test "$rc" = 0
+          sudo jq -e '.outcome == "already-current"' "$UPGRADE_DIR/migrate-again/result.json" > /dev/null
+          systemctl is-active --quiet sovereign-openclaw-gateway.service
+
       - name: Verify the pre-upgrade rooms and history are readable
         run: sudo env "PATH=$PATH" bash "$UPGRADE_HELPER" verify-history "$UPGRADE_DIR/state.json"
 
@@ -786,6 +826,8 @@ jobs:
       - name: Collect logs on failure
         if: failure()
         run: |
+          echo "=== staged OpenClaw migration ==="
+          sudo cat "$UPGRADE_DIR/migrate/migration.log" "$UPGRADE_DIR/migrate/result.json" 2>/dev/null || true
           echo "=== upgrade watcher ==="
           cat "$UPGRADE_DIR/watch.json" 2>/dev/null || true
           echo "=== snapshots ==="
