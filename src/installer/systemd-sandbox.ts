@@ -173,6 +173,12 @@ export type GatewaySandboxInput = {
   /** Candidate OpenClaw package directories (native addons included). */
   openclawPackageRoots: readonly string[];
   /**
+   * Directories OpenClaw installs external plugins into at runtime. They sit
+   * in the writable state dir, and a plugin's native addon there still has
+   * to be loadable.
+   */
+  openclawPluginInstallRoots?: readonly string[];
+  /**
    * Every host program the gateway may start: the runtime, shebang
    * interpreters, the root-owned sovereign CLIs and the programs agents are
    * allowed to run. Anything that gives agents a new way to start a host
@@ -196,6 +202,7 @@ export const buildGatewaySandboxPaths = (input: GatewaySandboxInput): SystemdSan
     ...input.programs,
     ...npmPrefixExecPaths(input.serviceNpmPrefix),
     ...input.openclawPackageRoots,
+    ...(input.openclawPluginInstallRoots ?? []),
   ],
 });
 

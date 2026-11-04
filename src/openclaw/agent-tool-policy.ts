@@ -1,5 +1,7 @@
-// Core tool ids and groups of the pinned OpenClaw runtime (2026.3.13). Plugin
-// tools are never part of these groups.
+// Core tool ids of the OpenClaw runtimes node renders for: 2026.3, then the
+// ids 2026.8 adds. A plugin tool must not take one of these names on either.
+// On its runtime, each one sits in one of the core groups below.
+// Plugin tools are never part of these groups.
 export const OPENCLAW_CORE_TOOL_IDS = [
   "read",
   "write",
@@ -27,6 +29,38 @@ export const OPENCLAW_CORE_TOOL_IDS = [
   "agents_list",
   "image",
   "tts",
+  "ask_user",
+  "create_goal",
+  "get_goal",
+  "progress_card",
+  "skill_workshop",
+  "update_goal",
+  "automations",
+  "heartbeat_respond",
+  "image_generate",
+  "music_generate",
+  "video_generate",
+  "view_image",
+  "computer",
+  "mobile_ui",
+  "code_execution",
+  "secrets",
+  "agents_wait",
+  "conversations_list",
+  "conversations_send",
+  "conversations_turn",
+  "dismiss_task",
+  "github_identity_status",
+  "github_publish",
+  "sessions_search",
+  "sessions",
+  "suggest_task",
+  "dashboard",
+  "portal",
+  "screen",
+  "show_widget",
+  "terminal",
+  "x_search",
 ] as const;
 
 export const OPENCLAW_CORE_TOOL_GROUP_IDS = [

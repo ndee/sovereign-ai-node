@@ -161,6 +161,8 @@ describe("sovereign-openclaw-gateway unit sandbox", () => {
         serviceUser: "sovereign-node",
         serviceGroup: "sovereign-node",
         gatewayEnvPath: join(paths.openclawServiceHome, "gateway.env"),
+        // No CLI answers here; the 2026.3 unit is the one under test.
+        requestedVersion: "2026.3.13",
       },
       ...(agents === undefined ? {} : { openclawProfile: { agents } }),
     }) as unknown as RuntimeConfig;

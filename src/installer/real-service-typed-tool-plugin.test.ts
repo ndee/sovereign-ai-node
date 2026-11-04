@@ -170,7 +170,11 @@ beforeAll(async () => {
       },
     ],
   };
-  await writeFile(join(pluginDir, "openclaw.plugin.json"), renderTypedToolPluginManifest(), "utf8");
+  await writeFile(
+    join(pluginDir, "openclaw.plugin.json"),
+    renderTypedToolPluginManifest(config.tools.map((tool) => tool.name)),
+    "utf8",
+  );
   await writeFile(
     join(pluginDir, "plugin-config.json"),
     renderTypedToolPluginConfig(config),
@@ -202,9 +206,23 @@ afterAll(async () => {
 });
 
 describe("typed tool plugin rendering", () => {
+  // OpenClaw 2026.8 loads a plugin's tool runtime only for the tools its
+  // manifest declares, and a registerTool name outside the list is refused.
+  it("declares exactly the tools the plugin registers and loads it on startup", async () => {
+    const manifest = JSON.parse(
+      await readFile(join(pluginDir, "openclaw.plugin.json"), "utf8"),
+    ) as { activation?: { onStartup?: boolean }; contracts?: { tools?: string[] } };
+    expect(manifest.contracts?.tools).toEqual(Array.from(tools.keys()).sort());
+    expect(manifest.activation?.onStartup).toBe(true);
+  });
+
   it("renders a manifest without plugin config and a sorted, deduplicated config", () => {
-    expect(JSON.parse(renderTypedToolPluginManifest())).toEqual({
+    expect(
+      JSON.parse(renderTypedToolPluginManifest(["zeta_tool", "alpha_tool", "zeta_tool"])),
+    ).toEqual({
       id: "sovereign-typed-tools",
+      activation: { onStartup: true },
+      contracts: { tools: ["alpha_tool", "zeta_tool"] },
       configSchema: { type: "object", additionalProperties: false, properties: {} },
     });
     const rendered = JSON.parse(
