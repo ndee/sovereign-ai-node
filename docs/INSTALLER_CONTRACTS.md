@@ -129,6 +129,8 @@ When that version differs from the pin, the step:
 
 The E2E upgrade job checks that `sovereign-node update` from the previous release keeps that release's OpenClaw version.
 
+The staged migration is `scripts/openclaw-migrate.sh`; its arguments, exit codes, rollback rules and `result.json` are in [OPENCLAW_MIGRATION.md](OPENCLAW_MIGRATION.md).
+
 ### Changing the OpenClaw pin
 
 A pin change is exactly one edit plus a regenerated lock:

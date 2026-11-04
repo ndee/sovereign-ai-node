@@ -145,6 +145,7 @@ sync_prebuilt_node_artifact() (
     deploy/systemd/sovereign-node-docker-prune.service \
     deploy/systemd/sovereign-node-docker-prune.timer \
     scripts/install-docker.sh \
+    scripts/openclaw-migrate.sh \
     scripts/install/lib-log.sh \
     scripts/install/lib-os.sh \
     scripts/install/lib-runtime-deps.sh \

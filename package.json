@@ -21,6 +21,7 @@
     "deploy/scripts",
     "deploy/systemd",
     "scripts/install-docker.sh",
+    "scripts/openclaw-migrate.sh",
     "scripts/install/lib-log.sh",
     "scripts/install/lib-os.sh",
     "scripts/install/lib-runtime-deps.sh",

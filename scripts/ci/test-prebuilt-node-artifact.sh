@@ -81,6 +81,7 @@ make_package() {
   done
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$PACKAGE_DIR/scripts/install-docker.sh"
   chmod 0755 "$PACKAGE_DIR/scripts/install-docker.sh"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$PACKAGE_DIR/scripts/openclaw-migrate.sh"
   for lib in lib-log.sh lib-os.sh lib-runtime-deps.sh; do
     printf '%s\n' '# shellcheck shell=bash' > "$PACKAGE_DIR/scripts/install/$lib"
   done
@@ -235,6 +236,13 @@ cp -- "$WORK_DIR/bad-package.json" "$PACKAGE_DIR/package.json"
 pack_package
 write_manifest
 assert_rejected_and_preserved "package version mismatch" "package version does not match"
+
+restore_good_inputs
+make_package
+rm -f "$PACKAGE_DIR/scripts/openclaw-migrate.sh"
+pack_package
+write_manifest
+assert_rejected_and_preserved "missing OpenClaw migration entry point" "missing required runtime payload: scripts/openclaw-migrate.sh"
 
 restore_good_inputs
 make_package
