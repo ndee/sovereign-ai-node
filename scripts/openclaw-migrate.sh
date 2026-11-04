@@ -1827,9 +1827,11 @@ step_start() {
   before="$(gateway_start_mark)"
   GATEWAY_SINCE="$(date +%s)"
   wait_s="$(clamp "$REFRESH_READY_TIMEOUT")"
+  # The node resolves openclaw and npm from PATH when it renders the unit;
+  # the unit's own PATH need not hold the prefix's bin.
   as_user "$NPM_OWNER" "$home" env -i \
     HOME="$home" \
-    PATH="$UNIT_PATH" \
+    PATH="$NPM_PREFIX/bin:$UNIT_PATH" \
     CI=1 NO_COLOR=1 \
     SOVEREIGN_NODE_GATEWAY_READY_TIMEOUT_MS="$((wait_s * 1000))" \
     SOVEREIGN_NODE_APP_DIR="$NODE_PACKAGE" \

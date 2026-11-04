@@ -172,7 +172,7 @@ if (args[0] === "openclaw-migration" && args[1] === "install-runtime") {
 }
 if (args[0] === "reconcile") {
   const command = "reconcile";
-  log(\`sovereign-node reconcile \${args.slice(1).join(" ")} ready_ms=\${process.env.SOVEREIGN_NODE_GATEWAY_READY_TIMEOUT_MS} app=\${process.env.SOVEREIGN_NODE_APP_DIR} bots=\${process.env.SOVEREIGN_BOTS_REPO_DIR} user_home=\${process.env.HOME}\`);
+  log(\`sovereign-node reconcile \${args.slice(1).join(" ")} ready_ms=\${process.env.SOVEREIGN_NODE_GATEWAY_READY_TIMEOUT_MS} app=\${process.env.SOVEREIGN_NODE_APP_DIR} bots=\${process.env.SOVEREIGN_BOTS_REPO_DIR} path_head=\${(process.env.PATH ?? "").split(":")[0]} user_home=\${process.env.HOME}\`);
   fs.appendFileSync(path.join(${JSON.stringify(units)}, ${JSON.stringify(GATEWAY)}), "# rendered by the node for the installed OpenClaw\\n");
   if (has("refresh-fail")) fail(command, "GATEWAY_REFRESH_FAILED", "Runtime refresh step openclaw-runtime failed: template pin mismatch");
   cp.spawnSync("systemctl", ["start", ${JSON.stringify(GATEWAY)}], { stdio: "ignore" });
@@ -669,7 +669,7 @@ describe("openclaw-migrate.sh happy path", () => {
     const fx = makeFixture();
     const r = await run(fx);
     expect(r.status).toBe(0);
-    expect(r.calls.filter((c) => c.startsWith("sovereign-node reconcile"))).toEqual([`sovereign-node reconcile --refresh-runtime --json ready_ms=600000 app=${fx.nodePackage} bots=${join(fx.root, "sovereign-ai-bots")} user_home=${fx.home}`]);
+    expect(r.calls.filter((c) => c.startsWith("sovereign-node reconcile"))).toEqual([`sovereign-node reconcile --refresh-runtime --json ready_ms=600000 app=${fx.nodePackage} bots=${join(fx.root, "sovereign-ai-bots")} path_head=${join(fx.prefix, "bin")} user_home=${fx.home}`]);
     const refresh = callIndex(r, /^sovereign-node reconcile/);
     expect(refresh).toBeGreaterThan(callIndex(r, / matrix verify status /));
     expect(readFileSync(join(fx.units, GATEWAY), "utf8")).toContain("# rendered by the node");
