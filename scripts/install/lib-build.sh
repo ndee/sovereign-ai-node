@@ -283,6 +283,12 @@ ${user} ALL=(root) NOPASSWD: /bin/systemctl is-active ${unit}, /bin/systemctl is
 ${user} ALL=(root) NOPASSWD: /bin/systemctl status ${unit}, /bin/systemctl status ${unit}.service
 EOF
   done
+  # OpenClaw's doctor repairs the gateway's state only while that gateway is
+  # stopped, and a repeat install finds the system unit already running.
+  unit=sovereign-openclaw-gateway
+  cat <<EOF
+${user} ALL=(root) NOPASSWD: /bin/systemctl stop ${unit}.service
+EOF
   unit=sovereign-mail-sentinel-scan
   cat <<EOF
 ${user} ALL=(root) NOPASSWD: /bin/systemctl enable ${unit}.service, /bin/systemctl enable ${unit}.timer

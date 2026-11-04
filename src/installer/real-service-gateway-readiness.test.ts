@@ -83,7 +83,11 @@ describe("OpenClaw gateway readiness", () => {
     listening: (probe: number) => boolean;
     exec?: Responder;
     noExec?: boolean;
-    gateway?: { restart?: () => Promise<void>; start?: () => Promise<void> };
+    gateway?: {
+      restart?: () => Promise<void>;
+      start?: () => Promise<void>;
+      hasUserServiceBus?: () => Promise<boolean>;
+    };
   }) => {
     const respond: Responder = input.exec ?? (() => ({}));
     const service = new RealInstallerService(createLogger(), paths, {
@@ -97,6 +101,9 @@ describe("OpenClaw gateway readiness", () => {
         install: async () => {},
         start: input.gateway?.start ?? (async () => {}),
         restart: input.gateway?.restart ?? (async () => {}),
+        ...(input.gateway?.hasUserServiceBus === undefined
+          ? {}
+          : { hasUserServiceBus: input.gateway.hasUserServiceBus }),
       },
       ...(input.noExec
         ? {}
@@ -491,6 +498,60 @@ describe("OpenClaw gateway readiness", () => {
         await installSystemUnit();
         const restart = vi.fn(async () => {});
         const service = makeService({ listening: () => true, gateway: { restart } });
+
+        await internals(service).refreshGatewayAfterRuntimeConfig(runtimeConfig());
+
+        expect(restart).toHaveBeenCalledTimes(1);
+        expect(execCalls.some((call) => call.args?.includes("daemon-reload"))).toBe(false);
+      });
+
+      // Without a user bus, `openclaw gateway restart` and `start` cannot reach
+      // a user service, and OpenClaw 2026.8 refuses to manage one for a
+      // non-default state dir, so a settings change must restart the unit.
+      it("restarts the installed system unit when the service user has no user bus", async () => {
+        asServiceUser();
+        await installSystemUnit();
+        const restart = vi.fn(async () => {});
+        const start = vi.fn(async () => {});
+        const service = makeService({
+          listening: () => true,
+          gateway: { restart, start, hasUserServiceBus: async () => false },
+        });
+
+        const outcome = await internals(service).refreshGatewayAfterRuntimeConfig(runtimeConfig());
+
+        expect(outcome).toMatchObject({ ready: true, unit: "sovereign-openclaw-gateway.service" });
+        expect(restart).not.toHaveBeenCalled();
+        expect(start).not.toHaveBeenCalled();
+        expect(
+          execCalls.some(
+            (call) => call.args?.join(" ") === "restart sovereign-openclaw-gateway.service",
+          ),
+        ).toBe(true);
+      });
+
+      it("keeps the user-service restart without a user bus when no system unit is installed", async () => {
+        asServiceUser();
+        const restart = vi.fn(async () => {});
+        const service = makeService({
+          listening: () => true,
+          gateway: { restart, hasUserServiceBus: async () => false },
+        });
+
+        const outcome = await internals(service).refreshGatewayAfterRuntimeConfig(runtimeConfig());
+
+        expect(restart).toHaveBeenCalledTimes(1);
+        expect(outcome.unit).toBe("openclaw-gateway.service");
+      });
+
+      it("keeps the user-service restart when the service user has a user bus", async () => {
+        asServiceUser();
+        await installSystemUnit();
+        const restart = vi.fn(async () => {});
+        const service = makeService({
+          listening: () => true,
+          gateway: { restart, hasUserServiceBus: async () => true },
+        });
 
         await internals(service).refreshGatewayAfterRuntimeConfig(runtimeConfig());
 

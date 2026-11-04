@@ -1,4 +1,5 @@
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
@@ -9,6 +10,7 @@ import type { ExecInput, ExecResult, ExecRunner } from "../system/exec.js";
 import { resolveServiceNodeCommand } from "../system/service-node.js";
 import { resolveOpenClawSpawnLookupPath } from "./bootstrap.js";
 import {
+  hasSystemdUserBus,
   isSystemdBusUnavailableMessage,
   ShellOpenClawGatewayServiceManager,
 } from "./gateway-service.js";
@@ -448,6 +450,111 @@ describe("ShellOpenClawGatewayServiceManager failure classification", () => {
       // The install writes the bin link here, so the spawn must look here.
       expect(expected).toContain("/var/lib/sovereign-node/.npm-global/bin");
       expect(env?.PATH).toBe(expected);
+    }
+  });
+});
+
+const listenOnUnixSocket = async (path: string): Promise<Server> =>
+  await new Promise<Server>((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(path, () => resolve(server));
+  });
+
+const unusedExecRunner: ExecRunner = {
+  run: async () => {
+    throw new Error("probing the user bus must not spawn anything");
+  },
+};
+
+describe("hasSystemdUserBus", () => {
+  const noSocket = async () => false;
+
+  it("trusts an explicit DBUS_SESSION_BUS_ADDRESS without looking for a socket", async () => {
+    await expect(
+      hasSystemdUserBus({
+        env: { DBUS_SESSION_BUS_ADDRESS: "unix:abstract=/tmp/dbus-ci" },
+        uid: 1001,
+        isSocket: noSocket,
+      }),
+    ).resolves.toBe(true);
+  });
+
+  it("ignores a blank DBUS_SESSION_BUS_ADDRESS", async () => {
+    const probed: string[] = [];
+    await expect(
+      hasSystemdUserBus({
+        env: { DBUS_SESSION_BUS_ADDRESS: "  " },
+        uid: 1001,
+        isSocket: async (path) => {
+          probed.push(path);
+          return false;
+        },
+      }),
+    ).resolves.toBe(false);
+    expect(probed).toEqual(["/run/user/1001/bus"]);
+  });
+
+  it("looks for the bus socket in XDG_RUNTIME_DIR when it is set", async () => {
+    const probed: string[] = [];
+    await expect(
+      hasSystemdUserBus({
+        env: { XDG_RUNTIME_DIR: "/run/user/4242" },
+        uid: 1001,
+        isSocket: async (path) => {
+          probed.push(path);
+          return true;
+        },
+      }),
+    ).resolves.toBe(true);
+    expect(probed).toEqual(["/run/user/4242/bus"]);
+  });
+
+  it("reports no bus for a system service: no session variables and no socket for its uid", async () => {
+    await expect(hasSystemdUserBus({ env: {}, uid: 998, isSocket: noSocket })).resolves.toBe(false);
+  });
+
+  it("cannot tell without a uid, so it assumes a bus and keeps the install attempt", async () => {
+    await expect(hasSystemdUserBus({ env: {}, uid: null, isSocket: noSocket })).resolves.toBe(true);
+  });
+
+  it("assumes a bus on a platform without process.getuid", async () => {
+    const proc = process as unknown as { getuid?: unknown };
+    const priorGetuid = proc.getuid;
+    proc.getuid = undefined;
+    try {
+      await expect(hasSystemdUserBus({ env: {}, isSocket: noSocket })).resolves.toBe(true);
+    } finally {
+      proc.getuid = priorGetuid;
+    }
+  });
+
+  it("probes the real process environment by default", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "user-bus-probe-"));
+    const prior = {
+      XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
+      DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS,
+    };
+    delete process.env.DBUS_SESSION_BUS_ADDRESS;
+    process.env.XDG_RUNTIME_DIR = dir;
+    const manager = new ShellOpenClawGatewayServiceManager(unusedExecRunner, createLogger());
+    let server: Server | undefined;
+    try {
+      await expect(manager.hasUserServiceBus()).resolves.toBe(false);
+      await writeFile(join(dir, "bus"), "");
+      await expect(hasSystemdUserBus()).resolves.toBe(false);
+      await rm(join(dir, "bus"));
+      server = await listenOnUnixSocket(join(dir, "bus"));
+      await expect(manager.hasUserServiceBus()).resolves.toBe(true);
+    } finally {
+      await new Promise<void>((resolve) =>
+        server === undefined ? resolve() : server.close(() => resolve()),
+      );
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      await rm(dir, { recursive: true, force: true });
     }
   });
 });
