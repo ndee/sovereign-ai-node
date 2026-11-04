@@ -39,11 +39,8 @@ import {
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const TEMPLATE_DIR = join(REPO_ROOT, "deploy", "openclaw-runtime");
-// The project the pin moves to next, kept so its lock stays verified until then.
-const NEXT_RUNTIME_DIR = join(REPO_ROOT, "test", "fixtures", "openclaw-runtime-2026.8.35");
 const LOCKED_RUNTIMES = [
   { label: "the shipped project", dir: TEMPLATE_DIR, version: SOVEREIGN_PINNED_OPENCLAW_VERSION },
-  { label: "the 2026.8.35 project", dir: NEXT_RUNTIME_DIR, version: "2026.8.35" },
 ];
 
 type LockEntry = {
@@ -288,20 +285,10 @@ describe("the locked OpenClaw runtime project", () => {
     }
   });
 
-  it("differs from the 2026.8.35 project only in the openclaw version, so a pin change is one edit plus a new lock", async () => {
-    const shipped = JSON.parse(await readFile(join(TEMPLATE_DIR, "package.json"), "utf8"));
-    const next = JSON.parse(await readFile(join(NEXT_RUNTIME_DIR, "package.json"), "utf8"));
-    expect({ ...next, dependencies: { openclaw: PIN } }).toEqual(shipped);
-  });
-
-  // Recorded so a markdown-it override is a visible decision: on 2026.3.13
-  // markdown-it is a runtime dependency below 15, on 2026.8.35 it is compiled
-  // into openclaw's dist and no longer a package.
-  it("has markdown-it 14 at runtime on 2026.3.13 and none on 2026.8.35", async () => {
-    expect(
-      lockedPackages(await readLock(TEMPLATE_DIR), "markdown-it").map(([, entry]) => entry.version),
-    ).toEqual(["14.3.3"]);
-    expect(lockedPackages(await readLock(NEXT_RUNTIME_DIR), "markdown-it")).toEqual([]);
+  // Recorded so a markdown-it override is a visible decision: on 2026.8.35
+  // markdown-it is compiled into openclaw's dist and is no longer a package.
+  it("has no markdown-it package at runtime", async () => {
+    expect(lockedPackages(await readLock(TEMPLATE_DIR), "markdown-it")).toEqual([]);
   });
 
   it.each(
@@ -562,29 +549,6 @@ describe("ShellOpenClawBootstrapper installs from the locked runtime project", (
 
       expect(info.version).toBe(PIN);
       expect(callsTo(calls, "npm", "ci")).toHaveLength(1);
-    });
-  });
-
-  it("installs the 2026.8.35 project the pin moves to next", async () => {
-    await withUid(1001, async () => {
-      const serviceHome = await mkdtemp(join(tmpdir(), "openclaw-service-home-"));
-      const prefix = join(serviceHome, ".npm-global");
-      const world = createWorld(() => join(prefix, "bin"), { ciPackage: { version: "2026.8.35" } });
-      const bootstrapper = new ShellOpenClawBootstrapper(
-        world.runner,
-        createLogger(),
-        serviceHome,
-        NEXT_RUNTIME_DIR,
-      );
-
-      const info = await bootstrapper.ensureInstalled({ ...INSTALL, version: "2026.8.35" });
-      const rerun = await bootstrapper.ensureInstalled({ ...INSTALL, version: "2026.8.35" });
-
-      expect(info).toMatchObject({ version: "2026.8.35", reinstalled: true });
-      expect(rerun.reinstalled).toBe(false);
-      expect(
-        await readFile(join(resolveOpenClawRuntimeDir(prefix), "package-lock.json"), "utf8"),
-      ).toBe(await readFile(join(NEXT_RUNTIME_DIR, "package-lock.json"), "utf8"));
     });
   });
 

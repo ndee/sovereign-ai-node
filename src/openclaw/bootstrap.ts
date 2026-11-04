@@ -41,7 +41,7 @@ const BUNDLED_OPENCLAW_EXTENSION_REPAIR_TARGETS = [
 // package-lock.json must name this exact version (a unit test enforces it).
 // Changing the pin is this edit plus regenerating that lock; see
 // docs/INSTALLER_CONTRACTS.md.
-export const SOVEREIGN_PINNED_OPENCLAW_VERSION = "2026.3.13";
+export const SOVEREIGN_PINNED_OPENCLAW_VERSION = "2026.8.35";
 export const SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS = "pinned-by-sovereign";
 
 export type OpenClawInstallOptions = {
