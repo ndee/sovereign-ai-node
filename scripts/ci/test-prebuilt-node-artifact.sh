@@ -32,6 +32,7 @@ make_package() {
     "$PACKAGE_DIR/deploy/ansible/roles/sovereign_host_resources_verify/tasks" \
     "$PACKAGE_DIR/deploy/config" \
     "$PACKAGE_DIR/deploy/runtime" \
+    "$PACKAGE_DIR/deploy/openclaw-runtime" \
     "$PACKAGE_DIR/deploy/scripts" \
     "$PACKAGE_DIR/deploy/systemd" \
     "$PACKAGE_DIR/scripts/install"
@@ -48,6 +49,8 @@ make_package() {
     }
   }' > "$PACKAGE_DIR/package.json"
   printf '%s\n' "lockfileVersion: '9.0'" > "$PACKAGE_DIR/deploy/runtime/pnpm-lock.yaml"
+  printf '%s\n' '{"dependencies":{"openclaw":"0.0.0"}}' > "$PACKAGE_DIR/deploy/openclaw-runtime/package.json"
+  printf '%s\n' '{"lockfileVersion":3}' > "$PACKAGE_DIR/deploy/openclaw-runtime/package-lock.json"
 
   for entrypoint in \
     sovereign-node.js \

@@ -128,30 +128,84 @@ install_docker_if_needed() {
   fi
 }
 
-node_major_version() {
-  if ! command -v node >/dev/null 2>&1; then
-    echo "0"
-    return
+# The Node.js range the gateway and sovereign-node run on: below the floor the
+# pinned OpenClaw refuses to start, which systemd turns into a crash loop.
+# Keep in sync with src/system/node-runtime-floor.ts and package.json engines.
+NODE_RUNTIME_MIN_VERSION="22.22.3"
+NODE_RUNTIME_MAJOR_LIMIT="23"
+NODE_RUNTIME_RANGE=">=${NODE_RUNTIME_MIN_VERSION} <${NODE_RUNTIME_MAJOR_LIMIT}"
+
+# Prints the active node's version as "major.minor.patch", or nothing when no
+# node is on PATH or it reports something unparsable.
+node_runtime_version() {
+  local raw
+  command -v node >/dev/null 2>&1 || return 0
+  raw="$(node -v 2>/dev/null || true)"
+  if [[ "$raw" =~ ^v?([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+    printf '%s.%s.%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
   fi
-  node -v | sed -E 's/^v([0-9]+).*/\1/'
+}
+
+# Succeeds when the given "major.minor.patch" is inside NODE_RUNTIME_RANGE.
+node_version_supported() {
+  local version="$1" index
+  local -a have want
+  [[ "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
+  have=("$((10#${BASH_REMATCH[1]}))" "$((10#${BASH_REMATCH[2]}))" "$((10#${BASH_REMATCH[3]}))")
+  IFS=. read -r -a want <<<"$NODE_RUNTIME_MIN_VERSION"
+  ((have[0] < NODE_RUNTIME_MAJOR_LIMIT)) || return 1
+  for index in 0 1 2; do
+    if ((have[index] > want[index])); then
+      return 0
+    fi
+    if ((have[index] < want[index])); then
+      return 1
+    fi
+  done
+  return 0
+}
+
+configure_nodesource_node22_repo() {
+  mkdir -p /etc/apt/keyrings
+  curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+    | gpg --dearmor --yes -o /etc/apt/keyrings/nodesource.gpg
+  echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+    > /etc/apt/sources.list.d/nodesource.list
 }
 
 install_node22_if_needed() {
-  local major
-  major="$(node_major_version)"
-  if [[ "$major" -ge 22 ]]; then
-    log "Node.js v${major} detected (>=22), skipping Node install"
+  local version major
+  version="$(node_runtime_version)"
+  if [[ -n "$version" ]] && node_version_supported "$version"; then
+    log "Node.js v${version} detected (${NODE_RUNTIME_RANGE}), skipping Node install"
     return
   fi
 
-  log "Installing Node.js 22"
-  mkdir -p /etc/apt/keyrings
-  curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
-    | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
-  echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
-    > /etc/apt/sources.list.d/nodesource.list
+  major="${version%%.*}"
+  if [[ -n "$version" ]] && ((major >= NODE_RUNTIME_MAJOR_LIMIT)); then
+    die "Node.js v${version} ($(command -v node)) is not supported; Sovereign requires Node.js ${NODE_RUNTIME_RANGE}. Install Node.js 22 (for example from NodeSource node_22.x) and rerun the installer."
+  fi
 
   export DEBIAN_FRONTEND=noninteractive
+  if [[ "$major" == "22" ]]; then
+    log "Node.js v${version} is below ${NODE_RUNTIME_MIN_VERSION}; upgrading the installed nodejs package"
+    apt_get_locked update -y
+    apt_get_locked install -y --only-upgrade nodejs
+    version="$(node_runtime_version)"
+    if [[ -n "$version" ]] && node_version_supported "$version"; then
+      log "Node.js upgraded to v${version}"
+      return
+    fi
+  fi
+
+  log "Installing Node.js 22 from NodeSource"
+  configure_nodesource_node22_repo
   apt_get_locked update -y
   apt_get_locked install -y nodejs
+
+  version="$(node_runtime_version)"
+  if [[ -z "$version" ]] || ! node_version_supported "$version"; then
+    die "Node.js ${NODE_RUNTIME_RANGE} is required, but the node on PATH ($(command -v node || echo none)) reports ${version:-no version} after the install. Remove or upgrade that Node.js and rerun the installer."
+  fi
+  log "Node.js v${version} installed"
 }

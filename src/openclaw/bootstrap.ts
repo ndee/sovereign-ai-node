@@ -1,7 +1,23 @@
-import { type Dirent, constants as fsConstants } from "node:fs";
-import { access, chmod, lstat, open, readdir, readFile, readlink, stat } from "node:fs/promises";
+import { type Dirent, existsSync, constants as fsConstants } from "node:fs";
+import {
+  access,
+  chmod,
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  readlink,
+  realpath,
+  rename,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type { Logger } from "../logging/logger.js";
 import {
@@ -20,10 +36,10 @@ const BUNDLED_OPENCLAW_EXTENSION_REPAIR_TARGETS = [
   },
 ] as const;
 
-// Sovereign pins a specific OpenClaw release to ensure stability.
-// 2026.3.13 includes health-monitor fixes for long-polling channels (Matrix),
-// cron isolated-session deadlock prevention, and numerous security patches.
-export const SOVEREIGN_PINNED_OPENCLAW_VERSION = "2026.3.13";
+// Sovereign pins one OpenClaw release and installs it only from the locked
+// runtime project in deploy/openclaw-runtime, whose package.json and
+// package-lock.json must name this exact version (a unit test enforces it).
+export const SOVEREIGN_PINNED_OPENCLAW_VERSION = "2026.8.35";
 export const SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS = "pinned-by-sovereign";
 
 export type OpenClawInstallOptions = {
@@ -42,7 +58,9 @@ export type DetectedOpenClaw = {
 export type OpenClawInstallInfo = {
   binaryPath: string;
   version: string;
-  installMethod: "install_sh" | "npm_fallback";
+  // Only "locked_project" is produced now; the older values stay assignable so
+  // test doubles and callers written against earlier releases still compile.
+  installMethod: "locked_project" | "install_sh" | "npm_fallback";
   /** True when this call (re)installed the CLI rather than keeping the one found. */
   reinstalled?: boolean;
 };
@@ -258,6 +276,9 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
     private readonly execRunner: ExecRunner,
     private readonly logger: Logger,
     private readonly serviceHome?: string,
+    private readonly runtimeTemplateDir: string | null = resolveOpenClawRuntimeTemplateDir(
+      dirname(fileURLToPath(import.meta.url)),
+    ),
   ) {}
 
   async detectInstalled(): Promise<DetectedOpenClaw | null> {
@@ -401,134 +422,232 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
   }
 
   async ensureInstalled(opts: OpenClawInstallOptions): Promise<OpenClawInstallInfo> {
-    const desiredVersion = resolveRequestedOpenClawVersion(opts.version);
-    const installVersion = resolveInstallVersion(desiredVersion);
+    const requestedVersion = resolveRequestedOpenClawVersion(opts.version);
+    const template = await this.readRuntimeTemplate();
+    if (!versionsMatch(requestedVersion, template.version)) {
+      // The locked project is the only install source, so another version
+      // cannot be honoured; installing the lock keeps old request files that
+      // still name an earlier pin working instead of failing the run.
+      this.logger.warn(
+        { requestedVersion, lockedVersion: template.version },
+        "Requested OpenClaw version differs from the locked runtime; installing the locked version",
+      );
+    }
     const detected = await this.detectInstalled();
+    const npmPrefix = await this.resolveInstallPrefix();
+    const runtimeDir = resolveOpenClawRuntimeDir(npmPrefix);
     if (
       detected !== null &&
       !opts.forceReinstall &&
       (opts.skipIfCompatibleInstalled ?? true) &&
-      versionsMatch(detected.version, desiredVersion)
+      versionsMatch(detected.version, template.version) &&
+      (await isLockedRuntimeCurrent(runtimeDir, npmPrefix, template))
     ) {
-      await this.repairBundledExtensionRuntimeDependencies();
+      await this.repairBundledExtensionRuntimeDependencies(runtimeDir);
       this.logger.info(
         {
           openclawVersion: detected.version,
           binaryPath: detected.binaryPath,
+          runtimeDir,
         },
-        "OpenClaw already installed with compatible version; skipping reinstall",
+        "OpenClaw already installed from the locked runtime; skipping reinstall",
       );
       return {
         binaryPath: detected.binaryPath,
         version: detected.version,
-        installMethod: "install_sh",
+        installMethod: "locked_project",
         reinstalled: false,
       };
     }
 
-    const shellScript = buildInstallShellScript({
-      noPrompt: opts.noPrompt ?? true,
-      noOnboard: opts.noOnboard ?? true,
-      npmPrefix: resolveOpenClawNpmPrefix(this.serviceHome),
-      ...(installVersion === undefined ? {} : { version: installVersion }),
-    });
     this.logger.info(
       {
-        openclawVersion: installVersion,
-        noPrompt: opts.noPrompt ?? true,
-        noOnboard: opts.noOnboard ?? true,
+        openclawVersion: template.version,
+        runtimeDir,
+        npmPrefix,
         forceReinstall: opts.forceReinstall ?? false,
         skipIfCompatibleInstalled: opts.skipIfCompatibleInstalled ?? true,
       },
-      "Installing OpenClaw via official install.sh",
+      "Installing OpenClaw from the locked runtime project",
     );
-
-    const shellCwd = resolveOpenClawSpawnCwd(this.serviceHome);
-    const installResult = await this.execRunner.run({
-      command: "bash",
-      args: ["-lc", shellScript],
-      options: {
-        timeout: OPENCLAW_INSTALL_TIMEOUT_MS,
-        ...(shellCwd === undefined ? {} : { cwd: shellCwd }),
-        env: {
-          CI: "1",
-        },
-      },
-    });
-    if (installResult.exitCode !== 0) {
-      this.logger.warn(
-        {
-          command: installResult.command,
-          exitCode: installResult.exitCode,
-          stderr: truncateText(installResult.stderr, 4000),
-          stdout: truncateText(installResult.stdout, 2000),
-        },
-        "OpenClaw install.sh failed; attempting direct npm fallback install",
-      );
-      await this.installViaDirectNpmFallback(desiredVersion);
-      const fallbackProbe = await this.probeInstalled();
-      const installed = fallbackProbe.detected;
-      if (installed === null) {
-        throw {
-          code: "OPENCLAW_INSTALL_FAILED",
-          message: "OpenClaw install fallback completed but the openclaw CLI was not detected",
-          retryable: true,
-          details: await this.buildDetectionFailureDetails(fallbackProbe, installResult),
-        };
-      }
-      await this.repairBundledExtensionRuntimeDependencies();
-      return {
-        binaryPath: installed.binaryPath,
-        version: installed.version,
-        installMethod: "npm_fallback",
-        reinstalled: true,
-      };
-    }
+    const installResult = await this.installLockedRuntime(npmPrefix, runtimeDir, template);
 
     const probe = await this.probeInstalled();
     const installed = probe.detected;
     if (installed === null) {
       throw {
         code: "OPENCLAW_INSTALL_FAILED",
-        message: "OpenClaw installer completed but the openclaw CLI was not detected",
+        message: "OpenClaw locked runtime install completed but the openclaw CLI was not detected",
         retryable: true,
-        details: await this.buildDetectionFailureDetails(probe, installResult),
+        details: {
+          runtimeDir,
+          ...(await this.buildDetectionFailureDetails(probe, installResult)),
+        },
       };
     }
 
-    if (!versionsMatch(installed.version, desiredVersion)) {
+    if (!versionsMatch(installed.version, template.version)) {
       this.logger.warn(
         {
-          expectedVersion: desiredVersion,
+          expectedVersion: template.version,
           detectedVersion: installed.version,
+          lookupPath: probe.lookupPath,
         },
-        "OpenClaw install completed but detected version does not match requested version",
+        "OpenClaw install completed but the openclaw on the lookup PATH reports another version",
       );
     }
 
-    await this.repairBundledExtensionRuntimeDependencies();
+    await this.repairBundledExtensionRuntimeDependencies(runtimeDir);
 
     return {
       binaryPath: installed.binaryPath,
       version: installed.version,
-      installMethod: "install_sh",
+      installMethod: "locked_project",
       reinstalled: true,
     };
   }
 
-  private async repairBundledExtensionRuntimeDependencies(): Promise<void> {
-    const packageRoot = await resolveInstalledOpenClawPackageRoot(
-      this.execRunner,
-      resolveOpenClawNpmPrefix(this.serviceHome),
-      resolveOpenClawSpawnCwd(this.serviceHome),
-    );
-    if (packageRoot === null) {
-      this.logger.warn(
-        "OpenClaw package root could not be resolved after install; skipping bundled extension dependency repair",
-      );
-      return;
+  private async readRuntimeTemplate(): Promise<OpenClawRuntimeTemplate> {
+    const templateDir = this.runtimeTemplateDir;
+    try {
+      if (templateDir === null) {
+        throw new Error("no deploy/openclaw-runtime directory next to this build");
+      }
+      return await readOpenClawRuntimeTemplate(templateDir);
+    } catch (error) {
+      throw {
+        code: "OPENCLAW_INSTALL_FAILED",
+        message: "The locked OpenClaw runtime project is missing or unreadable in this build",
+        retryable: false,
+        details: {
+          templateDir,
+          error: (error as Error).message,
+        },
+      };
+    }
+  }
+
+  /**
+   * The npm prefix whose `bin` receives the `openclaw` link and whose `lib`
+   * holds the locked runtime: the service user's own prefix when the install
+   * runs unprivileged, otherwise the running npm's global prefix, so the CLI
+   * lands where a root install always put it.
+   */
+  private async resolveInstallPrefix(): Promise<string> {
+    const servicePrefix = resolveOpenClawNpmPrefix(this.serviceHome);
+    if (servicePrefix !== undefined) {
+      return servicePrefix;
+    }
+    const spawnCwd = resolveOpenClawSpawnCwd(this.serviceHome);
+    const result = await this.execRunner.run({
+      command: "npm",
+      args: ["prefix", "-g"],
+      options: {
+        timeout: OPENCLAW_DETECT_TIMEOUT_MS,
+        ...(spawnCwd === undefined ? {} : { cwd: spawnCwd }),
+        env: { CI: "1" },
+      },
+    });
+    const prefix = result.exitCode === 0 ? firstNonEmptyLine(result.stdout) : undefined;
+    if (prefix === undefined) {
+      throw {
+        code: "OPENCLAW_INSTALL_FAILED",
+        message: "Could not resolve the npm global prefix for the OpenClaw install",
+        retryable: isRetryableExecFailure(result.failureReason),
+        details: {
+          command: result.command,
+          exitCode: result.exitCode,
+          stderr: truncateText(result.stderr, 2000),
+          stdout: truncateText(result.stdout, 2000),
+        },
+      };
+    }
+    return prefix;
+  }
+
+  /**
+   * Install the locked project into a staging directory and swap it in.
+   *
+   * `npm ci` honours the committed lockfile and the project's `overrides`,
+   * neither of which a global install can carry. Staging keeps a failed or
+   * interrupted install from touching the runtime that is in place, so a
+   * rerun always starts from a working tree.
+   */
+  private async installLockedRuntime(
+    npmPrefix: string,
+    runtimeDir: string,
+    template: OpenClawRuntimeTemplate,
+  ): Promise<ExecResultLike> {
+    const stagingDir = `${runtimeDir}${RUNTIME_STAGING_SUFFIX}`;
+    const previousDir = `${runtimeDir}${RUNTIME_PREVIOUS_SUFFIX}`;
+    await rm(stagingDir, { recursive: true, force: true });
+    await mkdir(stagingDir, { recursive: true, mode: 0o755 });
+    await writeFile(join(stagingDir, OPENCLAW_RUNTIME_MANIFEST), template.manifestText, "utf8");
+    await writeFile(join(stagingDir, OPENCLAW_RUNTIME_LOCKFILE), template.lockfileText, "utf8");
+
+    // Resolve HOME before the cache: an unprivileged install must keep npm's
+    // cache under the service home too, or npm writes beside root's and fails
+    // on the first unreadable entry.
+    const spawnHome = resolveOpenClawSpawnHome(this.serviceHome);
+    const effectiveHome = spawnHome ?? process.env.HOME ?? "/root";
+    const cacheDir = process.env.NPM_CONFIG_CACHE ?? join(effectiveHome, ".npm");
+    const lookupPath = resolveOpenClawSpawnLookupPath(this.serviceHome);
+    const installResult = await this.execRunner.run({
+      command: "npm",
+      args: ["ci", "--omit=dev", "--no-audit", "--no-fund"],
+      options: {
+        cwd: stagingDir,
+        timeout: OPENCLAW_INSTALL_TIMEOUT_MS,
+        env: {
+          CI: "1",
+          HOME: effectiveHome,
+          NPM_CONFIG_CACHE: cacheDir,
+          ...(lookupPath === undefined ? {} : { PATH: lookupPath }),
+        },
+      },
+    });
+    if (installResult.exitCode !== 0) {
+      await rm(stagingDir, { recursive: true, force: true });
+      throw {
+        code: "OPENCLAW_INSTALL_FAILED",
+        message: "OpenClaw locked runtime install (npm ci) exited with a non-zero status",
+        // A process that never started will never start on a retry: the cwd is
+        // untraversable or npm is unexecutable for this user, and neither heals
+        // with time. Only failures that CAN change are marked retryable.
+        retryable: isRetryableExecFailure(installResult.failureReason),
+        details: {
+          command: installResult.command,
+          exitCode: installResult.exitCode,
+          ...(installResult.failureReason === undefined
+            ? {}
+            : { failureReason: installResult.failureReason }),
+          ...(installResult.errorCode === undefined ? {} : { errorCode: installResult.errorCode }),
+          runtimeDir,
+          stderr: truncateText(installResult.stderr, 4000),
+          stdout: truncateText(installResult.stdout, 2000),
+        },
+      };
     }
 
+    // A restrictive umask on the installing shell would leave the tree
+    // unreadable for the service user the gateway runs as.
+    await ensureOpenClawPackageReadable(stagingDir, this.logger);
+    await rm(previousDir, { recursive: true, force: true });
+    if (existsSync(runtimeDir)) {
+      await rename(runtimeDir, previousDir);
+    }
+    await rename(stagingDir, runtimeDir);
+    await rm(previousDir, { recursive: true, force: true });
+    await linkOpenClawBin(runtimeDir, npmPrefix);
+    this.logger.info(
+      { runtimeDir, binPath: join(npmPrefix, "bin", "openclaw") },
+      "OpenClaw locked runtime installed",
+    );
+    return installResult;
+  }
+
+  private async repairBundledExtensionRuntimeDependencies(runtimeDir: string): Promise<void> {
+    const packageRoot = resolveOpenClawRuntimePackageRoot(runtimeDir);
     await ensureOpenClawPackageReadable(packageRoot, this.logger);
     await hardenBundledExtensionDirectories(packageRoot);
 
@@ -619,74 +738,7 @@ export class ShellOpenClawBootstrapper implements OpenClawBootstrapper {
       );
     }
   }
-
-  private async installViaDirectNpmFallback(desiredVersion: string): Promise<void> {
-    const installTarget =
-      desiredVersion === SOVEREIGN_PINNED_OPENCLAW_VERSION_ALIAS
-        ? SOVEREIGN_PINNED_OPENCLAW_VERSION
-        : desiredVersion;
-    const prefix = resolveOpenClawNpmPrefix(this.serviceHome);
-    // Resolve HOME before the cache: when this branch runs unprivileged the
-    // cache must live under the service home too, or npm writes it beside
-    // root's and fails on the first unreadable entry.
-    const spawnHome = resolveOpenClawSpawnHome(this.serviceHome);
-    const effectiveHome = spawnHome ?? process.env.HOME ?? "/root";
-    const cacheDir = process.env.NPM_CONFIG_CACHE ?? join(effectiveHome, ".npm");
-    if (prefix !== undefined) {
-      this.logger.info(
-        { npmPrefix: prefix, ...(spawnHome === undefined ? {} : { home: spawnHome }) },
-        "Installing OpenClaw into the service user's npm prefix (install is running unprivileged)",
-      );
-    }
-    const spawnCwd = resolveOpenClawSpawnCwd(this.serviceHome);
-    const lookupPath = resolveOpenClawSpawnLookupPath(this.serviceHome);
-    const installResult = await this.execRunner.run({
-      command: "npm",
-      args: ["install", "-g", `openclaw@${installTarget}`],
-      options: {
-        timeout: OPENCLAW_INSTALL_TIMEOUT_MS,
-        ...(spawnCwd === undefined ? {} : { cwd: spawnCwd }),
-        env: {
-          CI: "1",
-          HOME: effectiveHome,
-          NPM_CONFIG_CACHE: cacheDir,
-          ...(prefix === undefined ? {} : { npm_config_prefix: prefix }),
-          ...(lookupPath === undefined ? {} : { PATH: lookupPath }),
-        },
-      },
-    });
-    if (installResult.exitCode !== 0) {
-      throw {
-        code: "OPENCLAW_INSTALL_FAILED",
-        message: "OpenClaw direct npm fallback install exited with a non-zero status",
-        // A process that never started will never start on a retry: the cwd is
-        // untraversable or the binary is unexecutable for this user, and
-        // neither heals with time. Retrying one costs a full release cycle to
-        // relearn the same thing, so only failures that CAN change are marked
-        // retryable.
-        retryable: isRetryableExecFailure(installResult.failureReason),
-        details: {
-          command: installResult.command,
-          exitCode: installResult.exitCode,
-          ...(installResult.failureReason === undefined
-            ? {}
-            : { failureReason: installResult.failureReason }),
-          ...(installResult.errorCode === undefined ? {} : { errorCode: installResult.errorCode }),
-          ...(spawnCwd === undefined ? {} : { cwd: spawnCwd }),
-          stderr: truncateText(installResult.stderr, 4000),
-          stdout: truncateText(installResult.stdout, 2000),
-        },
-      };
-    }
-  }
 }
-
-type InstallShellArgs = {
-  version?: string;
-  noPrompt: boolean;
-  noOnboard: boolean;
-  npmPrefix?: string | undefined;
-};
 
 type PackageJsonWithDependencies = {
   name?: string;
@@ -703,43 +755,148 @@ type BundledExtensionRepairPlan = {
   missingDependencies: ExtensionDependencySpec[];
 };
 
-const buildInstallShellScript = (args: InstallShellArgs): string => {
-  const installArgs = ["-s", "--"];
-  if (args.version !== undefined) {
-    installArgs.push("--version", args.version);
-  }
-  if (args.noOnboard) {
-    installArgs.push("--no-onboard");
-  }
-  if (args.noPrompt) {
-    installArgs.push("--no-prompt");
-  }
-  const dollar = "$";
+/** Where the locked runtime project ships inside a sovereign-node build. */
+const OPENCLAW_RUNTIME_TEMPLATE_RELATIVE_DIR = join("deploy", "openclaw-runtime");
+const OPENCLAW_RUNTIME_MANIFEST = "package.json";
+const OPENCLAW_RUNTIME_LOCKFILE = "package-lock.json";
+const OPENCLAW_RUNTIME_PACKAGE = "openclaw";
+const OPENCLAW_RUNTIME_DIRNAME = "sovereign-openclaw-runtime";
+const RUNTIME_STAGING_SUFFIX = ".staging";
+const RUNTIME_PREVIOUS_SUFFIX = ".previous";
+/** dist/<entry>.js, dist/lib/<entry>.js and src/openclaw/<module>.ts all sit within two levels. */
+const RUNTIME_TEMPLATE_SEARCH_DEPTH = 3;
 
-  const prefixLines =
-    args.npmPrefix === undefined
-      ? []
-      : [
-          // Unprivileged install: the upstream install.sh shells out to
-          // `npm install -g`, which would target the root-owned system prefix
-          // and EACCES. Anchor it to a prefix the invoking user owns.
-          `export npm_config_prefix=${shellQuote(args.npmPrefix)}`,
-          'mkdir -p "$npm_config_prefix"',
-          `export PATH="${dollar}{npm_config_prefix}/bin:${dollar}PATH"`,
-        ];
-
-  return [
-    "set -euo pipefail",
-    `if [ "$(id -u)" = "0" ] && [ -z "${dollar}{HOME:-}" ]; then export HOME=/root; fi`,
-    `export NPM_CONFIG_CACHE="${dollar}{NPM_CONFIG_CACHE:-${dollar}{HOME:-/root}/.npm}"`,
-    'mkdir -p "$NPM_CONFIG_CACHE"',
-    ...prefixLines,
-    "curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install.sh \\",
-    `  | bash ${installArgs.map(shellQuote).join(" ")}`,
-  ].join("\n");
+type OpenClawRuntimeTemplate = {
+  version: string;
+  manifestText: string;
+  lockfileText: string;
 };
 
-const shellQuote = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
+/**
+ * Find the locked runtime project shipped next to this build.
+ *
+ * The module is bundled into dist/ for releases and run from src/ in tests and
+ * development, so walk up a few levels instead of assuming one layout.
+ */
+export const resolveOpenClawRuntimeTemplateDir = (
+  moduleDir: string,
+  fileExists: (path: string) => boolean = existsSync,
+): string | null => {
+  let current = moduleDir;
+  for (let depth = 0; depth < RUNTIME_TEMPLATE_SEARCH_DEPTH; depth += 1) {
+    const candidate = join(current, OPENCLAW_RUNTIME_TEMPLATE_RELATIVE_DIR);
+    if (fileExists(join(candidate, OPENCLAW_RUNTIME_LOCKFILE))) {
+      return candidate;
+    }
+    current = dirname(current);
+  }
+  return null;
+};
+
+/**
+ * The locked runtime lives in its own project directory inside the prefix's
+ * lib dir, never at the prefix itself: `npm ci` prunes everything its lockfile
+ * does not name, which at /usr/lib would delete npm and corepack.
+ */
+export const resolveOpenClawRuntimeDir = (npmPrefix: string): string =>
+  join(npmPrefix, "lib", OPENCLAW_RUNTIME_DIRNAME);
+
+export const resolveOpenClawRuntimePackageRoot = (runtimeDir: string): string =>
+  join(runtimeDir, "node_modules", OPENCLAW_RUNTIME_PACKAGE);
+
+export const readOpenClawRuntimeTemplate = async (
+  templateDir: string,
+): Promise<OpenClawRuntimeTemplate> => {
+  const manifestText = await readFile(join(templateDir, OPENCLAW_RUNTIME_MANIFEST), "utf8");
+  const lockfileText = await readFile(join(templateDir, OPENCLAW_RUNTIME_LOCKFILE), "utf8");
+  const manifest = JSON.parse(manifestText) as { dependencies?: Record<string, string> };
+  const version = manifest.dependencies?.[OPENCLAW_RUNTIME_PACKAGE]?.trim();
+  if (version === undefined || version.length === 0) {
+    throw new Error(`${OPENCLAW_RUNTIME_MANIFEST} does not depend on ${OPENCLAW_RUNTIME_PACKAGE}`);
+  }
+  return { version, manifestText, lockfileText };
+};
+
+const readOpenClawBinRelativePath = async (packageRoot: string): Promise<string> => {
+  const manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8")) as {
+    bin?: string | Record<string, string>;
+  };
+  const bin =
+    typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.[OPENCLAW_RUNTIME_PACKAGE];
+  if (bin === undefined || bin.trim().length === 0) {
+    throw {
+      code: "OPENCLAW_INSTALL_FAILED",
+      message: "The installed OpenClaw package declares no openclaw bin entry",
+      retryable: false,
+      details: { packageRoot },
+    };
+  }
+  return bin.trim();
+};
+
+/**
+ * Point `<prefix>/bin/openclaw` at the locked runtime's CLI.
+ *
+ * The link replaces whatever was there (an earlier global install's link
+ * included) through a rename, so a reader never sees the name missing.
+ */
+const linkOpenClawBin = async (runtimeDir: string, npmPrefix: string): Promise<void> => {
+  const packageRoot = resolveOpenClawRuntimePackageRoot(runtimeDir);
+  const target = join(packageRoot, await readOpenClawBinRelativePath(packageRoot));
+  const targetMode = (await stat(target)).mode & 0o777;
+  if ((targetMode & 0o111) !== 0o111) {
+    await chmod(target, targetMode | 0o555);
+  }
+  const binDir = join(npmPrefix, "bin");
+  await mkdir(binDir, { recursive: true, mode: 0o755 });
+  const linkPath = join(binDir, OPENCLAW_RUNTIME_PACKAGE);
+  const temporaryLink = join(binDir, `.${OPENCLAW_RUNTIME_PACKAGE}.${process.pid}.tmp`);
+  await rm(temporaryLink, { force: true });
+  await symlink(target, temporaryLink);
+  await rename(temporaryLink, linkPath);
+};
+
+/**
+ * True when the runtime in place was installed from exactly this lock and the
+ * prefix's `openclaw` resolves into it. A matching `--version` alone is not
+ * enough: a CLI installed any other way carries none of the overrides.
+ */
+const isLockedRuntimeCurrent = async (
+  runtimeDir: string,
+  npmPrefix: string,
+  template: OpenClawRuntimeTemplate,
+): Promise<boolean> => {
+  try {
+    const packageRoot = resolveOpenClawRuntimePackageRoot(runtimeDir);
+    const [manifestText, lockfileText, installedManifest] = await Promise.all([
+      readFile(join(runtimeDir, OPENCLAW_RUNTIME_MANIFEST), "utf8"),
+      readFile(join(runtimeDir, OPENCLAW_RUNTIME_LOCKFILE), "utf8"),
+      readFile(join(packageRoot, "package.json"), "utf8"),
+    ]);
+    const installedVersion = (JSON.parse(installedManifest) as { version?: string }).version;
+    if (
+      manifestText !== template.manifestText ||
+      lockfileText !== template.lockfileText ||
+      installedVersion === undefined ||
+      !versionsMatch(installedVersion, template.version)
+    ) {
+      return false;
+    }
+    const linked = await realpath(join(npmPrefix, "bin", OPENCLAW_RUNTIME_PACKAGE));
+    const expected = await realpath(
+      join(packageRoot, await readOpenClawBinRelativePath(packageRoot)),
+    );
+    return linked === expected;
+  } catch {
+    return false;
+  }
+};
+
+const firstNonEmptyLine = (value: string): string | undefined =>
+  value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
 
 /** How much of the resolved binary to read for the `firstLine` evidence. */
 const OPENCLAW_BINARY_HEAD_BYTES = 200;
@@ -794,51 +951,6 @@ const parseVersionToken = (value: string): string | null => {
   }
   const semverMatch = trimmed.match(/\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b/);
   return semverMatch?.[0] ?? trimmed.split(/\s+/)[0] ?? null;
-};
-
-const resolveInstalledOpenClawPackageRoot = async (
-  execRunner: ExecRunner,
-  npmPrefix?: string | undefined,
-  spawnCwd?: string | undefined,
-): Promise<string | null> => {
-  const candidates: string[] = [];
-  const npmRootResult = await execRunner.run({
-    command: "npm",
-    args: ["root", "-g"],
-    options: {
-      timeout: OPENCLAW_DETECT_TIMEOUT_MS,
-      ...(spawnCwd === undefined ? {} : { cwd: spawnCwd }),
-      env: {
-        CI: "1",
-        // Resolve against the same prefix the install targeted; otherwise
-        // `npm root -g` reports the system prefix and the post-install
-        // extension repair silently skips an unprivileged install.
-        ...(npmPrefix === undefined ? {} : { npm_config_prefix: npmPrefix }),
-      },
-    },
-  });
-  if (npmRootResult.exitCode === 0) {
-    const npmRoot = npmRootResult.stdout
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .find((line) => line.length > 0);
-    if (npmRoot !== undefined) {
-      candidates.push(join(npmRoot, "openclaw"));
-    }
-  }
-  if (npmPrefix !== undefined) {
-    candidates.push(join(npmPrefix, "lib", "node_modules", "openclaw"));
-  }
-  candidates.push("/usr/lib/node_modules/openclaw", "/usr/local/lib/node_modules/openclaw");
-
-  for (const candidate of candidates) {
-    try {
-      await access(join(candidate, "package.json"), fsConstants.R_OK);
-      return candidate;
-    } catch {}
-  }
-
-  return null;
 };
 
 /**
@@ -1031,11 +1143,6 @@ const versionsMatch = (detectedVersion: string, requestedVersion: string): boole
   const normalizedDetected = normalizeVersion(detectedVersion);
   const normalizedRequested = normalizeVersion(resolveRequestedOpenClawVersion(requestedVersion));
   return normalizedDetected === normalizedRequested;
-};
-
-const resolveInstallVersion = (requestedVersion: string): string | undefined => {
-  const trimmed = resolveRequestedOpenClawVersion(requestedVersion).trim();
-  return trimmed.length === 0 ? undefined : trimmed;
 };
 
 const isAbstractSovereignPin = (value: string): boolean =>

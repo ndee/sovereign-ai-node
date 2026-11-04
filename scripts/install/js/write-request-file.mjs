@@ -87,7 +87,7 @@ export function buildRequest(env) {
     openclaw: {
       manageInstallation: true,
       installMethod: "install_sh",
-      version: "2026.3.13",
+      version: "pinned-by-sovereign",
       skipIfCompatibleInstalled: true,
       forceReinstall: false,
       runOnboard: false,

@@ -101,17 +101,21 @@ In the default install path, `sovereign-node install` is responsible for install
 
 Default behavior:
 
-- use the official OpenClaw installer script (`https://openclaw.ai/install.sh`)
-- install the current Sovereign-pinned OpenClaw version `2026.3.13`
-- skip OpenClaw onboarding (`--no-onboard`) because Sovereign owns the domain-specific configuration flow
+- install the current Sovereign-pinned OpenClaw version `2026.8.35` from the locked runtime project shipped in `deploy/openclaw-runtime/` (a `package.json` with a `zod` `4.6.6` override and its committed `package-lock.json`); never from the upstream `openclaw.ai/install.sh` and never with a bare `npm install -g`
+- install it with `npm ci --omit=dev` into `<prefix>/lib/sovereign-openclaw-runtime`, where `<prefix>` is `<serviceHome>/.npm-global` for an unprivileged install and npm's global prefix (`npm prefix -g`) for a root install, then link `<prefix>/bin/openclaw` to the locked CLI
+- stage the install next to the runtime in place and swap it in only after `npm ci` succeeds, so a failed install leaves the previous runtime working; a rerun skips the install when the runtime in place was installed from the same lock and `<prefix>/bin/openclaw` points into it
+- require Node.js `>=22.22.3 <23` for both the process running `sovereign-node` and the system Node the gateway runs on (preflight checks `node-version` and `gateway-node-version`); `install.sh` upgrades or installs Node.js 22 from NodeSource when needed
+- skip OpenClaw onboarding because Sovereign owns the domain-specific configuration flow
 - run non-interactively in the installer backend
 
-Target internal command pattern:
+To regenerate the lockfile after a pin change:
 
 ```bash
-curl -fsSL --proto '=https' --tlsv1.2 https://openclaw.ai/install.sh | \
-  bash -s -- --version 2026.3.13 --no-onboard --no-prompt
+cd deploy/openclaw-runtime
+npm install --package-lock-only --ignore-scripts --install-strategy=shallow
 ```
+
+`--install-strategy=shallow` nests every dependency under `node_modules/openclaw`, so the package root holds the whole runtime.
 
 After writing Sovereign-managed OpenClaw config and environment, the installer installs or repairs the gateway service via `openclaw gateway install` (using `--force` when a rewrite is required).
 
