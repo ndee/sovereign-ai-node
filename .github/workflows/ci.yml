@@ -224,6 +224,56 @@ jobs:
           bash scripts/release/build-node-artifacts.sh "$ARTIFACT_DIR"
           bash scripts/release/test-node-artifacts.sh "$ARTIFACT_DIR"
 
+  # The installer runs the host-resources playbook with the host's own
+  # ansible-core, which is the distro package on a fresh host. The install
+  # E2Es run on whatever the runner image ships (2.21 today), and ansible-core
+  # up to 2.18 templates JSON-looking values differently, so the playbook also
+  # runs here, unchanged, on each distro's packaged ansible-core.
+  host_resources_ansible:
+    name: Host Resources Playbook (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    container: ${{ matrix.image }}
+    env:
+      LC_ALL: C.UTF-8
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Debian 12 ansible-core 2.14
+            image: debian:12
+            expect: "2.14."
+          - label: Ubuntu 24.04 ansible-core 2.16
+            image: ubuntu:24.04
+            expect: "2.16."
+          - label: Debian 13 ansible-core 2.19
+            image: debian:13
+            expect: "2.19."
+          # No supported distro packages 2.17 or 2.18; 2.18 is the last
+          # release with the old templating.
+          - label: pip ansible-core 2.18
+            image: python:3.12-slim
+            pip: ansible-core==2.18.*
+            expect: "2.18."
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ansible-core
+        env:
+          PIP_SPEC: ${{ matrix.pip }}
+        run: |
+          if [ -n "$PIP_SPEC" ]; then
+            pip install --quiet "$PIP_SPEC"
+          else
+            apt-get update -y
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ansible-core
+          fi
+      - name: Confirm the ansible-core under test
+        env:
+          EXPECT: ${{ matrix.expect }}
+        run: ansible-playbook --version | head -n 1 | grep -F "core $EXPECT"
+      - name: Run the host-resources playbook against stubbed host commands
+        run: bash scripts/ci/test-host-resources-ansible.sh
+
   e2e_noninteractive:
     name: E2E Install (non-interactive)
     # The gateway runs on the host's system Node, which must be inside the
@@ -262,6 +312,20 @@ jobs:
           docker pull "$synapse_image" &
           wait
 
+      # A fresh Ubuntu 24.04 host has no Ansible, so the installer apt-installs
+      # the distro's ansible-core (2.16). The runner image ships a newer one
+      # through pipx; removing it puts this install on the customer's path.
+      - name: Remove the runner's preinstalled Ansible
+        run: |
+          sudo env "PATH=$PATH" PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/opt/pipx_bin \
+            pipx uninstall ansible-core || true
+          sudo rm -f /opt/pipx_bin/ansible*
+          hash -r
+          if command -v ansible-playbook; then
+            echo "::error::ansible-playbook is still on PATH"
+            exit 1
+          fi
+
       - name: Run full installer (install.sh, non-interactive)
         run: |
           cp test/fixtures/ci-install-request.json /tmp/ci-install-request.json
@@ -280,6 +344,11 @@ jobs:
             and .operator.username == "operator"
           ' /tmp/ci-install-request.json > /dev/null
         timeout-minutes: 15
+
+      - name: Verify the install ran on the distro's ansible-core
+        run: |
+          dpkg-query -W ansible-core
+          ansible-playbook --version | head -n 1 | grep -F "core 2.16."
 
       - name: Verify Matrix is reachable
         run: |
@@ -998,6 +1067,7 @@ jobs:
       - integration_coverage
       - smoke
       - artifact_contract
+      - host_resources_ansible
       - e2e_noninteractive
       - e2e_interactive
       - e2e_rerun_after_partial_failure
@@ -1009,7 +1079,7 @@ jobs:
       - name: Require every main validation job to pass
         run: |
           jq -e '
-            length == 12 and
+            length == 13 and
             all(.[]; .result == "success")
           ' <<<"$REQUIRED_RESULTS" >/dev/null || {
             echo "::error::A required main CI job failed, was cancelled, or was skipped."
