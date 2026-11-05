@@ -308,10 +308,12 @@ import {
   truncateText,
 } from "./real-service-shared.js";
 import {
+  assignTypedToolSlashCommands,
   renderTypedToolPluginConfig,
   renderTypedToolPluginIndex,
   renderTypedToolPluginManifest,
   renderTypedToolPluginRuntime,
+  TYPED_TOOL_CHAT_UNAVAILABLE_REWRITE,
   TYPED_TOOL_COMMAND_TIMEOUT_MS,
   TYPED_TOOL_CONFIRM_TTL_MS,
   type TypedToolPluginTool,
@@ -462,6 +464,23 @@ const buildManagedClosedToolPolicy = (pluginToolNames: string[]): OpenClawClosed
     ],
   };
 };
+// OpenClaw's id for the account configured without an explicit id.
+const MATRIX_DEFAULT_ACCOUNT_ID = "default";
+
+// The Matrix account an agent with a Matrix login replies as: its own, or
+// OpenClaw's default account when it speaks with the shared service identity.
+// The channel bindings and the typed-tool slash commands must agree on it, or a
+// command answers from the wrong account.
+const resolveManagedAgentMatrixAccountId = (
+  agentId: string,
+  matrixUserId: string,
+  botPackage: LoadedBotPackage | null | undefined,
+  serviceBotUserId: string,
+): string =>
+  matrixUserId === serviceBotUserId &&
+  botPackage?.manifest.matrixIdentity.mode === "service-account"
+    ? MATRIX_DEFAULT_ACCOUNT_ID
+    : agentId;
 const OPENCLAW_STATUS_PROBE_TIMEOUT_MS = 5_000;
 // A warm `openclaw health` takes seconds on a fast host and far longer on a
 // small ARM board, because it loads every plugin before it answers.
@@ -6446,8 +6465,9 @@ export default function (api) {
 
   private async writeManagedOpenClawExtensions(input: {
     runtimeConfig: RuntimeConfig;
+    configShape: OpenClawRuntimeConfigShape;
   }): Promise<void> {
-    await this.writeManagedTypedToolExtension(input.runtimeConfig);
+    await this.writeManagedTypedToolExtension(input.runtimeConfig, input.configShape);
     const workspaceBindings: Record<string, string[]> = {};
     for (const agent of input.runtimeConfig.openclawProfile.agents) {
       const toolInstanceIds = agent.toolInstanceIds ?? [];
@@ -6568,7 +6588,10 @@ export default function (api) {
     );
   }
 
-  private async writeManagedTypedToolExtension(runtimeConfig: RuntimeConfig): Promise<void> {
+  private async writeManagedTypedToolExtension(
+    runtimeConfig: RuntimeConfig,
+    configShape: OpenClawRuntimeConfigShape,
+  ): Promise<void> {
     const extensionDir = join(
       runtimeConfig.openclaw.openclawHome,
       "extensions",
@@ -6624,17 +6647,36 @@ export default function (api) {
           bindings: [],
           templateRef: tool.templateRef,
         };
+        const accountId =
+          agent.matrix?.accessTokenSecretRef === undefined
+            ? undefined
+            : resolveManagedAgentMatrixAccountId(
+                agent.id,
+                agent.matrix.userId,
+                await this.findBotPackageByTemplateRef(agent.templateRef),
+                runtimeConfig.matrix.bot.userId,
+              );
         entry.bindings.push({
           workspaceDir: agent.workspace,
           toolInstanceId: tool.id,
           script: target,
           cwd: agent.workspace,
+          ...(accountId === undefined ? {} : { accountId }),
         });
         tools.set(typedTool.name, entry);
       }
     }
     if (tools.size === 0) {
       return;
+    }
+    const { tools: pluginTools, conflicts } = assignTypedToolSlashCommands(
+      Array.from(tools.values(), ({ templateRef: _templateRef, ...tool }) => tool),
+    );
+    for (const conflict of conflicts) {
+      this.logger.warn(
+        conflict,
+        "Slash command is already answered by another typed tool; not registering it twice",
+      );
     }
 
     // The parent is OpenClaw's own state dir (its SQLite database since
@@ -6672,7 +6714,12 @@ export default function (api) {
           operatorUserIds: [runtimeConfig.matrix.operator.userId],
           confirmTtlMs: TYPED_TOOL_CONFIRM_TTL_MS,
           commandTimeoutMs: TYPED_TOOL_COMMAND_TIMEOUT_MS,
-          tools: Array.from(tools.values(), ({ templateRef: _templateRef, ...tool }) => tool),
+          // 2026.3 delivers Matrix replies past every plugin hook, so there
+          // the raw provider error stays a documented limitation.
+          ...(configShape === "keyed"
+            ? { replyPayloadRewrites: [TYPED_TOOL_CHAT_UNAVAILABLE_REWRITE] }
+            : {}),
+          tools: pluginTools,
         }),
       },
       { name: "runtime.js", content: renderTypedToolPluginRuntime() },
@@ -13390,9 +13437,13 @@ export default function (api) {
   }
 
   private async writeOpenClawRuntimeArtifacts(runtimeConfig: RuntimeConfig): Promise<void> {
-    await this.writeManagedOpenClawExtensions({ runtimeConfig });
-    const openrouterApiKey = await this.resolveSecretRef(runtimeConfig.openrouter.apiKeySecretRef);
     const existingRuntimePayload = await this.readManagedOpenClawRuntimeJson(runtimeConfig);
+    const configShape = await this.resolveInstalledOpenClawConfigShape(
+      runtimeConfig,
+      existingRuntimePayload,
+    );
+    await this.writeManagedOpenClawExtensions({ runtimeConfig, configShape });
+    const openrouterApiKey = await this.resolveSecretRef(runtimeConfig.openrouter.apiKeySecretRef);
     const preservedMeta = isRecord(existingRuntimePayload?.meta)
       ? existingRuntimePayload.meta
       : undefined;
@@ -13513,10 +13564,13 @@ export default function (api) {
         continue;
       }
       const botPackage = managedAgentPackages.get(agent.id);
-      const usesSharedServiceIdentity =
-        agent.matrix.userId === runtimeConfig.matrix.bot.userId &&
-        botPackage?.manifest.matrixIdentity.mode === "service-account";
-      if (usesSharedServiceIdentity) {
+      const accountId = resolveManagedAgentMatrixAccountId(
+        agent.id,
+        agent.matrix.userId,
+        botPackage,
+        runtimeConfig.matrix.bot.userId,
+      );
+      if (accountId === MATRIX_DEFAULT_ACCOUNT_ID) {
         matrixBindings.push({
           agentId: agent.id,
           match: {
@@ -13529,7 +13583,7 @@ export default function (api) {
         agentId: agent.id,
         match: {
           channel: "matrix",
-          accountId: agent.id,
+          accountId,
         },
       });
       if (agent.matrix.userId === runtimeConfig.matrix.bot.userId) {
@@ -13545,7 +13599,7 @@ export default function (api) {
       const alertRoom = botInstance?.matrix?.alertRoom ?? runtimeConfig.matrix.alertRoom;
       const explicitAllowlist = botInstance?.matrix?.allowedUsers;
       const agentAllowlist = explicitAllowlist ?? matrixParticipantAllowlist;
-      matrixAccounts[agent.id] = {
+      matrixAccounts[accountId] = {
         homeserver: runtimeConfig.matrix.adminBaseUrl,
         userId: agent.matrix.userId,
         accessToken: await this.resolveSecretRef(agent.matrix.accessTokenSecretRef),
@@ -13581,7 +13635,7 @@ export default function (api) {
       };
     }
     if (hasSharedServiceBot || Object.keys(matrixAccounts).length === 0) {
-      matrixAccounts.default = {
+      matrixAccounts[MATRIX_DEFAULT_ACCOUNT_ID] = {
         homeserver: runtimeConfig.matrix.adminBaseUrl,
         userId: runtimeConfig.matrix.bot.userId,
         accessToken: await this.resolveSecretRef(runtimeConfig.matrix.bot.accessTokenSecretRef),
@@ -13781,10 +13835,6 @@ export default function (api) {
       openrouter: runtimeConfig.openrouter,
     };
     const managedTempDir = this.getManagedOpenClawTempDir(runtimeConfig);
-    const configShape = await this.resolveInstalledOpenClawConfigShape(
-      runtimeConfig,
-      existingRuntimePayload,
-    );
 
     try {
       await mkdir(this.paths.openclawServiceHome, { recursive: true });

@@ -353,6 +353,11 @@ jobs:
       - name: Verify the gateway and scan units run inside their systemd sandbox
         run: sudo env "PATH=$PATH" bash scripts/ci/verify-systemd-sandbox.sh
 
+      # The plugin command answers from the bot's CLI on the agent's own Matrix
+      # account, so it keeps working while the chat model is unavailable.
+      - name: Verify /version answers through the typed-tool plugin without a model
+        run: sudo env "PATH=$PATH" bash scripts/ci/verify-typed-tool-slash-command.sh
+
       # A gateway that is up but never listens must be reported as not ready
       # (warn, exit 0 for this command) rather than as restarted. The drop-in
       # keeps the unit active without ever opening the port; it adds sleep to

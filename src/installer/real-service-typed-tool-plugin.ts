@@ -23,6 +23,8 @@ export type TypedToolPluginBinding = {
   toolInstanceId: string;
   script: string;
   cwd: string;
+  /** Matrix account the bound agent replies as; slash commands answer only there. */
+  accountId?: string | undefined;
 };
 
 export type TypedToolPluginTool = {
@@ -30,6 +32,13 @@ export type TypedToolPluginTool = {
   description: string;
   operations: TypedToolOperationSpec[];
   bindings: TypedToolPluginBinding[];
+  /** Slash command name to the read operation it runs. */
+  slashCommands?: Record<string, string> | undefined;
+};
+
+export type TypedToolReplyRewrite = {
+  contains: string;
+  text: string;
 };
 
 export type TypedToolPluginConfig = {
@@ -38,7 +47,53 @@ export type TypedToolPluginConfig = {
   operatorUserIds: string[];
   confirmTtlMs: number;
   commandTimeoutMs: number;
+  /** Only for runtimes with the `reply_payload_sending` hook (OpenClaw 2026.8). */
+  replyPayloadRewrites?: TypedToolReplyRewrite[] | undefined;
   tools: TypedToolPluginTool[];
+};
+
+// The provider router's own error for a model no allowed provider serves. It
+// reaches chat verbatim and says nothing a user can act on.
+export const TYPED_TOOL_CHAT_UNAVAILABLE_REWRITE: TypedToolReplyRewrite = {
+  contains: "No allowed providers are available for the selected model",
+  text: "Chat is not available with the current model settings; mail alerts are not affected. Check the model settings.",
+};
+
+/**
+ * Gives each slash command to one read operation. OpenClaw keeps one handler
+ * per command name, so a name two tools declare goes to the first tool by name
+ * and the other declaration is reported.
+ */
+export const assignTypedToolSlashCommands = <
+  T extends { name: string; operations: readonly TypedToolOperationSpec[] },
+>(
+  tools: readonly T[],
+): {
+  tools: Array<T & { slashCommands?: Record<string, string> }>;
+  conflicts: Array<{ slashCommand: string; toolName: string; claimedBy: string }>;
+} => {
+  const claimedBy = new Map<string, string>();
+  const conflicts: Array<{ slashCommand: string; toolName: string; claimedBy: string }> = [];
+  const assignedTools = [...tools]
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .map((tool) => {
+      const assigned: Record<string, string> = {};
+      for (const operation of tool.operations) {
+        const slashCommand = operation.slashCommand;
+        if (slashCommand === undefined || operation.effect !== "read") {
+          continue;
+        }
+        const owner = claimedBy.get(slashCommand);
+        if (owner !== undefined) {
+          conflicts.push({ slashCommand, toolName: tool.name, claimedBy: owner });
+          continue;
+        }
+        claimedBy.set(slashCommand, tool.name);
+        assigned[slashCommand] = operation.name;
+      }
+      return Object.keys(assigned).length === 0 ? tool : { ...tool, slashCommands: assigned };
+    });
+  return { tools: assignedTools, conflicts };
 };
 
 export const TYPED_TOOL_CONFIRM_TTL_MS = 15 * 60 * 1000;
@@ -181,6 +236,61 @@ const textResult = (status, text, extra) => ({
 });
 
 const errorMessage = (error) => (error instanceof Error ? error.message : String(error));
+
+const replyPayloadRewrites = Array.isArray(config.replyPayloadRewrites) ? config.replyPayloadRewrites : [];
+
+const rewriteReplyPayload = (event) => {
+  const payload = event?.payload;
+  const text = payload?.text;
+  if (typeof text !== "string") {
+    return undefined;
+  }
+  const rewrite = replyPayloadRewrites.find((candidate) => text.includes(candidate.contains));
+  return rewrite === undefined ? undefined : { payload: { ...payload, text: rewrite.text } };
+};
+
+const slashCommandNames = Array.from(
+  new Set(config.tools.flatMap((tool) => Object.keys(tool.slashCommands ?? {}))),
+).sort();
+
+const describeSlashCommand = (name) => {
+  for (const tool of config.tools) {
+    const operation = tool.operations.find((candidate) => candidate.name === tool.slashCommands?.[name]);
+    if (operation !== undefined) {
+      return operation.description;
+    }
+  }
+  return "/" + name;
+};
+
+// Every bot account in a room receives the command; only the account bound to
+// the tool answers, and it answers from the tool's output, never the model.
+const answerSlashCommand = async (name, ctx) => {
+  const accountId = typeof ctx?.accountId === "string" ? ctx.accountId : undefined;
+  if (accountId === undefined) {
+    return {};
+  }
+  for (const tool of config.tools) {
+    const operation = tool.operations.find((candidate) => candidate.name === tool.slashCommands?.[name]);
+    const binding = tool.bindings.find((candidate) => candidate.accountId === accountId);
+    if (operation === undefined || binding === undefined) {
+      continue;
+    }
+    let argv;
+    try {
+      argv = typedToolBuildArgv({
+        operation,
+        params: { operation: operation.name },
+        toolInstanceId: binding.toolInstanceId,
+      });
+    } catch (error) {
+      return { text: errorMessage(error) };
+    }
+    const result = await runCommand(binding, argv);
+    return { text: typedToolSummarizeOutput(result.stdout, result.stderr, result.exitCode) };
+  }
+  return {};
+};
 
 const buildParameters = (tool) => {
   const properties = {
@@ -380,5 +490,17 @@ export default function (api) {
     requireAuth: true,
     handler: confirmPendingChange,
   });
+  for (const name of slashCommandNames) {
+    api.registerCommand({
+      name,
+      description: describeSlashCommand(name),
+      acceptsArgs: false,
+      requireAuth: true,
+      handler: async (ctx) => await answerSlashCommand(name, ctx),
+    });
+  }
+  if (replyPayloadRewrites.length > 0) {
+    api.on("reply_payload_sending", rewriteReplyPayload);
+  }
 }
 `;

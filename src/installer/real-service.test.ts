@@ -218,6 +218,13 @@ const TYPED_SENTINEL_TOOL = {
       argv: ["status", "--instance", "<tool-instance-id>", "--json"],
     },
     {
+      name: "version",
+      description: "Version",
+      effect: "read",
+      argv: ["version", "--json"],
+      slashCommand: "version",
+    },
+    {
       name: "feedback",
       description: "Feedback",
       effect: "change",
@@ -17814,16 +17821,23 @@ describe("typed tools, scan agents and exec pinning", () => {
             name: "typed_sentinel",
             description: TYPED_SENTINEL_TOOL.description,
             operations: TYPED_SENTINEL_TOOL.operations,
+            slashCommands: { version: "version" },
             bindings: [
               {
                 workspaceDir: workspace,
                 toolInstanceId: "typed-sentinel-core",
                 script,
                 cwd: workspace,
+                accountId: "typed-sentinel",
               },
             ],
           },
         ],
+      });
+      // The command answers on the same account the chat binding routes.
+      expect(openclawConfig.bindings).toContainEqual({
+        agentId: "typed-sentinel",
+        match: { channel: "matrix", accountId: "typed-sentinel" },
       });
       expect(await readFile(script, "utf8")).toBe(TYPED_SENTINEL_SCRIPT);
       expect(
@@ -17862,7 +17876,7 @@ describe("typed tools, scan agents and exec pinning", () => {
       const toolsMd = await readFile(join(workspace, "TOOLS.md"), "utf8");
       expect(toolsMd).toContain("Use only the documented OpenClaw tools listed below.");
       expect(toolsMd).toContain("openclaw-tool: `typed_sentinel`");
-      expect(toolsMd).toContain("operations: status, feedback");
+      expect(toolsMd).toContain("operations: status, version, feedback");
       expect(toolsMd).toContain("`/confirm <code>`");
       expect(toolsMd).not.toContain("command:");
       expect(toolsMd).not.toContain("sovereign-tool");
@@ -18139,6 +18153,111 @@ describe("typed tools, scan agents and exec pinning", () => {
     });
   });
 
+  it("binds slash commands to each agent's Matrix account and rewrites the provider error only on 2026.8", async () => {
+    await withRuntime(async ({ tempRoot, paths }) => {
+      const service = buildService(paths, {
+        commands: [],
+        execPinning: createTestExecPinning(join(tempRoot, "exec-wrappers")),
+      });
+      const internals = service as unknown as {
+        logger: { warn: (...args: unknown[]) => void };
+        resolveBoundToolManifests: (config: unknown, ids: string[]) => Promise<unknown>;
+        findBotPackageByTemplateRef: (ref: string | undefined) => Promise<unknown>;
+        writeManagedTypedToolExtension: (config: unknown, shape: string) => Promise<void>;
+      };
+      const warn = vi.spyOn(internals.logger, "warn");
+      const serviceBot = "@service:matrix.example.org";
+      const runtimeConfig = {
+        openclaw: { openclawHome: join(tempRoot, "home") },
+        matrix: {
+          operator: { userId: "@operator:matrix.example.org" },
+          bot: { userId: serviceBot },
+        },
+        openclawProfile: {
+          agents: [
+            {
+              id: "dedicated",
+              templateRef: "dedicated@1.0.0",
+              workspace: join(tempRoot, "ws-dedicated"),
+              toolInstanceIds: ["t-dedicated"],
+              matrix: { userId: "@dedicated:matrix.example.org", accessTokenSecretRef: "file:/a" },
+            },
+            {
+              id: "shared",
+              templateRef: "shared@1.0.0",
+              workspace: join(tempRoot, "ws-shared"),
+              toolInstanceIds: ["t-shared"],
+              matrix: { userId: serviceBot, accessTokenSecretRef: "file:/b" },
+            },
+            {
+              id: "offline",
+              workspace: join(tempRoot, "ws-offline"),
+              toolInstanceIds: ["t-offline"],
+              matrix: { userId: "@offline:matrix.example.org" },
+            },
+          ],
+        },
+      };
+      internals.findBotPackageByTemplateRef = async (ref) =>
+        ref === "shared@1.0.0"
+          ? { manifest: { matrixIdentity: { mode: "service-account" } } }
+          : null;
+      internals.resolveBoundToolManifests = async (_config, ids) =>
+        ids.map((id) => ({
+          tool: { id, templateRef: "typed-sentinel-tool@1.0.0" },
+          manifest: {
+            openclawTypedTool:
+              id === "t-offline"
+                ? { ...TYPED_SENTINEL_TOOL, name: "about_tool" }
+                : TYPED_SENTINEL_TOOL,
+          },
+        }));
+      const pluginConfigPath = join(
+        tempRoot,
+        "home",
+        "extensions",
+        "sovereign-typed-tools",
+        "plugin-config.json",
+      );
+      type Written = {
+        replyPayloadRewrites?: unknown;
+        tools: Array<{
+          name: string;
+          slashCommands?: Record<string, string>;
+          bindings: Array<{ toolInstanceId: string; accountId?: string }>;
+        }>;
+      };
+
+      await internals.writeManagedTypedToolExtension(runtimeConfig, "keyed");
+      const keyed = JSON.parse(await readFile(pluginConfigPath, "utf8")) as Written;
+      expect(keyed.replyPayloadRewrites).toEqual([
+        {
+          contains: "No allowed providers are available for the selected model",
+          text: "Chat is not available with the current model settings; mail alerts are not affected. Check the model settings.",
+        },
+      ]);
+      expect(keyed.tools.map((tool) => [tool.name, tool.slashCommands])).toEqual([
+        ["about_tool", { version: "version" }],
+        ["typed_sentinel", undefined],
+      ]);
+      expect(keyed.tools[1]?.bindings).toEqual([
+        expect.objectContaining({ toolInstanceId: "t-dedicated", accountId: "dedicated" }),
+        expect.objectContaining({ toolInstanceId: "t-shared", accountId: "default" }),
+      ]);
+      expect(keyed.tools[0]?.bindings).toEqual([
+        expect.not.objectContaining({ accountId: expect.anything() }),
+      ]);
+      expect(warn).toHaveBeenCalledWith(
+        { slashCommand: "version", toolName: "typed_sentinel", claimedBy: "about_tool" },
+        "Slash command is already answered by another typed tool; not registering it twice",
+      );
+
+      await internals.writeManagedTypedToolExtension(runtimeConfig, "list");
+      const list = JSON.parse(await readFile(pluginConfigPath, "utf8")) as Written;
+      expect(list).not.toHaveProperty("replyPayloadRewrites");
+    });
+  });
+
   it("refuses a typed-tool script it cannot trace to its bot package", async () => {
     await withRuntime(async ({ tempRoot, paths }) => {
       const service = buildService(paths, {
@@ -18148,7 +18267,7 @@ describe("typed tools, scan agents and exec pinning", () => {
       const internals = service as unknown as {
         resolveBoundToolManifests: () => Promise<unknown>;
         listBotPackages: () => Promise<unknown>;
-        writeManagedTypedToolExtension: (config: unknown) => Promise<void>;
+        writeManagedTypedToolExtension: (config: unknown, shape: string) => Promise<void>;
       };
       const runtimeConfig = {
         openclaw: { openclawHome: join(tempRoot, "home") },
@@ -18164,7 +18283,9 @@ describe("typed tools, scan agents and exec pinning", () => {
         },
       ];
       internals.resolveBoundToolManifests = bound("../outside.js");
-      await expect(internals.writeManagedTypedToolExtension(runtimeConfig)).rejects.toMatchObject({
+      await expect(
+        internals.writeManagedTypedToolExtension(runtimeConfig, "list"),
+      ).rejects.toMatchObject({
         code: "TYPED_TOOL_SOURCE_UNAVAILABLE",
         message: "Typed tool script for 'typed-sentinel-tool@1.0.0' is outside its bot package",
       });
@@ -18179,7 +18300,7 @@ describe("typed tools, scan agents and exec pinning", () => {
           manifest: { openclawTypedTool: { ...TYPED_SENTINEL_TOOL, operations: [] } },
         },
       ];
-      await internals.writeManagedTypedToolExtension(runtimeConfig);
+      await internals.writeManagedTypedToolExtension(runtimeConfig, "list");
       const written = JSON.parse(
         await readFile(
           join(tempRoot, "home", "extensions", "sovereign-typed-tools", "plugin-config.json"),
@@ -18199,7 +18320,9 @@ describe("typed tools, scan agents and exec pinning", () => {
 
       internals.listBotPackages = async () => [];
       internals.resolveBoundToolManifests = bound("workspace/bin/dist/typed-sentinel.js");
-      await expect(internals.writeManagedTypedToolExtension(runtimeConfig)).rejects.toMatchObject({
+      await expect(
+        internals.writeManagedTypedToolExtension(runtimeConfig, "list"),
+      ).rejects.toMatchObject({
         code: "TYPED_TOOL_SOURCE_UNAVAILABLE",
         message: "Bot package for typed tool template 'typed-sentinel-tool@1.0.0' is unavailable",
       });

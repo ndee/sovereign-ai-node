@@ -797,8 +797,9 @@ update.
   (`type` `string` | `boolean`, `description`, optional `enum`, `pattern`,
   `maxLength` ≤ 500, and the `argv` fragment `["--flag", "{value}"]` or
   `["--flag"]`), `required`, `exactlyOneOf`, `confirm` (`"always"` or
-  `{ param, values }`) and `confirmPreviewArgv` (flags appended for a
-  side-effect-free preview of a change that needs confirmation).
+  `{ param, values }`), `confirmPreviewArgv` (flags appended for a
+  side-effect-free preview of a change that needs confirmation) and
+  `slashCommand` (see below).
   - The plugin never starts a shell. It copies `script` from the bot package
     into its own extension directory, outside every agent workspace, and runs it
     with the gateway's node binary, a fixed argv, a fixed `PATH` and
@@ -815,6 +816,44 @@ update.
     `/confirm <code>` within 15 minutes. That command is an OpenClaw plugin
     command, handled before any model turn, so a model can neither propose and
     confirm in one turn nor confirm at all.
+  - **Slash commands** (optional, additive). An operation may declare
+    `slashCommand`, a name matching `^[a-z][a-z0-9_]{0,31}$`. Only an operation
+    with `effect: "read"` and no `params`, `required` or `exactlyOneOf` may
+    declare one; a name is unique within a tool and may not be a built-in
+    OpenClaw 2026.3 or 2026.8 command or alias (`help`, `status`, `model`,
+    `codex`, …, see `TYPED_TOOL_RESERVED_SLASH_COMMANDS` in
+    `src/bots/typed-tool-schema.ts`) nor `confirm`. A template that breaks any
+    of these rules is rejected. Across tools, a name goes to the first typed tool
+    by name and later declarations are logged and dropped.
+  - The plugin registers each distinct slash command as an OpenClaw plugin
+    command (`acceptsArgs: false`, `requireAuth: true`, description = the
+    operation's `description`), on both 2026.3 and 2026.8; the manifest is
+    unchanged. The handler answers before any model turn: it picks the binding
+    whose `accountId` equals the command context's `accountId`, runs the
+    operation with no parameters and replies with the operation's output (the
+    JSON `note`, else `error.message`, else the raw text, as for
+    `/confirm`). A failing run replies with its error text. An account without
+    a binding to the tool, and a context without an account, get no reply, so
+    in a room with several bot accounts only the bound bot answers. Because no
+    model is involved, the command still works while the chat model is
+    unavailable.
+  - `plugin-config.json` (node-owned, regenerated on every configure and
+    update) carries, additively: `tools[].bindings[].accountId`, the Matrix
+    account the bound agent replies as (the agent id, or `default` for an agent
+    on the shared service identity; absent for an agent without a Matrix
+    login), and `tools[].slashCommands`, a `{ <slash command>: <operation> }`
+    map present only when the tool has one.
+  - **Chat-unavailable reply (OpenClaw 2026.8 only).** When the installed
+    OpenClaw renders the 2026.8 config shape, `plugin-config.json` also carries
+    `replyPayloadRewrites: [{ contains, text }]` and the plugin registers a
+    `reply_payload_sending` hook. A reply whose text contains `No allowed
+    providers are available for the selected model` (the provider router's
+    error for a model no allowed provider serves) is replaced by the single line
+    `Chat is not available with the current model settings; mail alerts are not
+    affected. Check the model settings.`; every other reply passes unchanged.
+    OpenClaw 2026.3 delivers Matrix replies past every plugin hook, so there the
+    field is not rendered, no hook is registered, and the raw provider error
+    reaches chat unchanged (documented limitation).
   - An agent bound to a typed tool gets a closed tool policy:
     `tools.allow` holds the typed tool names, any plugin tools from
     `openclawToolNames`, and `session_status` as the core anchor OpenClaw needs to

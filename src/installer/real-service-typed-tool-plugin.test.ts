@@ -7,10 +7,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { TypedToolOperationSpec } from "../openclaw/typed-tool-runtime.js";
 import {
+  assignTypedToolSlashCommands,
   renderTypedToolPluginConfig,
   renderTypedToolPluginIndex,
   renderTypedToolPluginManifest,
   renderTypedToolPluginRuntime,
+  TYPED_TOOL_CHAT_UNAVAILABLE_REWRITE,
   type TypedToolPluginConfig,
 } from "./real-service-typed-tool-plugin.js";
 
@@ -27,10 +29,16 @@ type RegisteredTool = {
 type ToolFactory = (context: Record<string, unknown>) => RegisteredTool | null;
 type CommandDefinition = {
   name: string;
+  description: string;
   acceptsArgs: boolean;
   requireAuth: boolean;
   handler: (ctx: Record<string, unknown>) => Promise<{ text?: string }>;
 };
+
+type ReplyPayloadHook = (
+  event: { payload: Record<string, unknown> },
+  ctx: Record<string, unknown>,
+) => { payload?: Record<string, unknown> } | undefined;
 
 const OPERATOR = "@operator:example.org";
 
@@ -103,12 +111,39 @@ if (argv[0] === "slow") {
 }
 `;
 
+const INFO_OPERATIONS: TypedToolOperationSpec[] = [
+  {
+    name: "version",
+    description: "Report the running build",
+    effect: "read",
+    argv: ["version", "--json"],
+    slashCommand: "version",
+  },
+  {
+    name: "broken",
+    description: "Always fails",
+    effect: "read",
+    argv: ["fail"],
+    slashCommand: "broken",
+  },
+  {
+    name: "strict",
+    description: "Needs a parameter",
+    effect: "read",
+    argv: ["strict"],
+    params: { query: { type: "string", description: "Query", argv: ["--query", "{value}"] } },
+    required: ["query"],
+  },
+];
+
 let tempRoot = "";
 let workspace = "";
 let pluginDir = "";
 let stateDir = "";
 const tools = new Map<string, { factory: ToolFactory; options: Record<string, unknown> }>();
 const commands: CommandDefinition[] = [];
+const hooks: Array<{ name: string; handler: ReplyPayloadHook }> = [];
+const plainCommands: CommandDefinition[] = [];
 
 const toolFor = (context: Record<string, unknown>): RegisteredTool => {
   const tool = tools.get("demo_tool")?.factory({ workspaceDir: ` ${workspace} `, ...context });
@@ -118,12 +153,48 @@ const toolFor = (context: Record<string, unknown>): RegisteredTool => {
   return tool;
 };
 
-const confirm = async (ctx: Record<string, unknown>): Promise<{ text?: string }> => {
-  const command = commands[0];
-  if (command === undefined) {
-    throw new Error("confirm command missing");
+const command = (name: string): CommandDefinition => {
+  const found = commands.find((candidate) => candidate.name === name);
+  if (found === undefined) {
+    throw new Error(`command ${name} missing`);
   }
-  return await command.handler(ctx);
+  return found;
+};
+
+const confirm = async (ctx: Record<string, unknown>): Promise<{ text?: string }> =>
+  await command("confirm").handler(ctx);
+
+const rewriteReply = (payload: Record<string, unknown>) => {
+  const hook = hooks[0];
+  if (hook === undefined) {
+    throw new Error("reply hook missing");
+  }
+  return hook.handler({ payload }, { channelId: "matrix" });
+};
+
+// The plugin imports ./runtime.js; load it as ESM under vitest.
+const loadPlugin = async (
+  dir: string,
+  config: TypedToolPluginConfig,
+  api: Record<string, unknown>,
+): Promise<void> => {
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    join(dir, "openclaw.plugin.json"),
+    renderTypedToolPluginManifest(config.tools.map((tool) => tool.name)),
+    "utf8",
+  );
+  await writeFile(join(dir, "plugin-config.json"), renderTypedToolPluginConfig(config), "utf8");
+  await writeFile(join(dir, "runtime.mjs"), renderTypedToolPluginRuntime(), "utf8");
+  await writeFile(
+    join(dir, "index.mjs"),
+    renderTypedToolPluginIndex().replace('"./runtime.js"', '"./runtime.mjs"'),
+    "utf8",
+  );
+  const plugin = (await import(pathToFileURL(join(dir, "index.mjs")).href)) as {
+    default: (api: unknown) => void;
+  };
+  plugin.default(api);
 };
 
 const calls = async (): Promise<string[][]> =>
@@ -147,6 +218,7 @@ beforeAll(async () => {
     operatorUserIds: [OPERATOR, OPERATOR],
     confirmTtlMs: 15 * 60 * 1000,
     commandTimeoutMs: 1_000,
+    replyPayloadRewrites: [TYPED_TOOL_CHAT_UNAVAILABLE_REWRITE],
     tools: [
       {
         name: "demo_tool",
@@ -168,37 +240,63 @@ beforeAll(async () => {
         operations: [OPERATIONS[0] as TypedToolOperationSpec],
         bindings: [],
       },
+      {
+        name: "info_tool",
+        description: "Info",
+        operations: INFO_OPERATIONS,
+        // A config written by hand, not by node: one entry names a missing
+        // operation and one an operation with parameters.
+        slashCommands: {
+          version: "version",
+          broken: "broken",
+          strict: "strict",
+          orphan: "missing",
+        },
+        bindings: [
+          {
+            workspaceDir: workspace,
+            toolInstanceId: "info-core",
+            script,
+            cwd: workspace,
+            accountId: "info-bot",
+          },
+          {
+            workspaceDir: join(tempRoot, "gone"),
+            toolInstanceId: "gone-info",
+            script,
+            cwd: join(tempRoot, "gone"),
+            accountId: "gone-bot",
+          },
+        ],
+      },
     ],
   };
-  await writeFile(
-    join(pluginDir, "openclaw.plugin.json"),
-    renderTypedToolPluginManifest(config.tools.map((tool) => tool.name)),
-    "utf8",
-  );
-  await writeFile(
-    join(pluginDir, "plugin-config.json"),
-    renderTypedToolPluginConfig(config),
-    "utf8",
-  );
-  await writeFile(join(pluginDir, "index.mjs"), renderTypedToolPluginIndex(), "utf8");
-  await writeFile(join(pluginDir, "runtime.mjs"), renderTypedToolPluginRuntime(), "utf8");
-  // The plugin imports ./runtime.js; load it as ESM under vitest.
-  const indexSource = (await readFile(join(pluginDir, "index.mjs"), "utf8")).replace(
-    '"./runtime.js"',
-    '"./runtime.mjs"',
-  );
-  await writeFile(join(pluginDir, "index.mjs"), indexSource, "utf8");
-  const plugin = (await import(pathToFileURL(join(pluginDir, "index.mjs")).href)) as {
-    default: (api: unknown) => void;
-  };
-  plugin.default({
+  await loadPlugin(pluginDir, config, {
     registerTool: (factory: ToolFactory, options: Record<string, unknown>) => {
       tools.set(String(options.name), { factory, options });
     },
-    registerCommand: (command: CommandDefinition) => {
-      commands.push(command);
+    registerCommand: (definition: CommandDefinition) => {
+      commands.push(definition);
+    },
+    on: (name: string, handler: ReplyPayloadHook) => {
+      hooks.push({ name, handler });
     },
   });
+  // A 2026.3 gateway has no reply hook: the plugin must not ask for one.
+  await loadPlugin(
+    join(tempRoot, "plain-extension"),
+    {
+      ...config,
+      replyPayloadRewrites: undefined,
+      tools: config.tools.map(({ slashCommands: _slashCommands, ...tool }) => tool),
+    },
+    {
+      registerTool: () => undefined,
+      registerCommand: (definition: CommandDefinition) => {
+        plainCommands.push(definition);
+      },
+    },
+  );
 });
 
 afterAll(async () => {
@@ -255,11 +353,60 @@ describe("typed tool plugin rendering", () => {
   });
 
   it("registers optional tools by name and a confirm command that needs an authorized sender", () => {
-    expect(Array.from(tools.keys())).toEqual(["another_tool", "demo_tool"]);
+    expect(Array.from(tools.keys())).toEqual(["another_tool", "demo_tool", "info_tool"]);
     expect(tools.get("demo_tool")?.options).toEqual({ name: "demo_tool", optional: true });
     expect(
-      commands.map((command) => [command.name, command.acceptsArgs, command.requireAuth]),
-    ).toEqual([["confirm", true, true]]);
+      commands.map((definition) => [
+        definition.name,
+        definition.acceptsArgs,
+        definition.requireAuth,
+      ]),
+    ).toEqual([
+      ["confirm", true, true],
+      ["broken", false, true],
+      ["orphan", false, true],
+      ["strict", false, true],
+      ["version", false, true],
+    ]);
+    expect(command("version").description).toBe("Report the running build");
+    expect(command("orphan").description).toBe("/orphan");
+  });
+
+  it("registers no slash command and no reply hook without a declaration", () => {
+    expect(plainCommands.map((definition) => definition.name)).toEqual(["confirm"]);
+  });
+
+  it("renders slash commands and the account of each binding into the config", () => {
+    const rendered = JSON.parse(
+      renderTypedToolPluginConfig({
+        runtimeConfigPath: "/c",
+        stateDir: "/s",
+        operatorUserIds: [],
+        confirmTtlMs: 1,
+        commandTimeoutMs: 2,
+        replyPayloadRewrites: [TYPED_TOOL_CHAT_UNAVAILABLE_REWRITE],
+        tools: [
+          {
+            name: "a_tool",
+            description: "a",
+            operations: [],
+            slashCommands: { version: "version" },
+            bindings: [
+              {
+                workspaceDir: "/w",
+                toolInstanceId: "a",
+                script: "/s",
+                cwd: "/w",
+                accountId: "bot",
+              },
+            ],
+          },
+        ],
+      }),
+    ) as TypedToolPluginConfig;
+    expect(rendered.replyPayloadRewrites).toEqual([TYPED_TOOL_CHAT_UNAVAILABLE_REWRITE]);
+    expect(rendered.tools[0]?.slashCommands).toEqual({ version: "version" });
+    expect(rendered.tools[0]?.bindings[0]?.accountId).toBe("bot");
   });
 
   it("offers a tool only to the agents bound to it", () => {
@@ -276,6 +423,96 @@ describe("typed tool plugin rendering", () => {
       description: "Operation to run",
     });
     expect(tool.parameters.properties.mode).toEqual({ type: "string", description: "Mode" });
+  });
+});
+
+describe("typed tool slash commands", () => {
+  it("answers a slash command from the operation's note for the bound account only", async () => {
+    const before = (await calls()).length;
+    expect(await command("version").handler({ accountId: "info-bot", agentId: "info" })).toEqual({
+      text: "Done.",
+    });
+    expect((await calls()).slice(before)).toEqual([["version", "--json"]]);
+  });
+
+  it("stays silent for an account without a binding and for a turn without an account", async () => {
+    const before = (await calls()).length;
+    expect(await command("version").handler({ accountId: "other-bot" })).toEqual({});
+    expect(await command("version").handler({})).toEqual({});
+    expect(await command("orphan").handler({ accountId: "info-bot" })).toEqual({});
+    expect((await calls()).length).toBe(before);
+  });
+
+  it("replies with the error text of a failing run", async () => {
+    expect(await command("broken").handler({ accountId: "info-bot" })).toEqual({
+      text: "refused by cli",
+    });
+    expect(await command("strict").handler({ accountId: "info-bot" })).toEqual({
+      text: "Operation 'strict' requires 'query'",
+    });
+    const gone = await command("version").handler({ accountId: "gone-bot" });
+    expect(gone.text).toContain("ENOENT");
+  });
+});
+
+describe("typed tool reply rewrites", () => {
+  it("replaces the raw provider error with one calm line and keeps the rest of the payload", () => {
+    expect(hooks.map((hook) => hook.name)).toEqual(["reply_payload_sending"]);
+    expect(
+      rewriteReply({
+        text: '404 {"error":{"message":"No allowed providers are available for the selected model."}}',
+        isError: true,
+      }),
+    ).toEqual({
+      payload: {
+        text: "Chat is not available with the current model settings; mail alerts are not affected. Check the model settings.",
+        isError: true,
+      },
+    });
+  });
+
+  it("leaves every other reply untouched", () => {
+    expect(rewriteReply({ text: "Mail Sentinel 2.4.1" })).toBeUndefined();
+    expect(rewriteReply({ mediaUrl: "mxc://example.org/x" })).toBeUndefined();
+  });
+});
+
+describe("assignTypedToolSlashCommands", () => {
+  const op = (
+    name: string,
+    extra: Partial<TypedToolOperationSpec> = {},
+  ): TypedToolOperationSpec => ({
+    name,
+    description: name,
+    effect: "read",
+    argv: [name],
+    ...extra,
+  });
+
+  it("maps each slash command to its read operation, first tool by name wins", () => {
+    expect(
+      assignTypedToolSlashCommands([
+        { name: "zeta_tool", operations: [op("about", { slashCommand: "version" })] },
+        {
+          name: "alpha_tool",
+          operations: [
+            op("version", { slashCommand: "version" }),
+            op("ping", { slashCommand: "ping" }),
+            op("plain"),
+            op("apply", { effect: "change", slashCommand: "apply" }),
+          ],
+        },
+      ]),
+    ).toEqual({
+      tools: [
+        expect.objectContaining({
+          name: "alpha_tool",
+          slashCommands: { ping: "ping", version: "version" },
+        }),
+        expect.not.objectContaining({ slashCommands: expect.anything() }),
+      ],
+      conflicts: [{ slashCommand: "version", toolName: "zeta_tool", claimedBy: "alpha_tool" }],
+    });
   });
 });
 
