@@ -99,9 +99,16 @@ gateway_url() {
 invoke_status() {
   local header_file=$1 url
   url="$(gateway_url)"
+  # With several agents the gateway needs an owned session key, as the bots
+  # send one (agent:<id>:main); "main" alone is rejected with 400.
+  jq -c --arg tool "$PROBE_TOOL" '
+    ((.agents.entries // {} | keys) + [.agents.list[]?.id]) as $ids
+    | {tool: $tool, args: {}}
+      + (if ($ids | length) > 0 then {sessionKey: "agent:\($ids[0]):main"} else {} end)
+  ' "$work_dir/config.json" >"$work_dir/request.json"
   local args=(-s -o "$work_dir/body" -w '%{http_code}' --max-time 15 -X POST
     -H 'Content-Type: application/json'
-    --data "{\"tool\":\"$PROBE_TOOL\",\"args\":{}}")
+    --data "@$work_dir/request.json")
   [[ -n "$header_file" ]] && args+=(-H "@$header_file")
   curl "${args[@]}" "$url" || true
 }
