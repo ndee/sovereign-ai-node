@@ -44,6 +44,11 @@ for homeserver in "$STATE_DIR"/bundled-matrix/*/synapse/homeserver.yaml; do
   add_secret "registration shared secret" "$shared_secret"
 done
 
+openclaw_config="${OPENCLAW_CONFIG:-$STATE_DIR/openclaw-home/.openclaw/openclaw.json5}"
+if [[ -f "$openclaw_config" ]]; then
+  add_secret "OpenClaw gateway token" "$(jq -r '.gateway.auth.token | strings' "$openclaw_config" 2>/dev/null || true)"
+fi
+
 if ((${#secrets[@]} >= 3)); then
   pass "collected ${#secrets[@]} install credentials to look for"
 else

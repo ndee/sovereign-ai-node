@@ -816,7 +816,10 @@ describe("defaults", () => {
     });
     expect(defaultNodeKnownSecretSources()).toEqual({
       secretDirs: [DEFAULT_PATHS.secretsDir],
-      structuredFiles: [DEFAULT_PATHS.configPath],
+      structuredFiles: [
+        DEFAULT_PATHS.configPath,
+        "/var/lib/sovereign-node/openclaw-home/.openclaw/openclaw.json5",
+      ],
       recordDirs: [DEFAULT_PATHS.installJobsDir],
     });
   });
