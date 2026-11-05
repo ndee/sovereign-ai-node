@@ -60,6 +60,7 @@ import {
   type MatrixOnboardingReadiness,
   type PreflightResult,
   type ReconfigureResult,
+  type ReconfigureWarning,
   type RelayDns01Input,
   type SettingsSummary,
   type SetupUiBootstrapIssueResult,
@@ -160,6 +161,11 @@ import {
   type MatrixAvatarResolver,
 } from "../system/matrix-avatars.js";
 import type { OpenrouterKeyValidator } from "../system/openrouter.js";
+import {
+  type OpenrouterServability,
+  type OpenrouterServabilityChecker,
+  openrouterLookupModelId,
+} from "../system/openrouter-servability.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
 import { formatGiB, parseDfAvailableBytes } from "../system/preflight.js";
 import {
@@ -602,6 +608,8 @@ type RealInstallerServiceDeps = {
   imapTester: ImapTester;
   /** Optional: when absent, OpenRouter keys are accepted without a live check. */
   openrouterKeyValidator?: OpenrouterKeyValidator;
+  /** Optional: when absent, OpenRouter models are saved without a servability check. */
+  openrouterServabilityChecker?: OpenrouterServabilityChecker;
   matrixProvisioner: BundledMatrixProvisioner;
   execRunner?: ExecRunner;
   fetchImpl?: FetchLike;
@@ -658,6 +666,8 @@ export class RealInstallerService implements InstallerService {
   private readonly imapTester: ImapTester;
 
   private readonly openrouterKeyValidator: OpenrouterKeyValidator | null;
+
+  private readonly openrouterServabilityChecker: OpenrouterServabilityChecker | null;
 
   private readonly matrixProvisioner: BundledMatrixProvisioner;
 
@@ -746,6 +756,7 @@ export class RealInstallerService implements InstallerService {
     };
     this.imapTester = deps.imapTester;
     this.openrouterKeyValidator = deps.openrouterKeyValidator ?? null;
+    this.openrouterServabilityChecker = deps.openrouterServabilityChecker ?? null;
     this.matrixProvisioner = deps.matrixProvisioner;
     this.execRunner = deps.execRunner ?? null;
     this.fetchImpl = deps.fetchImpl ?? defaultFetch;
@@ -2473,6 +2484,19 @@ export class RealInstallerService implements InstallerService {
         : runtimeConfig.openrouter.model;
     const modelChanged = nextModel !== runtimeConfig.openrouter.model;
 
+    const nextPrivacy =
+      privacyUpdate === undefined
+        ? runtimeConfig.openrouter.privacy
+        : mergeOpenRouterPrivacy(runtimeConfig.openrouter.privacy, privacyUpdate.data);
+    const privacyChanged = !sameOpenRouterPrivacy(nextPrivacy, runtimeConfig.openrouter.privacy);
+
+    // Runs before anything is written: a refused review model leaves the
+    // previous settings, secret and gateway untouched.
+    const warnings =
+      req.openrouter.model === undefined && req.openrouter.privacy === undefined
+        ? []
+        : await this.checkOpenrouterServability(runtimeConfig, nextModel, nextPrivacy);
+
     let nextSecretRef = runtimeConfig.openrouter.apiKeySecretRef;
     let credentialsChanged = false;
     if (req.openrouter.apiKey !== undefined) {
@@ -2486,12 +2510,6 @@ export class RealInstallerService implements InstallerService {
       credentialsChanged = nextSecretRef !== runtimeConfig.openrouter.apiKeySecretRef;
     }
 
-    const nextPrivacy =
-      privacyUpdate === undefined
-        ? runtimeConfig.openrouter.privacy
-        : mergeOpenRouterPrivacy(runtimeConfig.openrouter.privacy, privacyUpdate.data);
-    const privacyChanged = !sameOpenRouterPrivacy(nextPrivacy, runtimeConfig.openrouter.privacy);
-
     const runtimeChanged = modelChanged || credentialsChanged || privacyChanged;
     const changed: string[] = [];
     if (modelChanged) {
@@ -2504,7 +2522,7 @@ export class RealInstallerService implements InstallerService {
       changed.push("openrouter.privacy");
     }
 
-    let gatewayReadiness: GatewayReadinessOutcome | undefined;
+    let gatewayRefresh: GatewayRefreshReport | undefined;
     if (runtimeChanged) {
       const openrouterConfig = isRecord(parsed.openrouter) ? parsed.openrouter : {};
       openrouterConfig.provider = "openrouter";
@@ -2529,7 +2547,11 @@ export class RealInstallerService implements InstallerService {
       };
       await this.writeOpenClawRuntimeArtifacts(nextRuntimeConfig);
       this.setManagedOpenClawEnv(nextRuntimeConfig);
-      gatewayReadiness = await this.refreshGatewayAfterRuntimeConfig(nextRuntimeConfig);
+      // On a system-unit host `openclaw gateway restart` only signals the
+      // running process, which keeps serving the previous routing settings.
+      gatewayRefresh = await this.refreshGatewayWithRestartReport(nextRuntimeConfig, {
+        preferInstalledSystemUnit: true,
+      });
     }
 
     const requestUpdate = await this.updateInstallRequestOpenrouter({
@@ -2545,7 +2567,7 @@ export class RealInstallerService implements InstallerService {
     return {
       target: "openrouter",
       changed,
-      restartRequiredServices: gatewayReadiness === undefined ? [] : ["openclaw-gateway"],
+      restartRequiredServices: gatewayRefresh === undefined ? [] : ["openclaw-gateway"],
       validation: [
         check(
           "openrouter-runtime",
@@ -2555,19 +2577,125 @@ export class RealInstallerService implements InstallerService {
             ? "OpenRouter runtime config updated"
             : "OpenRouter runtime config already matched the requested values",
         ),
-        ...(gatewayReadiness === undefined
-          ? []
-          : [
-              gatewayRestartCheck(
-                gatewayReadiness,
-                "OpenClaw gateway restarted with updated OpenRouter settings",
-              ),
-            ]),
+        ...(gatewayRefresh === undefined ? [] : [openrouterGatewayRestartCheck(gatewayRefresh)]),
         ...requestUpdate.validation,
       ],
-      ...(gatewayReadiness === undefined
+      ...(gatewayRefresh === undefined
         ? {}
-        : { gateway: summarizeGatewayReadiness(gatewayReadiness) }),
+        : {
+            gateway: {
+              ...summarizeGatewayReadiness(gatewayRefresh.outcome),
+              ...gatewayRefresh.restart,
+            },
+          }),
+      ...(warnings.length === 0 ? {} : { warnings }),
+    };
+  }
+
+  /**
+   * Refuses (OPENROUTER_MODEL_NOT_SERVABLE) when OpenRouter cannot serve the
+   * review model `openrouter.model` under the routing restrictions, and
+   * returns warnings for agents whose own model it cannot serve, and for
+   * every lookup that could not be completed. Reviews run on
+   * `openrouter.model`; an agent with an unservable model only loses its
+   * chat replies, so that never blocks the save.
+   */
+  private async checkOpenrouterServability(
+    runtimeConfig: RuntimeConfig,
+    reviewModel: string,
+    privacy: OpenRouterPrivacyConfig,
+  ): Promise<ReconfigureWarning[]> {
+    if (this.openrouterServabilityChecker === null) {
+      return [];
+    }
+    const reviewModelId = openrouterLookupModelId(normalizeOpenClawAgentModel(reviewModel));
+    const agentModels = ensureCoreManagedAgents(runtimeConfig.openclawProfile.agents).flatMap(
+      (agent) => {
+        const ref =
+          agent.model === undefined
+            ? normalizeOpenClawAgentModel(reviewModel)
+            : normalizeOpenClawAgentModel(agent.model);
+        return /^openrouter\//i.test(ref)
+          ? [{ agentId: agent.id, model: openrouterLookupModelId(ref) }]
+          : [];
+      },
+    );
+    const models = Array.from(new Set([reviewModelId, ...agentModels.map((entry) => entry.model)]));
+    const verdicts = new Map(
+      (await this.openrouterServabilityChecker.check(models, privacy)).map((verdict) => [
+        verdict.model,
+        verdict,
+      ]),
+    );
+    const restriction = describeOpenrouterRestriction(privacy);
+    const review = verdicts.get(reviewModelId);
+    if (review?.status === "unservable") {
+      throw {
+        code: "OPENROUTER_MODEL_NOT_SERVABLE",
+        message: `OpenRouter cannot serve ${reviewModelId} under the routing restrictions (${restriction}): ${describeUnservable(review)}. Nothing was changed.`,
+        retryable: false,
+        details: {
+          model: reviewModelId,
+          reason: review.reason,
+          endpoints: review.endpoints,
+          restriction: {
+            ...(privacy.only === undefined ? {} : { only: privacy.only }),
+            zdr: privacy.zdr,
+          },
+        },
+      };
+    }
+    const warnings: ReconfigureWarning[] = [];
+    if (review?.status === "unknown") {
+      warnings.push({
+        code: "OPENROUTER_SERVABILITY_UNKNOWN",
+        message: `Could not check whether OpenRouter can serve ${reviewModelId}: ${review.message}. The settings were saved unchecked.`,
+        model: reviewModelId,
+      });
+    }
+    for (const { agentId, model } of agentModels) {
+      const verdict = model === reviewModelId ? undefined : verdicts.get(model);
+      if (verdict?.status === "unservable") {
+        warnings.push({
+          code: "OPENROUTER_AGENT_MODEL_NOT_SERVABLE",
+          message: `Agent ${agentId} uses ${model}, which OpenRouter cannot serve under the routing restrictions (${restriction}): ${describeUnservable(verdict)}. Its replies fail until its model or the restrictions change.`,
+          agentId,
+          model,
+        });
+      } else if (verdict?.status === "unknown") {
+        warnings.push({
+          code: "OPENROUTER_SERVABILITY_UNKNOWN",
+          message: `Could not check whether OpenRouter can serve ${model} (agent ${agentId}): ${verdict.message}.`,
+          agentId,
+          model,
+        });
+      }
+    }
+    return warnings;
+  }
+
+  /** `restarted` is true only when systemd reports a new gateway invocation. */
+  private async refreshGatewayWithRestartReport(
+    runtimeConfig: RuntimeConfig,
+    options: GatewayRefreshOptions,
+  ): Promise<GatewayRefreshReport> {
+    // The unit actually restarted is only known afterwards, so both are read.
+    const before: Record<string, string | null> = {
+      [SOVEREIGN_GATEWAY_SYSTEMD_UNIT]: await this.readGatewayInvocationId(
+        SOVEREIGN_GATEWAY_SYSTEMD_UNIT,
+      ),
+      [USER_GATEWAY_SYSTEMD_UNIT]: await this.readGatewayInvocationId(USER_GATEWAY_SYSTEMD_UNIT),
+    };
+    const outcome = await this.refreshGatewayAfterRuntimeConfig(runtimeConfig, options);
+    const invocationIdBefore = outcome.unit === undefined ? null : (before[outcome.unit] ?? null);
+    const invocationIdAfter = await this.readGatewayInvocationId(outcome.unit);
+    return {
+      outcome,
+      restart: {
+        invocationIdBefore,
+        invocationIdAfter,
+        restarted: invocationIdAfter !== null && invocationIdAfter !== invocationIdBefore,
+      },
     };
   }
 
@@ -14664,6 +14792,15 @@ type HostPlanOpenClawCli = {
 
 type GatewayRefreshOptions = GatewayStartOptions & { preferInstalledSystemUnit?: boolean };
 
+type GatewayRefreshReport = {
+  outcome: GatewayReadinessOutcome;
+  restart: {
+    invocationIdBefore: string | null;
+    invocationIdAfter: string | null;
+    restarted: boolean;
+  };
+};
+
 type RuntimeRefreshState = {
   runtimeConfig: RuntimeConfig;
   report: ReconcileRuntimeRefreshReport;
@@ -14720,6 +14857,39 @@ const gatewayRestartCheck = (
         `Settings applied, but ${describeGatewayNotReady(outcome)}`,
         { ...outcome },
       );
+
+const openrouterGatewayRestartCheck = ({ outcome, restart }: GatewayRefreshReport): CheckResult => {
+  if (!outcome.ready || restart.restarted) {
+    return gatewayRestartCheck(
+      outcome,
+      "OpenClaw gateway restarted with updated OpenRouter settings",
+    );
+  }
+  return check(
+    "openclaw-gateway-restart",
+    "OpenClaw gateway restart",
+    "warn",
+    restart.invocationIdAfter === null
+      ? "Settings written and the OpenClaw gateway answers, but its restart could not be confirmed (systemd invocation unreadable)"
+      : "Settings written, but the OpenClaw gateway was not restarted (systemd invocation unchanged); the new OpenRouter settings may not be active until it restarts",
+    { ...outcome, ...restart },
+  );
+};
+
+const describeOpenrouterRestriction = (privacy: OpenRouterPrivacyConfig): string =>
+  [
+    ...(privacy.only === undefined ? [] : [`providers: ${privacy.only.join(", ")}`]),
+    ...(privacy.zdr ? ["zero data retention"] : []),
+  ].join("; ") || "no provider restriction";
+
+const describeUnservable = (
+  verdict: Extract<OpenrouterServability, { status: "unservable" }>,
+): string =>
+  verdict.reason === "unknown-model"
+    ? "OpenRouter does not list this model"
+    : verdict.endpoints.length === 0
+      ? "OpenRouter lists no endpoint for it"
+      : `it is served only by ${verdict.endpoints.join(", ")}`;
 
 const readRetryAfterMs = (body: unknown): number | undefined =>
   isRecord(body) &&

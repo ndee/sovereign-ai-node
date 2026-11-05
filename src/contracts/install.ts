@@ -357,6 +357,13 @@ export const gatewayReadinessSummarySchema = z.object({
   readyAt: isoTimestampSchema.optional(),
   waitedMs: z.number().int().nonnegative(),
   deadlineMs: z.number().int().nonnegative(),
+  // systemd InvocationID of the gateway unit around the restart; null when it
+  // could not be read. `restarted` is true only when systemd shows a new
+  // invocation: the gateway can answer again without having restarted (an
+  // in-process reload keeps the old process and its settings).
+  invocationIdBefore: z.string().min(1).nullable().optional(),
+  invocationIdAfter: z.string().min(1).nullable().optional(),
+  restarted: z.boolean().optional(),
 });
 
 export const installJobStatusResponseSchema = z.object({
@@ -438,6 +445,14 @@ export const doctorReportSchema = z.object({
   suggestedCommands: z.array(z.string()),
 });
 
+// `agentId` is absent when the warning is about `openrouter.model` itself.
+export const reconfigureWarningSchema = z.object({
+  code: z.string().min(1),
+  message: z.string().min(1),
+  agentId: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
+});
+
 export const reconfigureResultSchema = z.object({
   target: z.enum(["imap", "matrix", "openrouter"]),
   changed: z.array(z.string()),
@@ -450,6 +465,8 @@ export const reconfigureResultSchema = z.object({
   // Present when the gateway was restarted: by the reconfigure itself, or by
   // the install job a client waited for.
   gateway: gatewayReadinessSummarySchema.optional(),
+  // Problems that did not stop the change. Absent when there are none.
+  warnings: z.array(reconfigureWarningSchema).optional(),
 });
 
 // Non-secret view of the installer-entered settings that can be changed after
@@ -578,6 +595,7 @@ export type SovereignStatus = z.infer<typeof sovereignStatusSchema>;
 export type DoctorReport = z.infer<typeof doctorReportSchema>;
 export type TestAlertResult = z.infer<typeof testAlertResultSchema>;
 export type ReconfigureResult = z.infer<typeof reconfigureResultSchema>;
+export type ReconfigureWarning = z.infer<typeof reconfigureWarningSchema>;
 export type TestImapResult = z.infer<typeof testImapResultSchema>;
 export type MailProtocol = z.infer<typeof mailProtocolSchema>;
 export type SettingsSummary = z.infer<typeof settingsSummarySchema>;

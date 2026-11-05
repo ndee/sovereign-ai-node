@@ -433,6 +433,30 @@ jobs:
       - name: Verify /version answers through the typed-tool plugin without a model
         run: sudo env "PATH=$PATH" bash scripts/ci/verify-typed-tool-slash-command.sh
 
+      # A model OpenRouter does not list is refused before anything is written.
+      # The verdict comes from OpenRouter's public metadata; when that cannot be
+      # reached the node saves with a warning instead, so the step is skipped.
+      - name: Verify an unservable OpenRouter model is refused and nothing is written
+        run: |
+          if ! curl -sf -o /dev/null --max-time 20 https://openrouter.ai/api/v1/models/qwen/qwen3-30b-a3b-instruct-2507/endpoints; then
+            echo "::warning::OpenRouter metadata unreachable from this runner; servability refusal not exercised"
+            exit 0
+          fi
+          config_before="$(sudo sha256sum /etc/sovereign-node/sovereign-node.json5)"
+          invocation_before="$(systemctl show -p InvocationID --value sovereign-openclaw-gateway.service)"
+          rc=0
+          # The error envelope goes to stderr, after any log lines.
+          sudo env "PATH=$PATH" sovereign-node reconfigure openrouter \
+            --model ci-vendor/ci-unservable-probe --json 2> /tmp/reconfigure-unservable.log || rc=$?
+          jq -s '[.[] | select(.command? == "reconfigure openrouter")] | last' \
+            /tmp/reconfigure-unservable.log > /tmp/reconfigure-unservable.json
+          jq . /tmp/reconfigure-unservable.json
+          test "$rc" -ne 0
+          jq -e '.ok == false and .error.code == "OPENROUTER_MODEL_NOT_SERVABLE"
+            and .error.details.reason == "unknown-model"' /tmp/reconfigure-unservable.json > /dev/null
+          test "$(sudo sha256sum /etc/sovereign-node/sovereign-node.json5)" = "$config_before"
+          test "$(systemctl show -p InvocationID --value sovereign-openclaw-gateway.service)" = "$invocation_before"
+
       # A gateway that is up but never listens must be reported as not ready
       # (warn, exit 0 for this command) rather than as restarted. The drop-in
       # keeps the unit active without ever opening the port; it adds sleep to
@@ -444,12 +468,14 @@ jobs:
           printf '[Service]\nExecPaths=/usr/bin/sleep\nExecStart=\nExecStart=/usr/bin/sleep 600\n' | sudo tee "$dropin/ci-never-listens.conf" > /dev/null
           rc=0
           sudo env "PATH=$PATH" SOVEREIGN_NODE_GATEWAY_READY_TIMEOUT_MS=30000 \
-            sovereign-node reconfigure openrouter --model openrouter/ci-not-ready-probe --json \
+            sovereign-node reconfigure openrouter --model qwen/qwen3-30b-a3b-instruct-2507 --json \
             > /tmp/reconfigure.json || rc=$?
           jq . /tmp/reconfigure.json
           test "$rc" -eq 0
           jq -e '
             .result.gateway.ready == false
+            and .result.gateway.restarted == true
+            and .result.gateway.invocationIdAfter != .result.gateway.invocationIdBefore
             and .result.gateway.deadlineMs == 30000
             and ([.result.validation[] | select(.id == "openclaw-gateway-restart" and .status == "warn")] | length) == 1
           ' /tmp/reconfigure.json > /dev/null
@@ -845,9 +871,12 @@ jobs:
       - name: Reconfigure OpenRouter through the setup API and require a restarted, ready gateway
         run: |
           before="$(systemctl show -p ActiveEnterTimestampMonotonic --value sovereign-openclaw-gateway.service)"
-          sudo env "PATH=$PATH" bash "$WEB_E2E" reconfigure-openrouter openrouter/ci-web-reconfigure-probe /tmp/web-reconfigure.json
+          sudo env "PATH=$PATH" bash "$WEB_E2E" reconfigure-openrouter qwen/qwen3-30b-a3b-instruct-2507 /tmp/web-reconfigure.json
           jq -e '
             .result.gateway.ready == true
+            and .result.gateway.restarted == true
+            and .result.gateway.invocationIdBefore != null
+            and .result.gateway.invocationIdAfter != .result.gateway.invocationIdBefore
             and ([.result.validation[] | select(.id == "openclaw-gateway-restart" and .status == "pass")] | length) == 1
           ' /tmp/web-reconfigure.json > /dev/null
           after="$(systemctl show -p ActiveEnterTimestampMonotonic --value sovereign-openclaw-gateway.service)"
