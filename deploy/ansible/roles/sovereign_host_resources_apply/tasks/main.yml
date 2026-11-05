@@ -49,10 +49,12 @@
   loop_control:
     label: "{{ item.path | dirname }}"
 
+# `string` marks the content as text, so ansible-core up to 2.18 does not turn
+# JSON file content into a dict and write it back reformatted.
 - name: Write managed files and state files
   ansible.builtin.copy:
     dest: "{{ item.path }}"
-    content: "{{ item.content }}"
+    content: "{{ item.content | string }}"
     mode: "{{ item.mode | default('0644') }}"
     owner: "{{ item.owner | default(omit) }}"
     group: "{{ item.group | default(omit) }}"
@@ -65,7 +67,7 @@
 - name: Write managed systemd units
   ansible.builtin.copy:
     dest: "/etc/systemd/system/{{ item.name }}"
-    content: "{{ item.content }}"
+    content: "{{ item.content | string }}"
     mode: "0644"
   loop: "{{ sovereign_host_resource_systemd }}"
   loop_control:
@@ -126,28 +128,19 @@
   failed_when: false
   when: sovereign_host_resource_crons | length > 0
 
-- name: Normalize OpenClaw cron list
-  ansible.builtin.command:
-    argv:
-      - python3
-      - -c
-      - |
-        import json
-        import sys
-
-        raw = json.load(sys.stdin) if sys.stdin.readable() else []
-        if isinstance(raw, list):
-            jobs = raw
-        else:
-            jobs = raw.get("jobs") or raw.get("crons") or []
-        json.dump(jobs, sys.stdout)
-    stdin: "{{ sovereign_host_resources_openclaw_cron_list.stdout if (sovereign_host_resources_openclaw_cron_list.rc | default(1)) == 0 else '[]' }}"
-  register: sovereign_host_resources_openclaw_cron_jobs
-  changed_when: false
-
+# Parsed here rather than handed to a helper process: ansible-core up to 2.18
+# turns a templated value that looks like JSON into a Python dict or list, and
+# a string module parameter (stdin, content) then receives its Python repr.
+# The CLI prints an object with `jobs` (or `crons`) or a bare list; a failed
+# or silent call counts as no jobs.
 - name: Cache OpenClaw cron jobs
   ansible.builtin.set_fact:
-    sovereign_host_resources_openclaw_jobs: "{{ sovereign_host_resources_openclaw_cron_jobs.stdout | from_json }}"
+    sovereign_host_resources_openclaw_jobs: >-
+      {%- set listed = sovereign_host_resources_openclaw_cron_list -%}
+      {%- set raw = (listed.stdout | from_json)
+            if (listed.rc | default(1)) == 0 and (listed.stdout | default('') | trim) != ''
+            else [] -%}
+      {{ (raw.get('jobs') or raw.get('crons') or []) if raw is mapping else raw }}
 
 - name: Remove superseded or absent OpenClaw cron jobs
   ansible.builtin.command:
