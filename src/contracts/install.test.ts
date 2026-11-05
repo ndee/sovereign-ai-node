@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { installRequestSchema, matrixOnboardingReadinessSchema } from "./install.js";
+import {
+  installRequestSchema,
+  matrixOnboardingReadinessSchema,
+  reconfigureResultSchema,
+} from "./install.js";
 
 describe("installRequestSchema", () => {
   it("accepts managed relay requests without an enrollment token", () => {
@@ -216,5 +220,60 @@ describe("matrixOnboardingReadinessSchema", () => {
     expect(() =>
       matrixOnboardingReadinessSchema.parse({ ready: false, url: "", mode: "carrier-pigeon" }),
     ).toThrow();
+  });
+});
+
+describe("reconfigureResultSchema", () => {
+  const base = {
+    target: "openrouter",
+    changed: ["openrouter.privacy"],
+    restartRequiredServices: ["openclaw-gateway"],
+    validation: [],
+  };
+
+  it("still accepts a result without the restart report or warnings", () => {
+    expect(
+      reconfigureResultSchema.parse({
+        ...base,
+        gateway: { ready: true, waitedMs: 1, deadlineMs: 300_000 },
+      }),
+    ).not.toHaveProperty("warnings");
+  });
+
+  it("carries the restart report and warnings", () => {
+    const result = {
+      ...base,
+      gateway: {
+        ready: true,
+        waitedMs: 1,
+        deadlineMs: 300_000,
+        invocationIdBefore: null,
+        invocationIdAfter: "c0ffee",
+        restarted: true,
+      },
+      warnings: [
+        {
+          code: "OPENROUTER_AGENT_MODEL_NOT_SERVABLE",
+          message: "Agent mail-sentinel uses qwen/qwen3.5-27b, which OpenRouter cannot serve",
+          agentId: "mail-sentinel",
+          model: "qwen/qwen3.5-27b",
+        },
+        { code: "OPENROUTER_SERVABILITY_UNKNOWN", message: "Could not check" },
+      ],
+    };
+    expect(reconfigureResultSchema.parse(result)).toEqual(result);
+  });
+
+  it("rejects an empty invocation id or a warning without a code", () => {
+    expect(
+      reconfigureResultSchema.safeParse({
+        ...base,
+        gateway: { ready: true, waitedMs: 1, deadlineMs: 1, invocationIdAfter: "" },
+      }).success,
+    ).toBe(false);
+    expect(
+      reconfigureResultSchema.safeParse({ ...base, warnings: [{ code: "", message: "x" }] })
+        .success,
+    ).toBe(false);
   });
 });

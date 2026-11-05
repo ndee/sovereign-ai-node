@@ -521,6 +521,7 @@ Behavior:
 - a new `--api-key` is validated against OpenRouter's key endpoint (`GET /api/v1/auth/key`, no completion, no credit usage) before anything is written; a rejected key returns `changed = []` with an `openrouter-key` check of `fail` and keeps the previous key
 - the key is stored at `/etc/sovereign-node/secrets/openrouter-api-key` (mode `0600`); it is never logged and never echoed in results
 - the OpenClaw gateway is restarted so the new key takes effect; a gateway that is still starting at its readiness deadline does not fail the command: the `openclaw-gateway-restart` check is `warn` and `result.gateway.ready` is `false` (the same applies to `reconfigure matrix`). Only a gateway unit that failed to start is an error (`OPENCLAW_GATEWAY_RESTART_FAILED`)
+- `--model` and `--provider-only` run the servability check of `POST /api/reconfigure/openrouter`: an unservable review model fails the command with `OPENROUTER_MODEL_NOT_SERVABLE` and changes nothing; agent-model problems and incomplete lookups are reported in `result.warnings`. `result.gateway.restarted` says whether systemd shows a new gateway invocation
 
 `--json` result schema:
 
@@ -972,8 +973,14 @@ type GatewayReadinessSummary = {
   readyAt?: ISO8601; // when it was first seen listening
   waitedMs: number;
   deadlineMs: number;
+  // Restart report; currently set by `POST /api/reconfigure/openrouter` only:
+  invocationIdBefore?: string | null; // systemd InvocationID of the gateway unit before the restart
+  invocationIdAfter?: string | null; // ... and after it; null = could not be read
+  restarted?: boolean; // true only when invocationIdAfter is non-null and differs from invocationIdBefore
 };
 ```
+
+`ready` alone does not prove a restart: a gateway that reloads in-process answers again with the same process. `restarted` is the restart signal. A unit that was not running before (`invocationIdBefore: null`) and runs afterwards counts as restarted; when `invocationIdAfter` cannot be read, `restarted` is `false` (not proven).
 
 A job that applied its configuration but whose gateway was not listening by the deadline still ends `succeeded`; its `gateway_ready` step is `warned` with `error.code = "OPENCLAW_GATEWAY_NOT_READY"` and `error.details = { unit, unitStarted, waitedMs, deadlineMs, lastProbe }`, and `gateway.ready` is `false`. The `smoke_checks` step then records an `openclaw-gateway` check with status `warn` in `details.checks` instead of skipping the gateway checks silently.
 
@@ -1094,6 +1101,14 @@ type ReconfigureResult = {
   validation: CheckResult[];
   job?: InstallJobSummary; // when applied through the install job
   gateway?: GatewayReadinessSummary; // when the gateway was restarted
+  warnings?: ReconfigureWarning[]; // problems that did not stop the change; absent when none
+};
+
+type ReconfigureWarning = {
+  code: string; // e.g. "OPENROUTER_AGENT_MODEL_NOT_SERVABLE", "OPENROUTER_SERVABILITY_UNKNOWN"
+  message: string; // operator-facing sentence
+  agentId?: string; // the agent concerned; absent when the warning is about openrouter.model
+  model?: string; // OpenRouter model id, e.g. "qwen/qwen3.5-27b"
 };
 ```
 
@@ -1383,6 +1398,45 @@ Constraints:
   (`request.openrouter.privacy`), and the OpenClaw gateway is restarted. `changed` reports
   `openrouter.privacy` and `request.openrouter.privacy`; asking for the block already in
   place changes and restarts nothing
+
+Servability check (every request that carries `model` or `privacy`; key-only and
+`secretRef`-only requests are not checked):
+
+- before anything is written, the node asks OpenRouter's public model metadata (no API key
+  is sent) whether each OpenRouter model in use can be served under the resulting routing
+  restrictions: the review model `openrouter.model`, and the effective model of each agent
+  (`agents.list[].model`, or `openrouter.model` when an agent has none; non-OpenRouter
+  models are skipped). Each distinct model is looked up once
+- a model is servable when at least one endpoint from
+  `GET https://openrouter.ai/api/v1/models/<model>/endpoints` passes the provider allow-list
+  (`only` entries match an endpoint's provider slug, e.g. `nebius`, or its exact tag, e.g.
+  `nebius/fp8`, case-insensitively) and, when `zdr` is on, is listed by
+  `GET https://openrouter.ai/api/v1/endpoints/zdr` (same `model_id` and `tag`). A model
+  OpenRouter does not list (HTTP 404) is not servable. `dataCollection` and endpoint health
+  are not evaluated
+- **review model not servable:** the request fails with `OPENROUTER_MODEL_NOT_SERVABLE`
+  (HTTP 400, `retryable: false`, `details = { model, reason: "unknown-model" |
+  "no-allowed-endpoint", endpoints: string[], restriction: { only?, zdr } }`, where
+  `endpoints` lists every endpoint tag OpenRouter has for the model). Nothing is written:
+  config, secret, saved request and gateway are untouched
+- **an agent's model not servable:** the change is applied and `result.warnings` carries one
+  `OPENROUTER_AGENT_MODEL_NOT_SERVABLE` entry per agent (`agentId`, `model`). That agent's
+  chat replies fail until its model or the restrictions change; reviews are not affected
+- **lookup not completed** (timeout, network error, HTTP 5xx or another non-404 error,
+  unexpected answer): never blocks the save. `result.warnings` carries
+  `OPENROUTER_SERVABILITY_UNKNOWN`, with `agentId` for an agent's model and without it for
+  `openrouter.model`
+- warnings are reported on every checked request, also when nothing changed, so re-saving
+  the current setting returns the current state
+
+Gateway restart report:
+
+- an installed system gateway unit is restarted through systemd (the same path as
+  `reconcile --refresh-runtime`); otherwise the user unit is restarted
+- `result.gateway` carries `invocationIdBefore`, `invocationIdAfter` and `restarted` (see
+  `GatewayReadinessSummary`). The `openclaw-gateway-restart` check is `pass` only when the
+  gateway is ready and `restarted` is `true`; a ready gateway with an unchanged or unreadable
+  invocation gives `warn`
 
 Response:
 

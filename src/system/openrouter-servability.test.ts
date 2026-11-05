@@ -156,7 +156,12 @@ describe("HttpOpenrouterServabilityChecker", () => {
     const checker = new HttpOpenrouterServabilityChecker({ fetch });
 
     await expect(checker.check(["vendor/no-such-model"], strict)).resolves.toEqual([
-      { model: "vendor/no-such-model", status: "unservable", reason: "unknown-model", endpoints: [] },
+      {
+        model: "vendor/no-such-model",
+        status: "unservable",
+        reason: "unknown-model",
+        endpoints: [],
+      },
     ]);
   });
 
@@ -296,6 +301,7 @@ describe("HttpOpenrouterServabilityChecker", () => {
     it.each([
       ["not JSON", new Response("<html>", { status: 200 })],
       ["no data", json({ nope: true })],
+      ["not an object", json([])],
       ["no endpoint list", json({ data: { id: QWEN_30B } })],
     ])("on a malformed model answer (%s)", async (_label, response) => {
       const { fetch } = fakeOpenRouter({
@@ -312,10 +318,13 @@ describe("HttpOpenrouterServabilityChecker", () => {
       });
     });
 
-    it("on a malformed ZDR list", async () => {
+    it.each([
+      ["no list", { data: "x" }],
+      ["not an object", []],
+    ])("on a malformed ZDR list (%s)", async (_label, body) => {
       const { fetch } = fakeOpenRouter({
         ...metadata,
-        override: (url) => (url.endsWith("/endpoints/zdr") ? json({ data: "x" }) : undefined),
+        override: (url) => (url.endsWith("/endpoints/zdr") ? json(body) : undefined),
       });
       const checker = new HttpOpenrouterServabilityChecker({ fetch });
 

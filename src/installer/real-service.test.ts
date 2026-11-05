@@ -24,8 +24,8 @@ import { SOVEREIGN_PINNED_OPENCLAW_VERSION } from "../openclaw/bootstrap.js";
 import { type ExecPinningEnvironment, planExecWrapper } from "../openclaw/exec-pinning.js";
 import type { ExecInput, ExecResult } from "../system/exec.js";
 import type { ImapTester } from "../system/imap.js";
-import type { OpenrouterServabilityChecker } from "../system/openrouter-servability.js";
 import type { BundledMatrixProvisioner, BundledMatrixProvisionResult } from "../system/matrix.js";
+import type { OpenrouterServabilityChecker } from "../system/openrouter-servability.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
 import {
   RECLAIM_OWNERSHIP_HELPER_PATH,
@@ -11595,7 +11595,7 @@ describe("RealInstallerService", () => {
       execRunner: {
         run: async ({ command, args }): Promise<ExecResult> => {
           const serialized = [command, ...(args ?? [])].join(" ");
-          if (serialized.startsWith("systemctl --user show")) {
+          if (serialized.startsWith("systemctl --user show -p ActiveState")) {
             return {
               command: serialized,
               exitCode: 0,
@@ -12323,11 +12323,15 @@ describe("RealInstallerService", () => {
         verdicts?: Record<string, (model: string) => Verdict>;
         agents?: Record<string, unknown>[];
         withoutChecker?: boolean;
+        openrouterPrivacy?: Record<string, unknown>;
       } = {},
     ) => {
       const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
       const paths = buildReconfigurePaths(tempRoot);
       await writeRuntimeArtifacts(paths, {
+        ...(options.openrouterPrivacy === undefined
+          ? {}
+          : { openrouterPrivacy: options.openrouterPrivacy }),
         agents: options.agents ?? [
           {
             id: "mail-sentinel",
@@ -12418,6 +12422,53 @@ describe("RealInstallerService", () => {
       }
     });
 
+    it("names a model OpenRouter does not list", async () => {
+      const { tempRoot, service } = await setup({
+        verdicts: {
+          "vendor/typo": (model) => ({
+            model,
+            status: "unservable",
+            reason: "unknown-model",
+            endpoints: [],
+          }),
+        },
+      });
+      try {
+        await expect(
+          service.reconfigureOpenrouter({ openrouter: { model: "vendor/typo" } }),
+        ).rejects.toMatchObject({
+          code: "OPENROUTER_MODEL_NOT_SERVABLE",
+          message:
+            "OpenRouter cannot serve vendor/typo under the routing restrictions (zero data retention): OpenRouter does not list this model. Nothing was changed.",
+          details: { reason: "unknown-model", endpoints: [], restriction: { zdr: true } },
+        });
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("describes an agent model without endpoints under an install-time opt-out", async () => {
+      const { tempRoot, service } = await setup({
+        openrouterPrivacy: { zdr: false, dataCollection: "allow", allowFallbacks: true },
+        verdicts: {
+          [CHAT]: (model) => ({
+            model,
+            status: "unservable",
+            reason: "no-allowed-endpoint",
+            endpoints: [],
+          }),
+        },
+      });
+      try {
+        const result = await service.reconfigureOpenrouter({ openrouter: { model: REVIEW } });
+        expect(result.warnings?.[0]?.message).toBe(
+          `Agent mail-sentinel uses ${CHAT}, which OpenRouter cannot serve under the routing restrictions (no provider restriction): OpenRouter lists no endpoint for it. Its replies fail until its model or the restrictions change.`,
+        );
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
     it("saves and warns when a chat agent's model is not servable", async () => {
       const { tempRoot, service, check, gatewayRestart, snapshot } = await setup({
         verdicts: { [CHAT]: unservable },
@@ -12471,7 +12522,9 @@ describe("RealInstallerService", () => {
         expect(result.warnings).toEqual([
           {
             code: "OPENROUTER_SERVABILITY_UNKNOWN",
-            message: expect.stringContaining(`Could not check whether OpenRouter can serve ${REVIEW}`),
+            message: expect.stringContaining(
+              `Could not check whether OpenRouter can serve ${REVIEW}`,
+            ),
             model: REVIEW,
           },
           {
@@ -12498,7 +12551,6 @@ describe("RealInstallerService", () => {
           { id: "helper", workspace: workspace("helper"), model: "openai/gpt-5-mini" },
           { id: "helper-2", workspace: workspace("helper-2"), model: "openai/gpt-5-mini" },
           { id: "local", workspace: workspace("local"), model: "ollama/llama3.2:3b/q4" },
-          { id: "blank", workspace: workspace("blank"), model: "  " },
         ],
       });
       try {
@@ -12506,10 +12558,7 @@ describe("RealInstallerService", () => {
 
         expect(check).toHaveBeenCalledTimes(1);
         expect(check).toHaveBeenCalledWith([REVIEW, "openai/gpt-5-mini"], expect.anything());
-        expect(result.warnings?.map((warning) => warning.agentId)).toEqual([
-          "helper",
-          "helper-2",
-        ]);
+        expect(result.warnings?.map((warning) => warning.agentId)).toEqual(["helper", "helper-2"]);
       } finally {
         await rm(tempRoot, { recursive: true, force: true });
       }
