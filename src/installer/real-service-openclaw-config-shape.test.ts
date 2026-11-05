@@ -1,7 +1,8 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import pino from "pino";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { SovereignPaths } from "../config/paths.js";
@@ -26,6 +27,7 @@ type Internals = {
 
 type RenderedConfig = {
   meta?: Record<string, unknown>;
+  gateway?: { mode?: string; bind?: string; auth?: Record<string, unknown> };
   agents?: {
     list?: Array<{ id: string; default?: boolean }>;
     entries?: Record<string, { tools?: { deny?: string[] } }>;
@@ -160,8 +162,9 @@ describe("OpenClaw config shape follows the installed OpenClaw", () => {
   const makeService = (input: {
     installedVersion: string | null;
     gateway?: () => Promise<{ ready: boolean }>;
+    logger?: ReturnType<typeof createLogger>;
   }) => {
-    const service = new RealInstallerService(createLogger(), paths, {
+    const service = new RealInstallerService(input.logger ?? createLogger(), paths, {
       openclawBootstrapper: {
         detectInstalled: async () =>
           input.installedVersion === null
@@ -341,6 +344,88 @@ describe("OpenClaw config shape follows the installed OpenClaw", () => {
 
     const unit = await readFile(join(tempRoot, "gateway.service"), "utf8");
     expect(unit).not.toContain(join(paths.openclawServiceHome, ".openclaw", "npm"));
+  });
+
+  describe("gateway auth", () => {
+    const writeExisting = async (config: RuntimeConfig, payload: Record<string, unknown>) => {
+      await mkdir(join(paths.openclawServiceHome, ".openclaw"), { recursive: true });
+      await writeFile(config.openclaw.runtimeConfigPath, JSON.stringify(payload), "utf8");
+    };
+
+    it.each([
+      "2026.3.13",
+      "2026.8.35",
+    ])("renders a generated gateway token on a fresh %s install and keeps it on re-render", async (installedVersion) => {
+      const config = runtimeConfig();
+      const service = makeService({ installedVersion });
+      await service.writeOpenClawRuntimeArtifacts(config);
+
+      const first = await readRendered(config);
+      expect(first.gateway).toEqual({
+        mode: "local",
+        bind: "loopback",
+        auth: { mode: "token", token: expect.stringMatching(/^[0-9a-f]{64}$/) },
+      });
+
+      await service.writeOpenClawRuntimeArtifacts(config);
+      expect((await readRendered(config)).gateway?.auth).toEqual(first.gateway?.auth);
+    });
+
+    it("keeps the token the gateway persisted itself across re-renders and an OpenClaw upgrade", async () => {
+      const config = runtimeConfig();
+      const persisted = { mode: "token", token: "c".repeat(48) };
+      await writeExisting(config, {
+        meta: { lastTouchedVersion: "2026.3.13" },
+        gateway: { mode: "local", bind: "loopback", auth: persisted },
+      });
+
+      await makeService({ installedVersion: "2026.3.13" }).writeOpenClawRuntimeArtifacts(config);
+      expect((await readRendered(config)).gateway?.auth).toEqual(persisted);
+
+      await makeService({ installedVersion: "2026.8.35" }).writeOpenClawRuntimeArtifacts(config);
+      const rendered = await readRendered(config);
+      expect(rendered.agents?.ownership).toBe("explicit");
+      expect(rendered.gateway?.auth).toEqual(persisted);
+    });
+
+    it("keeps a token secret reference instead of replacing it with a literal", async () => {
+      const config = runtimeConfig();
+      const auth = { mode: "token", token: { source: "env", provider: "default", id: "GW" } };
+      await writeExisting(config, { gateway: { mode: "local", auth } });
+
+      await makeService({ installedVersion: "2026.8.35" }).writeOpenClawRuntimeArtifacts(config);
+
+      expect((await readRendered(config)).gateway?.auth).toEqual(auth);
+    });
+
+    it("fills in a token when the existing auth block has none", async () => {
+      const config = runtimeConfig();
+      await writeExisting(config, { gateway: { mode: "local", auth: { mode: "token" } } });
+
+      await makeService({ installedVersion: "2026.8.35" }).writeOpenClawRuntimeArtifacts(config);
+
+      expect((await readRendered(config)).gateway?.auth).toEqual({
+        mode: "token",
+        token: expect.stringMatching(/^[0-9a-f]{64}$/),
+      });
+    });
+
+    it("keeps the token only in the owner-only runtime config, never in a log or the gateway env", async () => {
+      const config = runtimeConfig();
+      const logLines: string[] = [];
+      const logger = pino({ level: "trace" }, { write: (line: string) => logLines.push(line) });
+      await makeService({
+        installedVersion: "2026.8.35",
+        logger: logger as unknown as ReturnType<typeof createLogger>,
+      }).writeOpenClawRuntimeArtifacts(config);
+
+      const token = (await readRendered(config)).gateway?.auth?.token;
+      expect(typeof token).toBe("string");
+      expect((await stat(config.openclaw.runtimeConfigPath)).mode & 0o777).toBe(0o600);
+      expect(await readFile(config.openclaw.gatewayEnvPath, "utf8")).not.toContain(token);
+      expect(await readFile(config.openclaw.runtimeProfilePath, "utf8")).not.toContain(token);
+      expect(logLines.join("\n")).not.toContain(token);
+    });
   });
 
   it("refuses the 2026.3 shape on a 2026.8 gateway", () => {

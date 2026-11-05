@@ -9,6 +9,14 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 From this point forward, GitHub Release notes are auto-generated from commit history
 by the `.github/workflows/release.yml` workflow.
 
+## [2.15.2](https://github.com/ndee/sovereign-ai-node/compare/v2.15.1...v2.15.2) (2026-11-05)
+
+
+### Bug Fixes
+
+* **installer:** parse the OpenClaw cron list without a templating round trip ([#357](https://github.com/ndee/sovereign-ai-node/issues/357)) ([7b96c04](https://github.com/ndee/sovereign-ai-node/commit/7b96c049dd78f19ade71b9a978adf385b30c9733))
+* **installer:** render a gateway auth token when OpenClaw does not persist one ([#359](https://github.com/ndee/sovereign-ai-node/issues/359)) ([7d6c2dc](https://github.com/ndee/sovereign-ai-node/commit/7d6c2dcbfd98b330cfd29c5c13cba8aa9738f14a))
+
 ## [2.15.1](https://github.com/ndee/sovereign-ai-node/compare/v2.15.0...v2.15.1) (2026-11-04)
 
 

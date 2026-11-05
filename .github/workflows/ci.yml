@@ -224,6 +224,56 @@ jobs:
           bash scripts/release/build-node-artifacts.sh "$ARTIFACT_DIR"
           bash scripts/release/test-node-artifacts.sh "$ARTIFACT_DIR"
 
+  # The installer runs the host-resources playbook with the host's own
+  # ansible-core, which is the distro package on a fresh host. The install
+  # E2Es run on whatever the runner image ships (2.21 today), and ansible-core
+  # up to 2.18 templates JSON-looking values differently, so the playbook also
+  # runs here, unchanged, on each distro's packaged ansible-core.
+  host_resources_ansible:
+    name: Host Resources Playbook (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    container: ${{ matrix.image }}
+    env:
+      LC_ALL: C.UTF-8
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Debian 12 ansible-core 2.14
+            image: debian:12
+            expect: "2.14."
+          - label: Ubuntu 24.04 ansible-core 2.16
+            image: ubuntu:24.04
+            expect: "2.16."
+          - label: Debian 13 ansible-core 2.19
+            image: debian:13
+            expect: "2.19."
+          # No supported distro packages 2.17 or 2.18; 2.18 is the last
+          # release with the old templating.
+          - label: pip ansible-core 2.18
+            image: python:3.12-slim
+            pip: ansible-core==2.18.*
+            expect: "2.18."
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ansible-core
+        env:
+          PIP_SPEC: ${{ matrix.pip }}
+        run: |
+          if [ -n "$PIP_SPEC" ]; then
+            pip install --quiet "$PIP_SPEC"
+          else
+            apt-get update -y
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ansible-core
+          fi
+      - name: Confirm the ansible-core under test
+        env:
+          EXPECT: ${{ matrix.expect }}
+        run: ansible-playbook --version | head -n 1 | grep -F "core $EXPECT"
+      - name: Run the host-resources playbook against stubbed host commands
+        run: bash scripts/ci/test-host-resources-ansible.sh
+
   e2e_noninteractive:
     name: E2E Install (non-interactive)
     # The gateway runs on the host's system Node, which must be inside the
@@ -262,6 +312,20 @@ jobs:
           docker pull "$synapse_image" &
           wait
 
+      # A fresh Ubuntu 24.04 host has no Ansible, so the installer apt-installs
+      # the distro's ansible-core (2.16). The runner image ships a newer one
+      # through pipx; removing it puts this install on the customer's path.
+      - name: Remove the runner's preinstalled Ansible
+        run: |
+          sudo env "PATH=$PATH" PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/opt/pipx_bin \
+            pipx uninstall ansible-core || true
+          sudo rm -f /opt/pipx_bin/ansible*
+          hash -r
+          if command -v ansible-playbook; then
+            echo "::error::ansible-playbook is still on PATH"
+            exit 1
+          fi
+
       - name: Run full installer (install.sh, non-interactive)
         run: |
           cp test/fixtures/ci-install-request.json /tmp/ci-install-request.json
@@ -280,6 +344,11 @@ jobs:
             and .operator.username == "operator"
           ' /tmp/ci-install-request.json > /dev/null
         timeout-minutes: 15
+
+      - name: Verify the install ran on the distro's ansible-core
+        run: |
+          dpkg-query -W ansible-core
+          ansible-playbook --version | head -n 1 | grep -F "core 2.16."
 
       - name: Verify Matrix is reachable
         run: |
@@ -346,6 +415,12 @@ jobs:
           curl -s -o /dev/null --max-time 5 http://127.0.0.1:18789/
           sudo env "PATH=$PATH" sovereign-node status --json > /tmp/status.json
           jq -e '.result.services[] | select(.kind == "openclaw") | .readiness == "ready"' /tmp/status.json
+
+      # The bots authenticate their /tools/invoke calls with the token in the
+      # rendered OpenClaw config. A gateway that generated its own runtime-only
+      # token rejects every one of them, and nothing else in this job notices.
+      - name: Verify the gateway accepts only the token in the rendered config
+        run: sudo env "PATH=$PATH" GITHUB_ACTIONS="$GITHUB_ACTIONS" bash scripts/ci/verify-gateway-auth.sh check
 
       # Checked from inside the units' mount namespaces: no new privileges, no
       # capabilities, a read-only system, no container-runtime socket and only
@@ -722,6 +797,13 @@ jobs:
           systemctl is-active sovereign-openclaw-gateway.service
           test "$(systemctl show -p User --value sovereign-openclaw-gateway.service)" = sovereign-node
 
+      # This path never runs `openclaw gateway install`, the only OpenClaw 2026.8
+      # command that writes a gateway token into the config.
+      - name: Verify the gateway accepts only the token in the rendered config
+        run: |
+          sudo env "PATH=$PATH" GITHUB_ACTIONS="$GITHUB_ACTIONS" bash scripts/ci/verify-gateway-auth.sh record /tmp/gateway-token.sha256
+          sudo env "PATH=$PATH" GITHUB_ACTIONS="$GITHUB_ACTIONS" bash scripts/ci/verify-gateway-auth.sh check
+
       - name: Verify the OpenClaw state belongs to the service user
         run: sudo env "PATH=$PATH" bash scripts/ci/verify-openclaw-state-ownership.sh
 
@@ -797,6 +879,12 @@ jobs:
           test "$after" -gt "$before"
           curl -s -o /dev/null --max-time 5 --retry 10 --retry-connrefused --retry-delay 3 http://127.0.0.1:18789/
         timeout-minutes: 12
+
+      # Callers hold the token they read before; re-renders must not rotate it.
+      - name: Verify the re-run and the reconfigure kept the gateway token
+        run: |
+          sudo env "PATH=$PATH" GITHUB_ACTIONS="$GITHUB_ACTIONS" bash scripts/ci/verify-gateway-auth.sh unchanged /tmp/gateway-token.sha256
+          sudo env "PATH=$PATH" GITHUB_ACTIONS="$GITHUB_ACTIONS" bash scripts/ci/verify-gateway-auth.sh check
 
       - name: Collect logs on failure
         if: failure()
@@ -923,6 +1011,9 @@ jobs:
           test "$installed" = "$previous_pin"
           echo "PREVIOUS_OPENCLAW_VERSION=$installed" >> "$GITHUB_ENV"
 
+      - name: Record the gateway token the previous release left in the config
+        run: sudo env "PATH=$PATH" GITHUB_ACTIONS="$GITHUB_ACTIONS" bash scripts/ci/verify-gateway-auth.sh record "$UPGRADE_DIR/gateway-token.sha256"
+
       - name: Verify the previous release runs its Synapse
         run: |
           bash "$UPGRADE_HELPER" snapshot "$UPGRADE_DIR/pre.json"
@@ -967,6 +1058,11 @@ jobs:
           jq -e '.result.checks[] | select(.id == "openclaw-version-pin") | .status == "pass"' \
             "$UPGRADE_DIR/doctor-post.json" > /dev/null
           echo "OPENCLAW_VERSION_AFTER_UPDATE=$installed" >> "$GITHUB_ENV"
+
+      # Devices whose config already carries a gateway token keep exactly that
+      # token: the bots and every other local caller still hold it.
+      - name: Verify the update kept the gateway token
+        run: sudo env "PATH=$PATH" GITHUB_ACTIONS="$GITHUB_ACTIONS" bash scripts/ci/verify-gateway-auth.sh unchanged "$UPGRADE_DIR/gateway-token.sha256"
 
       - name: Verify the pre-upgrade rooms and history are readable
         run: sudo env "PATH=$PATH" bash "$UPGRADE_HELPER" verify-history "$UPGRADE_DIR/state.json"
@@ -1027,6 +1123,7 @@ jobs:
       - integration_coverage
       - smoke
       - artifact_contract
+      - host_resources_ansible
       - e2e_noninteractive
       - e2e_interactive
       - e2e_rerun_after_partial_failure
@@ -1038,7 +1135,7 @@ jobs:
       - name: Require every main validation job to pass
         run: |
           jq -e '
-            length == 12 and
+            length == 13 and
             all(.[]; .result == "success")
           ' <<<"$REQUIRED_RESULTS" >/dev/null || {
             echo "::error::A required main CI job failed, was cancelled, or was skipped."
