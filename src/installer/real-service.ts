@@ -203,6 +203,7 @@ import {
   type JobRunnerSnapshot,
 } from "./job-runner.js";
 import { prepareOpenClawGatewayFirstStart } from "./openclaw-first-start.js";
+import { resolveManagedGatewayAuth } from "./openclaw-gateway-auth.js";
 import {
   clearOpenClawTempDirCaches,
   removeForeignOwnedTempEntries,
@@ -13396,10 +13397,9 @@ export default function (api) {
     const preservedMeta = isRecord(existingRuntimePayload?.meta)
       ? existingRuntimePayload.meta
       : undefined;
-    const preservedGatewayAuth =
-      isRecord(existingRuntimePayload?.gateway) && isRecord(existingRuntimePayload.gateway.auth)
-        ? existingRuntimePayload.gateway.auth
-        : undefined;
+    const gatewayAuth = resolveManagedGatewayAuth(
+      isRecord(existingRuntimePayload?.gateway) ? existingRuntimePayload.gateway.auth : undefined,
+    );
     const managedAgents = ensureCoreManagedAgents(runtimeConfig.openclawProfile.agents);
     const operatorAllowlist = [runtimeConfig.matrix.operator.userId];
     const managedAgentPackages = new Map(
@@ -13650,7 +13650,7 @@ export default function (api) {
         // loopback and tunnel via the relay-tunnel systemd service.
         mode: "local" as const,
         bind: "loopback" as const,
-        ...(preservedGatewayAuth === undefined ? {} : { auth: preservedGatewayAuth }),
+        auth: gatewayAuth,
       },
       session: {
         dmScope: runtimeConfig.openclawProfile.session?.dmScope ?? MANAGED_OPENCLAW_DM_SCOPE,

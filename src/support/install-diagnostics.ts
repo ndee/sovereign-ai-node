@@ -1346,12 +1346,18 @@ export const mailIntegrityDiagnosticsSource = (
   ...(options.priority === undefined ? {} : { priority: options.priority }),
 });
 
-/** The node's own secret stores. */
+/**
+ * The node's own secret stores. The OpenClaw runtime config holds the gateway
+ * token node generates, a value with no recognisable shape.
+ */
 export const defaultNodeKnownSecretSources = (
   paths: SovereignPaths = DEFAULT_PATHS,
 ): KnownSecretSources => ({
   secretDirs: [paths.secretsDir],
-  structuredFiles: [paths.configPath],
+  structuredFiles: [
+    paths.configPath,
+    join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
+  ],
   recordDirs: [paths.installJobsDir],
 });
 

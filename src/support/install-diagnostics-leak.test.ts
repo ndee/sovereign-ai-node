@@ -31,10 +31,12 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import type { SovereignPaths } from "../config/paths.js";
 import {
   buildInstallDiagnostics,
   type DiagnosticsRunCommand,
   type DiagnosticsSource,
+  defaultNodeKnownSecretSources,
   pickFields,
 } from "./install-diagnostics.js";
 import { findUnmaskedIpClasses } from "./ip-mask.js";
@@ -392,6 +394,55 @@ describe("install diagnostics — adversarial inputs", () => {
       }
       expect(Buffer.byteLength(text)).toBeLessThanOrEqual(cap);
     }
+  });
+});
+
+describe("install diagnostics — OpenClaw gateway token", () => {
+  // A hex token has no recognisable shape, so only knowing the value removes it.
+  const gatewayToken = "9f".repeat(32);
+
+  const build = async (withOpenClawConfig: boolean) => {
+    const openclawServiceHome = join(dir, "openclaw-home");
+    await mkdir(join(openclawServiceHome, ".openclaw"), { recursive: true });
+    await writeFile(
+      join(openclawServiceHome, ".openclaw", "openclaw.json5"),
+      JSON.stringify({ gateway: { mode: "local", auth: { mode: "token", token: gatewayToken } } }),
+    );
+    const paths = {
+      secretsDir: join(dir, "secrets"),
+      configPath: join(dir, "node.json5"),
+      installJobsDir: join(dir, "install-jobs"),
+      openclawServiceHome,
+    } as SovereignPaths;
+    const sources = defaultNodeKnownSecretSources(paths);
+    return buildInstallDiagnostics({
+      sources: [{ kind: "journal", unit: "sovereign-openclaw-gateway" }],
+      run: async () => ({ stdout: `Nov 05 gateway[1]: client connected with ${gatewayToken}\n` }),
+      readKernelFile: async () => "",
+      generatedBy: "gateway-token-test",
+      knownSecrets: await loadKnownSecrets(
+        withOpenClawConfig
+          ? sources
+          : {
+              ...sources,
+              structuredFiles: (sources.structuredFiles ?? []).filter(
+                (file) => !file.includes("openclaw"),
+              ),
+            },
+      ),
+    });
+  };
+
+  it("scrubs the gateway token from the gateway journal without withholding it", async () => {
+    const result = await build(true);
+    const entries = unpack(result.archive);
+    expect(entries.has("files/journal/sovereign-openclaw-gateway.txt")).toBe(true);
+    expect(findLeaks(entries, [gatewayToken])).toEqual([]);
+  });
+
+  it("negative control: the token survives when the OpenClaw config is not a source", async () => {
+    const result = await build(false);
+    expect(findLeaks(unpack(result.archive), [gatewayToken]).length).toBeGreaterThan(0);
   });
 });
 
