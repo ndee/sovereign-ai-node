@@ -492,6 +492,29 @@ jobs:
           echo "::error::gateway did not listen again after removing the drop-in"
           exit 1
 
+      # The bot accounts keep the same sender allowlist when federation is
+      # switched on, when it is switched off, and on a later render with it on.
+      - name: Verify the bot sender allowlist holds with federation enabled
+        run: |
+          verify() { sudo env "PATH=$PATH" bash scripts/ci/verify-bot-sender-allowlist.sh "$@"; }
+          federation() {
+            sudo env "PATH=$PATH" sovereign-node reconfigure matrix "$1" --json > /tmp/reconfigure-federation.json
+            jq . /tmp/reconfigure-federation.json
+            jq -e '.ok == true and (.result.changed | index("matrix.federationEnabled") != null)' \
+              /tmp/reconfigure-federation.json > /dev/null
+            sudo jq -e --argjson want "$2" '.matrix.federationEnabled == $want' \
+              /etc/sovereign-node/sovereign-node.json5 > /dev/null
+          }
+          verify record /tmp/bot-sender-policy.sha256
+          federation --federation true
+          verify unchanged /tmp/bot-sender-policy.sha256
+          federation --no-federation false
+          verify unchanged /tmp/bot-sender-policy.sha256
+          federation --federation true
+          verify unchanged /tmp/bot-sender-policy.sha256
+          federation --no-federation false
+          verify unchanged /tmp/bot-sender-policy.sha256
+
       - name: Collect logs on failure
         if: failure()
         run: |
