@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { isOpenClawCoreToolId } from "../openclaw/agent-tool-policy.js";
 import {
+  TYPED_TOOL_CONFIRM_COMMAND,
   TYPED_TOOL_INSTANCE_PLACEHOLDER,
   TYPED_TOOL_MAX_LENGTH_LIMIT,
   TYPED_TOOL_OPENCLAW_PLUGIN_ID,
@@ -73,6 +74,84 @@ const typedToolParamSchema = z
     }
   });
 
+const SLASH_COMMAND_PATTERN = /^[a-z][a-z0-9_]{0,31}$/;
+
+// Built-in chat commands and text aliases of the OpenClaw runtimes node
+// supports (2026.3 and 2026.8), plus the plugin's own confirm command. OpenClaw
+// refuses a plugin command with one of these names, or shadows it.
+export const TYPED_TOOL_RESERVED_SLASH_COMMANDS: ReadonlySet<string> = new Set([
+  "acp",
+  "activation",
+  "agents",
+  "allowlist",
+  "approve",
+  "bash",
+  "btw",
+  "codex",
+  "commands",
+  "compact",
+  "config",
+  TYPED_TOOL_CONFIRM_COMMAND,
+  "context",
+  "debug",
+  "diagnostics",
+  "elev",
+  "elevated",
+  "exec",
+  "export",
+  "fast",
+  "focus",
+  "goal",
+  "help",
+  "id",
+  "kill",
+  "learn",
+  "login",
+  "loop",
+  "mcp",
+  "model",
+  "models",
+  "name",
+  "new",
+  "openclaw",
+  "plugin",
+  "plugins",
+  "queue",
+  "reason",
+  "reasoning",
+  "reset",
+  "restart",
+  "send",
+  "session",
+  "side",
+  "skill",
+  "status",
+  "steer",
+  "stop",
+  "subagents",
+  "t",
+  "tasks",
+  "tell",
+  "think",
+  "thinking",
+  "tools",
+  "trace",
+  "trajectory",
+  "tts",
+  "unfocus",
+  "usage",
+  "v",
+  "verbose",
+  "whoami",
+]);
+
+const slashCommandSchema = z
+  .string()
+  .regex(SLASH_COMMAND_PATTERN, { message: `must match ${SLASH_COMMAND_PATTERN.source}` })
+  .refine((name) => !TYPED_TOOL_RESERVED_SLASH_COMMANDS.has(name), {
+    message: "is reserved by the runtime",
+  });
+
 const typedToolConfirmSchema = z.union([
   z.literal("always"),
   z.object({
@@ -100,9 +179,32 @@ const typedToolOperationSchema = z
     exactlyOneOf: z.array(z.array(z.string().min(1)).min(2)).optional(),
     confirm: typedToolConfirmSchema.optional(),
     confirmPreviewArgv: z.array(fixedArgvEntrySchema.regex(FLAG_PATTERN)).min(1).optional(),
+    slashCommand: slashCommandSchema.optional(),
   })
   .superRefine((operation, ctx) => {
     const params = operation.params ?? {};
+    // The node answers a slash command without the model, and the runtime
+    // hands the command only free text, never typed parameters.
+    if (operation.slashCommand !== undefined) {
+      if (operation.effect !== "read") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["slashCommand"],
+          message: "only a read operation can have a slash command",
+        });
+      }
+      if (
+        Object.keys(params).length > 0 ||
+        operation.required !== undefined ||
+        operation.exactlyOneOf !== undefined
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["slashCommand"],
+          message: "a slash command takes no parameters",
+        });
+      }
+    }
     const known = (name: string) => Object.hasOwn(params, name);
     for (const name of [...(operation.required ?? []), ...(operation.exactlyOneOf ?? []).flat()]) {
       if (!known(name)) {
@@ -170,12 +272,22 @@ export const typedToolTemplateSchema = z
   })
   .superRefine((tool, ctx) => {
     const names = new Set<string>();
+    const slashCommands = new Set<string>();
     const paramTypes = new Map<string, string>();
     for (const operation of tool.operations) {
       if (names.has(operation.name)) {
         ctx.addIssue({ code: "custom", message: `duplicate operation '${operation.name}'` });
       }
       names.add(operation.name);
+      if (operation.slashCommand !== undefined) {
+        if (slashCommands.has(operation.slashCommand)) {
+          ctx.addIssue({
+            code: "custom",
+            message: `duplicate slash command '${operation.slashCommand}'`,
+          });
+        }
+        slashCommands.add(operation.slashCommand);
+      }
       if (
         !operation.argv.includes(TYPED_TOOL_INSTANCE_PLACEHOLDER) &&
         operation.effect === "change"

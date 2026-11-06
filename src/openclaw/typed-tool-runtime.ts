@@ -25,6 +25,8 @@ export type TypedToolOperationSpec = {
   confirm?: TypedToolConfirmSpec | undefined;
   /** Appended to the argv for a side-effect-free preview shown before confirmation. */
   confirmPreviewArgv?: string[] | undefined;
+  /** Chat command the plugin answers from this read operation without the model. */
+  slashCommand?: string | undefined;
 };
 
 export type TypedToolPendingEntry = {

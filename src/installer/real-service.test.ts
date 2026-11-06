@@ -25,6 +25,7 @@ import { type ExecPinningEnvironment, planExecWrapper } from "../openclaw/exec-p
 import type { ExecInput, ExecResult } from "../system/exec.js";
 import type { ImapTester } from "../system/imap.js";
 import type { BundledMatrixProvisioner, BundledMatrixProvisionResult } from "../system/matrix.js";
+import type { OpenrouterServabilityChecker } from "../system/openrouter-servability.js";
 import type { HostPreflightChecker } from "../system/preflight.js";
 import {
   RECLAIM_OWNERSHIP_HELPER_PATH,
@@ -216,6 +217,13 @@ const TYPED_SENTINEL_TOOL = {
       description: "Status",
       effect: "read",
       argv: ["status", "--instance", "<tool-instance-id>", "--json"],
+    },
+    {
+      name: "version",
+      description: "Version",
+      effect: "read",
+      argv: ["version", "--json"],
+      slashCommand: "version",
     },
     {
       name: "feedback",
@@ -11372,6 +11380,10 @@ describe("RealInstallerService", () => {
        * default stubs throw, which is right for tests that never apply.
        */
       applyForReal?: boolean;
+      openrouterServabilityChecker?: OpenrouterServabilityChecker;
+      execRunner?: { run: (input: ExecInput) => Promise<ExecResult> };
+      gatewayRestart?: () => Promise<void>;
+      fetchImpl?: (url: string, init?: RequestInit) => Promise<Response>;
     } = {},
   ): Promise<RealInstallerService> =>
     new RealInstallerService(createLogger(), paths, {
@@ -11386,7 +11398,7 @@ describe("RealInstallerService", () => {
       openclawGatewayServiceManager: {
         install: async () => {},
         start: async () => {},
-        restart: async () => {},
+        restart: overrides.gatewayRestart ?? (async () => {}),
       },
       managedAgentRegistrar: {
         register: async () => ({
@@ -11405,6 +11417,11 @@ describe("RealInstallerService", () => {
           recommendedActions: [],
         }),
       },
+      ...(overrides.openrouterServabilityChecker === undefined
+        ? {}
+        : { openrouterServabilityChecker: overrides.openrouterServabilityChecker }),
+      ...(overrides.execRunner === undefined ? {} : { execRunner: overrides.execRunner }),
+      ...(overrides.fetchImpl === undefined ? {} : { fetchImpl: overrides.fetchImpl }),
       imapTester: overrides.imapTester ?? {
         test: async (req) => ({
           ok: true,
@@ -11585,7 +11602,7 @@ describe("RealInstallerService", () => {
       execRunner: {
         run: async ({ command, args }): Promise<ExecResult> => {
           const serialized = [command, ...(args ?? [])].join(" ");
-          if (serialized.startsWith("systemctl --user show")) {
+          if (serialized.startsWith("systemctl --user show -p ActiveState")) {
             return {
               command: serialized,
               exitCode: 0,
@@ -11650,7 +11667,14 @@ describe("RealInstallerService", () => {
             "Settings applied, but OpenClaw gateway unit is running but not listening after 300 s (deadline 300 s); last probe: ECONNREFUSED",
         }),
       );
-      expect(result.gateway).toEqual({ ready: false, waitedMs: 300_000, deadlineMs: 300_000 });
+      expect(result.gateway).toEqual({
+        ready: false,
+        waitedMs: 300_000,
+        deadlineMs: 300_000,
+        invocationIdBefore: null,
+        invocationIdAfter: null,
+        restarted: false,
+      });
 
       // Asking for the settings already in place restarts nothing.
       const unchanged = await service.reconfigureOpenrouter({
@@ -12265,6 +12289,507 @@ describe("RealInstallerService", () => {
         });
         expect(validate).not.toHaveBeenCalled();
         expect(await readFile(paths.configPath, "utf8")).toBe(before);
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("reconfigureOpenrouter servability guard", () => {
+    const REVIEW = "qwen/qwen3-30b-a3b-instruct-2507";
+    const CHAT = "qwen/qwen3.5-27b";
+
+    beforeEach(() => {
+      vi.stubEnv("OPENROUTER_API_KEY", "sk-or-test");
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    type Verdict = Awaited<ReturnType<OpenrouterServabilityChecker["check"]>>[number];
+    const servable = (model: string): Verdict => ({
+      model,
+      status: "servable",
+      endpoints: ["nebius/fp8"],
+    });
+    const unservable = (model: string): Verdict => ({
+      model,
+      status: "unservable",
+      reason: "no-allowed-endpoint",
+      endpoints: ["alibaba", "deepinfra/fp8"],
+    });
+    const unknown = (model: string): Verdict => ({
+      model,
+      status: "unknown",
+      message: "Timed out contacting OpenRouter for the model endpoint lookup",
+    });
+
+    const setup = async (
+      options: {
+        verdicts?: Record<string, (model: string) => Verdict>;
+        agents?: Record<string, unknown>[];
+        withoutChecker?: boolean;
+        openrouterPrivacy?: Record<string, unknown>;
+      } = {},
+    ) => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+      const paths = buildReconfigurePaths(tempRoot);
+      await writeRuntimeArtifacts(paths, {
+        ...(options.openrouterPrivacy === undefined
+          ? {}
+          : { openrouterPrivacy: options.openrouterPrivacy }),
+        agents: options.agents ?? [
+          {
+            id: "mail-sentinel",
+            workspace: join(paths.stateDir, "mail-sentinel", "workspace"),
+            model: CHAT,
+          },
+        ],
+      });
+      const requestPath = join(dirname(paths.configPath), "install-request.json");
+      await writeFile(
+        requestPath,
+        `${JSON.stringify(buildReconfigureRequest(), null, 2)}\n`,
+        "utf8",
+      );
+      const check = vi.fn(async (models: readonly string[]) =>
+        models.map((model) => {
+          const bare = model.replace(/^openrouter\//, "");
+          return (options.verdicts?.[bare] ?? servable)(model);
+        }),
+      );
+      const gatewayRestart = vi.fn(async () => {});
+      const service = await buildReconfigureService(paths, {
+        openrouterKeyValidator: { validate: async () => ({ ok: true }) },
+        gatewayRestart,
+        ...(options.withoutChecker === true ? {} : { openrouterServabilityChecker: { check } }),
+      });
+      const runtimeConfigPath = join(paths.openclawServiceHome, ".openclaw", "openclaw.json5");
+      const snapshot = async () => ({
+        config: await readFile(paths.configPath, "utf8"),
+        runtime: await readFile(runtimeConfigPath, "utf8"),
+        request: await readFile(requestPath, "utf8"),
+      });
+      return { tempRoot, paths, service, check, gatewayRestart, snapshot };
+    };
+
+    it("refuses an unservable review model and writes nothing", async () => {
+      const { tempRoot, paths, service, check, gatewayRestart, snapshot } = await setup({
+        verdicts: { [CHAT]: unservable },
+      });
+      try {
+        const before = await snapshot();
+        await expect(
+          service.reconfigureOpenrouter({
+            openrouter: { model: CHAT, apiKey: "sk-or-new", privacy: { only: ["nebius"] } },
+          }),
+        ).rejects.toMatchObject({
+          code: "OPENROUTER_MODEL_NOT_SERVABLE",
+          retryable: false,
+          message: expect.stringContaining(CHAT),
+          details: {
+            model: CHAT,
+            reason: "no-allowed-endpoint",
+            endpoints: ["alibaba", "deepinfra/fp8"],
+            restriction: { only: ["nebius"], zdr: true },
+          },
+        });
+        // The lookup used the merged restriction the save would have applied.
+        expect(check).toHaveBeenCalledWith(
+          [CHAT],
+          expect.objectContaining({ only: ["nebius"], zdr: true }),
+        );
+        expect(await snapshot()).toEqual(before);
+        expect(gatewayRestart).not.toHaveBeenCalled();
+        await expect(stat(join(paths.secretsDir, "openrouter-api-key"))).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("refuses a restriction the current review model cannot be served under", async () => {
+      const { tempRoot, service, gatewayRestart, snapshot } = await setup({
+        verdicts: { "qwen/qwen-2.5-7b-instruct": unservable },
+      });
+      try {
+        const before = await snapshot();
+        await expect(
+          service.reconfigureOpenrouter({ openrouter: { privacy: { only: ["nebius"] } } }),
+        ).rejects.toMatchObject({
+          code: "OPENROUTER_MODEL_NOT_SERVABLE",
+          details: { model: "qwen/qwen-2.5-7b-instruct" },
+        });
+        expect(await snapshot()).toEqual(before);
+        expect(gatewayRestart).not.toHaveBeenCalled();
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("names a model OpenRouter does not list", async () => {
+      const { tempRoot, service } = await setup({
+        verdicts: {
+          "vendor/typo": (model) => ({
+            model,
+            status: "unservable",
+            reason: "unknown-model",
+            endpoints: [],
+          }),
+        },
+      });
+      try {
+        await expect(
+          service.reconfigureOpenrouter({ openrouter: { model: "vendor/typo" } }),
+        ).rejects.toMatchObject({
+          code: "OPENROUTER_MODEL_NOT_SERVABLE",
+          message:
+            "OpenRouter cannot serve vendor/typo under the routing restrictions (zero data retention): OpenRouter does not list this model. Nothing was changed.",
+          details: { reason: "unknown-model", endpoints: [], restriction: { zdr: true } },
+        });
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("describes an agent model without endpoints under an install-time opt-out", async () => {
+      const { tempRoot, service } = await setup({
+        openrouterPrivacy: { zdr: false, dataCollection: "allow", allowFallbacks: true },
+        verdicts: {
+          [CHAT]: (model) => ({
+            model,
+            status: "unservable",
+            reason: "no-allowed-endpoint",
+            endpoints: [],
+          }),
+        },
+      });
+      try {
+        const result = await service.reconfigureOpenrouter({ openrouter: { model: REVIEW } });
+        expect(result.warnings?.[0]?.message).toBe(
+          `Agent mail-sentinel uses ${CHAT}, which OpenRouter cannot serve under the routing restrictions (no provider restriction): OpenRouter lists no endpoint for it. Its replies fail until its model or the restrictions change.`,
+        );
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("saves and warns when a chat agent's model is not servable", async () => {
+      const { tempRoot, service, check, gatewayRestart, snapshot } = await setup({
+        verdicts: { [CHAT]: unservable },
+      });
+      try {
+        const result = await service.reconfigureOpenrouter({
+          openrouter: { model: REVIEW, privacy: { only: ["nebius"] } },
+        });
+
+        expect(check).toHaveBeenCalledWith([REVIEW, CHAT], expect.anything());
+        expect(result.changed).toEqual(
+          expect.arrayContaining(["openrouter.model", "openrouter.privacy"]),
+        );
+        expect(gatewayRestart).toHaveBeenCalledTimes(1);
+        expect(result.warnings).toEqual([
+          {
+            code: "OPENROUTER_AGENT_MODEL_NOT_SERVABLE",
+            message: expect.stringContaining(`Agent mail-sentinel uses ${CHAT}`),
+            agentId: "mail-sentinel",
+            model: CHAT,
+          },
+        ]);
+        expect(JSON.parse((await snapshot()).config).openrouter).toMatchObject({
+          model: REVIEW,
+          privacy: { only: ["nebius"] },
+        });
+
+        // Re-saving the same setting changes nothing but still reports it.
+        const again = await service.reconfigureOpenrouter({
+          openrouter: { model: REVIEW, privacy: { only: ["nebius"] } },
+        });
+        expect(again.changed).toEqual([]);
+        expect(gatewayRestart).toHaveBeenCalledTimes(1);
+        expect(again.warnings).toEqual(result.warnings);
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("never blocks a save on a lookup that could not be completed", async () => {
+      const { tempRoot, service, gatewayRestart } = await setup({
+        verdicts: { [REVIEW]: unknown, [CHAT]: unknown },
+      });
+      try {
+        const result = await service.reconfigureOpenrouter({
+          openrouter: { model: REVIEW, privacy: { only: ["nebius"] } },
+        });
+
+        expect(result.changed).toContain("openrouter.model");
+        expect(gatewayRestart).toHaveBeenCalledTimes(1);
+        expect(result.warnings).toEqual([
+          {
+            code: "OPENROUTER_SERVABILITY_UNKNOWN",
+            message: expect.stringContaining(
+              `Could not check whether OpenRouter can serve ${REVIEW}`,
+            ),
+            model: REVIEW,
+          },
+          {
+            code: "OPENROUTER_SERVABILITY_UNKNOWN",
+            message: expect.stringContaining(
+              `Could not check whether OpenRouter can serve ${CHAT} (agent mail-sentinel)`,
+            ),
+            agentId: "mail-sentinel",
+            model: CHAT,
+          },
+        ]);
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("looks up each OpenRouter model in use once and skips other providers", async () => {
+      const workspace = (id: string) => join(tmpdir(), id);
+      const { tempRoot, service, check } = await setup({
+        verdicts: { "openai/gpt-5-mini": unservable },
+        agents: [
+          { id: "mail-sentinel", workspace: workspace("mail-sentinel") },
+          { id: "same", workspace: workspace("same"), model: `openrouter/${REVIEW}` },
+          { id: "helper", workspace: workspace("helper"), model: "openai/gpt-5-mini" },
+          { id: "helper-2", workspace: workspace("helper-2"), model: "openai/gpt-5-mini" },
+          { id: "local", workspace: workspace("local"), model: "ollama/llama3.2:3b/q4" },
+        ],
+      });
+      try {
+        const result = await service.reconfigureOpenrouter({ openrouter: { model: REVIEW } });
+
+        expect(check).toHaveBeenCalledTimes(1);
+        expect(check).toHaveBeenCalledWith([REVIEW, "openai/gpt-5-mini"], expect.anything());
+        expect(result.warnings?.map((warning) => warning.agentId)).toEqual(["helper", "helper-2"]);
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("runs no lookup for a key-only change and reports no warnings when all is servable", async () => {
+      const { tempRoot, service, check } = await setup();
+      try {
+        const keyOnly = await service.reconfigureOpenrouter({ openrouter: { apiKey: "sk-or-2" } });
+        expect(check).not.toHaveBeenCalled();
+        expect(keyOnly).not.toHaveProperty("warnings");
+
+        const clean = await service.reconfigureOpenrouter({ openrouter: { model: REVIEW } });
+        expect(check).toHaveBeenCalledTimes(1);
+        expect(clean).not.toHaveProperty("warnings");
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("skips the check when no checker is configured", async () => {
+      const { tempRoot, service } = await setup({ withoutChecker: true });
+      try {
+        const result = await service.reconfigureOpenrouter({
+          openrouter: { model: CHAT, privacy: { only: ["nebius"] } },
+        });
+        expect(result.changed).toContain("openrouter.model");
+        expect(result).not.toHaveProperty("warnings");
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("reconfigureOpenrouter gateway restart report", () => {
+    const USER_UNIT = "openclaw-gateway.service";
+    const SYSTEM_UNIT = "sovereign-openclaw-gateway.service";
+
+    beforeEach(() => {
+      vi.stubEnv("OPENROUTER_API_KEY", "sk-or-test");
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.restoreAllMocks();
+    });
+
+    /**
+     * `invocations[unit]` lists the InvocationID systemd reports for that unit
+     * before and after the restart; `null` makes the read fail.
+     */
+    const setup = async (invocations: Record<string, [string | null, string | null]>) => {
+      const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
+      vi.stubEnv("SOVEREIGN_NODE_GATEWAY_SYSTEMD_UNIT_PATH", join(tempRoot, "absent.service"));
+      const paths = buildReconfigurePaths(tempRoot);
+      await writeRuntimeArtifacts(paths);
+      await writeFile(
+        join(dirname(paths.configPath), "install-request.json"),
+        `${JSON.stringify(buildReconfigureRequest(), null, 2)}\n`,
+        "utf8",
+      );
+      let restarted = false;
+      const execRunner = {
+        run: async ({ command, args }: ExecInput): Promise<ExecResult> => {
+          const serialized = [command, ...(args ?? [])].join(" ");
+          const invocationRead = /show -p InvocationID --value (\S+)$/.exec(serialized);
+          if (invocationRead?.[1] !== undefined) {
+            const value = invocations[invocationRead[1]]?.[restarted ? 1 : 0] ?? null;
+            return value === null
+              ? { command: serialized, exitCode: 1, stdout: "", stderr: "no bus" }
+              : { command: serialized, exitCode: 0, stdout: `${value}\n`, stderr: "" };
+          }
+          if (serialized.startsWith("systemctl --user show")) {
+            return { command: serialized, exitCode: 0, stdout: "ActiveState=active\n", stderr: "" };
+          }
+          return { command: serialized, exitCode: 0, stdout: "", stderr: "" };
+        },
+      };
+      const service = await buildReconfigureService(paths, {
+        execRunner,
+        gatewayRestart: async () => {
+          restarted = true;
+        },
+        fetchImpl: async () => new Response("ok", { status: 200 }),
+      });
+      return {
+        tempRoot,
+        service,
+        markRestarted: () => {
+          restarted = true;
+        },
+      };
+    };
+
+    const restartCheck = (result: { validation: Array<{ id: string }> }) =>
+      result.validation.find((entry) => entry.id === "openclaw-gateway-restart");
+
+    it("reports a real restart from a changed systemd invocation", async () => {
+      const { tempRoot, service } = await setup({ [USER_UNIT]: ["inv-before", "inv-after"] });
+      try {
+        const result = await service.reconfigureOpenrouter({
+          openrouter: { privacy: { only: ["nebius"] } },
+        });
+
+        expect(result.gateway).toMatchObject({
+          ready: true,
+          invocationIdBefore: "inv-before",
+          invocationIdAfter: "inv-after",
+          restarted: true,
+        });
+        expect(restartCheck(result)).toMatchObject({
+          status: "pass",
+          message: "OpenClaw gateway restarted with updated OpenRouter settings",
+        });
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("does not claim a restart when the invocation stayed the same", async () => {
+      const { tempRoot, service } = await setup({ [USER_UNIT]: ["inv-same", "inv-same"] });
+      try {
+        const result = await service.reconfigureOpenrouter({
+          openrouter: { privacy: { only: ["nebius"] } },
+        });
+
+        expect(result.gateway).toMatchObject({
+          ready: true,
+          invocationIdBefore: "inv-same",
+          invocationIdAfter: "inv-same",
+          restarted: false,
+        });
+        expect(restartCheck(result)).toMatchObject({
+          status: "warn",
+          message:
+            "Settings written, but the OpenClaw gateway was not restarted (systemd invocation unchanged); the new OpenRouter settings may not be active until it restarts",
+        });
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("counts a gateway that was not running before as restarted", async () => {
+      const { tempRoot, service } = await setup({ [USER_UNIT]: [null, "inv-new"] });
+      try {
+        const result = await service.reconfigureOpenrouter({
+          openrouter: { privacy: { only: ["nebius"] } },
+        });
+        expect(result.gateway).toMatchObject({
+          invocationIdBefore: null,
+          invocationIdAfter: "inv-new",
+          restarted: true,
+        });
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("says so when the restart cannot be confirmed", async () => {
+      const { tempRoot, service } = await setup({});
+      try {
+        const result = await service.reconfigureOpenrouter({
+          openrouter: { privacy: { only: ["nebius"] } },
+        });
+
+        expect(result.gateway).toMatchObject({
+          ready: true,
+          invocationIdBefore: null,
+          invocationIdAfter: null,
+          restarted: false,
+        });
+        expect(restartCheck(result)).toMatchObject({
+          status: "warn",
+          message:
+            "Settings written and the OpenClaw gateway answers, but its restart could not be confirmed (systemd invocation unreadable)",
+        });
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("restarts an installed system unit and reads that unit's invocation", async () => {
+      const { tempRoot, service, markRestarted } = await setup({
+        [USER_UNIT]: ["user-1", "user-1"],
+        [SYSTEM_UNIT]: ["sys-1", "sys-2"],
+      });
+      const refresh = vi
+        .spyOn(
+          service as unknown as {
+            refreshGatewayAfterRuntimeConfig: (
+              config: RuntimeConfig,
+              options?: { preferInstalledSystemUnit?: boolean },
+            ) => Promise<unknown>;
+          },
+          "refreshGatewayAfterRuntimeConfig",
+        )
+        .mockImplementation(async () => {
+          markRestarted();
+          return {
+            unitStarted: true,
+            ready: true,
+            waitedMs: 1_200,
+            deadlineMs: 300_000,
+            unit: SYSTEM_UNIT,
+          };
+        });
+      try {
+        const result = await service.reconfigureOpenrouter({
+          openrouter: { privacy: { only: ["nebius"] } },
+        });
+
+        // A plain `openclaw gateway restart` only signals a system unit's
+        // process, so the installed unit is restarted through systemd.
+        expect(refresh).toHaveBeenCalledWith(expect.anything(), {
+          preferInstalledSystemUnit: true,
+        });
+        expect(result.gateway).toEqual({
+          ready: true,
+          waitedMs: 1_200,
+          deadlineMs: 300_000,
+          invocationIdBefore: "sys-1",
+          invocationIdAfter: "sys-2",
+          restarted: true,
+        });
       } finally {
         await rm(tempRoot, { recursive: true, force: true });
       }
@@ -17814,16 +18339,23 @@ describe("typed tools, scan agents and exec pinning", () => {
             name: "typed_sentinel",
             description: TYPED_SENTINEL_TOOL.description,
             operations: TYPED_SENTINEL_TOOL.operations,
+            slashCommands: { version: "version" },
             bindings: [
               {
                 workspaceDir: workspace,
                 toolInstanceId: "typed-sentinel-core",
                 script,
                 cwd: workspace,
+                accountId: "typed-sentinel",
               },
             ],
           },
         ],
+      });
+      // The command answers on the same account the chat binding routes.
+      expect(openclawConfig.bindings).toContainEqual({
+        agentId: "typed-sentinel",
+        match: { channel: "matrix", accountId: "typed-sentinel" },
       });
       expect(await readFile(script, "utf8")).toBe(TYPED_SENTINEL_SCRIPT);
       expect(
@@ -17862,7 +18394,7 @@ describe("typed tools, scan agents and exec pinning", () => {
       const toolsMd = await readFile(join(workspace, "TOOLS.md"), "utf8");
       expect(toolsMd).toContain("Use only the documented OpenClaw tools listed below.");
       expect(toolsMd).toContain("openclaw-tool: `typed_sentinel`");
-      expect(toolsMd).toContain("operations: status, feedback");
+      expect(toolsMd).toContain("operations: status, version, feedback");
       expect(toolsMd).toContain("`/confirm <code>`");
       expect(toolsMd).not.toContain("command:");
       expect(toolsMd).not.toContain("sovereign-tool");
@@ -18139,6 +18671,111 @@ describe("typed tools, scan agents and exec pinning", () => {
     });
   });
 
+  it("binds slash commands to each agent's Matrix account and rewrites the provider error only on 2026.8", async () => {
+    await withRuntime(async ({ tempRoot, paths }) => {
+      const service = buildService(paths, {
+        commands: [],
+        execPinning: createTestExecPinning(join(tempRoot, "exec-wrappers")),
+      });
+      const internals = service as unknown as {
+        logger: { warn: (...args: unknown[]) => void };
+        resolveBoundToolManifests: (config: unknown, ids: string[]) => Promise<unknown>;
+        findBotPackageByTemplateRef: (ref: string | undefined) => Promise<unknown>;
+        writeManagedTypedToolExtension: (config: unknown, shape: string) => Promise<void>;
+      };
+      const warn = vi.spyOn(internals.logger, "warn");
+      const serviceBot = "@service:matrix.example.org";
+      const runtimeConfig = {
+        openclaw: { openclawHome: join(tempRoot, "home") },
+        matrix: {
+          operator: { userId: "@operator:matrix.example.org" },
+          bot: { userId: serviceBot },
+        },
+        openclawProfile: {
+          agents: [
+            {
+              id: "dedicated",
+              templateRef: "dedicated@1.0.0",
+              workspace: join(tempRoot, "ws-dedicated"),
+              toolInstanceIds: ["t-dedicated"],
+              matrix: { userId: "@dedicated:matrix.example.org", accessTokenSecretRef: "file:/a" },
+            },
+            {
+              id: "shared",
+              templateRef: "shared@1.0.0",
+              workspace: join(tempRoot, "ws-shared"),
+              toolInstanceIds: ["t-shared"],
+              matrix: { userId: serviceBot, accessTokenSecretRef: "file:/b" },
+            },
+            {
+              id: "offline",
+              workspace: join(tempRoot, "ws-offline"),
+              toolInstanceIds: ["t-offline"],
+              matrix: { userId: "@offline:matrix.example.org" },
+            },
+          ],
+        },
+      };
+      internals.findBotPackageByTemplateRef = async (ref) =>
+        ref === "shared@1.0.0"
+          ? { manifest: { matrixIdentity: { mode: "service-account" } } }
+          : null;
+      internals.resolveBoundToolManifests = async (_config, ids) =>
+        ids.map((id) => ({
+          tool: { id, templateRef: "typed-sentinel-tool@1.0.0" },
+          manifest: {
+            openclawTypedTool:
+              id === "t-offline"
+                ? { ...TYPED_SENTINEL_TOOL, name: "about_tool" }
+                : TYPED_SENTINEL_TOOL,
+          },
+        }));
+      const pluginConfigPath = join(
+        tempRoot,
+        "home",
+        "extensions",
+        "sovereign-typed-tools",
+        "plugin-config.json",
+      );
+      type Written = {
+        replyPayloadRewrites?: unknown;
+        tools: Array<{
+          name: string;
+          slashCommands?: Record<string, string>;
+          bindings: Array<{ toolInstanceId: string; accountId?: string }>;
+        }>;
+      };
+
+      await internals.writeManagedTypedToolExtension(runtimeConfig, "keyed");
+      const keyed = JSON.parse(await readFile(pluginConfigPath, "utf8")) as Written;
+      expect(keyed.replyPayloadRewrites).toEqual([
+        {
+          contains: "No allowed providers are available for the selected model",
+          text: "Chat is not available with the current model settings; mail alerts are not affected. Check the model settings.",
+        },
+      ]);
+      expect(keyed.tools.map((tool) => [tool.name, tool.slashCommands])).toEqual([
+        ["about_tool", { version: "version" }],
+        ["typed_sentinel", undefined],
+      ]);
+      expect(keyed.tools[1]?.bindings).toEqual([
+        expect.objectContaining({ toolInstanceId: "t-dedicated", accountId: "dedicated" }),
+        expect.objectContaining({ toolInstanceId: "t-shared", accountId: "default" }),
+      ]);
+      expect(keyed.tools[0]?.bindings).toEqual([
+        expect.not.objectContaining({ accountId: expect.anything() }),
+      ]);
+      expect(warn).toHaveBeenCalledWith(
+        { slashCommand: "version", toolName: "typed_sentinel", claimedBy: "about_tool" },
+        "Slash command is already answered by another typed tool; not registering it twice",
+      );
+
+      await internals.writeManagedTypedToolExtension(runtimeConfig, "list");
+      const list = JSON.parse(await readFile(pluginConfigPath, "utf8")) as Written;
+      expect(list).not.toHaveProperty("replyPayloadRewrites");
+    });
+  });
+
   it("refuses a typed-tool script it cannot trace to its bot package", async () => {
     await withRuntime(async ({ tempRoot, paths }) => {
       const service = buildService(paths, {
@@ -18148,7 +18785,7 @@ describe("typed tools, scan agents and exec pinning", () => {
       const internals = service as unknown as {
         resolveBoundToolManifests: () => Promise<unknown>;
         listBotPackages: () => Promise<unknown>;
-        writeManagedTypedToolExtension: (config: unknown) => Promise<void>;
+        writeManagedTypedToolExtension: (config: unknown, shape: string) => Promise<void>;
       };
       const runtimeConfig = {
         openclaw: { openclawHome: join(tempRoot, "home") },
@@ -18164,7 +18801,9 @@ describe("typed tools, scan agents and exec pinning", () => {
         },
       ];
       internals.resolveBoundToolManifests = bound("../outside.js");
-      await expect(internals.writeManagedTypedToolExtension(runtimeConfig)).rejects.toMatchObject({
+      await expect(
+        internals.writeManagedTypedToolExtension(runtimeConfig, "list"),
+      ).rejects.toMatchObject({
         code: "TYPED_TOOL_SOURCE_UNAVAILABLE",
         message: "Typed tool script for 'typed-sentinel-tool@1.0.0' is outside its bot package",
       });
@@ -18179,7 +18818,7 @@ describe("typed tools, scan agents and exec pinning", () => {
           manifest: { openclawTypedTool: { ...TYPED_SENTINEL_TOOL, operations: [] } },
         },
       ];
-      await internals.writeManagedTypedToolExtension(runtimeConfig);
+      await internals.writeManagedTypedToolExtension(runtimeConfig, "list");
       const written = JSON.parse(
         await readFile(
           join(tempRoot, "home", "extensions", "sovereign-typed-tools", "plugin-config.json"),
@@ -18199,7 +18838,9 @@ describe("typed tools, scan agents and exec pinning", () => {
 
       internals.listBotPackages = async () => [];
       internals.resolveBoundToolManifests = bound("workspace/bin/dist/typed-sentinel.js");
-      await expect(internals.writeManagedTypedToolExtension(runtimeConfig)).rejects.toMatchObject({
+      await expect(
+        internals.writeManagedTypedToolExtension(runtimeConfig, "list"),
+      ).rejects.toMatchObject({
         code: "TYPED_TOOL_SOURCE_UNAVAILABLE",
         message: "Bot package for typed tool template 'typed-sentinel-tool@1.0.0' is unavailable",
       });

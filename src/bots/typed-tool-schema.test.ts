@@ -214,6 +214,79 @@ describe("typedToolTemplateSchema", () => {
   });
 });
 
+describe("typedToolTemplateSchema slash commands", () => {
+  const read = (name: string, extra: Record<string, unknown> = {}) => ({
+    name,
+    description: name,
+    effect: "read",
+    argv: [name, "--json"],
+    ...extra,
+  });
+
+  it("keeps a slash command on a parameterless read operation", () => {
+    const parsed = typedToolTemplateSchema.parse(
+      tool({ operations: [read("version", { slashCommand: "version" }), operation()] }),
+    );
+    expect(parsed.operations[0]?.slashCommand).toBe("version");
+    expect(parsed.operations[1]).not.toHaveProperty("slashCommand");
+  });
+
+  it.each([
+    ["an uppercase name", read("shout", { slashCommand: "Shout" }), "must match"],
+    ["a hyphenated name", read("shout", { slashCommand: "shout-now" }), "must match"],
+    [
+      "a name over 32 characters",
+      read("long", { slashCommand: `a${"b".repeat(32)}` }),
+      "must match",
+    ],
+    ["a built-in command", read("state", { slashCommand: "status" }), "is reserved"],
+    ["a 2026.8 built-in command", read("code", { slashCommand: "codex" }), "is reserved"],
+    ["the confirm command", read("ok", { slashCommand: "confirm" }), "is reserved"],
+    [
+      "a change operation",
+      {
+        ...read("apply", { slashCommand: "apply" }),
+        effect: "change",
+        argv: ["apply", "<tool-instance-id>"],
+      },
+      "only a read operation can have a slash command",
+    ],
+    [
+      "an operation with parameters",
+      read("lookup", {
+        slashCommand: "lookup",
+        params: { query: { type: "string", description: "Query", argv: ["--query", "{value}"] } },
+      }),
+      "a slash command takes no parameters",
+    ],
+    [
+      "an operation with an empty requirement list",
+      read("lookup", { slashCommand: "lookup", required: [] }),
+      "a slash command takes no parameters",
+    ],
+    [
+      "an operation with an empty exactlyOneOf list",
+      read("lookup", { slashCommand: "lookup", exactlyOneOf: [] }),
+      "a slash command takes no parameters",
+    ],
+  ])("rejects %s", (_label, value, message) => {
+    expect(issues(tool({ operations: [value] })).join("\n")).toContain(message);
+  });
+
+  it("rejects a slash command two operations of one tool declare", () => {
+    expect(
+      issues(
+        tool({
+          operations: [
+            read("version", { slashCommand: "version" }),
+            read("about", { slashCommand: "version" }),
+          ],
+        }),
+      ),
+    ).toEqual(["duplicate slash command 'version'"]);
+  });
+});
+
 describe("scanAgentTemplateSchema", () => {
   it("accepts plugin tools and rejects core tools", () => {
     expect(scanAgentTemplateSchema.safeParse({ toolNames: ["llm-task"] }).success).toBe(true);
