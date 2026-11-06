@@ -14219,7 +14219,7 @@ describe("RealInstallerService", () => {
     }
   });
 
-  it("keeps room reply routing open in OpenClaw config when federation is enabled", async () => {
+  it("applies the bot sender allowlist when federation is enabled", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "sovereign-node-installer-test-"));
     const paths: SovereignPaths = {
       configPath: join(tempRoot, "etc", "sovereign-node.json5"),
@@ -14391,21 +14391,23 @@ describe("RealInstallerService", () => {
       expect(openclawConfig.channels?.matrix?.groupAllowFrom).toBeUndefined();
       expect(openclawConfig.channels?.matrix?.groups).toBeUndefined();
 
+      const participants = ["@operator:matrix.example.org", "@satoshi:matrix.example.org"];
       const btcAccount = openclawConfig.channels?.matrix?.accounts?.["bitcoin-skill-match"];
       expect(btcAccount?.dm?.enabled).toBe(true);
-      expect(btcAccount?.dm?.policy).toBe("open");
-      expect(btcAccount?.dm?.allowFrom).toBeUndefined();
-      expect(btcAccount?.groupPolicy).toBe("open");
-      expect(btcAccount?.groupAllowFrom).toBeUndefined();
+      expect(btcAccount?.dm?.policy).toBe("allowlist");
+      expect(btcAccount?.dm?.allowFrom).toEqual(participants);
+      expect(btcAccount?.groupPolicy).toBe("allowlist");
+      expect(btcAccount?.groupAllowFrom).toEqual(participants);
+      expect(btcAccount?.groups?.["!alerts:matrix.example.org"]?.users).toEqual(participants);
       expect(btcAccount?.groups?.["!alerts:matrix.example.org"]?.autoReply).toBe(true);
       expect(btcAccount?.groups?.["!alerts:matrix.example.org"]?.requireMention).toBe(false);
 
       const opAccount = openclawConfig.channels?.matrix?.accounts?.["node-operator"];
       expect(opAccount?.dm?.enabled).toBe(true);
-      expect(opAccount?.dm?.policy).toBe("open");
-      expect(opAccount?.dm?.allowFrom).toBeUndefined();
-      expect(opAccount?.groupPolicy).toBe("open");
-      expect(opAccount?.groupAllowFrom).toBeUndefined();
+      expect(opAccount?.dm?.policy).toBe("allowlist");
+      expect(opAccount?.dm?.allowFrom).toEqual(participants);
+      expect(opAccount?.groupPolicy).toBe("allowlist");
+      expect(opAccount?.groupAllowFrom).toEqual(participants);
       expect(opAccount?.groups?.["!alerts:matrix.example.org"]?.autoReply).toBe(false);
       expect(opAccount?.groups?.["!alerts:matrix.example.org"]?.requireMention).toBe(true);
     } finally {
@@ -14528,7 +14530,6 @@ describe("RealInstallerService", () => {
       const config = JSON.parse(configRaw) as { matrix?: { federationEnabled?: boolean } };
       expect(config.matrix?.federationEnabled).toBe(true);
 
-      // OpenClaw config should keep room routing open without allowlists
       const openclawRaw = await readFile(
         join(paths.openclawServiceHome, ".openclaw", "openclaw.json5"),
         "utf8",
@@ -14536,6 +14537,7 @@ describe("RealInstallerService", () => {
       type AccountShape = {
         dm?: { policy?: string; allowFrom?: string[] };
         groupPolicy?: string;
+        groupAllowFrom?: string[];
         groups?: Record<string, { autoReply?: boolean; requireMention?: boolean }>;
       };
       const openclawConfig = JSON.parse(openclawRaw) as {
@@ -14558,9 +14560,10 @@ describe("RealInstallerService", () => {
       expect(accountIds.length).toBeGreaterThan(0);
       for (const id of accountIds) {
         const a = accounts[id];
-        expect(a?.dm?.policy).toBe("open");
-        expect(a?.dm?.allowFrom).toBeUndefined();
-        expect(a?.groupPolicy).toBe("open");
+        expect(a?.dm?.policy).toBe("allowlist");
+        expect(a?.dm?.allowFrom).toEqual(["@operator:matrix.example.org"]);
+        expect(a?.groupPolicy).toBe("allowlist");
+        expect(a?.groupAllowFrom).toEqual(["@operator:matrix.example.org"]);
         expect(a?.groups?.["!alerts:matrix.example.org"]).toBeDefined();
       }
     } finally {

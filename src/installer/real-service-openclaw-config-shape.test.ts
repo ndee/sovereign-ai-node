@@ -34,6 +34,14 @@ type RenderedConfig = {
     ownership?: string;
   };
   tools?: { deny?: string[]; web?: { search?: { enabled?: boolean; provider?: string } } };
+  channels?: { matrix?: { accounts?: Record<string, RenderedMatrixAccount> } };
+};
+
+type RenderedMatrixAccount = {
+  dm?: { enabled?: boolean; policy?: string; allowFrom?: string[] };
+  groupPolicy?: string;
+  groupAllowFrom?: string[];
+  groups?: Record<string, { users?: string[] }>;
 };
 
 /**
@@ -425,6 +433,96 @@ describe("OpenClaw config shape follows the installed OpenClaw", () => {
       expect(await readFile(config.openclaw.gatewayEnvPath, "utf8")).not.toContain(token);
       expect(await readFile(config.openclaw.runtimeProfilePath, "utf8")).not.toContain(token);
       expect(logLines.join("\n")).not.toContain(token);
+    });
+  });
+
+  describe("bot sender allowlist", () => {
+    const OPERATOR = "@operator:matrix.example.org";
+    const ALERT_ROOM = "!alerts:matrix.example.org";
+
+    const withDedicatedBot = (
+      config: RuntimeConfig,
+      allowedUsers: string[] | undefined,
+    ): RuntimeConfig => {
+      const tokenPath = join(tempRoot, "secrets", "mail-sentinel-token");
+      config.openclawProfile.agents.push({
+        id: "mail-sentinel",
+        workspace: join(paths.stateDir, "mail-sentinel", "workspace"),
+        botInstanceId: "mail-sentinel",
+        matrix: {
+          localpart: "mail-sentinel",
+          userId: "@mail-sentinel:matrix.example.org",
+          accessTokenSecretRef: `file:${tokenPath}`,
+        },
+      } as RuntimeConfig["openclawProfile"]["agents"][number]);
+      config.bots.instances.push({
+        id: "mail-sentinel",
+        packageId: "mail-sentinel",
+        workspace: join(paths.stateDir, "mail-sentinel", "workspace"),
+        ...(allowedUsers === undefined ? {} : { matrix: { allowedUsers } }),
+      } as RuntimeConfig["bots"]["instances"][number]);
+      return config;
+    };
+
+    const expectAllowlist = (account: RenderedMatrixAccount | undefined, users: string[]) => {
+      expect(account?.dm).toEqual({ enabled: true, policy: "allowlist", allowFrom: users });
+      expect(account?.groupPolicy).toBe("allowlist");
+      expect(account?.groupAllowFrom).toEqual(users);
+      expect(account?.groups?.["*"]?.users).toEqual(users);
+      expect(account?.groups?.[ALERT_ROOM]?.users).toEqual(users);
+    };
+
+    beforeEach(async () => {
+      await writeFile(join(tempRoot, "secrets", "mail-sentinel-token"), "syt-ms\n", "utf8");
+    });
+
+    describe.each(["2026.3.13", "2026.8.35"])("on OpenClaw %s", (installedVersion) => {
+      it("applies the bot sender allowlist when federation is enabled", async () => {
+        const config = runtimeConfig();
+        config.matrix.federationEnabled = true;
+        await makeService({ installedVersion }).writeOpenClawRuntimeArtifacts(config);
+
+        expectAllowlist((await readRendered(config)).channels?.matrix?.accounts?.default, [
+          OPERATOR,
+        ]);
+      });
+
+      it("limits a dedicated bot to the operator when its instance lists no users", async () => {
+        const config = withDedicatedBot(runtimeConfig(), undefined);
+        config.matrix.federationEnabled = true;
+        await makeService({ installedVersion }).writeOpenClawRuntimeArtifacts(config);
+
+        const accounts = (await readRendered(config)).channels?.matrix?.accounts;
+        expect(Object.keys(accounts ?? {})).toEqual(["mail-sentinel"]);
+        expectAllowlist(accounts?.["mail-sentinel"], [OPERATOR]);
+      });
+
+      it("admits exactly the users a dedicated bot instance lists", async () => {
+        const listed = [OPERATOR, "@friend:other.example.org"];
+        const config = withDedicatedBot(runtimeConfig(), listed);
+        config.matrix.federationEnabled = true;
+        await makeService({ installedVersion }).writeOpenClawRuntimeArtifacts(config);
+
+        const account = (await readRendered(config)).channels?.matrix?.accounts?.["mail-sentinel"];
+        expectAllowlist(account, listed);
+        expect(account?.dm?.allowFrom).not.toContain("@someone:elsewhere.example.org");
+      });
+
+      it("renders the same Matrix accounts with federation on and off, across re-renders", async () => {
+        const config = withDedicatedBot(runtimeConfig(), undefined);
+        const service = makeService({ installedVersion });
+        await service.writeOpenClawRuntimeArtifacts(config);
+        const federationOff = (await readRendered(config)).channels?.matrix;
+        expectAllowlist(federationOff?.accounts?.["mail-sentinel"], [OPERATOR]);
+
+        config.matrix.federationEnabled = true;
+        await service.writeOpenClawRuntimeArtifacts(config);
+        const federationOn = (await readRendered(config)).channels?.matrix;
+        await service.writeOpenClawRuntimeArtifacts(config);
+
+        expect(federationOn).toEqual(federationOff);
+        expect((await readRendered(config)).channels?.matrix).toEqual(federationOn);
+      });
     });
   });
 
