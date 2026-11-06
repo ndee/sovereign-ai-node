@@ -13602,7 +13602,6 @@ export default function (api) {
       ...operatorAllowlist,
       ...(await this.listInvitedHumanMatrixUserIds(runtimeConfig)),
     ]);
-    const federationOpen = runtimeConfig.matrix.federationEnabled;
     const pluginEntries: Record<string, unknown> = {
       matrix: {
         enabled: true,
@@ -13631,14 +13630,14 @@ export default function (api) {
         homeserver: string;
         userId: string;
         accessToken: string;
-        dm?: {
+        dm: {
           enabled: boolean;
-          policy?: "allowlist" | "open";
-          allowFrom?: string[];
+          policy: "allowlist";
+          allowFrom: string[];
         };
-        groupPolicy?: "allowlist" | "open";
-        groupAllowFrom?: string[];
-        groups?: Record<
+        groupPolicy: "allowlist";
+        groupAllowFrom: string[];
+        groups: Record<
           string,
           {
             enabled: boolean;
@@ -13731,35 +13730,19 @@ export default function (api) {
         homeserver: runtimeConfig.matrix.adminBaseUrl,
         userId: agent.matrix.userId,
         accessToken: await this.resolveSecretRef(agent.matrix.accessTokenSecretRef),
-        ...(explicitAllowlist !== undefined || !federationOpen
-          ? {
-              dm: {
-                enabled: routing.dmEnabled,
-                policy: "allowlist" as const,
-                allowFrom: agentAllowlist,
-              },
-              groupPolicy: "allowlist" as const,
-              groupAllowFrom: agentAllowlist,
-              groups: buildMatrixGroupEntries({
-                roomId: alertRoom.roomId,
-                users: agentAllowlist,
-                autoReply: routing.alertRoom.autoReply,
-                requireMention: routing.alertRoom.requireMention,
-              }),
-            }
-          : {
-              dm: {
-                enabled: routing.dmEnabled,
-                policy: "open" as const,
-              },
-              groupPolicy: "open" as const,
-              groups: buildMatrixGroupEntries({
-                roomId: alertRoom.roomId,
-                users: [],
-                autoReply: routing.alertRoom.autoReply,
-                requireMention: routing.alertRoom.requireMention,
-              }),
-            }),
+        dm: {
+          enabled: routing.dmEnabled,
+          policy: "allowlist",
+          allowFrom: agentAllowlist,
+        },
+        groupPolicy: "allowlist",
+        groupAllowFrom: agentAllowlist,
+        groups: buildMatrixGroupEntries({
+          roomId: alertRoom.roomId,
+          users: agentAllowlist,
+          autoReply: routing.alertRoom.autoReply,
+          requireMention: routing.alertRoom.requireMention,
+        }),
       };
     }
     if (hasSharedServiceBot || Object.keys(matrixAccounts).length === 0) {
@@ -13767,35 +13750,19 @@ export default function (api) {
         homeserver: runtimeConfig.matrix.adminBaseUrl,
         userId: runtimeConfig.matrix.bot.userId,
         accessToken: await this.resolveSecretRef(runtimeConfig.matrix.bot.accessTokenSecretRef),
-        ...(federationOpen
-          ? {
-              dm: {
-                enabled: true,
-                policy: "open" as const,
-              },
-              groupPolicy: "open" as const,
-              groups: buildMatrixGroupEntries({
-                roomId: runtimeConfig.matrix.alertRoom.roomId,
-                users: [],
-                autoReply: true,
-                requireMention: false,
-              }),
-            }
-          : {
-              dm: {
-                enabled: true,
-                policy: "allowlist" as const,
-                allowFrom: matrixParticipantAllowlist,
-              },
-              groupPolicy: "allowlist" as const,
-              groupAllowFrom: matrixParticipantAllowlist,
-              groups: buildMatrixGroupEntries({
-                roomId: runtimeConfig.matrix.alertRoom.roomId,
-                users: matrixParticipantAllowlist,
-                autoReply: true,
-                requireMention: false,
-              }),
-            }),
+        dm: {
+          enabled: true,
+          policy: "allowlist",
+          allowFrom: matrixParticipantAllowlist,
+        },
+        groupPolicy: "allowlist",
+        groupAllowFrom: matrixParticipantAllowlist,
+        groups: buildMatrixGroupEntries({
+          roomId: runtimeConfig.matrix.alertRoom.roomId,
+          users: matrixParticipantAllowlist,
+          autoReply: true,
+          requireMention: false,
+        }),
       };
     }
 
