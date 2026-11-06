@@ -9,6 +9,13 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 From this point forward, GitHub Release notes are auto-generated from commit history
 by the `.github/workflows/release.yml` workflow.
 
+## [2.16.1](https://github.com/ndee/sovereign-ai-node/compare/v2.16.0...v2.16.1) (2026-11-06)
+
+
+### Bug Fixes
+
+* **installer:** apply the bot sender allowlist when federation is enabled ([#363](https://github.com/ndee/sovereign-ai-node/issues/363)) ([df26e39](https://github.com/ndee/sovereign-ai-node/commit/df26e39ec835c955677680ebf84aa3d4a9e27f5a))
+
 ## [2.16.0](https://github.com/ndee/sovereign-ai-node/compare/v2.15.2...v2.16.0) (2026-11-06)
 
 
