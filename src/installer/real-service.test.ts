@@ -18756,6 +18756,10 @@ describe("typed tools, scan agents and exec pinning", () => {
           contains: "No allowed providers are available for the selected model",
           text: "Chat is not available with the current model settings; mail alerts are not affected. Check the model settings.",
         },
+        {
+          contains: "The configured model is unavailable from the provider",
+          text: "Chat is not available with the current model settings; mail alerts are not affected. Check the model settings.",
+        },
       ]);
       expect(keyed.tools.map((tool) => [tool.name, tool.slashCommands])).toEqual([
         ["about_tool", { version: "version" }],

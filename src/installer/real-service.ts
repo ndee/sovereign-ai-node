@@ -320,7 +320,7 @@ import {
   renderTypedToolPluginIndex,
   renderTypedToolPluginManifest,
   renderTypedToolPluginRuntime,
-  TYPED_TOOL_CHAT_UNAVAILABLE_REWRITE,
+  TYPED_TOOL_CHAT_UNAVAILABLE_REWRITES,
   TYPED_TOOL_COMMAND_TIMEOUT_MS,
   TYPED_TOOL_CONFIRM_TTL_MS,
   type TypedToolPluginTool,
@@ -6846,7 +6846,7 @@ export default function (api) {
           // 2026.3 delivers Matrix replies past every plugin hook, so there
           // the raw provider error stays a documented limitation.
           ...(configShape === "keyed"
-            ? { replyPayloadRewrites: [TYPED_TOOL_CHAT_UNAVAILABLE_REWRITE] }
+            ? { replyPayloadRewrites: [...TYPED_TOOL_CHAT_UNAVAILABLE_REWRITES] }
             : {}),
           tools: pluginTools,
         }),
