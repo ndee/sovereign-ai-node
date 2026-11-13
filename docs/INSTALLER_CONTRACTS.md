@@ -849,7 +849,10 @@ update.
     `replyPayloadRewrites: [{ contains, text }]` and the plugin registers a
     `reply_payload_sending` hook. A reply whose text contains `No allowed
     providers are available for the selected model` (the provider router's
-    error for a model no allowed provider serves) is replaced by the single line
+    error for a model no allowed provider serves) or `The configured model is
+    unavailable from the provider` (the copy OpenClaw 2026.8 substitutes, before
+    the hook runs, for any provider HTTP 404 it classifies as
+    `model_not_found`) is replaced by the single line
     `Chat is not available with the current model settings; mail alerts are not
     affected. Check the model settings.`; every other reply passes unchanged.
     OpenClaw 2026.3 delivers Matrix replies past every plugin hook, so there the
