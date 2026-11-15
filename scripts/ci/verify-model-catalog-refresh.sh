@@ -9,6 +9,7 @@
 # Run as root. An optional argument names the chat model the rendered config
 # must now use (after a model change).
 set -euo pipefail
+trap 'echo "::error::$0 failed at line $LINENO: $BASH_COMMAND"' ERR
 
 here="$(cd "$(dirname "$0")" && pwd)"
 gateway_unit=sovereign-openclaw-gateway.service
@@ -24,9 +25,23 @@ if [[ -z "$pid" || "$pid" == "0" ]]; then
   exit 1
 fi
 node_bin="$(readlink -f "/proc/$pid/exe")"
-# The unit runs <node> <openclaw.mjs> gateway run ...
-openclaw_entry="$(tr '\0' '\n' <"/proc/$pid/cmdline" | sed -n 2p)"
-openclaw_entry="$(readlink -f "$openclaw_entry")"
+# The unit runs [<node>] <openclaw> gateway run ...; the gateway retitles its
+# process, so /proc/<pid>/cmdline no longer carries the entry.
+exec_start="$(systemctl show -p ExecStart --value "$gateway_unit")"
+openclaw_entry=""
+read -r -a words <<<"$(sed -n 's/.*argv\[\]=\([^;]*\);.*/\1/p' <<<"$exec_start")"
+for word in "${words[@]}"; do
+  [[ "$word" == "gateway" ]] && break
+  resolved="$(readlink -f "$word" || true)"
+  if [[ "$resolved" == */openclaw.mjs ]]; then
+    openclaw_entry="$resolved"
+    break
+  fi
+done
+if [[ -z "$openclaw_entry" ]]; then
+  echo "::error::cannot find openclaw.mjs in the ExecStart of $gateway_unit: $exec_start"
+  exit 1
+fi
 package_root="$(dirname "$openclaw_entry")"
 echo "gateway: $node_bin $openclaw_entry"
 
