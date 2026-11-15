@@ -3318,6 +3318,7 @@ describe("RealInstallerService", () => {
         skills?: unknown;
         memory?: unknown;
         update?: unknown;
+        models?: unknown;
       };
       expect(finished.job.state).toBe("succeeded");
       expect(openclawConfig.meta).toEqual({ migrations: { modelPolicyAllowlist: true } });
@@ -3373,6 +3374,7 @@ describe("RealInstallerService", () => {
       expect(openclawConfig.skills).toEqual({ workshop: { autonomous: { mode: "off" } } });
       expect(openclawConfig.memory).toEqual({ search: { enabled: false } });
       expect(openclawConfig.update).toEqual({ checkOnStart: false });
+      expect(openclawConfig.models).toEqual({ catalogRefresh: { enabled: false } });
 
       // Status reads the keyed roster: the managed agent is still found.
       const status = await service.getStatus();
