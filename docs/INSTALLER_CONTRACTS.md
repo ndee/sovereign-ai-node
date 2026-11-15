@@ -101,9 +101,9 @@ In the default install path, `sovereign-node install` is responsible for install
 
 Default behavior:
 
-- install the current Sovereign-pinned OpenClaw version `2026.8.35` from the locked runtime project shipped in `deploy/openclaw-runtime/` (a `package.json` with a `zod` `4.6.6` override and its committed `package-lock.json`); never from the upstream `openclaw.ai/install.sh` and never with a bare `npm install -g`
+- install the current Sovereign-pinned OpenClaw version `2026.8.35` from the locked runtime project shipped in `deploy/openclaw-runtime/` (a `package.json` with `undici` `8.12.4` and `zod` `4.6.6` overrides and its committed `package-lock.json`); never from the upstream `openclaw.ai/install.sh` and never with a bare `npm install -g`
 - install it with `npm ci --omit=dev` into `<prefix>/lib/sovereign-openclaw-runtime`, where `<prefix>` is `<serviceHome>/.npm-global` for an unprivileged install and npm's global prefix (`npm prefix -g`) for a root install, then link `<prefix>/bin/openclaw` to the locked CLI
-- stage the install next to the runtime in place and swap it in only after `npm ci` succeeds, so a failed install leaves the previous runtime working; a rerun skips the install when the runtime in place was installed from the same lock and `<prefix>/bin/openclaw` points into it
+- stage the install next to the runtime in place and swap it in only after `npm ci` succeeds, so a failed install leaves the previous runtime working; a rerun skips the install when the runtime in place was installed from the same lock and `<prefix>/bin/openclaw` points into it, so a release that only changes the lock (an override bump) reinstalls the pinned OpenClaw
 - keep an installed OpenClaw whose version differs from the pin (see below); a host without OpenClaw gets the pin
 - require Node.js `>=22.22.3 <23` for both the process running `sovereign-node` and the system Node the gateway runs on (preflight checks `node-version` and `gateway-node-version`); `install.sh` upgrades or installs Node.js 22 from NodeSource when needed
 - skip OpenClaw onboarding because Sovereign owns the domain-specific configuration flow
@@ -142,7 +142,7 @@ A pin change is exactly one edit plus a regenerated lock:
    npm install --package-lock-only --ignore-scripts --install-strategy=shallow
    ```
 
-3. Run `pnpm test:coverage:unit`. The `src/openclaw/bootstrap.test.ts` lock tests fail when the pin, the manifest and the lock disagree, when any `zod` in the lock is not the override, or when a package other than one of openclaw's peers sits outside `node_modules/openclaw`.
+3. Run `pnpm test:coverage:unit`. The `src/openclaw/bootstrap.test.ts` lock tests fail when the pin, the manifest and the lock disagree, when any `undici` or `zod` in the lock is not its override, or when a package other than one of openclaw's peers sits outside `node_modules/openclaw`.
 
 `--install-strategy=shallow` nests every dependency under `node_modules/openclaw`, so the package root the gateway sandbox derives from the CLI holds the runtime. npm still places openclaw's peer dependencies beside it in `node_modules`, which the sandbox therefore also allows.
 
@@ -159,6 +159,8 @@ After writing Sovereign-managed OpenClaw config and environment, the installer i
 5. starts the gateway and waits up to 600 s for its first start (`SOVEREIGN_NODE_GATEWAY_READY_TIMEOUT_MS` still overrides it).
 
 On 2026.8 the rendered config already registers every managed agent (`agents.entries`) and binding, so the installer runs no `openclaw agents` registration command and only checks that `openclaw agents list` shows each agent. 2026.3 keeps its existing CLI registration and start order.
+
+The 2026.8 config sets `models.catalogRefresh.enabled: false`. OpenClaw otherwise downloads its hosted model catalog at startup and every six hours and parses it with the zod copy compiled into OpenClaw core (GHSA-mrhx-c7xc-m3w5), which the runtime project's override cannot replace. With the switch off, model metadata stays at the catalog shipped with the release; OpenRouter models node configures still resolve through the OpenRouter plugin. 2026.3 has no such key and validates `models` strictly, so its config is unchanged. `scripts/ci/verify-model-catalog-refresh.sh` checks the installed gateway in the E2E install job: no catalog request at startup or on a scheduled refresh, a request when the switch is on, and chat and llm-task replies through a local model stub.
 
 Known residual: the `@openclaw/matrix` plugin bundles two dependencies that npm overrides cannot reach. They carry GHSA-gfr2-rv44-r23c and GHSA-mrhx-c7xc-m3w5, with an availability-only impact (no confidentiality or integrity impact). The residual closes with the next `@openclaw/matrix` release, which the installer picks up through the normal pin update.
 
