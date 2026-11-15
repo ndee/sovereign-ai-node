@@ -684,7 +684,7 @@ type InstallRequest = {
       zdr?: boolean; // default true: only zero-data-retention endpoints
       dataCollection?: "deny" | "allow"; // default "deny": exclude providers that retain/train
       allowFallbacks?: boolean; // default false: never fall back outside the filtered set
-      only?: string[]; // optional provider allowlist (OpenRouter provider slugs)
+      only?: string[]; // optional provider allowlist (OpenRouter provider slugs); <= 512 entries of <= 128 chars
     };
   };
   imap?: {
@@ -709,21 +709,21 @@ type InstallRequest = {
     password?: string; // optional if backend generates one
   };
   bots?: {
-    selected?: string[];
-    config?: Record<string, Record<string, string | number | boolean>>;
-    instances?: Array<{
-      id: string;
-      packageId: string;
+    selected?: string[]; // <= 64 bot ids of <= 128 chars
+    config?: Record<string, Record<string, string | number | boolean>>; // <= 64 bots, <= 256 keys each
+    instances?: Array<{ // <= 64 instances
+      id: string; // <= 128 chars
+      packageId: string; // <= 128 chars
       workspace?: string;
-      config?: Record<string, string | number | boolean>;
-      secretRefs?: Record<string, string>;
+      config?: Record<string, string | number | boolean>; // <= 256 keys
+      secretRefs?: Record<string, string>; // <= 64 keys
       matrix?: {
         localpart?: string;
         alertRoom?: {
           roomId?: string;
           roomName?: string;
         };
-        allowedUsers?: string[];
+        allowedUsers?: string[]; // <= 1024 Matrix user IDs of <= 255 chars
       };
     }>;
   };
@@ -744,6 +744,13 @@ Constraints:
 - `openclaw.runOnboard` defaults to `false` and should remain `false` in the default Sovereign flow
 - `openrouter` is required
 - `openrouter.apiKey` or `openrouter.secretRef` is required
+- request arrays and records have maximum sizes, listed in the comments above
+  (`INSTALL_REQUEST_LIMITS` in `src/contracts/install.ts`). A request over a limit
+  is refused with a single `too_big` issue at that field, without validating its
+  elements, so an oversized request stays cheap to reject. The same limits apply
+  wherever these blocks are reused: `POST /api/install/preflight`,
+  `POST /api/reconfigure/matrix` (`bots`) and `POST /api/reconfigure/openrouter`
+  (`openrouter.privacy.only`)
 - `openrouter.privacy` is optional; omitted fields default to the strict profile
   (`zdr: true`, `dataCollection: "deny"`, `allowFallbacks: false`). The resolved
   block is persisted as `openrouter.privacy` in `sovereign-node.json5`, rendered into

@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { onboardingIssueRequestSchema, reconfigureOpenrouterRequestSchema } from "./api.js";
+import {
+  onboardingIssueRequestSchema,
+  preflightRequestSchema,
+  reconfigureMatrixRequestSchema,
+  reconfigureOpenrouterRequestSchema,
+} from "./api.js";
+import { INSTALL_REQUEST_LIMITS } from "./install.js";
 
 describe("onboardingIssueRequestSchema", () => {
   it("accepts an empty object", () => {
@@ -93,5 +99,81 @@ describe("reconfigureOpenrouterRequestSchema privacy", () => {
     expect(messages(result)).toContain(
       "Provide at least one of openrouter.model, openrouter.apiKey, openrouter.secretRef, or openrouter.privacy",
     );
+  });
+});
+
+describe("request size limits outside the install request", () => {
+  const slugs = (count: number) => Array.from({ length: count }, (_, index) => `provider-${index}`);
+  const reconfigureOnly = (only: unknown) =>
+    reconfigureOpenrouterRequestSchema.safeParse({ openrouter: { privacy: { only } } });
+
+  it("bounds the reconfigure provider allow-list", () => {
+    expect(reconfigureOnly(slugs(INSTALL_REQUEST_LIMITS.providerSlugs)).success).toBe(true);
+
+    const result = reconfigureOnly(slugs(INSTALL_REQUEST_LIMITS.providerSlugs + 1));
+    expect(result.error?.issues).toEqual([
+      expect.objectContaining({
+        code: "too_big",
+        maximum: INSTALL_REQUEST_LIMITS.providerSlugs,
+        path: ["openrouter", "privacy", "only"],
+      }),
+    ]);
+  });
+
+  it("bounds the length of a reconfigure provider slug after trimming", () => {
+    const limit = INSTALL_REQUEST_LIMITS.providerSlugLength;
+    expect(reconfigureOnly([` ${"a".repeat(limit)} `]).success).toBe(true);
+
+    const result = reconfigureOnly(["a".repeat(limit + 1)]);
+    expect(result.error?.issues).toEqual([
+      expect.objectContaining({
+        code: "too_big",
+        maximum: limit,
+        path: ["openrouter", "privacy", "only", 0],
+      }),
+    ]);
+  });
+
+  it("refuses a 500k-entry reconfigure allow-list with one issue", () => {
+    const result = reconfigureOnly(Array.from({ length: 500_000 }, () => ""));
+    expect(result.error?.issues).toHaveLength(1);
+  });
+
+  it("applies the bot limits to reconfigure matrix requests", () => {
+    const instances = (count: number) =>
+      Array.from({ length: count }, (_, index) => ({
+        id: `instance-${index}`,
+        packageId: "mail-sentinel",
+      }));
+
+    expect(
+      reconfigureMatrixRequestSchema.safeParse({
+        bots: { instances: instances(INSTALL_REQUEST_LIMITS.botInstances) },
+      }).success,
+    ).toBe(true);
+
+    const result = reconfigureMatrixRequestSchema.safeParse({
+      bots: { instances: instances(INSTALL_REQUEST_LIMITS.botInstances + 1) },
+    });
+    expect(result.error?.issues).toEqual([
+      expect.objectContaining({ code: "too_big", path: ["bots", "instances"] }),
+    ]);
+  });
+
+  it("applies the bot limits to preflight requests", () => {
+    const selected = (count: number) => Array.from({ length: count }, (_, index) => `bot-${index}`);
+
+    expect(
+      preflightRequestSchema.safeParse({
+        bots: { selected: selected(INSTALL_REQUEST_LIMITS.botsSelected) },
+      }).success,
+    ).toBe(true);
+
+    const result = preflightRequestSchema.safeParse({
+      bots: { selected: selected(INSTALL_REQUEST_LIMITS.botsSelected + 1) },
+    });
+    expect(result.error?.issues).toEqual([
+      expect.objectContaining({ code: "too_big", path: ["bots", "selected"] }),
+    ]);
   });
 });
