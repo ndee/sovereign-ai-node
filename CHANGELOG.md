@@ -9,6 +9,14 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 From this point forward, GitHub Release notes are auto-generated from commit history
 by the `.github/workflows/release.yml` workflow.
 
+## [2.16.2](https://github.com/ndee/sovereign-ai-node/compare/v2.16.1...v2.16.2) (2026-11-16)
+
+
+### Bug Fixes
+
+* **installer:** bound array and record sizes in installer request contracts ([#369](https://github.com/ndee/sovereign-ai-node/issues/369)) ([a6fde5b](https://github.com/ndee/sovereign-ai-node/commit/a6fde5ba978da58e08f0b0e66747222d9cdf2a59))
+* **openclaw:** override undici to 8.12.4 and turn the hosted model catalog refresh off ([#368](https://github.com/ndee/sovereign-ai-node/issues/368)) ([367840c](https://github.com/ndee/sovereign-ai-node/commit/367840cf5439766cac46c13cb00c444983e90e05))
+
 ## [2.16.1](https://github.com/ndee/sovereign-ai-node/compare/v2.16.0...v2.16.1) (2026-11-06)
 
 
