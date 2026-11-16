@@ -279,7 +279,7 @@ jobs:
     # The gateway runs on the host's system Node, which must be inside the
     # supported >=22.22.3 <23 range; ubuntu-latest (26.04) ships Node 24 there.
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     needs: [test, changes]
     if: >-
       github.event_name == 'workflow_dispatch' ||
@@ -433,6 +433,14 @@ jobs:
       - name: Verify /version answers through the typed-tool plugin without a model
         run: sudo env "PATH=$PATH" bash scripts/ci/verify-typed-tool-slash-command.sh
 
+      # undici GHSA-qrxm-fqhp-jwvm / GHSA-xjj6-f33q-929c are fixed in 8.12.2.
+      # The zod copy compiled into OpenClaw core (GHSA-mrhx-c7xc-m3w5) is only
+      # reached by the hosted model catalog refresh, which the render turns
+      # off; the probe shows no catalog request at startup or on a scheduled
+      # refresh, a request when it is on, and chat and llm-task replies.
+      - name: Verify undici and the model catalog switch on the installed OpenClaw
+        run: sudo env "PATH=$PATH" bash scripts/ci/verify-model-catalog-refresh.sh
+
       # A model OpenRouter does not list is refused before anything is written.
       # The verdict comes from OpenRouter's public metadata; when that cannot be
       # reached the node saves with a warning instead, so the step is skipped.
@@ -491,6 +499,11 @@ jobs:
           done
           echo "::error::gateway did not listen again after removing the drop-in"
           exit 1
+
+      # The model change above re-rendered the config: the catalog refresh
+      # stays off and the gateway replies on the new model.
+      - name: Verify the model change kept the catalog refresh off and the gateway replies
+        run: sudo env "PATH=$PATH" bash scripts/ci/verify-model-catalog-refresh.sh qwen/qwen3-30b-a3b-instruct-2507
 
       # The bot accounts keep the same sender allowlist when federation is
       # switched on, when it is switched off, and on a later render with it on.

@@ -35,6 +35,7 @@ type RenderedConfig = {
   };
   tools?: { deny?: string[]; web?: { search?: { enabled?: boolean; provider?: string } } };
   channels?: { matrix?: { accounts?: Record<string, RenderedMatrixAccount> } };
+  models?: Record<string, unknown>;
 };
 
 type RenderedMatrixAccount = {
@@ -234,6 +235,8 @@ describe("OpenClaw config shape follows the installed OpenClaw", () => {
     // The 2026.3 render is unchanged: no 2026.8-only settings leak into it.
     expect(rendered.tools?.web).toBeUndefined();
     expect(rendered.agents?.ownership).toBeUndefined();
+    // 2026.3 validates models strictly and has no catalogRefresh key.
+    expect(rendered.models).toBeUndefined();
   });
 
   it("renders the 2026.8 shape when 2026.8 is installed", async () => {
@@ -244,6 +247,7 @@ describe("OpenClaw config shape follows the installed OpenClaw", () => {
     expect(rendered.agents?.list).toBeUndefined();
     expect(rendered.agents?.ownership).toBe("explicit");
     expect(Object.keys(rendered.agents?.entries ?? {})).toEqual(["node-operator"]);
+    expect(rendered.models).toEqual({ catalogRefresh: { enabled: false } });
   });
 
   it("uses the version that last wrote the config when the CLI cannot be run", async () => {

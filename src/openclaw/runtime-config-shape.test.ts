@@ -328,6 +328,7 @@ describe("toKeyedOpenClawRuntimeConfig", () => {
       skills: { workshop: { autonomous: { mode: "off" } } },
       memory: { search: { enabled: false } },
       update: { checkOnStart: false },
+      models: { catalogRefresh: { enabled: false } },
     });
   });
 

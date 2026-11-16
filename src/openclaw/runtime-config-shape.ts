@@ -359,5 +359,12 @@ export const toKeyedOpenClawRuntimeConfig = (
     update: {
       checkOnStart: false,
     },
+    // The hosted model catalog is downloaded at startup and every six hours and
+    // parsed by the zod copy compiled into OpenClaw core, which the runtime
+    // project's zod override cannot replace. Node renders every model it uses,
+    // so the catalog shipped with the release is enough.
+    models: {
+      catalogRefresh: { enabled: false },
+    },
   };
 };

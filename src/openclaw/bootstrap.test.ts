@@ -294,13 +294,19 @@ describe("the locked OpenClaw runtime project", () => {
     expect((await readOpenClawRuntimeTemplate(TEMPLATE_DIR)).version).toBe(PIN);
   });
 
-  it.each(LOCKED_RUNTIMES)("$label forces every zod in the tree to 4.6.6", async ({ dir }) => {
+  it.each(LOCKED_RUNTIMES)("$label overrides only undici and zod", async ({ dir }) => {
     const manifest = JSON.parse(await readFile(join(dir, "package.json"), "utf8"));
-    expect(manifest.overrides).toEqual({ zod: "4.6.6" });
-    const zods = lockedPackages(await readLock(dir), "zod");
-    expect(zods.length).toBeGreaterThan(0);
-    for (const [path, entry] of zods) {
-      expect(entry.version, path).toBe("4.6.6");
+    expect(manifest.overrides).toEqual({ undici: "8.12.4", zod: "4.6.6" });
+  });
+
+  it.each([
+    { name: "undici", version: "8.12.4" },
+    { name: "zod", version: "4.6.6" },
+  ])("forces every $name in the shipped tree to $version", async ({ name, version }) => {
+    const copies = lockedPackages(await readLock(TEMPLATE_DIR), name);
+    expect(copies.length).toBeGreaterThan(0);
+    for (const [path, entry] of copies) {
+      expect(entry.version, path).toBe(version);
     }
   });
 
@@ -936,6 +942,26 @@ describe("ShellOpenClawBootstrapper keeps reruns idempotent", () => {
 
       expect(info.reinstalled).toBe(true);
       expect(callsTo(calls, "npm", "ci")).toHaveLength(1);
+    });
+  });
+
+  // An update that only changes the lock (an override bump) must reach hosts
+  // that already run the pinned OpenClaw.
+  it("reinstalls the pinned OpenClaw when the lock in place is an earlier one", async () => {
+    await withUid(1001, async () => {
+      const { bootstrapper, calls, runtimeDir } = await unprivilegedInstall();
+      await bootstrapper.ensureInstalled(INSTALL);
+      const lockPath = join(runtimeDir, "package-lock.json");
+      const earlier = JSON.parse(await readFile(lockPath, "utf8"));
+      earlier.packages["node_modules/openclaw/node_modules/undici"].version = "8.10.2";
+      await writeFile(lockPath, `${JSON.stringify(earlier, null, 2)}\n`, "utf8");
+      calls.length = 0;
+
+      expect((await bootstrapper.ensureInstalled(INSTALL)).reinstalled).toBe(true);
+      expect(callsTo(calls, "npm", "ci")).toHaveLength(1);
+      expect(await readFile(lockPath, "utf8")).toBe(
+        await readFile(join(TEMPLATE_DIR, "package-lock.json"), "utf8"),
+      );
     });
   });
 
