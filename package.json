@@ -95,7 +95,7 @@
     "pino": "^9.9.0",
     "postal-mime": "^2.7.3",
     "yaml": "^2.8.1",
-    "zod": "^4.1.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.6",

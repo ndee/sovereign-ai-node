@@ -88,11 +88,53 @@ export const imapInstallInputSchema = z.object({
   mailbox: z.string().min(1).optional(),
 });
 
+// Request arrays and records are bounded so that one oversized request cannot
+// make validation report an issue per element. The limits leave generous
+// headroom over real deployments; see docs/INSTALLER_CONTRACTS.md.
+export const INSTALL_REQUEST_LIMITS = {
+  botsSelected: 64,
+  botInstances: 64,
+  botsConfigBots: 64,
+  botConfigEntries: 256,
+  botSecretRefs: 64,
+  allowedUsers: 1024,
+  providerSlugs: 512,
+  botIdLength: 128,
+  // The Matrix specification caps a full user ID at 255 characters.
+  matrixUserIdLength: 255,
+  providerSlugLength: 128,
+} as const;
+
+// zod (from 4.6.6, the floor in package.json) rejects an over-long array on
+// its .max() before visiting any element, but records have no size check of their own. Counting the keys of the raw
+// input before the record is parsed keeps an oversized record from being
+// copied and from reporting an issue per invalid value.
+const boundedRecord = <V extends z.ZodType>(value: V, maxEntries: number) =>
+  z
+    .unknown()
+    .superRefine((input, ctx) => {
+      if (typeof input === "object" && input !== null && Object.keys(input).length > maxEntries) {
+        ctx.addIssue({
+          code: "too_big",
+          origin: "object",
+          maximum: maxEntries,
+          inclusive: true,
+          input,
+          message: `Too big: expected object to have <=${maxEntries} entries`,
+        });
+      }
+    })
+    .pipe(z.record(z.string(), value));
+
+const providerSlugsSchema = z
+  .array(z.string().min(1).max(INSTALL_REQUEST_LIMITS.providerSlugLength))
+  .max(INSTALL_REQUEST_LIMITS.providerSlugs);
+
 export const openrouterPrivacyInputSchema = z.object({
   zdr: z.boolean().optional(),
   dataCollection: z.enum(["deny", "allow"]).optional(),
   allowFallbacks: z.boolean().optional(),
-  only: z.array(z.string().min(1)).optional(),
+  only: providerSlugsSchema.optional(),
 });
 
 export const openrouterInstallInputSchema = z
@@ -188,22 +230,35 @@ export const botInstanceMatrixSchema = z.object({
       roomName: z.string().min(1).optional(),
     })
     .optional(),
-  allowedUsers: z.array(z.string().min(1)).optional(),
+  allowedUsers: z
+    .array(z.string().min(1).max(INSTALL_REQUEST_LIMITS.matrixUserIdLength))
+    .max(INSTALL_REQUEST_LIMITS.allowedUsers)
+    .optional(),
 });
 
+const botIdSchema = z.string().min(1).max(INSTALL_REQUEST_LIMITS.botIdLength);
+
+const botConfigSchema = boundedRecord(
+  botConfigValueSchema,
+  INSTALL_REQUEST_LIMITS.botConfigEntries,
+);
+
 export const botInstanceInstallInputSchema = z.object({
-  id: z.string().min(1),
-  packageId: z.string().min(1),
+  id: botIdSchema,
+  packageId: botIdSchema,
   workspace: z.string().min(1).optional(),
-  config: z.record(z.string(), botConfigValueSchema).optional(),
-  secretRefs: z.record(z.string(), z.string().min(1)).optional(),
+  config: botConfigSchema.optional(),
+  secretRefs: boundedRecord(z.string().min(1), INSTALL_REQUEST_LIMITS.botSecretRefs).optional(),
   matrix: botInstanceMatrixSchema.optional(),
 });
 
 export const botsInstallInputSchema = z.object({
-  selected: z.array(z.string().min(1)).optional(),
-  config: z.record(z.string(), z.record(z.string(), botConfigValueSchema)).optional(),
-  instances: z.array(botInstanceInstallInputSchema).optional(),
+  selected: z.array(botIdSchema).max(INSTALL_REQUEST_LIMITS.botsSelected).optional(),
+  config: boundedRecord(botConfigSchema, INSTALL_REQUEST_LIMITS.botsConfigBots).optional(),
+  instances: z
+    .array(botInstanceInstallInputSchema)
+    .max(INSTALL_REQUEST_LIMITS.botInstances)
+    .optional(),
 });
 
 export const advancedInstallInputSchema = z.object({

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  INSTALL_REQUEST_LIMITS,
   installRequestSchema,
   matrixOnboardingReadinessSchema,
   reconfigureResultSchema,
@@ -275,5 +276,184 @@ describe("reconfigureResultSchema", () => {
       reconfigureResultSchema.safeParse({ ...base, warnings: [{ code: "", message: "x" }] })
         .success,
     ).toBe(false);
+  });
+});
+
+describe("installRequestSchema size limits", () => {
+  const baseRequest = {
+    mode: "bundled_matrix" as const,
+    openrouter: { secretRef: "file:/etc/sovereign-node/secrets/openrouter-api-key" },
+    matrix: {
+      homeserverDomain: "matrix.example.com",
+      publicBaseUrl: "https://matrix.example.com",
+    },
+    operator: { username: "operator" },
+  };
+  const instance = (overrides: Record<string, unknown> = {}) => ({
+    id: "mail-sentinel",
+    packageId: "mail-sentinel",
+    ...overrides,
+  });
+  const withBots = (bots: Record<string, unknown>) => ({ ...baseRequest, bots });
+  const withPrivacyOnly = (only: string[]) => ({
+    ...baseRequest,
+    openrouter: { ...baseRequest.openrouter, privacy: { only } },
+  });
+  const filled = <T>(length: number, value: (index: number) => T): T[] =>
+    Array.from({ length }, (_, index) => value(index));
+  const entries = <T>(count: number, value: T): Record<string, T> =>
+    Object.fromEntries(filled(count, (index) => [`key-${index}`, value]));
+  const mxid = (index: number) => `@user-${index}:matrix.example.com`;
+  const oversizedString = (length: number) => "a".repeat(length);
+
+  const cases: Array<{
+    name: string;
+    limit: number;
+    path: (string | number)[];
+    request: (size: number) => unknown;
+  }> = [
+    {
+      name: "bots.selected entries",
+      limit: INSTALL_REQUEST_LIMITS.botsSelected,
+      path: ["bots", "selected"],
+      request: (size) => withBots({ selected: filled(size, (index) => `bot-${index}`) }),
+    },
+    {
+      name: "bots.instances entries",
+      limit: INSTALL_REQUEST_LIMITS.botInstances,
+      path: ["bots", "instances"],
+      request: (size) =>
+        withBots({ instances: filled(size, (index) => instance({ id: `instance-${index}` })) }),
+    },
+    {
+      name: "bots.config bots",
+      limit: INSTALL_REQUEST_LIMITS.botsConfigBots,
+      path: ["bots", "config"],
+      request: (size) => withBots({ config: entries(size, { pollInterval: "30m" }) }),
+    },
+    {
+      name: "bots.config keys per bot",
+      limit: INSTALL_REQUEST_LIMITS.botConfigEntries,
+      path: ["bots", "config", "mail-sentinel"],
+      request: (size) => withBots({ config: { "mail-sentinel": entries(size, "value") } }),
+    },
+    {
+      name: "bots.instances[].config keys",
+      limit: INSTALL_REQUEST_LIMITS.botConfigEntries,
+      path: ["bots", "instances", 0, "config"],
+      request: (size) => withBots({ instances: [instance({ config: entries(size, true) })] }),
+    },
+    {
+      name: "bots.instances[].secretRefs keys",
+      limit: INSTALL_REQUEST_LIMITS.botSecretRefs,
+      path: ["bots", "instances", 0, "secretRefs"],
+      request: (size) =>
+        withBots({ instances: [instance({ secretRefs: entries(size, "env:SECRET") })] }),
+    },
+    {
+      name: "bots.instances[].matrix.allowedUsers entries",
+      limit: INSTALL_REQUEST_LIMITS.allowedUsers,
+      path: ["bots", "instances", 0, "matrix", "allowedUsers"],
+      request: (size) =>
+        withBots({ instances: [instance({ matrix: { allowedUsers: filled(size, mxid) } })] }),
+    },
+    {
+      name: "openrouter.privacy.only entries",
+      limit: INSTALL_REQUEST_LIMITS.providerSlugs,
+      path: ["openrouter", "privacy", "only"],
+      request: (size) => withPrivacyOnly(filled(size, (index) => `provider-${index}`)),
+    },
+    {
+      name: "bots.selected[] id length",
+      limit: INSTALL_REQUEST_LIMITS.botIdLength,
+      path: ["bots", "selected", 0],
+      request: (size) => withBots({ selected: [oversizedString(size)] }),
+    },
+    {
+      name: "bots.instances[].id length",
+      limit: INSTALL_REQUEST_LIMITS.botIdLength,
+      path: ["bots", "instances", 0, "id"],
+      request: (size) => withBots({ instances: [instance({ id: oversizedString(size) })] }),
+    },
+    {
+      name: "bots.instances[].packageId length",
+      limit: INSTALL_REQUEST_LIMITS.botIdLength,
+      path: ["bots", "instances", 0, "packageId"],
+      request: (size) => withBots({ instances: [instance({ packageId: oversizedString(size) })] }),
+    },
+    {
+      name: "bots.instances[].matrix.allowedUsers[] length",
+      limit: INSTALL_REQUEST_LIMITS.matrixUserIdLength,
+      path: ["bots", "instances", 0, "matrix", "allowedUsers", 0],
+      request: (size) =>
+        withBots({ instances: [instance({ matrix: { allowedUsers: [oversizedString(size)] } })] }),
+    },
+    {
+      name: "openrouter.privacy.only[] length",
+      limit: INSTALL_REQUEST_LIMITS.providerSlugLength,
+      path: ["openrouter", "privacy", "only", 0],
+      request: (size) => withPrivacyOnly([oversizedString(size)]),
+    },
+  ];
+
+  it.each(cases)("accepts $name at the limit", ({ limit, request }) => {
+    expect(installRequestSchema.safeParse(request(limit)).success).toBe(true);
+  });
+
+  it.each(cases)("refuses $name one above the limit", ({ limit, path, request }) => {
+    const result = installRequestSchema.safeParse(request(limit + 1));
+
+    expect(result.success).toBe(false);
+    expect(result.error?.issues).toEqual([
+      expect.objectContaining({ code: "too_big", maximum: limit, path }),
+    ]);
+  });
+
+  it("refuses a 500k-element array with one small issue before checking any element", () => {
+    const request = withBots({
+      instances: [instance({ matrix: { allowedUsers: filled(500_000, () => "") } })],
+    });
+
+    const startedAt = performance.now();
+    const result = installRequestSchema.safeParse(request);
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(result.success).toBe(false);
+    expect(result.error?.issues).toHaveLength(1);
+    expect(JSON.stringify(result.error?.issues).length).toBeLessThan(1_000);
+    expect(elapsedMs).toBeLessThan(1_000);
+  });
+
+  it("refuses a 500k-entry record with one small issue before checking any value", () => {
+    const request = withBots({ config: { "mail-sentinel": entries(500_000, null) } });
+
+    const startedAt = performance.now();
+    const result = installRequestSchema.safeParse(request);
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(result.success).toBe(false);
+    expect(result.error?.issues).toHaveLength(1);
+    expect(JSON.stringify(result.error?.issues).length).toBeLessThan(1_000);
+    expect(elapsedMs).toBeLessThan(1_000);
+  });
+
+  it("still reports invalid values inside a record that is within its limit", () => {
+    const result = installRequestSchema.safeParse(
+      withBots({ config: { "mail-sentinel": { pollInterval: null } } }),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error?.issues).toEqual([
+      expect.objectContaining({ path: ["bots", "config", "mail-sentinel", "pollInterval"] }),
+    ]);
+  });
+
+  it("refuses a bots.config record that is not an object", () => {
+    const result = installRequestSchema.safeParse(withBots({ config: ["mail-sentinel"] }));
+
+    expect(result.success).toBe(false);
+    expect(result.error?.issues).toEqual([
+      expect.objectContaining({ code: "invalid_type", path: ["bots", "config"] }),
+    ]);
   });
 });

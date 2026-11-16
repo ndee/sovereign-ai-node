@@ -4,6 +4,7 @@ import { baseErrorEnvelopeSchema, baseSuccessEnvelopeSchema, idSchema } from "./
 import {
   botsInstallInputSchema,
   doctorReportSchema,
+  INSTALL_REQUEST_LIMITS,
   imapInstallInputSchema,
   installJobStatusResponseSchema,
   installRequestSchema,
@@ -75,10 +76,15 @@ export const reconfigureOpenrouterPrivacySchema = z
       .optional(),
     only: z
       .array(
-        z.string().trim().min(1, {
-          message: "openrouter.privacy.only entries must be non-empty provider slugs",
-        }),
+        z
+          .string()
+          .trim()
+          .min(1, {
+            message: "openrouter.privacy.only entries must be non-empty provider slugs",
+          })
+          .max(INSTALL_REQUEST_LIMITS.providerSlugLength),
       )
+      .max(INSTALL_REQUEST_LIMITS.providerSlugs)
       .optional(),
   })
   .strict();
