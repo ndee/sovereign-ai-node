@@ -59,6 +59,21 @@ export const TYPED_TOOL_CHAT_UNAVAILABLE_REWRITE: TypedToolReplyRewrite = {
   text: "Chat is not available with the current model settings; mail alerts are not affected. Check the model settings.",
 };
 
+// OpenClaw 2026.8 classifies every provider HTTP 404 as model_not_found by
+// status alone and swaps the provider's text for its own copy before the reply
+// hook runs, so on that path the router error above never reaches the plugin.
+// The match is the copy's opening clause: it names this one failure, and it
+// leaves out the warning emoji, the dash and the config hint that follow.
+export const TYPED_TOOL_MODEL_UNAVAILABLE_REWRITE: TypedToolReplyRewrite = {
+  contains: "The configured model is unavailable from the provider",
+  text: TYPED_TOOL_CHAT_UNAVAILABLE_REWRITE.text,
+};
+
+export const TYPED_TOOL_CHAT_UNAVAILABLE_REWRITES: readonly TypedToolReplyRewrite[] = [
+  TYPED_TOOL_CHAT_UNAVAILABLE_REWRITE,
+  TYPED_TOOL_MODEL_UNAVAILABLE_REWRITE,
+];
+
 /**
  * Gives each slash command to one read operation. OpenClaw keeps one handler
  * per command name, so a name two tools declare goes to the first tool by name

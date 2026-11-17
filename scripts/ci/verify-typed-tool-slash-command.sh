@@ -24,6 +24,12 @@ if [[ -z "$pid" || "$pid" == "0" ]]; then
   echo "::error::$gateway_unit has no main process"
   exit 1
 fi
+# ExecStart= starts the gateway through the openclaw executable itself.
+openclaw_executable="$(systemctl show -p ExecStart --value "$gateway_unit" | sed -n 's/^{ path=\([^ ;]*\) ;.*/\1/p' | head -n 1)"
+if [[ -z "$openclaw_executable" ]]; then
+  echo "::error::cannot read the openclaw executable from $gateway_unit"
+  exit 1
+fi
 nsenter --target "$pid" --mount --setuid "$(id -u "$service_user")" --setgid "$(id -g "$service_user")" -- \
   "$(readlink -f "/proc/$pid/exe")" "$probe" \
-  "$extension_dir" "$openclaw_home/.openclaw/openclaw.json5" "$openclaw_home/tmp"
+  "$extension_dir" "$openclaw_home/.openclaw/openclaw.json5" "$openclaw_home/tmp" "$openclaw_executable"

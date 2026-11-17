@@ -12,9 +12,17 @@ import {
   renderTypedToolPluginIndex,
   renderTypedToolPluginManifest,
   renderTypedToolPluginRuntime,
-  TYPED_TOOL_CHAT_UNAVAILABLE_REWRITE,
+  TYPED_TOOL_CHAT_UNAVAILABLE_REWRITES,
   type TypedToolPluginConfig,
 } from "./real-service-typed-tool-plugin.js";
+
+// Copied byte for byte from openclaw@2026.8.35 dist/user-copy-l0XnFuNV.js.
+const OPENCLAW_MODEL_UNAVAILABLE_COPY =
+  "⚠️ The configured model is unavailable from the provider — it may have been renamed, retired, or is not offered on this account. This needs a config update (agents.defaults.model); retrying or starting a new session won't fix it.";
+const OPENCLAW_PROVIDER_INTERNAL_COPY =
+  "⚠️ The model provider returned a temporary internal error before replying. Try again in a moment, or switch to another model if it keeps happening.";
+const OPENCLAW_GENERIC_FAILURE_COPY =
+  "⚠️ Something went wrong while processing your request. Please try again, or use /new to start a fresh session.";
 
 type ToolResult = {
   content: Array<{ type: string; text: string }>;
@@ -218,7 +226,7 @@ beforeAll(async () => {
     operatorUserIds: [OPERATOR, OPERATOR],
     confirmTtlMs: 15 * 60 * 1000,
     commandTimeoutMs: 1_000,
-    replyPayloadRewrites: [TYPED_TOOL_CHAT_UNAVAILABLE_REWRITE],
+    replyPayloadRewrites: [...TYPED_TOOL_CHAT_UNAVAILABLE_REWRITES],
     tools: [
       {
         name: "demo_tool",
@@ -384,7 +392,7 @@ describe("typed tool plugin rendering", () => {
         operatorUserIds: [],
         confirmTtlMs: 1,
         commandTimeoutMs: 2,
-        replyPayloadRewrites: [TYPED_TOOL_CHAT_UNAVAILABLE_REWRITE],
+        replyPayloadRewrites: [...TYPED_TOOL_CHAT_UNAVAILABLE_REWRITES],
         tools: [
           {
             name: "a_tool",
@@ -404,7 +412,7 @@ describe("typed tool plugin rendering", () => {
         ],
       }),
     ) as TypedToolPluginConfig;
-    expect(rendered.replyPayloadRewrites).toEqual([TYPED_TOOL_CHAT_UNAVAILABLE_REWRITE]);
+    expect(rendered.replyPayloadRewrites).toEqual(TYPED_TOOL_CHAT_UNAVAILABLE_REWRITES);
     expect(rendered.tools[0]?.slashCommands).toEqual({ version: "version" });
     expect(rendered.tools[0]?.bindings[0]?.accountId).toBe("bot");
   });
@@ -471,8 +479,19 @@ describe("typed tool reply rewrites", () => {
     });
   });
 
+  it("replaces OpenClaw's own copy for a model the provider does not serve", () => {
+    expect(rewriteReply({ text: OPENCLAW_MODEL_UNAVAILABLE_COPY, isError: true })).toEqual({
+      payload: {
+        text: "Chat is not available with the current model settings; mail alerts are not affected. Check the model settings.",
+        isError: true,
+      },
+    });
+  });
+
   it("leaves every other reply untouched", () => {
     expect(rewriteReply({ text: "Mail Sentinel 2.4.1" })).toBeUndefined();
+    expect(rewriteReply({ text: OPENCLAW_PROVIDER_INTERNAL_COPY, isError: true })).toBeUndefined();
+    expect(rewriteReply({ text: OPENCLAW_GENERIC_FAILURE_COPY, isError: true })).toBeUndefined();
     expect(rewriteReply({ mediaUrl: "mxc://example.org/x" })).toBeUndefined();
   });
 });
