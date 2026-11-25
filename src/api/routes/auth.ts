@@ -138,7 +138,8 @@ export const registerAuthRoutes = (
     }
     const result = await app.installerService.verifyOperatorPassword(password);
     if (!result.ok) {
-      rateLimiter.recordFailure(ip);
+      // Not a failed attempt: no password was evaluated, so counting it would lock the
+      // operator out during a homeserver outage without costing an attacker a guess.
       if (result.reason === "homeserver-unreachable") {
         return sendApiError(reply, 503, {
           code: "HOMESERVER_UNREACHABLE",
@@ -146,6 +147,7 @@ export const registerAuthRoutes = (
           retryable: true,
         });
       }
+      rateLimiter.recordFailure(ip);
       if (result.reason === "rate-limited") {
         if (result.retryAfterSeconds !== undefined) {
           reply.header("Retry-After", String(result.retryAfterSeconds));

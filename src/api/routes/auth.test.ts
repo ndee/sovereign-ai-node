@@ -240,6 +240,108 @@ describe("auth routes", () => {
     }
   });
 
+  describe("login lockout accounting", () => {
+    const login = (app: FastifyInstance, payload: Record<string, string>) =>
+      app.inject({ method: "POST", url: "/api/auth/login", payload });
+
+    it("does not count homeserver-unreachable attempts toward the lockout", async () => {
+      let reachable = false;
+      const { app, service } = await buildHarness();
+      const verify = service.verifyOperatorPassword.bind(service);
+      service.verifyOperatorPassword = async (password) =>
+        reachable ? verify(password) : { ok: false, reason: "homeserver-unreachable" };
+      try {
+        for (let attempt = 0; attempt < 8; attempt += 1) {
+          const response = await login(app, { password: "scaffold-operator-password" });
+          expect(response.statusCode).toBe(503);
+          expect(response.json().error.code).toBe("HOMESERVER_UNREACHABLE");
+        }
+        reachable = true;
+        const response = await login(app, { password: "scaffold-operator-password" });
+        expect(response.statusCode).toBe(200);
+        expect(response.json().result.username).toBe("@admin:matrix.example.org");
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("does not let unreachable attempts top up earlier wrong-password failures", async () => {
+      let reachable = true;
+      const { app, service } = await buildHarness(undefined, { max: 2 });
+      const verify = service.verifyOperatorPassword.bind(service);
+      service.verifyOperatorPassword = async (password) =>
+        reachable ? verify(password) : { ok: false, reason: "homeserver-unreachable" };
+      try {
+        expect((await login(app, { password: "wrong" })).statusCode).toBe(401);
+        reachable = false;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          expect((await login(app, { password: "wrong" })).statusCode).toBe(503);
+        }
+        reachable = true;
+        expect((await login(app, { password: "scaffold-operator-password" })).statusCode).toBe(200);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it.each([
+      ["a wrong password", { password: "wrong" }, 401],
+      ["a missing password", { token: "ABCD-EFGH-JKLM" }, 400],
+    ])("counts %s toward the lockout", async (_label, payload, status) => {
+      const { app } = await buildHarness(undefined, { max: 2 });
+      try {
+        expect((await login(app, payload)).statusCode).toBe(status);
+        expect((await login(app, payload)).statusCode).toBe(status);
+        const locked = await login(app, { password: "scaffold-operator-password" });
+        expect(locked.statusCode).toBe(429);
+        expect(locked.json().error.message).toBe("Too many login attempts; try again later");
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("counts the homeserver's own rate limiting toward the lockout", async () => {
+      const { app, service } = await buildHarness(undefined, { max: 2 });
+      service.verifyOperatorPassword = async () => ({ ok: false, reason: "rate-limited" });
+      try {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const throttled = await login(app, { password: "anything" });
+          expect(throttled.statusCode).toBe(429);
+          expect(throttled.json().error.message).toMatch(/homeserver/);
+        }
+        const locked = await login(app, { password: "anything" });
+        expect(locked.statusCode).toBe(429);
+        expect(locked.json().error.message).toBe("Too many login attempts; try again later");
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("keeps a locked-out IP locked while the homeserver is unreachable", async () => {
+      let reachable = true;
+      let verifyCalls = 0;
+      const { app, service } = await buildHarness(undefined, { max: 2 });
+      const verify = service.verifyOperatorPassword.bind(service);
+      service.verifyOperatorPassword = async (password) => {
+        verifyCalls += 1;
+        return reachable ? verify(password) : { ok: false, reason: "homeserver-unreachable" };
+      };
+      try {
+        expect((await login(app, { password: "wrong" })).statusCode).toBe(401);
+        expect((await login(app, { password: "wrong" })).statusCode).toBe(401);
+        reachable = false;
+        const callsBeforeLockedAttempt = verifyCalls;
+        const locked = await login(app, { password: "scaffold-operator-password" });
+        expect(locked.statusCode).toBe(429);
+        expect(locked.json().error.code).toBe("RATE_LIMITED");
+        expect(locked.headers["retry-after"]).toBeDefined();
+        expect(verifyCalls).toBe(callsBeforeLockedAttempt);
+      } finally {
+        await app.close();
+      }
+    });
+  });
+
   it("logs out, clears cookies, and the session no longer authenticates state", async () => {
     const { app, service } = await buildHarness();
     service.getAuthStage = async () => ({ stage: "needs-bootstrap" });
