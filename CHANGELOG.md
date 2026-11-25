@@ -9,6 +9,13 @@ Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.
 From this point forward, GitHub Release notes are auto-generated from commit history
 by the `.github/workflows/release.yml` workflow.
 
+## [2.16.4](https://github.com/ndee/sovereign-ai-node/compare/v2.16.3...v2.16.4) (2026-11-25)
+
+
+### Bug Fixes
+
+* **api:** do not count homeserver-unreachable logins toward the lockout ([#372](https://github.com/ndee/sovereign-ai-node/issues/372)) ([35a13af](https://github.com/ndee/sovereign-ai-node/commit/35a13af1021ffa2ff74b65962c40e827f1b810ec))
+
 ## [2.16.3](https://github.com/ndee/sovereign-ai-node/compare/v2.16.2...v2.16.3) (2026-11-17)
 
 
